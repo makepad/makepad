@@ -22,6 +22,7 @@ pub enum MarkdownNode{
     BeginCode,
     EndCode,
     BeginInlineCode,
+    NewLine,
     EndInlineCode,
     BeginBold,
     BeginItalic,
@@ -82,8 +83,14 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
     let mut cursor = Cursor::new(body);
     enum State{
         Root{spaces:usize},
-        Inline{head:bool, bold:usize, italic:usize}, // terminates
+        Inline{kind:Kind, bold:usize, italic:usize}, // terminates
     }
+    enum Kind{
+        Normal,
+        Head,
+        Quote(usize)
+    }
+    
     let mut state = State::Root{spaces:0};
     
     fn push_char(nodes: &mut Vec<MarkdownNode>, decoded:&mut String, c:char){
@@ -100,32 +107,79 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
         }
     }
     
+    fn push_optional_char(nodes: &mut Vec<MarkdownNode>, decoded:&mut String, c:char){
+        // ok so lets check our last node
+        if let Some(last) = nodes.last_mut(){
+            if let MarkdownNode::Text{end,..} = last{
+                decoded.push(c);
+                *end = decoded.len()
+            }
+        }
+    }
+    
+    fn code_on_one_line(nodes: &mut Vec<MarkdownNode>, decoded:&mut String, cursor:&mut Cursor){
+        // alright we have to check if we are in a code block already
+        let already_in_code = if let Some(MarkdownNode::EndCode) = nodes.last(){
+            nodes.pop();
+            true
+        }
+        else{false};
+        
+        let start = decoded.len();
+        while !cursor.at_end() && cursor.chars[0] != '\n'{
+            decoded.push(cursor.chars[0]);
+            cursor.next();
+        }
+        if !cursor.at_end(){
+            cursor.next();
+        }
+        if !already_in_code{
+            nodes.push(MarkdownNode::BeginCode);
+        }
+        else{
+            nodes.push(MarkdownNode::NewLine);
+        }
+        nodes.push(MarkdownNode::Text{start, end:decoded.len()});
+        nodes.push(MarkdownNode::EndCode);
+    }
+    
     while !cursor.at_end(){
         match &mut state{
-            State::Inline{head, bold, italic}=> match cursor.chars{
+            State::Inline{kind, bold, italic}=> match cursor.chars{
                 ['\n',_,_]=>{
                     let bold = *bold;
                     let italic = *italic;
-                    if *head{
-                        cursor.next();
-                        nodes.push(MarkdownNode::EndHead);
-                        state = State::Root{spaces:0};
-                    }
-                    else{
-                        let last_is_space = cursor.last_char == ' ';
-                        cursor.next();
-                        while cursor.chars[0] == ' '{
+                    match kind{
+                        Kind::Head=>{
                             cursor.next();
-                        }
-                        if cursor.chars[0] == '\n'{
-                            cursor.next();
+                            nodes.push(MarkdownNode::EndHead);
                             state = State::Root{spaces:0};
-                            nodes.push(MarkdownNode::EndNormal);
                         }
-                        else if !last_is_space{
-                            push_char(&mut nodes, &mut decoded, ' ');
+                        Kind::Quote(blocks)=>{
+                            cursor.next();
+                            // alright so. now what
+                            for _ in 0..*blocks{
+                                nodes.push(MarkdownNode::EndQuote);
+                            }
+                            state = State::Root{spaces:0};
+                        }
+                        Kind::Normal=>{
+                            let last_is_space = cursor.last_char == ' ';
+                            cursor.next();
+                            while cursor.chars[0] == ' '{
+                                cursor.next();
+                            }
+                            if cursor.chars[0] == '\n'{
+                                cursor.next();
+                                state = State::Root{spaces:0};
+                                nodes.push(MarkdownNode::EndNormal);
+                            }
+                            else if !last_is_space{
+                                push_char(&mut nodes, &mut decoded, ' ');
+                            }
                         }
                     }
+                    
                     // TODO: clean up unmatched bolds and italics properly
                     if let State::Root{..} = state{
                         for _ in 0..bold{
@@ -234,8 +288,8 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     }
                     cursor.next();
                 }
-                _=>{
-                    push_char(&mut nodes, &mut decoded, cursor.chars[0]);
+                [x,_,_]=>{
+                    push_char(&mut nodes, &mut decoded, x);
                     cursor.next();
                 }
             }
@@ -245,12 +299,33 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     cursor.skip(1)
                 }
                 ['>',_,_]=>{
-                    if *spaces>4{ // its code
-                        //state = State::InlineCode;
-                       // decoded.push('>');
+                    // alright lets parse and render the quotes
+                    if *spaces>=4{ // its code
+                        code_on_one_line(&mut nodes, &mut decoded, &mut cursor);
+                        state = State::Root{spaces:0};
                     }
-                    else{ // its a quote block, lets cound more >s
-                        
+                    else{ // its a quote block, lets count all the >s and make quote blocks
+                        let mut blocks = 0;
+                        while cursor.chars[0] == ' ' || cursor.chars[0] == '>'{
+                            if cursor.chars[0] == '>'{
+                                blocks += 1;
+                            }
+                            cursor.next();
+                        }
+                        // ok so first we remove about as many begin
+                        let mut removed = 0;
+                        for _ in 0..blocks{
+                            if let Some(MarkdownNode::EndQuote) = nodes.last(){
+                                removed +=1;
+                                nodes.pop();
+                            }
+                        }
+                        for _ in 0..(blocks - removed){
+                            nodes.push(MarkdownNode::BeginQuote);
+                        }
+                        push_optional_char(&mut nodes, &mut decoded, ' ');
+                        // alright now we know how deep in the block stack we need to be
+                        state = State::Inline{kind:Kind::Quote(blocks), bold:0, italic:0};
                     }
                 }
                 ['#',_,_]=>{
@@ -272,33 +347,36 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         else{
                             nodes.push(MarkdownNode::Text{start, end:decoded.len()});
                         }
-                        state = State::Inline{head:false, bold:0, italic:0};
+                        state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
                     }
                     else {
                         cursor.next();
                         decoded.truncate(start);
                         nodes.push(MarkdownNode::BeginHead{level});
-                        state = State::Inline{head:true, bold:0, italic:0};
+                        state = State::Inline{kind:Kind::Head, bold:0, italic:0};
                     }
                 }
                 ['`','`','`']=>{ // begins or ends blocks of code. 
-                    let mut scan = cursor.clone();
-                    scan.skip(3);
+                    cursor.skip(3);
+                    nodes.push(MarkdownNode::BeginCode);
                     let start = decoded.len();
-                    while scan.chars != ['`','`','`'] && !scan.at_end(){
-                        decoded.push(scan.chars[0]);
-                        scan.skip(1);
+                    while cursor.chars != ['`','`','`'] && !cursor.at_end(){
+                        if cursor.chars[0] == '\n' && start != decoded.len(){
+                            nodes.push(MarkdownNode::NewLine);
+                        }
+                        else{
+                            push_char(&mut nodes, &mut decoded, cursor.chars[0]);
+                        }
+                        cursor.skip(1);
                     }
-                    if !scan.at_end(){
-                        nodes.push(MarkdownNode::BeginCode);
-                        nodes.push(MarkdownNode::Text{start, end:decoded.len()});
-                        nodes.push(MarkdownNode::EndCode);
-                        scan.skip(3); // skip last
-                        cursor = scan;
+                    if !cursor.at_end(){
+                        cursor.skip(3);
                     }
-                    else{
-                        decoded.truncate(start);
+                    // remove last newline
+                    if let Some(MarkdownNode::NewLine) = nodes.last(){
+                        nodes.pop();
                     }
+                    nodes.push(MarkdownNode::EndCode);
                 }
                 /*
                 ['-',_,_]=>{ // possible list item
@@ -315,13 +393,20 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                 }*/
                 ['\n',_,_]=>{ // skip it
                     cursor.skip(1);
+                    state = State::Root{spaces:0};
                 }
                 [_a,_b,_c]=>{
-                    // parse if numbered list
-                    // otherwise this is a normal text block
-                    nodes.push(MarkdownNode::BeginNormal);
-                    state = State::Inline{head:false, bold:0, italic:0};
-                    nodes.push(MarkdownNode::EndNormal);
+                    if *spaces>=4{ // its code
+                        code_on_one_line(&mut nodes, &mut decoded, &mut cursor);
+                        state = State::Root{spaces:0};
+                    }
+                    else{
+                        // parse if numbered list
+                        // otherwise this is a normal text block
+                        nodes.push(MarkdownNode::BeginNormal);
+                        state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                        nodes.push(MarkdownNode::EndNormal);
+                    }
                 }
             }
         }
