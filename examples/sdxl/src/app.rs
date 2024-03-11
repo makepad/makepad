@@ -84,7 +84,7 @@ pub struct App {
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
-        Machine::new("10.0.0.125:8188", id_lut!(m1)),
+        Machine::new("10.0.0.111:8188", id_lut!(m1)),
        /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     

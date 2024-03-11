@@ -138,7 +138,12 @@ impl Widget for Html {
     }
     
     fn set_text(&mut self, v:&str){
-        self.body = Rc::new(v.to_string())
+        self.body = Rc::new(v.to_string());
+        let mut errors = Some(Vec::new());
+        self.doc = parse_html(&*self.body, &mut errors);
+        if errors.as_ref().unwrap().len()>0{
+            log!("HTML parser returned errors {:?}", errors)
+        }
     }
 } 
  
