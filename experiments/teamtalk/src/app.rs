@@ -345,7 +345,7 @@ impl App {
         let wind_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let wind_send_addr = "10.0.0.202:44443";
         let platform_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let platform_send_addr = "10.0.0.128:51010";
+        let platform_send_addr = "10.0.0.126:51010";
                 
         // open up port udp X and forward packets to both wind + platform
         let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
@@ -362,6 +362,7 @@ impl App {
                 // lets say 100mph = 60 = 127.
                 let buf = [(speed*2.2).min(255.0) as u8,];
                 let _ = wind_socket.send_to(&buf, wind_send_addr);
+                println!("SENDING TO {:?}", buf); 
                 let _ = platform_socket.send_to(&buffer[0..length], platform_send_addr);
             }
         });
