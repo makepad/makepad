@@ -15,8 +15,8 @@ pub enum MarkdownNode{
     EndItem,
     BeginNormal,
     EndNormal,
-    Link{name_start:usize, name_end:usize, url_start:usize, url_end:usize},
-    Image{name_start:usize, name_end:usize, url_start:usize, url_end:usize},
+    Link{start:usize, url_start:usize, end:usize},
+    Image{start:usize, url_start:usize, end:usize},
     BeginQuote,
     EndQuote,
     BeginCode,
@@ -293,10 +293,75 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     }
                 }
                 ['!', '[', _]=>{
+                    // alright lets do it
+                    let mut scan = cursor.clone();
+                    scan.skip(1);
+                    
+                    let start = decoded.len();
+                    // lets first patternmatch it
+                    while scan.chars[0] != ']' && !scan.at_end(){
+                        decoded.push(scan.chars[0]);
+                        if scan.chars[0] == '\n' && scan.last_char == '\n'{
+                            break; // double newline terminates scan
+                        }
+                        scan.next();
+                    }
+                    if scan.chars[0] == ']' && scan.chars[1] == '('{
+                        scan.skip(2);
+                        let url_start = decoded.len();
+                        while scan.chars[0] != ')' && !scan.at_end(){
+                            decoded.push(scan.chars[0]);
+                            if scan.chars[0] == '\n' && scan.last_char == '\n'{
+                                break; // double newline terminates scan
+                            }
+                            scan.next();
+                        }
+                        if scan.chars[0] == ')' {
+                            scan.next();
+                            nodes.push(MarkdownNode::Image{start, url_start, end:decoded.len()});
+                            cursor = scan;
+                            continue;
+                        }
+                    }
+                    decoded.truncate(start);
+                    decoded.push(cursor.chars[0]);
+                    decoded.push(cursor.chars[1]);
                     // parse inline image
-                    cursor.next();
+                    cursor.skip(2);
                 }
                 ['[',_,_]=>{ // possible named link
+                    let mut scan = cursor.clone();
+                    scan.skip(1);
+                    let start = decoded.len();
+                    // lets first patternmatch it
+                    while scan.chars[0] != ']' && !scan.at_end(){
+                        decoded.push(scan.chars[0]);
+                        if scan.chars[0] == '\n' && scan.last_char == '\n'{
+                            break; // double newline terminates scan
+                        }
+                        scan.next();
+                        
+                    }
+                    if scan.chars[0] == ']' && scan.chars[1] == '('{
+                        scan.skip(2);
+                        let url_start = decoded.len();
+                        while scan.chars[0] != ')' && !scan.at_end(){
+                            decoded.push(scan.chars[0]);
+                            if scan.chars[0] == '\n' && scan.last_char == '\n'{
+                                break; // double newline terminates scan
+                            }
+                            scan.next();
+                        }
+                        // alright find last
+                        if scan.chars[0] == ')' {
+                            scan.next();
+                            nodes.push(MarkdownNode::Link{start, url_start, end:decoded.len()});
+                            cursor = scan;
+                            continue;
+                        }
+                    }
+                    decoded.truncate(start);
+                    decoded.push(cursor.chars[0]);
                     cursor.next();
                 }
                 [' ',_,_]=>{
