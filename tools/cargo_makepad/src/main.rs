@@ -58,6 +58,7 @@ fn show_help(err: &str){
     println!("       --app-label=\"applabel\"                  The app label");
     println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
     println!("       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset).");
+    println!("                                                 This is required for building apps that compile native code as part of the Rust build process.");
     println!("       --keep-sdk-sources                        Keep downloaded SDK source files (default is to remove them).");
     println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
     println!("                                                 Host OS is autodetected but can be overridden here");
