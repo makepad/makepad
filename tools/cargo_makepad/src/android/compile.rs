@@ -98,14 +98,16 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
     for android_target in android_targets {
         let clang_filename = format!("{}33-clang", android_target.clang());
         
-        let bin_path = |bin_filename: &str| match host_os {
+        let bin_path = |bin_filename: &str, windows_extension: &str| match host_os {
             HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
             HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
-            HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.cmd"),
+            HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.{windows_extension}"),
             HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
             _ => panic!()
         };
-        let full_clang_path = sdk_dir.join(bin_path(&clang_filename));
+        let full_clang_path       = sdk_dir.join(bin_path(&clang_filename, "cmd"));
+        let full_llvm_ar_path     = sdk_dir.join(bin_path("llvm-ar", "exe"));
+        let full_llvm_ranlib_path = sdk_dir.join(bin_path("llvm-ranlib", "exe"));
 
         let toolchain = android_target.toolchain();
         let target_opt = format!("--target={toolchain}");
@@ -143,8 +145,8 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
                 // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
                 // The naming conventions of these env variable keys are established by the `cc` Rust crate.
                 (&format!("CC_{toolchain}"),     full_clang_path.to_str().unwrap()),
-                (&format!("AR_{toolchain}"),     sdk_dir.join(bin_path("llvm-ar")).to_str().unwrap()),
-                (&format!("RANLIB_{toolchain}"), sdk_dir.join(bin_path("llvm-ranlib")).to_str().unwrap()),
+                (&format!("AR_{toolchain}"),     full_llvm_ar_path.to_str().unwrap()),
+                (&format!("RANLIB_{toolchain}"), full_llvm_ranlib_path.to_str().unwrap()),
 
                 ("RUSTFLAGS", &cfg_flag),
                 ("MAKEPAD", "lines"),
