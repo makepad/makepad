@@ -2,8 +2,30 @@ use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget};
 use crate::utils::*;
 use crate::makepad_shell::*;
-use super::sdk::NDK_VERSION_FULL;
+use super::sdk::{NDK_VERSION_FULL, BUILD_TOOLS_DIR, SDK_VERSION, PLATFORMS_DIR, API_LEVEL};
 
+fn aapt_path(sdk_dir: &Path) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("aapt")
+}
+
+fn d8_jar_path(sdk_dir: &Path) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("lib/d8.jar")
+}
+
+fn apksigner_jar_path(sdk_dir: &Path) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("lib/apksigner.jar")
+}
+
+fn zipalign_path(sdk_dir: &Path) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("zipalign")
+}
+
+fn android_jar_path(sdk_dir: &Path) -> PathBuf {
+    sdk_dir.join(PLATFORMS_DIR).join(API_LEVEL).join("android.jar")
+}
+
+
+#[derive(Debug)]
 struct BuildPaths {
     tmp_dir: PathBuf,
     out_dir: PathBuf,
@@ -184,13 +206,13 @@ fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String>
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
-       sdk_dir.join("android-13/aapt").to_str().unwrap(),
+       &aapt_path(sdk_dir).to_str().unwrap(),
        &[
            "package",
            "-f",
            "-m",
            "-I",
-           (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
+           (android_jar_path(sdk_dir).to_str().unwrap()),
            "-S",
            (cargo_manifest_dir.join("src/android/res").to_str().unwrap()),
            "-M",
@@ -221,7 +243,7 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
         java_home.join("bin/javac").to_str().unwrap(),
         &[
             "-classpath", 
-            (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
+            (android_jar_path(sdk_dir).to_str().unwrap()),
             "-Xlint:deprecation",
             "-d", 
             (build_paths.out_dir.to_str().unwrap()),
@@ -254,10 +276,10 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
         java_home.join("bin/java").to_str().unwrap(),
         &[ 
             "-cp",
-            (sdk_dir.join("android-13/lib/d8.jar").to_str().unwrap()),
+            (d8_jar_path(sdk_dir).to_str().unwrap()),
             "com.android.tools.r8.D8",
             "--classpath",
-            (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
+            (android_jar_path(sdk_dir).to_str().unwrap()),
             "--output",  
             (build_paths.out_dir.to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadNative.class").to_str().unwrap()),
@@ -291,14 +313,14 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
-       sdk_dir.join("android-13/aapt").to_str().unwrap(),
+       aapt_path(sdk_dir).to_str().unwrap(),
        &[ 
            "package",
            "-f",
            "-F",
            (build_paths.dst_unaligned_apk.to_str().unwrap()),
            "-I",
-           (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
+           (android_jar_path(sdk_dir).to_str().unwrap()),
            "-M",
            (build_paths.manifest_file.to_str().unwrap()),
            "-S",
@@ -327,7 +349,7 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false) ?;
 
-        shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
+        shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &[
             "add",
             (build_paths.dst_unaligned_apk.to_str().unwrap()),
             &binary_path,
@@ -377,13 +399,13 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
         aapt_args.push(asset);
     }
 
-    shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/aapt").to_str().unwrap(), &aapt_args) ?;
+    shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &aapt_args) ?;
 
     Ok(())
 }
 
 fn build_zipaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
-    shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/zipalign").to_str().unwrap(), &[
+    shell_env_cap(&[], &build_paths.out_dir, zipalign_path(sdk_dir).to_str().unwrap(), &[
        "-v",
        "-f",
        "4",
@@ -405,7 +427,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
         java_home.join("bin/java").to_str().unwrap(),
         &[
             "-jar",
-            (sdk_dir.join("android-13/lib/apksigner.jar").to_str().unwrap()),
+            (apksigner_jar_path(sdk_dir).to_str().unwrap()),
             "sign",
             "-v",
             "-ks",
