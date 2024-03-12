@@ -335,8 +335,14 @@ impl Cx {
                 CxOsOp::NormalizeWindow(_window_id) => {
                     todo!()
                 }
-                CxOsOp::SetTopmost(_window_id, _is_topmost) => {
-                    todo!()
+                CxOsOp::SetTopmost(window_id, is_topmost) => {
+                    if d3d11_windows.len() == 0 {
+                        self.platform_ops.insert(0, CxOsOp::SetTopmost(window_id, is_topmost));
+                        continue;
+                    }
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.win32_window.set_topmost(is_topmost);
+                    }
                 }
                 CxOsOp::ShowClipboardActions(_) => {
                 }
