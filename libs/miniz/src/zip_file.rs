@@ -263,7 +263,7 @@ pub enum ZipError{
 }
 
 pub fn zip_read_central_directory(zip_data:&mut (impl Seek+Read))->Result<ZipCentralDirectory, ZipError>{
-    // lets read the the dirend
+    // lets read the dirend
     zip_data.seek(SeekFrom::End(-(END_OF_CENTRAL_DIRECTORY_SIZE as i64))).map_err(|_| ZipError::CantSeekToDirEnd)?;
     let eocd = EndOfCentralDirectory::from_stream(zip_data)?;
     zip_data.seek(SeekFrom::Start(eocd.central_directory_offset as u64)).map_err(|_| ZipError::CantSeekToDirStart)?;

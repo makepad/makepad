@@ -1056,7 +1056,7 @@ fn decompress_fast(
 /// `flags` indicates settings and status to the decompression function.
 /// * The [`TINFL_FLAG_HAS_MORE_INPUT`] has to be specified if more compressed data is to be provided
 /// in a subsequent call to this function.
-/// * See the the [`inflate_flags`] module for details on other flags.
+/// * See the [`inflate_flags`] module for details on other flags.
 ///
 /// # Returns
 ///
