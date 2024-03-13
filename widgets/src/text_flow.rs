@@ -24,7 +24,8 @@ pub enum FlowBlockType {
     Sep = shader_enum(2),
     Code = shader_enum(3),
     InlineCode = shader_enum(4),
-    Underline = shader_enum(5)
+    Underline = shader_enum(5),
+    Strikethrough = shader_enum(6)
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -419,7 +420,14 @@ impl TextFlow{
             let fs = self.font_size_stack.value(self.font_size);
             dt.text_style.font_size = fs;
             // the turtle is at pos X so we walk it.
-            if self.underline_counter > 0{
+            if self.strikethrough_counter > 0{
+                let db = &mut self.draw_block;
+                db.block_type = FlowBlockType::Strikethrough;
+                dt.draw_walk_word_with(cx, text, |cx, rect|{
+                    db.draw_abs(cx, rect);
+                });
+            }
+            else if self.underline_counter > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::Underline;
                 dt.draw_walk_word_with(cx, text, |cx, rect|{
