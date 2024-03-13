@@ -71,7 +71,7 @@ impl ActiveBuilds {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, SerJson)]
 pub struct ProfileSampleStore{
     pub event: Vec<EventSample>,
     pub gpu: Vec<GPUSample>,
