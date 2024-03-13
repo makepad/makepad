@@ -209,6 +209,9 @@ pub struct HtmlDoc{
          CommentStartDash2,
          CommentEndDash,
          CommentEnd,
+         DocType,
+         HeaderQuestion,
+         HeaderAngle,
          CommentBody
      }
              
@@ -255,6 +258,30 @@ pub struct HtmlDoc{
      let mut last_was_ws = false;
      for (i, c) in body.char_indices(){
          state = match state{
+             State::DocType=>{
+                 if c == '>'{
+                     State::Text(i+1, decoded.len())
+                 }
+                 else{
+                     State::DocType
+                 }
+             }
+             State::HeaderQuestion=>{
+                 if c == '?'{
+                    State::HeaderAngle
+                 }
+                 else{
+                     State::HeaderQuestion
+                 }              
+             }
+             State::HeaderAngle=>{
+                 if c == '>'{
+                     State::Text(i+1, decoded.len())
+                 }
+                 else{
+                     State::HeaderQuestion
+                 }
+             }
              State::Text(start, dec_start)=>{ 
                  if c == '<'{
                      if start != i{
@@ -276,6 +303,9 @@ pub struct HtmlDoc{
                  }
                  else if c == '!' && i == start{
                      State::CommentStartDash1
+                 }
+                 else if c == '?'{
+                     State::HeaderQuestion
                  }
                  else if c.is_whitespace(){
                      if start == i{
@@ -450,9 +480,13 @@ pub struct HtmlDoc{
              }
              State::CommentStartDash1=>{
                  if c != '-'{
-                      if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected character looking for - after <!".into(), position:i})};
+                     // we should scan for >
+                     State::DocType
+                     // if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected //character looking for - after <!".into(), position:i})};
                  }
-                 State::CommentStartDash2
+                 else{
+                    State::CommentStartDash2
+                }
              }
              State::CommentStartDash2=>{
                  if c != '-'{
