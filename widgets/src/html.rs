@@ -69,6 +69,7 @@ impl Html{
             some_id!(br)=>cx.turtle_new_line(),
             some_id!(sep)=>tf.sep(cx),
             some_id!(u)=>tf.push_underline(),
+            some_id!(s)=>tf.push_strikethrough(),
             some_id!(b)=>tf.push_bold(),
             some_id!(i)=>tf.push_italic(),
             some_id!(li)=>tf.begin_list_item(cx,"\u{2022}",1.0),
@@ -89,6 +90,7 @@ impl Html{
             some_id!(h1)=>tf.pop_size(),
             some_id!(b)=>tf.pop_bold(),
             some_id!(u)=>tf.pop_underline(),
+            some_id!(s)=>tf.pop_strikethrough(),
             some_id!(i)=>tf.pop_italic(),
             Some(x)=>{return Some(x)}
             _=>()
