@@ -70,7 +70,7 @@ impl Html{
             some_id!(sep)=>tf.sep(cx),
             some_id!(b)=>tf.push_bold(),
             some_id!(i)=>tf.push_italic(),
-            some_id!(li)=>tf.begin_list_item(cx),
+            some_id!(li)=>tf.begin_list_item(cx,"\u{2022}",1.0),
             Some(x)=>{return Some(x)}
             _=>()
         } 
