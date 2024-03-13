@@ -24,6 +24,7 @@ pub enum FlowBlockType {
     Sep = shader_enum(2),
     Code = shader_enum(3),
     InlineCode = shader_enum(4),
+    Underline = shader_enum(5)
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -33,7 +34,7 @@ pub struct DrawFlowBlock {
     #[live] block_type: FlowBlockType
 } 
 
-     
+      
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
@@ -418,7 +419,16 @@ impl TextFlow{
             let fs = self.font_size_stack.value(self.font_size);
             dt.text_style.font_size = fs;
             // the turtle is at pos X so we walk it.
-            dt.draw_walk_word(cx, text);
+            if self.underline_counter > 0{
+                let db = &mut self.draw_block;
+                db.block_type = FlowBlockType::Underline;
+                dt.draw_walk_word_with(cx, text, |cx, rect|{
+                    db.draw_abs(cx, rect);
+                });
+            }
+            else{
+                dt.draw_walk_word(cx, text);
+            }
         }
     }
 }

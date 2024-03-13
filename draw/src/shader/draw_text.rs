@@ -605,8 +605,11 @@ impl DrawText {
             }
         }
     }
+    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str){
+        self.draw_walk_word_with(cx, text, |_,_|{});
+    }
     
-    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str) {
+    pub fn draw_walk_word_with<F>(&mut self, cx: &mut Cx2d, text: &str, mut cb:F) where F: FnMut(&mut Cx2d, Rect){
         
         // this walks the turtle per word
         if text.len() == 0 {
@@ -640,6 +643,7 @@ impl DrawText {
                 width: Size::Fixed(word.width),
                 height: Size::Fixed(line_drop)
             });
+            cb(cx, walk_rect);
             // make sure our iterator uses the xpos from the turtle
             self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
         }

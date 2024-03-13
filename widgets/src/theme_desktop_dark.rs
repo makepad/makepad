@@ -232,6 +232,17 @@ live_design! {
                         sdf.fill(#7);
                         return sdf.result;
                     }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            1.,
+                            0.5
+                        );
+                        sdf.fill(#f);
+                        return sdf.result;
+                    }
                 }
                 return #f00
             } 
