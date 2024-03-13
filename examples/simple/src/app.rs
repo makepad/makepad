@@ -21,7 +21,7 @@ live_design!{
                 }
             }
             
-            body = <View>{
+            body = <ScrollXYView>{
                 flow: Down,
                 spacing:10,
                 align: {
@@ -42,12 +42,7 @@ live_design!{
                     text: "Counter: 0"
                 }
                 <Html>{
-                    font_size: 12,
-                    flow: RightWrap,
-                    width:Fill,
-                    height:Fit,
-                    padding: 5,
-                    line_spacing: 10,
+                    
                     Button = <TextInput> {
                         text: "Helloworld"
                     }  
@@ -67,15 +62,23 @@ live_design!{
                     "
                 }
                 <Markdown>{
-                    font_size: 12,
-                    flow: RightWrap,
-                    width:Fill,
-                    height:Fit,
-                    padding: 5,
-                    line_spacing: 10,
+                    
                     body:"
                     # MD H1 
                     ## H2 **Bold** *italic*
+                    
+                    - list item
+                      - another *list*
+                        - more list
+                        2. number
+                    - here
+                    - more Here
+                    
+                    1. list
+                    3. have another list
+                      1. nested list
+                    2. item
+                      
                     > block
                     > next
                     >> hi

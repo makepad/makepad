@@ -14,7 +14,7 @@ live_design!{
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
     }
-}
+} 
 
 #[derive(Live, Widget)]
 pub struct Markdown{
@@ -37,10 +37,10 @@ impl Widget for Markdown {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
         let tf = &mut self.text_flow;
-        tf.begin(cx, walk);
+        tf.begin(cx, walk); 
         // alright lets walk the markdown
         for node in &self.doc.nodes{
-            match node{ 
+            match node{
                 MarkdownNode::BeginHead{level}=>{
                     tf.push_size_abs_scale(3.0 / *level as f64);
                 },
@@ -57,9 +57,21 @@ impl Widget for Markdown {
                 MarkdownNode::EndNormal=>{
                     
                 },
-                MarkdownNode::BeginItem{count:_}=>{
+                MarkdownNode::BeginListItem{label}=>{
+                    cx.turtle_new_line();
+                    let str = match label{
+                        MarkdownListLabel::Plus=>"+",
+                        MarkdownListLabel::Minus=>"-",
+                        MarkdownListLabel::Star=>"*",
+                        MarkdownListLabel::Number{start,end,..}=>{
+                            &self.doc.decoded[*start..*end]
+                        }
+                                                
+                    };
+                    tf.begin_list_item(cx, str, 1.5);
                 },
-                MarkdownNode::EndItem=>{
+                MarkdownNode::EndListItem=>{
+                    tf.end_list_item(cx);
                 },
                 MarkdownNode::Link{start, url_start, end}=>{
                     tf.draw_text(cx, "Link[name:");

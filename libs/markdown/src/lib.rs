@@ -6,13 +6,19 @@ pub struct MarkdownDoc{
     pub decoded: String,
     pub nodes: Vec<MarkdownNode>,
 }
-
+#[derive(Debug)]
+pub enum MarkdownListLabel{
+    Plus,
+    Minus,
+    Star,
+    Number{digit:usize, start:usize, end:usize},
+}
 #[derive(Debug)]
 pub enum MarkdownNode{
     BeginHead{level:usize},
     EndHead,
-    BeginItem{count:usize},
-    EndItem,
+    BeginListItem{label:MarkdownListLabel},
+    EndListItem,
     BeginNormal,
     EndNormal,
     Link{start:usize, url_start:usize, end:usize},
@@ -88,7 +94,8 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
     enum Kind{
         Normal,
         Head,
-        Quote(usize)
+        Quote(usize),
+        List(usize)
     }
     
     let mut state = State::Root{spaces:0};
@@ -147,8 +154,15 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
         match &mut state{
             State::Inline{kind, bold, italic}=> match cursor.chars{
                 ['\n',_,_]=>{
-                    let bold = *bold;
-                    let italic = *italic;
+                    for _ in 0..*bold{
+                        nodes.push(MarkdownNode::EndBold);
+                    }
+                    for _ in 0..*italic{
+                        nodes.push(MarkdownNode::EndItalic);
+                    }
+                    *bold = 0;
+                    *italic = 0;
+                    
                     match kind{
                         Kind::Head=>{
                             cursor.next();
@@ -195,17 +209,39 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                                 push_char(&mut nodes, &mut decoded, ' ');
                             }
                         }
+                        Kind::List(depth)=>{
+                            let last_is_space = cursor.last_char == ' ';
+                            cursor.next();
+                            let mut spaces = 0;
+                            while cursor.chars[0] == ' '{
+                                cursor.next();
+                                spaces += 1;
+                            }
+                            if cursor.chars[0] == '\n' {
+                                cursor.next();
+                                for _ in 0..*depth{
+                                    nodes.push(MarkdownNode::EndListItem);
+                                }
+                                state = State::Root{spaces:0};
+                            }
+                            else if (cursor.chars[0] == '+' || cursor.chars[0] == '*' || cursor.chars[0] == '-') && cursor.chars[1] == ' '{
+                                for _ in 0..*depth{
+                                    nodes.push(MarkdownNode::EndListItem);
+                                }
+                                state = State::Root{spaces};
+                            }
+                            else if cursor.chars[0].is_ascii_digit(){ // todo scan better
+                                for _ in 0..*depth{
+                                    nodes.push(MarkdownNode::EndListItem);
+                                }
+                                state = State::Root{spaces};
+                            }
+                            else if !last_is_space{
+                                push_char(&mut nodes, &mut decoded, ' ');
+                            }
+                        }
                     }
                     
-                    // TODO: clean up unmatched bolds and italics properly
-                    if let State::Root{..} = state{
-                        for _ in 0..bold{
-                            nodes.push(MarkdownNode::EndBold);
-                        }
-                        for _ in 0..italic{
-                            nodes.push(MarkdownNode::EndItalic);
-                        }
-                    }
                 }
                 ['*','*',w] | ['_','_',w] if w != ' ' && w != '\n'=>{ // alright so have have 2 *'s
                     // this is the start of a bold block
@@ -460,16 +496,52 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     }
                     nodes.push(MarkdownNode::EndCode);
                 }
-                /*
-                ['-',_,_]=>{ // possible list item
-                                    
+                ['-',' ',_] |
+                ['*',' ',_] |
+                ['+',' ',_] =>{ // possible list item
+                    let depth = (*spaces >> 1) + 1;
+                    let mut end_count = 0;
+                    let mut iter = nodes.iter().rev();
+                    while let Some(MarkdownNode::EndListItem) = iter.next(){
+                        end_count += 1;
+                    }
+                    
+                    if depth > end_count+1{
+                        if *spaces>=4{ // its code
+                            code_on_one_line(&mut nodes, &mut decoded, &mut cursor);
+                            state = State::Root{spaces:0};
+                        }
+                        else{ // its normal 
+                            nodes.push(MarkdownNode::BeginNormal);
+                            state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                        }
+                    }
+                    else{
+                        for i in 0..depth-1{
+                            if i < end_count{
+                                nodes.pop();
+                            }
+                        }
+                        // we always push a begin list item on
+                        nodes.push(MarkdownNode::BeginListItem{label:match cursor.chars[0]{
+                            '-'=>MarkdownListLabel::Minus,
+                            '*'=>MarkdownListLabel::Star,
+                            '+'=>MarkdownListLabel::Plus,
+                            _=>panic!()
+                        }});
+                        
+                        state = State::Inline{kind:Kind::List(depth), bold:0, italic:0}
+                    }
+                    cursor.skip(2);
+                    //push_optional_char(&mut nodes, &mut decoded, ' ');
                 }
-                ['+',_,_]=>{ // possible list item
-                                    
+                /*['+',_,_]=>{ // possible list item
+                    
                 }
                 ['*',_,_]=>{ // possible list item
-                                                    
-                }
+                                        
+                }*/
+                /*
                 ['|',_,_]=>{ // table
                                     
                 }*/
@@ -477,17 +549,67 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     cursor.skip(1);
                     state = State::Root{spaces:0};
                 }
-                [_a,_b,_c]=>{
-                    if *spaces>=4{ // its code
+                [a,_b,_c]=>{
+                    let mut is_list_digit = None;
+                    if a.is_ascii_digit(){
+                        let mut scan = cursor.clone();
+                        let start = decoded.len();
+                        while scan.chars[0].is_ascii_digit(){
+                            decoded.push(scan.chars[0]);
+                            scan.next();
+                        }
+                        if scan.chars[0] == '.' && scan.chars[1] == ' '{
+                            decoded.push('.');
+                            is_list_digit = Some((start, decoded.len()));
+                            scan.skip(2);
+                            cursor = scan;
+                        }
+                        else{
+                            decoded.truncate(start);
+                        }
+                    }
+                    // lets parse number. and number number.
+                    if let Some((start, end)) = is_list_digit{
+                        let depth = (*spaces >> 1) + 1;
+                        let mut end_count = 0;
+                        let mut iter = nodes.iter().rev();
+                        while let Some(MarkdownNode::EndListItem) = iter.next(){
+                            end_count += 1;
+                        }
+                                            
+                        if depth > end_count+1{
+                            if *spaces>=4{ // its code
+                                code_on_one_line(&mut nodes, &mut decoded, &mut cursor);
+                                state = State::Root{spaces:0};
+                            }
+                            else{ // its normal 
+                                nodes.push(MarkdownNode::BeginNormal);
+                                state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                            }
+                        }
+                        else{
+                            for i in 0..depth-1{
+                                if i < end_count{
+                                    nodes.pop();
+                                }
+                            }
+                            // we always push a begin list item on
+                            nodes.push(MarkdownNode::BeginListItem{label:MarkdownListLabel::Number{
+                                digit: decoded[start..end].parse::<usize>().unwrap_or(1),
+                                start,
+                                end
+                            }});
+                                                    
+                            state = State::Inline{kind:Kind::List(depth), bold:0, italic:0}
+                        }
+                    }
+                    else if *spaces>=4{ // its code
                         code_on_one_line(&mut nodes, &mut decoded, &mut cursor);
                         state = State::Root{spaces:0};
                     }
                     else{
-                        // parse if numbered list
-                        // otherwise this is a normal text block
                         nodes.push(MarkdownNode::BeginNormal);
                         state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
-                        nodes.push(MarkdownNode::EndNormal);
                     }
                 }
             }
