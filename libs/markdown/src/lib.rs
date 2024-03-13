@@ -535,16 +535,6 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     cursor.skip(2);
                     //push_optional_char(&mut nodes, &mut decoded, ' ');
                 }
-                /*['+',_,_]=>{ // possible list item
-                    
-                }
-                ['*',_,_]=>{ // possible list item
-                                        
-                }*/
-                /*
-                ['|',_,_]=>{ // table
-                                    
-                }*/
                 ['\n',_,_]=>{ // skip it
                     cursor.skip(1);
                     state = State::Root{spaces:0};
@@ -568,7 +558,6 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             decoded.truncate(start);
                         }
                     }
-                    // lets parse number. and number number.
                     if let Some((start, end)) = is_list_digit{
                         let depth = (*spaces >> 1) + 1;
                         let mut end_count = 0;
@@ -587,7 +576,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                                 state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
                             }
                         }
-                        else{
+                        else{ 
                             for i in 0..depth-1{
                                 if i < end_count{
                                     nodes.pop();
