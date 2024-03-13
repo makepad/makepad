@@ -47,7 +47,7 @@ live_design!{
                         text: "Helloworld"
                     }  
                     body:"
-                    Normal <u>underlined html</u> text hello world <br/>
+                    Normal <u>underlined html</u> <s>strike</s> text hello world <br/>
                     <li>one</li><br/>
                     <li>two</li><br/>
                     <code>let x = 1.0;</code>
