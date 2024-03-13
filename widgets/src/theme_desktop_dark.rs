@@ -163,6 +163,13 @@ live_design! {
     const THEME_SPLITTER_SIZE = 5.0
     
     Html = <HtmlBase>{
+        font_size: 12,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: 5,
+        line_spacing: 10,
+        
         draw_normal: {text_style:<THEME_FONT_LABEL>{}}
         draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
         draw_bold: {text_style:<THEME_FONT_BOLD>{}}
@@ -175,9 +182,9 @@ live_design! {
         quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         quote_walk:{height:Fit,width:Fill}
         
-        list_item_layout:{flow: RightWrap, padding:{left:15,top:0,right:10,bottom:0}},
+        list_item_layout:{flow: RightWrap, padding:{left:0,top:0,right:10,bottom:0}},
         list_item_walk:{height:Fit,width:Fill}
-        
+          
         sep_walk:{height:4, width: Fill},
         
         draw_block:{
@@ -225,17 +232,6 @@ live_design! {
                         sdf.fill(#7);
                         return sdf.result;
                     }
-                    FlowBlockType::ListItem => {
-                        sdf.box(
-                            4.,
-                            6.,
-                            4.,
-                            4.,
-                            1.
-                        );
-                        sdf.fill(#f);
-                        return sdf.result;
-                    }
                 }
                 return #f00
             } 
@@ -243,6 +239,13 @@ live_design! {
     }
     
     Markdown = <MarkdownBase>{
+        font_size: 12,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: 5,
+        line_spacing: 10,
+        
         draw_normal: {text_style:<THEME_FONT_LABEL>{}}
         draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
         draw_bold: {text_style:<THEME_FONT_BOLD>{}}
@@ -258,8 +261,8 @@ live_design! {
         quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         quote_walk:{height:Fit,width:Fill}
                 
-        list_item_layout:{flow: RightWrap, padding:{left:15,top:0,right:10,bottom:0}},
-        list_item_walk:{height:Fit,width:Fill}
+        list_item_layout:{flow: RightWrap, line_spacing: 10 padding:{left:15,top:0,right:10,bottom:0}},
+        list_item_walk:{margin:{top:0},height:Fit,width:Fill}
                 
         sep_walk:{height:4, width: Fill},
                 
@@ -317,17 +320,6 @@ live_design! {
                             2.
                         );
                         sdf.fill(#7);
-                        return sdf.result;
-                    }
-                    FlowBlockType::ListItem => {
-                        sdf.box(
-                            4.,
-                            6.,
-                            4.,
-                            4.,
-                            1.
-                        );
-                        sdf.fill(#f);
                         return sdf.result;
                     }
                 }
