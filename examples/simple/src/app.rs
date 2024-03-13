@@ -47,7 +47,7 @@ live_design!{
                         text: "Helloworld"
                     }  
                     body:"
-                    Normal HTML text hello world <br/>
+                    Normal <u>underlined html</u> text hello world <br/>
                     <li>one</li><br/>
                     <li>two</li><br/>
                     <code>let x = 1.0;</code>
@@ -69,7 +69,7 @@ live_design!{
                     
                     - list item
                       - another *list*
-                        - more list
+                        - more list `code`
                         2. number
                     - here
                     - more Here
