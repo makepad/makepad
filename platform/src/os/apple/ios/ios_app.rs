@@ -5,7 +5,6 @@ use {
     },
     crate::{
         makepad_math::*,
-        makepad_objc_sys::runtime::{ObjcId, nil},
         os::{
             apple::apple_util::str_to_nsstring,
             apple::apple_sys::*,
