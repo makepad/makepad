@@ -28,3 +28,5 @@ rustc*.txt
 /tools/cargo_makepad/ios-deploy/_Frameworks/
 /tools/cargo_makepad/ios-deploy/build/
 *.fish
+experiments/websocket-windows/nodejs-websocketserver
+experiments/svgloader
