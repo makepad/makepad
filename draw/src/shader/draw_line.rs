@@ -46,6 +46,38 @@ pub struct DrawLine {
 
 impl DrawLine
 {
+    pub fn  get_bezier_point(&mut self,t: f64, control_points: &Vec<DVec2>,index: usize, count: usize) -> DVec2
+    {
+        if count == 1
+        {
+            return control_points[index];
+        }
+        let  p0 = self.get_bezier_point(t, control_points, index, count - 1);
+        let  p1 = self.get_bezier_point(t, control_points, index + 1, count - 1);
+        return p0*t + p1*(1.0-t);
+    }
+
+
+    pub fn draw_bezier_abs(&mut self,  cx: &mut Cx2d, points: Vec<DVec2>, color: Vec4, line_width: f64 )
+    {
+        let step = 0.01;
+        let mut t = 0.0;
+        let mut omt = 1.0;
+        let mut from = points[points.len()-1];
+        while t< 1.
+        {
+            let nextt = t + step;
+            let nextomt = 1.0 - nextt;
+            let next = self.get_bezier_point(nextt, &points, 0 , points.len())            ;
+           
+            self.draw_line_abs(cx, from, next, color, line_width);
+            from = next;
+            omt = nextomt;
+            t = nextt;
+        }
+
+    }
+
     pub fn draw_line_abs(&mut self,  cx: &mut Cx2d, line_start: DVec2, line_end: DVec2, color: Vec4, line_width: f64 )
     {
         let maxpixels = 300. as f64;
