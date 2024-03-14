@@ -22,13 +22,15 @@ live_design!{
             let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter * 18.0) - .01 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 18) - .01 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
+            
             return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
+            
         }
     }
     

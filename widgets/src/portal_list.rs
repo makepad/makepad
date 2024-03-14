@@ -288,7 +288,14 @@ impl PortalList {
             }
         }
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
-        self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
+        match self.vec_index {
+            Vec2Index::Y => {
+                self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
+            }
+            Vec2Index::X => {
+                self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Horizontal, rect, dvec2(rect.size.x * total_views, 100.0));
+            }
+        }        
         if !self.keep_invisible{
             self.items.retain_visible();
         }
@@ -297,6 +304,7 @@ impl PortalList {
     
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
+        let layout = if vi == Vec2Index::Y { Layout::flow_down() } else { Layout::flow_right() };
         if let Some(draw_state) = self.draw_state.get() {
             match draw_state {
                 ListDrawState::Begin => {
@@ -306,13 +314,24 @@ impl PortalList {
                         pos: self.first_scroll,
                         viewport,
                     });
-                    
-                    cx.begin_turtle(Walk {
-                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
-                        margin: Default::default(),
-                        width: Size::Fill,
-                        height: Size::Fit
-                    }, Layout::flow_down());
+                    match vi {
+                        Vec2Index::Y => {
+                            cx.begin_turtle(Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
+                                margin: Default::default(),
+                                width: Size::Fill,
+                                height: Size::Fit
+                            }, layout);
+                        }
+                        Vec2Index::X => {
+                            cx.begin_turtle(Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x + self.first_scroll, viewport.pos.y)),
+                                margin: Default::default(),
+                                width: Size::Fit,
+                                height: Size::Fill
+                            }, layout);
+                        }
+                    }
                     return Some(self.first_id)
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
@@ -336,12 +355,24 @@ impl PortalList {
                                 hit_bottom: index >= self.range_end,
                                 viewport
                             });
-                            cx.begin_turtle(Walk {
-                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                                margin: Default::default(),
-                                width: Size::Fill,
-                                height: Size::Fit
-                            }, Layout::flow_down());
+                            match vi {
+                                Vec2Index::Y => {
+                                    cx.begin_turtle(Walk {
+                                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                        margin: Default::default(),
+                                        width: Size::Fill,
+                                        height: Size::Fit
+                                    }, layout);
+                                }
+                                Vec2Index::X => {
+                                    cx.begin_turtle(Walk {
+                                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                        margin: Default::default(),
+                                        width: Size::Fit,
+                                        height: Size::Fill
+                                    }, layout);
+                                }
+                            }
                             return Some(self.first_id - 1);
                         }
                         else {
@@ -363,12 +394,24 @@ impl PortalList {
                             viewport
                         });
                     }
-                    cx.begin_turtle(Walk {
-                        abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
-                        margin: Default::default(),
-                        width: Size::Fill,
-                        height: Size::Fit
-                    }, Layout::flow_down());
+                    match vi {
+                        Vec2Index::Y => {
+                            cx.begin_turtle(Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
+                                margin: Default::default(),
+                                width: Size::Fill,
+                                height: Size::Fit
+                            }, layout);
+                        }
+                        Vec2Index::X => {
+                            cx.begin_turtle(Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x + pos + rect.size.index(vi), viewport.pos.y)),
+                                margin: Default::default(),
+                                width: Size::Fit,
+                                height: Size::Fill
+                            }, layout);
+                        }
+                    }
                     return Some(index + 1)
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {

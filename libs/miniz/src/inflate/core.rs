@@ -3,7 +3,6 @@
 use super::*;
 use crate::shared::{update_adler32, HUFFMAN_LENGTH_ORDER};
 
-use ::core::convert::TryInto;
 use ::core::{cmp, slice};
 
 use self::output_buffer::OutputBuffer;

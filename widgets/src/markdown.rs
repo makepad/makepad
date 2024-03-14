@@ -14,7 +14,7 @@ live_design!{
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
     }
-}
+} 
 
 #[derive(Live, Widget)]
 pub struct Markdown{
@@ -26,67 +26,110 @@ pub struct Markdown{
 // alright lets parse the HTML
 impl LiveHook for Markdown{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
-        let mut errors = Some(Vec::new());
-        self.doc = parse_markdown(&*self.body, &mut errors);
-        if errors.as_ref().unwrap().len() > 0{
-            log!("HTML parser returned errors {:?}", errors)
-        }
+       self.doc = parse_markdown(&*self.body);
     }
 }
  
 impl Widget for Markdown {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
-    }
+    } 
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
         let tf = &mut self.text_flow;
-        tf.begin(cx, walk);
-        /*
-        let mut auto_id = 0;
-        // alright lets iterate the html doc and draw it
-        let mut node = self.doc.walk();
-        while !node.empty(){
-            
-            match node.open_tag_lc(){
-                some_id!(a)=>{
-                    node = node.jump_to_close();
-                }
-                some_id!(h1)=>{
-                    tf.push_scale(1.5)
+        tf.begin(cx, walk); 
+        // alright lets walk the markdown
+        for node in &self.doc.nodes{
+            match node{
+                MarkdownNode::BeginHead{level}=>{
+                    tf.push_size_abs_scale(3.0 / *level as f64);
                 },
-                some_id!(br)=>cx.turtle_new_line(),
-                some_id!(b)=>tf.push_bold(),
-                some_id!(i)=>tf.push_italic(),
-                Some(_)=>{ // custom widget
-                    let id = if let Some(id) = node.find_attr_lc(live_id!(id)){
-                        LiveId::from_str(id)
-                    }
-                    else{
-                        auto_id += 1;
-                        LiveId(auto_id)
+                MarkdownNode::EndHead=>{
+                    tf.pop_size();
+                    cx.turtle_new_line();
+                },
+                MarkdownNode::NewLine=>{
+                    cx.turtle_new_line();
+                },
+                MarkdownNode::BeginNormal=>{
+                    cx.turtle_new_line();
+                },
+                MarkdownNode::EndNormal=>{
+                    
+                },
+                MarkdownNode::BeginListItem{label}=>{
+                    cx.turtle_new_line();
+                    let str = match label{
+                        MarkdownListLabel::Plus=>"+",
+                        MarkdownListLabel::Minus=>"-",
+                        MarkdownListLabel::Star=>"*",
+                        MarkdownListLabel::Number{start,end,..}=>{
+                            &self.doc.decoded[*start..*end]
+                        }
+                                                
                     };
-                    let template = node.open_tag_nc().unwrap();
-                    if let Some(item) = tf.item(cx, id, template){
-                        item.set_text(node.find_text().unwrap_or(""));
-                        item.draw_all(cx, scope);
-                    }
-                    node = node.jump_to_close();
+                    tf.begin_list_item(cx, str, 1.5);
+                },
+                MarkdownNode::EndListItem=>{
+                    tf.end_list_item(cx);
+                },
+                MarkdownNode::Link{start, url_start, end}=>{
+                    tf.draw_text(cx, "Link[name:");
+                    tf.draw_text(cx, &self.doc.decoded[*start..*url_start]);
+                    tf.draw_text(cx, ", url:");
+                    tf.draw_text(cx, &self.doc.decoded[*url_start..*end]);
+                    tf.draw_text(cx, " ]");
+                },
+                MarkdownNode::Image{start, url_start, end}=>{
+                    tf.draw_text(cx, "Image[name:");
+                    tf.draw_text(cx, &self.doc.decoded[*start..*url_start]);
+                    tf.draw_text(cx, ", url:");
+                    tf.draw_text(cx, &self.doc.decoded[*url_start..*end]);
+                    tf.draw_text(cx, " ]");
+                },
+                MarkdownNode::BeginQuote=>{
+                    cx.turtle_new_line();
+                    tf.begin_quote(cx);
+                },
+                MarkdownNode::EndQuote=>{
+                    tf.end_quote(cx);
+                },
+                MarkdownNode::BeginInlineCode=>{
+                    tf.push_fixed();
+                    tf.begin_inline_code(cx);     
+                },
+                MarkdownNode::EndInlineCode=>{
+                    tf.pop_fixed();
+                    tf.end_inline_code(cx);                 
+                },
+                MarkdownNode::BeginCode=>{
+                    cx.turtle_new_line();
+                    tf.push_fixed();
+                    tf.begin_code(cx);     
+                },
+                MarkdownNode::EndCode=>{
+                    tf.pop_fixed();
+                    tf.end_code(cx);
+                },
+                MarkdownNode::BeginBold=>{
+                    tf.push_bold();
+                },
+                MarkdownNode::BeginItalic=>{
+                    tf.push_italic();
+                },
+                MarkdownNode::EndBold=>{
+                    tf.pop_bold();          
+                },
+                MarkdownNode::EndItalic=>{
+                    tf.pop_italic();
+                },
+                MarkdownNode::Text{start, end}=>{
+                    tf.draw_text(cx, &self.doc.decoded[*start..*end]);
                 }
-                _=>()
-            } 
-            match node.close_tag_lc(){
-                some_id!(h1)=>tf.pop_size(),
-                some_id!(b)=>tf.pop_bold(),
-                some_id!(i)=>tf.pop_italic(),
-                _=>()
             }
-            if let Some(text) = node.text(){
-                tf.draw_text(cx, text);
-            }
-            node = node.walk();
         }
-        tf.end(cx);*/
+        
+        tf.end(cx);
         DrawStep::done()
     }
      

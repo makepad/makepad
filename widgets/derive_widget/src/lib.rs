@@ -18,7 +18,8 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
     deref,
     redraw,
     find,
-    wrap
+    wrap,
+    event
 ))]
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
@@ -29,7 +30,8 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
     deref,
     redraw,
     find,
-    wrap
+    wrap,
+    event
 ))]
 pub fn derive_widget_node(input: TokenStream) -> TokenStream {
     derive_widget_node_impl(input)
