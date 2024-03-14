@@ -794,11 +794,16 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time).as_secs_f64()
+    }
 }
 
 impl Default for CxOs {
     fn default() -> Self {
         Self {
+            start_time: Instant::now(),
             first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
@@ -832,6 +837,7 @@ pub struct CxOs {
 
     pub quit: bool,
     pub fullscreen: bool,
+    pub (crate) start_time: Instant,
     pub (crate) timers: PollTimers,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,

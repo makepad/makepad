@@ -1,8 +1,8 @@
 
 use {
-    std::time::{Instant},
     std::collections::{HashSet, HashMap},
     crate::{
+        cx_api::CxOsApi,
         cx::Cx,
         pass::{
             PassId,
@@ -112,15 +112,15 @@ impl Cx {
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
         if Cx::has_studio_web_socket(){
-            let start = Instant::now().duration_since(self.start_time);
+            let start = self.seconds_since_app_start();
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
             self.event_handler = Some(event_handler);
-            let end = Instant::now().duration_since(self.start_time);
+            let end = self.seconds_since_app_start();
             Cx::send_studio_message(AppToStudio::EventSample(EventSample{
                 event_u32: event.to_u32(),
-                start: start.as_secs_f64(),
-                end: end.as_secs_f64()
+                start: start,
+                end: end
             }))
         }
         else{
