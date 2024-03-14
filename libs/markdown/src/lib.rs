@@ -153,6 +153,10 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
     loop{
         match &mut state{
             State::Inline{kind, bold, italic}=> match cursor.chars{
+                [' ',' ','\n']=>{
+                    nodes.push(MarkdownNode::NewLine);
+                    cursor.skip(2);
+                }
                 ['\n',_,_] | ['\0',_,_]=>{
                     for _ in 0..*bold{
                         nodes.push(MarkdownNode::EndBold);
