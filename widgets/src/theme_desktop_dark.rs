@@ -177,37 +177,195 @@ live_design! {
     THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
     THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     THEME_SPLITTER_SIZE = 5.0
- 
+    
     Html = <HtmlBase>{
-        draw_normal: {text_style: <THEME_FONT_LABEL>{}}
-        draw_italic: {text_style: <THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style: <THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC>{}}
-        block_layout:{padding: {left:15,top:10,right:10,bottom:10} },
-        block_walk:{width:Fill}
+        font_size: 12,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: 5,
+        line_spacing: 10,
+        
+        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
+        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
+        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
+        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
+        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
+        
+        code_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
+        code_walk:{height:Fit,width:Fill}
+        
+        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
+        quote_walk:{height:Fit,width:Fill}
+        
+        list_item_layout:{flow: RightWrap, padding:{left:0,top:0,right:10,bottom:0}},
+        list_item_walk:{height:Fit,width:Fill}
+          
+        sep_walk:{height:4, width: Fill},
+        
         draw_block:{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x-2.,
-                    self.rect_size.y-2.,
-                    2.
-                );
-                sdf.fill(#6)
-                sdf.box(
-                    4.,
-                    3.,
-                    4.,
-                    self.rect_size.y-6,
-                    1.
-                );
-                return sdf.fill(#8);
-            }
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#6)
+                        sdf.box(
+                            4.,
+                            3.,
+                            4.,
+                            self.rect_size.y-6, 
+                            1.
+                        );
+                        sdf.fill(#8);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#8);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            1.5,
+                            0.5
+                        );
+                        sdf.fill(#f);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y*0.5,
+                            self.rect_size.x,
+                            1.5,
+                            0.5
+                        );
+                        sdf.fill(#f);
+                        return sdf.result;
+                    }
+                }
+                return #f00
+            } 
         }
     }
-
+    
+    Markdown = <MarkdownBase>{
+        font_size: 12,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: 5,
+        line_spacing: 10,
+        
+        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
+        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
+        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
+        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
+        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
+                
+        code_layout:{flow: RightWrap,align:{x:0.0,y:0.0}, padding:{left:10,top:10,right:10,bottom:10}},
+        code_walk:{height:Fit,width:Fill}
+        
+        inline_code_layout:{flow: RightWrap,  padding:{left:3,top:2,right:3,bottom:2}},
+        inline_code_walk:{height:Fit,width:Fit,margin:{top:-4}} 
+                        
+        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
+        quote_walk:{height:Fit,width:Fill}
+                
+        list_item_layout:{flow: RightWrap, line_spacing: 10 padding:{left:15,top:0,right:10,bottom:0}},
+        list_item_walk:{margin:{top:0},height:Fit,width:Fill}
+                
+        sep_walk:{height:4, width: Fill},
+                
+        draw_block:{
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#6)
+                        sdf.box(
+                            4.,
+                            3.,
+                            4.,
+                            self.rect_size.y-6, 
+                            1.
+                        );
+                        sdf.fill(#8);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#6);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
+                }
+                return #f00
+            } 
+        }
+    }
+    
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0

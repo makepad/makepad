@@ -12,7 +12,7 @@ live_design!{
             width: Fill,
             height: Fill
             body = {
-                <SlidesView> {
+                <SlidesView> {/*
                     <SlideChapter> {
                         title = {text: "Realtime generation\nWith Stable diffusion"},
                         <SlideBody> {text: "Rik Arends\n"}
@@ -48,13 +48,13 @@ live_design!{
                     <Slide> {
                         title = {text: "Thank you"},
                         <SlideBody> {text: "twitter: @rikarends\ngithub.com/makepad/makepad"}
-                    }
-                    /*<Slide> {
-                        title = {text: "Hello conference"},
+                    }*/
+                    <Slide> {
+                        title = {text: " Hello world"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "LIVE APP BUILDING\nWITH MAKEPAD"},
+                        title = {text: "WHAT IS UP\nWITH MAKEPAD"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
@@ -161,7 +161,7 @@ live_design!{
                     <Slide> {
                         title = {text: "Links"}, 
                         <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl"}
-                    }*/
+                    }
                 }
             }
         }

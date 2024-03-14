@@ -99,7 +99,7 @@ impl ProfilerEventChart{
             write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
         }
         else{
-            write!(&mut self.tmp_label, "{} {:.0} ns", label, (sample_end-sample_start)*1000000.0).unwrap();
+            write!(&mut self.tmp_label, "{} {:.0} µs", label, (sample_end-sample_start)*1000_000.0).unwrap();
         }
         
         // if xsize > 10.0 lets draw a clipped piece of text 
