@@ -1,5 +1,6 @@
 use {
     std::cell::RefCell,
+    std::time::Instant,
     std::rc::Rc,
     self::super::opengl_x11::{
         OpenglWindow,
@@ -347,6 +348,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        self.os.start_time = Some(Instant::now());
         self.live_expand();
         self.live_scan_dependencies();
         self.native_load_dependencies();
@@ -355,13 +357,17 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
 }
 
 #[derive(Default)]
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
     pub (crate) stdin_timers: PollTimers,
-
+    pub (crate) start_time: Option<Instant>,
     // HACK(eddyb) generalize this to EGL, properly.
     pub(super) opengl_cx: Option<OpenglCx>,
 }

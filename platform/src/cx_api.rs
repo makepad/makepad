@@ -33,6 +33,8 @@ pub trait CxOsApi {
     fn pre_start() -> bool {
         false
     }
+    
+    fn seconds_since_app_start(&self)->f64;
 
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
