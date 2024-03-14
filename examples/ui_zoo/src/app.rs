@@ -477,20 +477,20 @@ live_design!{
                         }
                     }
 
-                    // <ZooHeader>{
-                    //     title = {text:"Markdown"}
-                    //     <ZooDesc>{text:"Markdown"}
-                    //     <ZooGroup> {
-                    //         <Markdown>{
-                    //             width:Fill, height: Fit,
-                    //             // font_size: (THEME_FONT_SIZE_BASE),
-                    //             // flow: RightWrap,
-                    //             // padding: 5,
-                    //             // line_spacing: 10,
-                    //             body:"# Lorem Ipsum Dolor"
-                    //         }
-                    //     }
-                    // }
+                    <ZooHeader>{
+                        title = {text:"Markdown"}
+                        <ZooDesc>{text:"Markdown"}
+                        <ZooGroup> {
+                            <Markdown>{
+                                width:Fill, height: Fit,
+                                // font_size: (THEME_FONT_SIZE_BASE),
+                                // flow: RightWrap,
+                                // padding: 5,
+                                // line_spacing: 10,
+                                body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n Standard text \n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n Test"
+                            }
+                        }
+                    }
 
                     // TODO: SHOW
                     // SEEMS NOT TO WORK WITHOUT DUMMY DATA
