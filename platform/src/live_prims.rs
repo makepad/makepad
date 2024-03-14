@@ -15,7 +15,7 @@ macro_rules!get_component {
         $ frame.get_component( $ comp_id).map_or(None, | v | v.cast_mut::< $ ty>())
     }
 }
-
+ 
 #[macro_export]
 macro_rules!live_primitive {
     ( $ ty: ty, $ default: expr, $ apply: item, $ to_live_value: item) => {
@@ -32,7 +32,6 @@ macro_rules!live_primitive {
             //fn type_id(&self) -> TypeId {
             //    TypeId::of::< $ ty>()
             // }
-            
             $ apply
         }
         impl LiveNew for $ ty {

@@ -154,7 +154,7 @@ pub struct Win32App {
     pub was_signal_poll: bool,
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
-    pub current_cursor: MouseCursor,
+    pub current_cursor: Option<MouseCursor>,
     pub currently_clicked_window_id: Option<WindowId >,
     pub start_dragging_items: Option<Vec<DragItem >>,
     pub is_dragging_internal: Cell<bool>,
@@ -218,7 +218,7 @@ impl Win32App {
             all_windows: Vec::new(),
             timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
-            current_cursor: MouseCursor::Default,
+            current_cursor: None,
             currently_clicked_window_id: None,
             is_dragging_internal: Cell::new(false),
         };
@@ -471,7 +471,7 @@ impl Win32App {
     }
     
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
-        if self.current_cursor != cursor {
+        if self.current_cursor.is_none() || self.current_cursor.unwrap() != cursor {
             let win32_cursor = match cursor {
                 MouseCursor::Hidden => {
                     PCWSTR::null()
@@ -504,7 +504,7 @@ impl Win32App {
                 MouseCursor::ColResize => IDC_SIZEWE,
                 MouseCursor::RowResize => IDC_SIZENS,
             };
-            self.current_cursor = cursor;
+            self.current_cursor = Some(cursor);
             unsafe {
                 if win32_cursor == PCWSTR::null() {
                     ShowCursor(FALSE);

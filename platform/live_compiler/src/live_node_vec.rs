@@ -743,6 +743,10 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <Class> {:?}", node.id, pt, live_type).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
+                LiveValue::Deref {live_type, clone} => {
+                    writeln!(f, "{}{} <Deref> {:?} {}", node.id, pt, live_type, clone).unwrap();
+                    stack_depth += 1;
+                }, // subnodes including this one
                 LiveValue::Root {..} => {
                     writeln!(f, "{}{} <Root>", node.id, pt).unwrap();
                     stack_depth += 1;

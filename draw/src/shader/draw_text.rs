@@ -605,8 +605,11 @@ impl DrawText {
             }
         }
     }
+    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str){
+        self.draw_walk_word_with(cx, text, |_,_|{});
+    }
     
-    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str) {
+    pub fn draw_walk_word_with<F>(&mut self, cx: &mut Cx2d, text: &str, mut cb:F) where F: FnMut(&mut Cx2d, Rect){
         
         // this walks the turtle per word
         if text.len() == 0 {
@@ -621,7 +624,7 @@ impl DrawText {
         let fonts_atlas = &mut*fonts_atlas;
                 
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
-        let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+        let line_drop = self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.top_drop;
         
         // lets get the width of the current turtle
         // we need it for the next_word item to properly break off
@@ -638,8 +641,9 @@ impl DrawText {
                 abs_pos: None,
                 margin: Margin::default(),
                 width: Size::Fixed(word.width),
-                height: Size::Fixed(line_height)
+                height: Size::Fixed(line_drop)
             });
+            cb(cx, walk_rect);
             // make sure our iterator uses the xpos from the turtle
             self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
         }
@@ -689,7 +693,18 @@ impl DrawText {
                             height: Size::Fixed(height)
                         });
                         
-                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip], fonts_atlas);
+                        // Ensure the chunk before the ellipsis is aligned down to a char boundary
+                        let chunk = text.get(0..ellip).unwrap_or_else(|| {
+                            let mut new_ellip = ellip.saturating_sub(1);
+                            while new_ellip > 0 {
+                                if let Some(s) = text.get(0..new_ellip) {
+                                    return s;
+                                }
+                                new_ellip -= 1;
+                            }
+                            ""
+                        });
+                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), chunk, fonts_atlas);
                         self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots], fonts_atlas);
                     }
                     else { // we might have space to h-align
@@ -776,7 +791,7 @@ impl DrawText {
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             if last_y.is_none() {last_y = Some(y)}
             let advance = advance.buffer[index + 0] as f64;
-            if i > 0 && y > last_y.unwrap() && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
+            if i > 0 && (y - last_y.unwrap()) > 0.001 && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
                 return Some(i - 1)
             }
             if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {

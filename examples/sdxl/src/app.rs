@@ -84,7 +84,7 @@ pub struct App {
         Machine::new("DESKTOP-2:8188", id_lut!(m2)),
         Machine::new("DESKTOP-3:8188", id_lut!(m3)),
         Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
-        Machine::new("10.0.0.125:8188", id_lut!(m1)),
+        Machine::new("10.0.0.111:8188", id_lut!(m1)),
        /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
     ])] machines: Vec<Machine>,
     
@@ -105,8 +105,8 @@ pub struct App {
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust(true)] take_photo:bool,
-    #[rust(0.85)] dial1: f32,
-    #[rust(0.85)] dial2: f32
+    #[rust(0.5)] dial1: f32,
+    #[rust(0.2)] dial2: f32
     //#[rust(Instant::now())] last_flip: Instant
 }
 
@@ -709,6 +709,12 @@ impl MatchEvent for App {
                 _=>()
             }
         }
+        self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+            draw_bg:{dial2:(self.dial2)}
+        });
+        self.ui.widget(id!(video_input0)).apply_over(cx, live!{
+            draw_bg:{dial1:(self.dial1)}
+        });
         while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
             let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
             if img_width != vfb.format.width / 2 || img_height != vfb.format.height {
