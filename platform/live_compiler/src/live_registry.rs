@@ -533,7 +533,6 @@ impl LiveRegistry {
                 line_start = line_end;
             }
             else {
-                println!("BREAKIN");
                 break;
             }
             state = next_state;

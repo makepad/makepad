@@ -1,5 +1,6 @@
 
 use {
+    std::panic,
     std::rc::Rc,
     std::cell::RefCell,
     self::super::{
@@ -594,6 +595,10 @@ impl CxOsApi for Cx {
         ]);
     }
     
+    fn seconds_since_app_start(&self)->f64{
+        0.0
+    }
+    
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
         let context_ptr = Box::into_raw(Box::new(closure_box));
@@ -702,6 +707,16 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
         0
     }
 }
+
+#[export_name = "wasm_init_panic_hook"]
+pub unsafe extern "C" fn init_panic_hook() {
+    pub fn panic_hook(info: &panic::PanicInfo) {
+        crate::error!("{}", info)
+    }
+    panic::set_hook(Box::new(panic_hook));
+}
+
+
 
 
 #[no_mangle]

@@ -2,6 +2,7 @@ use {
     std::{
         rc::Rc,
         cell::RefCell,
+        time::Instant
     },
     makepad_objc_sys::{
         msg_send,
@@ -573,6 +574,7 @@ impl CxOsApi for Cx {
     }
     
     fn init_cx_os(&mut self) {
+        self.os.start_time = Some(Instant::now());
         self.live_expand();
         if std::env::args().find( | v | v == "--stdin-loop").is_none() {
             self.start_disk_live_file_watcher(100);
@@ -587,6 +589,10 @@ impl CxOsApi for Cx {
     
     fn start_stdin_service(&mut self) {
         self.start_xpc_service()
+    }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
     }
     
     /*
@@ -608,6 +614,6 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) stdin_timers: PollTimers,
-
+    pub (crate) start_time: Option<Instant>,
     pub metal_device: Option<ObjcId>,
 }

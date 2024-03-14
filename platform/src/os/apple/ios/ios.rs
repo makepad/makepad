@@ -1,5 +1,6 @@
 use {
     std::{
+        time::Instant,
         rc::Rc,
         cell::{RefCell},
         io::prelude::*,
@@ -8,7 +9,6 @@ use {
 
     crate::{
         makepad_live_id::*,
-        makepad_objc_sys::runtime::{ObjcId},
         os::{
             apple::apple_sys::*,
             apple::apple_util::nsstring_to_string,
@@ -340,7 +340,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) { 
-        
+        self.os.start_time = Some(Instant::now());
         #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         }
@@ -362,6 +362,10 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }    
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
@@ -375,6 +379,7 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
+    pub (crate) start_time: Option<Instant>,
     pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
