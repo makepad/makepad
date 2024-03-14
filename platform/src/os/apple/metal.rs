@@ -484,7 +484,7 @@ impl Cx {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
-        let start_time = self.start_time;
+        let start_time = self.os.start_time.unwrap();
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
