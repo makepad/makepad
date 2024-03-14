@@ -62,8 +62,7 @@ live_design!{
                     "
                 }
                 <Markdown>{
-                    body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n Standard text \n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n Test"
-                    /*
+                    
                     body:"
                     # MD H1 
                     ## H2 **Bold** *italic*
@@ -102,7 +101,7 @@ live_design!{
                     ```
                     *italic* **Bold** normal _italic_ __bold__ ***Bolditalic*** normal
                     123
-                    "*/
+                    "
                 }
             }
         }
