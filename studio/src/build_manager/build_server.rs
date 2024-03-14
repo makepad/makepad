@@ -441,7 +441,6 @@ pub trait MsgSender: Send {
     }
     
     fn process_compiler_message(&self, cmd_id: LiveId, msg: RustcCompilerMessage) {
-         println!("GOT HERE");
         if let Some(msg) = msg.message {
             
             let level = match msg.level.as_ref() {
@@ -455,6 +454,11 @@ pub trait MsgSender: Send {
                     return
                 }
             };
+            if let LogLevel::Warning = level{
+                if msg.message.starts_with("unstable feature specified for"){
+                    return
+                }
+            }
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
                
                 self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.end(), msg.message.clone());

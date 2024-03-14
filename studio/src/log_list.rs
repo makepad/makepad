@@ -8,7 +8,6 @@ use {
         app::{AppAction, AppData},
         makepad_widgets::*,
         makepad_code_editor::text::{Position},
-        makepad_widgets::portal_list::PortalList,
     },
     std::{
         env,
