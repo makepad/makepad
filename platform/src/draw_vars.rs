@@ -121,6 +121,12 @@ impl LiveApply for DrawVars {
     }
 }
 
+impl LiveApplyUpdate for DrawVars {
+    fn apply_update(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        // do nothing
+    }
+}
+
 impl LiveHook for DrawVars {}
 
 impl DrawVars {

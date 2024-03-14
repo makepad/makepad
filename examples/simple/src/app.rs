@@ -1,8 +1,12 @@
 use makepad_widgets::*;
- 
+  
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
+    
+    MyHtml = {{MyHtml}}<Html>{
+    }
+    
     App = {{App}} {
 
         ui: <Window>{
@@ -12,14 +16,14 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    //return #000
+                    // test
                     return mix(#7, #3, self.pos.y);
                 }
             }
             
-            body = <View>{
+            body = <ScrollXYView>{
                 flow: Down,
-                spacing: 20,
+                spacing:10,
                 align: {
                     x: 0.5,
                     y: 0.5
@@ -32,29 +36,79 @@ live_design!{
                     text: "Click to count"
                 }
                 label1 = <Label> {
-                    draw_text: {
+                    draw_text: {d
                         color: #f
                     },
                     text: "Counter: 0"
                 }
                 <Html>{
-                    font_size: 13,
-                    flow: RightWrap,
-                    width:Fill,
-                    height:Fit,
-                    padding: 5,
-                    line_spacing: 10,
-                    Button = <Button> {
-                        text: "Hello world"
-                    } 
-                    body:"this is <b>BOLD text</b>&nbsp;italic<Button>Hi</Button><br/><block_quote>blockquote<br/><block_quote>blockquote</block_quote></block_quote><i>Bold italic</i>"
+                    
+                    Button = <TextInput> {
+                        text: "Helloworld"
+                    }  
+                    body:"
+                    Normal <u>underlined html</u> <s>strike</s> text hello world <br/>
+                    <li>one</li><br/>
+                    <li>two</li><br/>
+                    <code>let x = 1.0;</code>
+                    <b>BOLD text</b>&nbsp;<i>italic</i><br/>
+                    <sep/>
+                    Next line normal text button:<Button>Hi</Button><br/>
+                    <block_quote>block<b>quote</b><br/><block_quote>blockquote</block_quote><br/>
+                    Next line <br/>
+                    <sep/>
+                    </block_quote><b><i>Bold italic</i><br/>
+                    <sep/></br>
+                    "
+                }
+                <Markdown>{
+                    
+                    body:"
+                    # MD H1 
+                    ## H2 **Bold** *italic*
+                    
+                    - list item
+                      - another *list*
+                        - more list `code`
+                        2. number
+                    - here
+                    - more Here
+                    
+                    1. list
+                    3. have another list
+                      1. nested list
+                    2. item
+                      
+                    > block
+                    > next
+                    >> hi
+                    continuation
+                    
+                    [link](https://image)
+                    ![image](https://link)
+                    Normal
+                    Next line
+                    single newline becomes space
+                    *hello*hello world
+                    
+                        inline code
+                        more inline code
+                    Double newline
+                    `inline code` text after
+                    ```
+                    let x = 10
+                    let y = 10
+                    ```
+                    *italic* **Bold** normal _italic_ __bold__ ***Bolditalic*** normal
+                    123
+                    "
                 }
             }
         }
     }
-} 
-    
-app_main!(App);
+}  
+              
+app_main!(App); 
  
 #[derive(Live, LiveHook)]
 pub struct App {
@@ -85,6 +139,43 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 } 
+
+
+
+#[derive(Live, LiveHook, Widget)]
+struct MyHtml{ 
+    #[deref] html:Html
+}
+
+impl Widget for MyHtml{
+    fn draw_walk(&mut self, cx:&mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
+        let tf = &mut self.html.text_flow;
+        tf.begin(cx, walk); 
+        let mut node = self.html.doc.walk();
+        while !node.empty(){
+            match Html::handle_open_tag(cx, tf, &mut node){
+                Some(_)=>{
+                    // handle tag here
+                }
+                _=>()
+            }
+            match Html::handle_close_tag(cx, tf, &mut  node){
+                Some(_)=>{
+                    // handle tag here
+                }
+                _=>()
+            }
+            Html::handle_text_node(cx, tf, &mut node);
+            node = node.walk();
+        }
+        tf.end(cx);
+        DrawStep::done()
+    }
+    
+    fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope){
+        self.html.handle_event(cx, event, scope)
+    }
+}
 /*
 // This is our custom allocator!
 use std::{

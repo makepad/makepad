@@ -226,7 +226,7 @@ impl InitialState {
     fn line_comment(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
-        while cursor.skip_if( | ch | ch != '\0') {}
+        while cursor.skip_if( | ch | ch != '\n' && ch != '\0') {}
         (State::Initial(InitialState), FullToken::Comment)
     }
     
@@ -500,10 +500,15 @@ impl BlockCommentTailState {
 /// The state of the tokenizer when it is in the middle of a double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DoubleQuotedStringTailState;
-
+  
 impl DoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         let mut s = String::new();
+        enum Skip{
+            Scanning(bool, usize, usize),
+            Found(usize)
+        }
+        let mut skip = Skip::Scanning(true, 0,0);
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
                 ('"', _) => {
@@ -518,18 +523,60 @@ impl DoubleQuotedStringTailState {
                     );
                 }
                 ('\\', '\\') => {
+                    if let Skip::Scanning(_,_,len) = skip{
+                        skip = Skip::Found(len);
+                    }
                     s.push('\\');
                     cursor.skip(2);
                 },
                 ('\\', '"') => {
+                    if let Skip::Scanning(_,_,len) = skip{
+                        skip = Skip::Found(len);
+                    }
                     s.push('"');
                     cursor.skip(2);
                 },
                 ('\\', 'n') => {
+                    if let Skip::Scanning(_,_,len) = skip{
+                        skip = Skip::Found(len);
+                    }
                     s.push('\n');
                     cursor.skip(2);
                 },
+                ('\n',_)=>{ // first newline sets indent strip
+                    s.push('\n');
+                    if let Skip::Scanning(first,_,len) = skip{
+                        skip = Skip::Scanning(first, 0, len);
+                    }
+                    else if let Skip::Found(len) = skip{
+                        skip = Skip::Scanning(false, 0, len);
+                    }
+                    cursor.skip(1);
+                }
+                (' ', _)=>{
+                    if let Skip::Scanning(first, count, len) = &mut skip{
+                        if *first{
+                            *len += 1;
+                        }
+                        else{
+                            if *count>=*len{
+                                skip = Skip::Found(*len);
+                                s.push(' ');
+                            }
+                            else{
+                                *count += 1;
+                            }
+                        }
+                    }
+                    else{
+                        s.push(' ');
+                    }
+                    cursor.skip(1);
+                }
                 (x,_) => {
+                    if let Skip::Scanning(_,_,len) = skip{
+                        skip = Skip::Found(len);
+                    }
                     s.push(x);
                     cursor.skip(1);
                 }

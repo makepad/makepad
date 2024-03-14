@@ -502,16 +502,34 @@ impl<'a> LiveParser<'a> {
                     if val >= self.live_type_infos.len() {
                         return Err(self.error(format!("live_type index out of range {}", val), live_error_origin!()));
                     }
-                    ld.nodes.push(LiveNode {
-                        origin,
-                        id: prop_id,
-                        value: LiveValue::Class {
-                            live_type: self.live_type_infos[val].live_type,
-                            class_parent: None,
-                        }
-                    });
+                    
                     self.expect_token(LiveToken::Close(Delim::Brace)) ?;
                     self.expect_token(LiveToken::Close(Delim::Brace)) ?;
+                    
+                    // lets see
+                    if self.peek_token() == LiveToken::Punct(live_id!(<)) {
+                        self.skip_token();
+                        let ident = self.expect_ident()?;
+                        self.expect_token(LiveToken::Punct(live_id!(>))) ?;
+                        ld.nodes.push(LiveNode {
+                            origin,
+                            id: prop_id,
+                            value: LiveValue::Deref{
+                                live_type: self.live_type_infos[val].live_type,
+                                clone: ident
+                            }
+                        });
+                    }
+                    else{
+                        ld.nodes.push(LiveNode {
+                            origin,
+                            id: prop_id,
+                            value: LiveValue::Class {
+                                live_type: self.live_type_infos[val].live_type,
+                                class_parent: None,
+                            }
+                        });
+                    }
                     
                     self.expect_token(LiveToken::Open(Delim::Brace)) ?;
                     self.expect_live_class(false, prop_id, ld) ?;

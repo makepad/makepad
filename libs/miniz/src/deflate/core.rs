@@ -1,7 +1,6 @@
 //! Streaming compression functionality.
 
 //use alloc::boxed::Box;
-use core::convert::TryInto;
 use core::{cmp, mem};
 
 use super::super::*;
@@ -11,8 +10,7 @@ use crate::deflate::buffer::{
     update_hash, HashBuffers, LocalBuf, LZ_CODE_BUF_SIZE, LZ_DICT_FULL_SIZE, LZ_HASH_BITS,
     LZ_HASH_SHIFT, LZ_HASH_SIZE, OUT_BUF_SIZE,
 };
-use crate::shared::{update_adler32, HUFFMAN_LENGTH_ORDER, MZ_ADLER32_INIT};
-use crate::DataFormat;
+use crate::shared::{update_adler32, HUFFMAN_LENGTH_ORDER};
 
 // Currently not bubbled up outside this module, so can fill in with more
 // context eventually if needed.

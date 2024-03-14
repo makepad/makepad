@@ -81,6 +81,24 @@ impl Rect {
         }
     }
     
+    pub fn hull(&self, other: Rect) -> Rect {
+        let otherpos = other.pos;
+        let otherfarside = other.pos + other.size;
+        let farside = self.pos + self.size;
+        let mut finalpos = self.pos;
+        let mut finalfarside = farside;
+        if otherpos.x < finalpos.x{ finalpos.x = otherpos.x };
+        if otherpos.y < finalpos.y{ finalpos.y = otherpos.y };
+
+        if otherfarside.x > finalfarside.x{ finalfarside.x = otherfarside.x };
+        if otherfarside.y > finalfarside.y{ finalfarside.y = otherfarside.y };
+        let finalsize = finalfarside - finalpos;
+        Rect{
+            pos: finalpos,
+            size: finalsize
+        }
+    }
+
     pub fn clip(&self, clip: (DVec2, DVec2)) -> Rect {
         let mut x1 = self.pos.x;
         let mut y1 = self.pos.y;

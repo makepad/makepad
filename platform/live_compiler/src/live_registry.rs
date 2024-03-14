@@ -391,56 +391,65 @@ impl LiveRegistry {
     }
     
     pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<Vec<TokenWithSpan>, LiveError> {
-        let mut line_chars = Vec::new();
+        let mut chars = Vec::new();
+        chars.extend(source.chars());
         let mut state = State::default();
         let mut scratch = String::new();
         let mut tokens = Vec::new();
-        let mut line_count = start_pos.line;
-        for line_str in source.lines() {
-            line_chars.clear();
-            line_chars.extend(line_str.chars());
-            let mut cursor = Cursor::new(&line_chars, &mut scratch);
-            let mut last_index = 0usize;
-            loop {
-                let (next_state, full_token) = state.next(&mut cursor);
-                if let Some(full_token) = full_token {
-                    let span = TextSpan {
-                        file_id,
-                        start: TextPos {column: last_index  as u32, line: line_count},
-                        end: TextPos {column: last_index as u32 + full_token.len  as u32, line: line_count}
-                    };
-                    match full_token.token {
-                        FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
-                            return Err(LiveError {
-                                origin: live_error_origin!(),
-                                span: span.into(),
-                                message: "Error tokenizing".to_string()
-                            })
-                        },
-                        _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
-                            // lets build up the span info
-                            tokens.push(TokenWithSpan {span, token: live_token})
-                        },
+        let mut line_start = start_pos.line;
+        let mut cursor = Cursor::new(&chars, &mut scratch);
+        let mut last_index = 0usize;
+        let mut last_new_line = 0usize;
+        loop {
+            let (next_state, full_token) = state.next(&mut cursor);
+            if let Some(full_token) = full_token {
+                // lets count the newlines 
+                let mut line_end = line_start;
+                let mut next_new_line = last_new_line;
+                for i in 0..full_token.len{
+                    if chars[last_index + i] == '\n'{
+                        line_end += 1;
+                        next_new_line = last_index + 2;
                     }
                 }
-                else {
-                    break;
+                let span = TextSpan {
+                    file_id,
+                    start: TextPos {column:  (last_index - last_new_line)  as u32, line: line_start},
+                    end: TextPos {column:  (last_index - last_new_line) as u32 + full_token.len  as u32, line: line_end}
+                };
+                match full_token.token {
+                    FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: span.into(),
+                            message: "Error tokenizing".to_string()
+                        })
+                    },
+                    _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
+                        // lets build up the span info
+                        tokens.push(TokenWithSpan {span, token: live_token})
+                    },
                 }
-                state = next_state;
-                last_index = cursor.index()+1;
+                line_start = line_end;
+                last_new_line = next_new_line;
             }
-            line_count += 1;
+            else {
+                break;
+            }
+            state = next_state;
+            last_index = cursor.index()
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
     }
     
     pub fn tokenize_from_str_live_design(source: &str, start_pos: TextPos, file_id: LiveFileId, mut negative:Option<&mut Vec<TokenWithLen>>) -> Result<Vec<TokenWithSpan>, LiveError> {
-        let mut line_chars = Vec::new();
+        let mut chars = Vec::new();
+        chars.extend(source.chars());
         let mut state = State::default();
         let mut scratch = String::new();
         let mut tokens = Vec::new();
-        let mut line_count = start_pos.line;
+        let mut line_start = start_pos.line;
         #[derive(Debug)]
         enum Parse{
             Before,
@@ -448,81 +457,87 @@ impl LiveRegistry {
             Bang,
             Brace,
             Body(usize),
-        }
+        } 
         let mut parse = Parse::Before;
-        
-        'outer: for line_str in source.lines() {
-            line_chars.clear();
-            line_chars.extend(line_str.chars());
-            let mut cursor = Cursor::new(&line_chars, &mut scratch);
-            let mut last_index = 1usize;
-            loop {
-                let (next_state, full_token) = state.next(&mut cursor);
-                if let Some(full_token) = full_token {
-                    //log!("PARSE STATE {:?} {:?}", parse, full_token);
-                    match parse{
-                        Parse::Before=>{
-                            if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
-                                parse = Parse::Bang;
-                            }
-                            else if let Some(negative) = &mut negative{
-                                negative.push(full_token);
-                            }
+        let mut cursor = Cursor::new(&chars, &mut scratch);
+        let mut last_index = 0usize;
+        let mut last_new_line = 0usize;
+        loop {
+            let (next_state, full_token) = state.next(&mut cursor);
+            if let Some(full_token) = full_token {
+                let mut line_end = line_start;
+                let mut next_new_line = last_new_line;
+                for i in 0..full_token.len{
+                    if chars[last_index + i] == '\n'{
+                        line_end += 1;
+                        next_new_line = last_index + 1;
+                    }
+                }
+                //log!("PARSE STATE {:?} {:?}", parse, full_token);
+                match parse{
+                    Parse::Before=>{
+                        if let FullToken::Ident(live_id!(live_design)) = &full_token.token{
+                            parse = Parse::Bang;
                         }
-                        Parse::Bang=> if let FullToken::Punct(live_id!(!)) = &full_token.token{
-                            parse = Parse::Brace;
+                        else if let Some(negative) = &mut negative{
+                            negative.push(full_token);
                         }
-                        else if let FullToken::Whitespace = &full_token.token{
+                    }
+                    Parse::Bang=> if let FullToken::Punct(live_id!(!)) = &full_token.token{
+                        parse = Parse::Brace;
+                    }
+                    else if let FullToken::Whitespace = &full_token.token{
+                    }
+                    else{
+                        parse = Parse::Before;
+                    }
+                    Parse::Brace=> if let FullToken::Open(Delim::Brace) = &full_token.token{
+                        parse = Parse::Body(0);
+                    }
+                    else if let FullToken::Whitespace = &full_token.token{
+                    }
+                    else{
+                        parse = Parse::Before;
+                    }
+                    Parse::Body(depth)=>{
+                        if let FullToken::Open(Delim::Brace) = &full_token.token{
+                                parse = Parse::Body(depth + 1)
+                        }
+                        if let FullToken::Close(Delim::Brace) = &full_token.token{
+                            if depth == 0{
+                                last_index = cursor.index();
+                                parse = Parse::After;
+                                continue;
+                            }
+                            parse = Parse::Body(depth - 1);
+                        }
+                        let span = TextSpan {
+                            file_id,
+                            start: TextPos {column: (last_index - last_new_line)  as u32, line: line_start},
+                            end: TextPos {column: (last_index - last_new_line) as u32 + full_token.len  as u32, line: line_end}
+                        };
+                        if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
+                            tokens.push(TokenWithSpan {span, token: live_token})
+                        }
+                    }
+                    Parse::After=>{
+                        if let Some(negative) = &mut negative{
+                            negative.push(full_token);
                         }
                         else{
-                            parse = Parse::Before;
-                        }
-                        Parse::Brace=> if let FullToken::Open(Delim::Brace) = &full_token.token{
-                            parse = Parse::Body(0);
-                        }
-                        else if let FullToken::Whitespace = &full_token.token{
-                        }
-                        else{
-                            parse = Parse::Before;
-                        }
-                        Parse::Body(depth)=>{
-                             if let FullToken::Open(Delim::Brace) = &full_token.token{
-                                 parse = Parse::Body(depth + 1)
-                            }
-                            if let FullToken::Close(Delim::Brace) = &full_token.token{
-                                if depth == 0{
-                                    last_index = cursor.index();
-                                    parse = Parse::After;
-                                    continue;
-                                }
-                                parse = Parse::Body(depth - 1);
-                            }
-                            let span = TextSpan {
-                                file_id,
-                                start: TextPos {column: last_index  as u32, line: line_count},
-                                end: TextPos {column: last_index as u32 + full_token.len  as u32, line: line_count}
-                            };
-                            if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
-                                tokens.push(TokenWithSpan {span, token: live_token})
-                            }
-                        }
-                        Parse::After=>{
-                            if let Some(negative) = &mut negative{
-                                negative.push(full_token);
-                            }
-                            else{
-                                break 'outer;
-                            }
+                            break;
                         }
                     }
                 }
-                else {
-                    break;
-                }
-                state = next_state;
-                last_index = cursor.index()+1;
+                last_new_line = next_new_line;
+                line_start = line_end;
             }
-            line_count += 1;
+            else {
+                println!("BREAKIN");
+                break;
+            }
+            state = next_state;
+            last_index = cursor.index();
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
@@ -627,6 +642,15 @@ impl LiveRegistry {
                         entry.get_module_set(&mut deps);
                     }
                 }, */
+                LiveValue::Deref {live_type, ..} => { // hold up. this is always own_module_path
+                    let infos = self.live_type_infos.get(live_type).unwrap();
+                    for sub_type in infos.fields.clone() {
+                        let sub_module_id = sub_type.live_type_info.module_id;
+                        if sub_module_id != own_module_id {
+                            deps.insert(sub_module_id);
+                        }
+                    }
+                }
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
                     let infos = self.live_type_infos.get(live_type).unwrap();
                     for sub_type in infos.fields.clone() {
@@ -738,7 +762,6 @@ impl LiveRegistry {
             if !self.live_files[file_id.to_index()].reexpand {
                 continue;
             }
-            
             let mut out_doc = LiveExpanded::new();
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
             

@@ -454,7 +454,13 @@ pub trait MsgSender: Send {
                     return
                 }
             };
+            if let LogLevel::Warning = level{
+                if msg.message.starts_with("unstable feature specified for"){
+                    return
+                }
+            }
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
+               
                 self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.end(), msg.message.clone());
                 /*
                 if let Some(label) = &span.label {
