@@ -150,10 +150,10 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
         nodes.push(MarkdownNode::EndCode);
     }
     
-    while !cursor.at_end(){
+    loop{
         match &mut state{
             State::Inline{kind, bold, italic}=> match cursor.chars{
-                ['\n',_,_]=>{
+                ['\n',_,_] | ['\0',_,_]=>{
                     for _ in 0..*bold{
                         nodes.push(MarkdownNode::EndBold);
                     }
@@ -177,7 +177,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                                 cursor.next();
                                 spaces += 1;
                             }
-                            if cursor.chars[0] == '\n' {
+                            if cursor.chars[0] == '\n' || cursor.chars[0] == '\0' {
                                 cursor.next();
                                 for _ in 0..*blocks{
                                     nodes.push(MarkdownNode::EndQuote);
@@ -200,7 +200,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             while cursor.chars[0] == ' '{
                                 cursor.next();
                             }
-                            if cursor.chars[0] == '\n'{
+                            if cursor.chars[0] == '\n' || cursor.chars[0] == '\0'{
                                 cursor.next();
                                 state = State::Root{spaces:0};
                                 nodes.push(MarkdownNode::EndNormal);
@@ -217,13 +217,13 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                                 cursor.next();
                                 spaces += 1;
                             }
-                            if cursor.chars[0] == '\n' {
+                            if cursor.chars[0] == '\n' || cursor.chars[0] == '\0'{
                                 cursor.next();
                                 for _ in 0..*depth{
                                     nodes.push(MarkdownNode::EndListItem);
                                 }
                                 state = State::Root{spaces:0};
-                            }
+                            } 
                             else if (cursor.chars[0] == '+' || cursor.chars[0] == '*' || cursor.chars[0] == '-') && cursor.chars[1] == ' '{
                                 for _ in 0..*depth{
                                     nodes.push(MarkdownNode::EndListItem);
@@ -412,6 +412,9 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                 }
             }
             State::Root{spaces} => match cursor.chars{
+                ['\0',_,_]=>{
+                    break
+                },
                 [' ',_,_]=>{ // space counter
                     state = State::Root{spaces:*spaces + 1};
                     cursor.skip(1)
