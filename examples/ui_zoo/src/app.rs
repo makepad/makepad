@@ -487,7 +487,7 @@ live_design!{
                                 // flow: RightWrap,
                                 // padding: 5,
                                 // line_spacing: 10,
-                                body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n Standard text \n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n Test"
+                                body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n Standard text \n\n *Italic text* \n\n **Bold text** \n\n --- \n\n - Bullet\nt - Indented Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Bullet\n 2. Another bullet\n\n 3. Third bullet\n\n `Monospaced text`\n\n [Link]('https://www.google.com')\n\n > This is a quote"
                             }
                         }
                     }
