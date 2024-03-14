@@ -716,8 +716,5 @@ pub unsafe extern "C" fn init_panic_hook() {
     panic::set_hook(Box::new(panic_hook));
 }
 
-
-
-
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
