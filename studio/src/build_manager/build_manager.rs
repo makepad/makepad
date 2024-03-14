@@ -10,7 +10,6 @@ use {
             StdinToHost,
         },
         makepad_platform::studio::{AppToStudioVec,AppToStudio,EventSample, GPUSample},
-        makepad_platform::log::LogLevel,
         build_manager::{
             build_protocol::*,
             build_client::BuildClient
