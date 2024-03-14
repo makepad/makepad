@@ -7,7 +7,6 @@ use {
         },
         any::{Any, TypeId},
         rc::Rc,
-        time::Instant,
         rc::Weak,
         cell::RefCell,
     },
@@ -65,8 +64,7 @@ pub struct Cx {
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
-    pub (crate) start_time: Instant,
-    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
+    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>, 
     
     pub draw_shaders: CxDrawShaders,
     
@@ -118,8 +116,6 @@ pub struct Cx {
     pub(crate) studio_web_socket: Option<WebSocket>,
     
     pub performance_stats: PerformanceStats,
-
-
 }
 
 #[derive(Clone)]
@@ -230,8 +226,6 @@ impl Cx {
             
             new_draw_event: Default::default(),
             new_actions: Default::default(),
-            
-            start_time: Instant::now(),
             
             redraw_id: 1,
             event_id: 1,
