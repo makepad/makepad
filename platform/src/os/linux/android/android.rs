@@ -7,9 +7,9 @@ use {
     std::time::{Instant, Duration},
     std::sync::{mpsc, mpsc::Sender},
     std::collections::HashMap,
+    jni_sys::jobject,
     self::super::{
         android_media::CxAndroidMedia,
-        jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
