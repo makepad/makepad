@@ -5,7 +5,6 @@ use {
     std::sync::{mpsc, mpsc::Sender},
     self::super::{
         ndk_sys,
-        jni_sys,
         ndk_utils,
     },
     crate::{
