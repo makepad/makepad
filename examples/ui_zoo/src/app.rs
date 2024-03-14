@@ -5,6 +5,7 @@ use makepad_platform::live_atomic::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widgets::vectorline::*;
     import makepad_draw::shader::std::*;
     import makepad_example_ui_zoo::demofiletree::*;
 
@@ -153,17 +154,6 @@ live_design!{
                 flow: Right
                 margin: 0., padding: 0.
                 spacing: 0.
-
-                // <View>{
-                //     width: 200.
-                //     show_bg: true
-                //     margin: 0
-
-                //     <FileTree>{
-                //         <FileTreeNode>{text:"bleh"}
-                //         <Label>{text: "item"}
-                //     }
-                // }
 
                 <View>{
                     width: Fill, height: Fill,
@@ -472,107 +462,56 @@ live_design!{
                         }
                     }
 
-                    // <ZooHeader>{
-                    //     title = {text:"SlidePanel"}
-                    //     <ZooDesc>{text:"Slide panel?"}
-                    //     <ZooGroup> {
-                    //         <SlidePanel> {
-                    //             width: (1000 * 0.175), height: (1000 * 0.175),
-                    //             margin: 0.
-                    //             side: Right,
-                    //             <ZooHeader>{
-                    //                 title = {text:"Image"}
-                    //                 <ZooDesc>{text:"A static inline image from a resource."}
-                    //                 <ZooGroup> {
-                    //                     <Image> {
-                    //                         width: (1000 * 0.175), height: (1000 * 0.175),
-                    //                         margin: 0
-                    //                         source: dep("crate://self/resources/ducky.png" ),
-                    //                     }
-                    //                 }
-                    //             }
-                    //         }
-                    //     }
-                    // }
-
                     <ZooHeader>{
-                        title = {text:"Image"}
-                        <ZooDesc>{text:"A static inline image from a resource."}
+                        title = {text:"Html"}
+                        <ZooDesc>{text:"HTML Widget"}
                         <ZooGroup> {
-                            <Image> {
-                                // width: (1000 * 0.175), height: (1000 * 0.175),
-                                // margin: 0
-                                source: dep("crate://self/resources/ducky.png" ),
+                            <Html>{
+                                width:Fill, height:Fit,
+                                // font_size: (THEME_FONT_SIZE_BASE),
+                                // flow: RightWrap,
+                                // padding: 5,
+                                // line_spacing: 10,
+                                body:"This is <b>bold text</b>&nbsp;and&nbsp;<i>italic text</i>.<br/> <Button>Button</Button><br/> <block_quote>Blockquote<br/> <block_quote>Nested blockquote</block_quote> </block_quote> <b><i>Bold italic</i></b>"
                             }
                         }
                     }
 
-                    // TODO: SHOW
                     // <ZooHeader>{
-                    //     title = {text:"Color Picker"}
-                    //     <ZooDesc>{text:"Color Picker?"}
-                    //     <ZooGroup> { <ColorPicker> {} }
-                    // }
-                
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Dock"}
-                    //     <ZooDesc>{text:"Dock"}
-                    //     <ZooGroup> { <Dock> { width: Fill, height: 100.} }
-                    // }
-
-                    // <ZooHeader>{
-                    //     title = {text:"Expandable Panel"}
-                    //     <ZooDesc>{text:"Expandable Panel"}
-                    //     <ZooGroup> { <ExpandablePanel> { width: Fill, height: 100.} }
-                    // }
-
-                    // <ZooHeader>{
-                    //     title = {text:"Filetree"}
-                    //     <ZooDesc>{text:"Filetree"}
-                    //     <ZooGroup> { <Filetree> { width: Fill, height: 100.} }
+                    //     title = {text:"Markdown"}
+                    //     <ZooDesc>{text:"Markdown"}
+                    //     <ZooGroup> {
+                    //         <Markdown>{
+                    //             width:Fill, height: Fit,
+                    //             // font_size: (THEME_FONT_SIZE_BASE),
+                    //             // flow: RightWrap,
+                    //             // padding: 5,
+                    //             // line_spacing: 10,
+                    //             body:"# Lorem Ipsum Dolor"
+                    //         }
+                    //     }
                     // }
 
                     // TODO: SHOW
+                    // SEEMS NOT TO WORK WITHOUT DUMMY DATA
                     // <ZooHeader>{
-                    //     title = {text:"Flat list"}
-                    //     <ZooDesc>{text:"Flat list"}
-                    //     <ZooGroup> { <FlatList> { width: Fill, height: 100.} }
+                    //     title = {text:"Portal List"}
+                    //     <ZooDesc>{text:"Portal List"}
+                    //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
                     // }
 
                     // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"HTML"}
-                    //     <ZooDesc>{text:"HTML"}
-                    //     <ZooGroup> { <Html> { width: Fill, height: 100.} }
-                    // }
+                    <ZooHeader>{
+                        title = {text:"Image"}
+                        <ZooDesc>{text:"A static inline image from a resource."}
+                        <ZooGroup> { <Image> { source: dep("crate://self/resources/ducky.png" ) } }
+                    }
 
                     <ZooHeader>{
                         title = {text:"Link Label"}
                         <ZooDesc>{text:"Link Label"}
                         <ZooGroup> { <LinkLabel> { text: "Click me!"} }
                     }
-
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Markdown"}
-                    //     <ZooDesc>{text:"Markdown"}
-                    //     <ZooGroup> { <Markdown> { width: Fill, height: 100.} }
-                    // }
-
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Nav Controls"}
-                    //     <ZooDesc>{text:"Nav Controls"}
-                    //     <ZooGroup> { <NavControls> { width: Fill, height: 100.} }
-                    // }
-
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Popup Menu"}
-                    //     <ZooGroup> { <PopupMenu> { width: Fill, height: 100.} }
-                    // }
-
 
                     <ZooHeader>{
                         title = {text:"RadioButton"}
@@ -596,20 +535,14 @@ live_design!{
                         }
                     }
 
-                    // <ZooHeader>{
-                    //     title = {text:"Portal List"}
-                    //     <ZooDesc>{text:"Portal List"}
-                    //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
-                    // }
-
                     <ZooHeader>{
                         title = {text:"Slides View"}
-                        width: Fill, height: Fit, 
+                        width: Fill, height: Fit,
                         <ZooDesc>{text:"Slides View"}
                         <ZooGroup> {
                             <SlidesView> {
-                                width: Fill, height: 400, 
- 
+                                width: Fill, height: 400,
+
                                 <SlideChapter> {
                                     title = {text: "Hey!"},
                                     <SlideBody> {text: "This is the 1st slide. Use your right\ncursor key to show the next slide."}
@@ -622,23 +555,103 @@ live_design!{
                         }
                     }
 
+                    // TODO: SHOW
                     <ZooHeader>{
-                        title = {text:"Splitter"}
-                        <ZooDesc>{text:"Splitter"}
+                        title = {text:"Dock"}
+                        <ZooDesc>{text:"Dock"}
                         <ZooGroup> {
-                            height: 200.
-                            <Splitter> {
-                                height: Fill, width: Fill
-                                a: <View> {
-                                    width: Fill, height: Fill,
-                                    show_bg: true,
-                                    draw_bg: { color: (COLOR_D_2) }
+                            <Dock> {
+                                height: 500., width: Fill
+
+                                root = Splitter {
+                                    axis: Horizontal,
+                                    align: FromA(300.0),
+                                    a: tab_set_1,
+                                    b: tab_set_2
                                 }
-                                b: <View> {
-                                    width: Fill, height: Fill,
-                                    show_bg: true,
-                                    draw_bg: { color: (COLOR_D_2) }
+
+                                tab_set_1 = Tabs {
+                                    tabs: [tab_a, tab_b],
+                                    selected: 1
                                 }
+
+                                tab_set_2 = Tabs {
+                                    tabs: [tab_c, tab_d],
+                                    selected: 1
+                                }
+
+                                tab_a = Tab {
+                                    name: "Tab A"
+                                    kind: Container_A
+                                }   
+
+                                tab_b = Tab {
+                                    name: "Tab B"
+                                    kind: Container_B
+                                }
+
+                                tab_c = Tab {
+                                    name: "Tab C"
+                                    kind: Container_C
+                                }   
+
+                                tab_d = Tab {
+                                    name: "Tab D"
+                                    kind: Container_D
+                                }
+
+                                tab_e = Tab {
+                                    name: "Tab E"
+                                    kind: Container_E
+                                }   
+
+                                tab_f = Tab {
+                                    name: "Tab F"
+                                    kind: Container_F
+                                }
+
+                                Container_A = <RectView> {
+                                    height: Fill, width: Fill
+                                    draw_bg: { color: (COLOR_D_3) }
+                                    padding: 10.,
+                                    <Label> {text: "Hallo"}
+                                }
+
+                                Container_B = <RectView> {
+                                    height: Fill, width: Fill
+                                    draw_bg: { color: (COLOR_D_3) }
+                                    padding: 10.,
+                                    <Label> {text: "Kuckuck"}
+                                }
+
+                                Container_C = <RectView> {
+                                    height: Fill, width: Fill
+                                    draw_bg: { color: (COLOR_D_3) }
+                                    padding: 10.,
+                                    <Label> {text: "Ahoy"}
+                                }
+
+                                Container_D = <RectView> {
+                                    height: Fill, width: Fill
+                                    draw_bg: { color: (COLOR_D_3) }
+                                    padding: 10.,
+                                    <Label> {text: "Hi"}
+                                }
+
+                                Container_E = <RectView> {
+                                    height: Fill, width: Fill
+                                    draw_bg: { color: (COLOR_D_3) }
+                                    padding: 10.,
+                                    <Label> {text: "Ahoy"}
+                                }
+
+                                Container_F = <RectView> {
+                                    height: Fill, width: Fill
+                                    draw_bg: { color: (COLOR_D_3) }
+                                    padding: 10.,
+                                    <Label> {text: "Hi"}
+                                }
+
                             }
                         }
                     }
@@ -649,6 +662,10 @@ live_design!{
                     //     <ZooDesc>{text:"Stack Navigation"}
                     //     <ZooGroup> { <StackNavigation> { width: Fill, height: 100.} }
                     // }
+
+                    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
                     // TODO: SHOW
                     // <ZooHeader>{
@@ -665,29 +682,60 @@ live_design!{
                     // }
 
                     // TODO: SHOW
+                    // SEEMS NOT TO WORK WITHOUT DUMMY DATA
                     // <ZooHeader>{
-                    //     title = {text:"Vectorline"}
-                    //     <ZooDesc>{text:"Vectorline"}
-                    //     <ZooGroup> { <Vectorline> { width: Fill, height: 100.} }
+                    //     title = {text:"Portal List"}
+                    //     <ZooDesc>{text:"Portal List"}
+                    //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
                     // }
 
                     // TODO: SHOW
                     // <ZooHeader>{
-                    //     title = {text:"Vectorspline"}
-                    //     <ZooDesc>{text:"Vectorspline"}
-                    //     <ZooGroup> { <Vectorspline> { width: Fill, height: 100.} }
+                    //     title = {text:"Flat list"}
+                    //     <ZooDesc>{text:"Flat list"}
+                    //     <ZooGroup> { <FlatList> { width: Fill, height: 100.} }
                     // }
 
+                    // TODO: SHOW
                     // <ZooHeader>{
-                    //     title = {text:"Video"}
-                    //     <ZooDesc>{text:"Video"}
-                    //     <ZooGroup> { <Video> { width: Fill, height: 100.} }
+                    //     title = {text:"Expandable Panel"}
+                    //     <ZooDesc>{text:"Expandable Panel"}
+                    //     <ZooGroup> {
+                    //         <ExpandablePanel> { }
+                    //     }
                     // }
 
+                    // TODO: SHOW
                     // <ZooHeader>{
-                    //     title = {text:"Window Menu"}
-                    //     <ZooDesc>{text:"Window Menu"}
-                    //     <ZooGroup> { <WindowMenu> { width: Fill, height: 100.} }
+                    //     title = {text:"Markdown"}
+                    //     <ZooDesc>{text:"Markdown"}
+                    //     <ZooGroup> {
+                    //         <Markdown>{ }
+                    //     }
+                    // }
+
+                    //  TODO: Slidepanel appears to be buggy
+                    // <ZooHeader>{
+                    //     title = {text:"SlidePanel"}
+                    //     <ZooDesc>{text:"Slide panel?"}
+                    //     <ZooGroup> {
+                    //         <SlidePanel> {
+                    //             width: (1000 * 0.175), height: (1000 * 0.175),
+                    //             margin: 0.
+                    //             side: Right,
+                    //             <ZooHeader>{
+                    //                 title = {text:"Image"}
+                    //                 <ZooDesc>{text:"A static inline image from a resource."}
+                    //                 <ZooGroup> {
+                    //                     <Image> {
+                    //                         width: (1000 * 0.175), height: (1000 * 0.175),
+                    //                         margin: 0
+                    //                         source: dep("crate://self/resources/ducky.png" ),
+                    //                     }
+                    //                 }
+                    //             }
+                    //         }
+                    //     }
                     // }
 
                 }
@@ -730,6 +778,8 @@ impl LiveRegister for App {
     }
 }
 
+
+
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         let ui = self.ui.clone();
@@ -738,7 +788,6 @@ impl MatchEvent for App{
             .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
 
         if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
-
             log!("TEXTBOX CHANGED {}", self.counter);
             self.counter += 1;
             let lbl = self.ui.label(id!(simpletextinput_outputbox));
