@@ -88,7 +88,7 @@ pub struct FishConnectionWidget {
     #[live(0)]
     pub to_h: i32,
 
-    #[live(5.0)]
+    #[live(10.0)]
     pub line_width: f64,
 
     #[live(-1)]
@@ -159,7 +159,9 @@ impl FishConnectionWidget {
         self.draw_line.begin(cx, walk, self.layout);
         self.draw_line.end(cx);
 
-        if self.end_pos.x < self.start_pos.x {
+        let overshoot = 40.;
+
+        if self.end_pos.x < self.start_pos.x + overshoot*2. {
             let mut midpoint = (self.end_pos + self.start_pos) * 0.5;
 
             if self.from_bottom > -1 {
@@ -170,76 +172,53 @@ impl FishConnectionWidget {
                 }
             }
 
-            //let _deltatomid = midpoint - self.start_pos;
-            //let _delta = self.end_pos - self.start_pos;
 
-            let overshoot = 40.;
+            let points = vec![
+                    self.start_pos, self.start_pos + dvec2(overshoot,0.), 
+                    dvec2(self.start_pos.x + overshoot, midpoint.y),
+                    dvec2(self.end_pos.x - overshoot, midpoint.y),
+                    self.end_pos + dvec2(-overshoot, 0.),
+                    self.end_pos             
+                ];
 
-            self.draw_line.draw_line_abs(
-                cx,
-                self.start_pos,
-                self.start_pos + dvec2(40., 0.),
-                self.color,
-                self.line_width,
-            );
-            self.draw_line.draw_line_abs(
-                cx,
-                self.start_pos + dvec2(overshoot, 0.),
-                dvec2(self.start_pos.x + overshoot, midpoint.y),
-                self.color,
-                self.line_width,
-            );
 
-            self.draw_line.draw_line_abs(
-                cx,
-                dvec2(self.start_pos.x + overshoot, midpoint.y),
-                dvec2(self.end_pos.x - overshoot, midpoint.y),
-                self.color,
-                self.line_width,
-            );
+          /*  for i in 0..points.len()-1
+            {
+                self.draw_line.draw_line_abs(
+                    cx,
+                    points[i],
+                    points[i+1],
+                    self.color,
+                    self.line_width,
+                );
 
-            self.draw_line.draw_line_abs(
-                cx,
-                dvec2(self.end_pos.x - overshoot, midpoint.y),
-                self.end_pos + dvec2(-overshoot, 0.),
-                self.color,
-                self.line_width,
-            );
+    
+            }*/
 
-            self.draw_line.draw_line_abs(
-                cx,
-                self.end_pos + dvec2(-overshoot, 0.),
-                self.end_pos,
-                self.color,
-                self.line_width,
-            );
+                self.draw_line.draw_bezier_abs(
+                    cx,
+                    points,
+                    self.color,
+                    self.line_width,
+                );
+    
+            
+
+
         } else {
             let midpoint = (self.end_pos + self.start_pos) * 0.5;
             let deltatomid = midpoint - self.start_pos;
 
-            self.draw_line.draw_line_abs(
-                cx,
-                self.start_pos,
-                self.start_pos + dvec2(deltatomid.x, 0.),
-                self.color,
-                self.line_width,
-            );
-
-            self.draw_line.draw_line_abs(
-                cx,
+            let points = vec![
+                self.start_pos, 
+                self.start_pos + dvec2(deltatomid.x, 0.),                 
                 self.end_pos - dvec2(deltatomid.x, 0.),
-                self.start_pos + dvec2(deltatomid.x, 0.),
-                self.color,
-                self.line_width,
-            );
+                self.end_pos             
+            ];
 
-            self.draw_line.draw_line_abs(
-                cx,
-                self.end_pos,
-                self.end_pos - dvec2(deltatomid.x, 0.),
-                self.color,
-                self.line_width,
-            );
+
+            self.draw_line.draw_bezier_abs(cx, points, self.color, self.line_width);
+            
         }
 
         //   self.draw_line.draw_abs(cx, cx.turtle().unscrolled_rect());
