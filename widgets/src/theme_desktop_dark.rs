@@ -232,6 +232,17 @@ live_design! {
                         sdf.fill(#7);
                         return sdf.result;
                     }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
                     FlowBlockType::Underline => {
                         sdf.box(
                             0.,
@@ -342,6 +353,28 @@ live_design! {
                             2.
                         );
                         sdf.fill(#7);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            1.5,
+                            0.5
+                        );
+                        sdf.fill(#f);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y*0.5,
+                            self.rect_size.x,
+                            1.5,
+                            0.5
+                        );
+                        sdf.fill(#f);
                         return sdf.result;
                     }
                 }
