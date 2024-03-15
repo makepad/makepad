@@ -67,18 +67,12 @@ live_design!{
                     # MD H1 
                     ## H2 **Bold** *italic*
                     
-                    - list item
-                      - another *list*
-                        - more list `code`
-                        2. number
-                    - here
-                    - more Here
-                    
-                    1. list
-                    3. have another list
-                      1. nested list
-                    2. item
-                      
+                    1. aitem
+                    1. item
+                      2. item  
+                      1. test   
+                    4. item               
+                                          
                     > block
                     > next
                     >> hi
@@ -88,7 +82,9 @@ live_design!{
                     ![image](https://link)
                     Normal
                     Next line
-                    single newline becomes space
+                    
+                    ---
+                    ~~single newline~~ becomes space
                     *hello*hello world
                     
                         inline code
