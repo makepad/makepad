@@ -343,6 +343,8 @@ impl TextFlow{
       
     pub fn begin_list_item(&mut self, cx:&mut Cx2d, dot:&str, pad:f64){
         // alright we are going to push a block with a layout and a walk
+        let fs = self.font_size_stack.value(self.font_size);
+        self.draw_normal.text_style.font_size = fs;
         let pad = self.draw_normal.get_font_size() * pad;
         cx.begin_turtle(self.list_item_walk, Layout{
             padding:Padding{
@@ -355,8 +357,7 @@ impl TextFlow{
         // lets get the turtle position and abs draw 
         
         let pos = cx.turtle().pos() - dvec2(pad,0.0);
-        let fs = self.font_size_stack.value(self.font_size);
-        self.draw_normal.text_style.font_size = fs;
+        
         self.draw_normal.draw_abs(cx, pos, dot);
         
         self.area_stack.push(self.draw_block.draw_vars.area);

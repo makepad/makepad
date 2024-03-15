@@ -1,5 +1,6 @@
 //use makepad_live_id::*;
 use std::str::Chars;
+use std::fmt::Write;
 
 #[derive(Default)]
 pub struct MarkdownDoc{
@@ -25,6 +26,9 @@ pub enum MarkdownNode{
     Image{start:usize, url_start:usize, end:usize},
     BeginQuote,
     EndQuote,
+    Separator, 
+    BeginUnderline,
+    EndUnderline,
     BeginCode,
     EndCode,
     BeginInlineCode,
@@ -89,7 +93,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
     let mut cursor = Cursor::new(body);
     enum State{
         Root{spaces:usize},
-        Inline{kind:Kind, bold:usize, italic:usize}, // terminates
+        Inline{kind:Kind, bold:usize, italic:usize, underline:usize}, // terminates
     }
     enum Kind{
         Normal,
@@ -152,7 +156,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
     
     loop{
         match &mut state{
-            State::Inline{kind, bold, italic}=> match cursor.chars{
+            State::Inline{kind, bold, italic, underline}=> match cursor.chars{
                 [' ',' ','\n']=>{
                     nodes.push(MarkdownNode::NewLine);
                     cursor.skip(2);
@@ -164,8 +168,12 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     for _ in 0..*italic{
                         nodes.push(MarkdownNode::EndItalic);
                     }
+                    for _ in 0..*underline{
+                        nodes.push(MarkdownNode::EndUnderline);
+                    }
                     *bold = 0;
                     *italic = 0;
+                    *underline = 0;
                     
                     match kind{
                         Kind::Head=>{
@@ -260,6 +268,24 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         *bold -= 1;
                         cursor.skip(3);
                         nodes.push(MarkdownNode::EndBold);
+                    }
+                    else{
+                        cursor.next();
+                    }
+                }
+                ['~','~',w] if w != ' ' && w != '\n'=>{ // alright so have have 2 *'s
+                    // this is the start of a bold block
+                    nodes.push(MarkdownNode::BeginUnderline);
+                    *underline += 1;
+                    cursor.skip(2);
+                }
+                [w,'~','~'] if w != ' '&& w != '\n'=>{
+                    // end of a bold block
+                    push_char(&mut nodes, &mut decoded, w);
+                    if *underline > 0{
+                        *underline -= 1;
+                        cursor.skip(3);
+                        nodes.push(MarkdownNode::EndUnderline);
                     }
                     else{
                         cursor.next();
@@ -450,7 +476,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         }
                         push_optional_char(&mut nodes, &mut decoded, ' ');
                         // alright now we know how deep in the block stack we need to be
-                        state = State::Inline{kind:Kind::Quote(blocks), bold:0, italic:0};
+                        state = State::Inline{kind:Kind::Quote(blocks), bold:0, italic:0, underline:0};
                     }
                 }
                 ['#',_,_]=>{
@@ -472,13 +498,32 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         else{
                             nodes.push(MarkdownNode::Text{start, end:decoded.len()});
                         }
-                        state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                        state = State::Inline{kind:Kind::Normal, bold:0, italic:0, underline:0};
                     }
                     else {
                         cursor.next();
                         decoded.truncate(start);
                         nodes.push(MarkdownNode::BeginHead{level});
-                        state = State::Inline{kind:Kind::Head, bold:0, italic:0};
+                        state = State::Inline{kind:Kind::Head, bold:0, italic:0, underline:0};
+                    }
+                }
+                ['-','-','-']=>{ // separator
+                    if *spaces>=4{ // its code
+                        code_on_one_line(&mut nodes, &mut decoded, &mut cursor);
+                        state = State::Root{spaces:0};
+                    }
+                    else{
+                        cursor.skip(1);
+                        if cursor.chars[2] != '\n'{
+                            nodes.push(MarkdownNode::BeginNormal);
+                            push_char(&mut nodes, &mut decoded, '-');
+                            state = State::Inline{kind:Kind::Normal, bold:0, italic:0, underline:0};
+                        }
+                        else{
+                            cursor.skip(3);
+                            nodes.push(MarkdownNode::Separator);
+                            state = State::Root{spaces:0};
+                        }
                     }
                 }
                 ['`','`','`']=>{ // begins or ends blocks of code. 
@@ -520,7 +565,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         }
                         else{ // its normal 
                             nodes.push(MarkdownNode::BeginNormal);
-                            state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                            state = State::Inline{kind:Kind::Normal, bold:0, italic:0, underline:0};
                         }
                     }
                     else{
@@ -537,7 +582,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             _=>panic!()
                         }});
                         
-                        state = State::Inline{kind:Kind::List(depth), bold:0, italic:0}
+                        state = State::Inline{kind:Kind::List(depth), bold:0, italic:0, underline:0}
                     }
                     cursor.skip(2);
                     //push_optional_char(&mut nodes, &mut decoded, ' ');
@@ -556,8 +601,8 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             scan.next();
                         }
                         if scan.chars[0] == '.' && scan.chars[1] == ' '{
-                            decoded.push('.');
                             is_list_digit = Some((start, decoded.len()));
+                            decoded.push('.');
                             scan.skip(2);
                             cursor = scan;
                         }
@@ -580,23 +625,53 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             }
                             else{ // its normal 
                                 nodes.push(MarkdownNode::BeginNormal);
-                                state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                                state = State::Inline{kind:Kind::Normal, bold:0, italic:0, underline:0};
                             }
                         }
                         else{ 
+                            let mut popped = 0;
                             for i in 0..depth-1{
                                 if i < end_count{
                                     nodes.pop();
+                                    popped += 1;
                                 }
                             }
+                            let mut start_digit = None;
+                            let mut counter = 0;
+                            if end_count>0{
+                                for iter in nodes.iter().rev(){
+                                    if let MarkdownNode::EndListItem = iter{
+                                        // lets increase the counter
+                                        counter += 1;
+                                    }
+                                    if let MarkdownNode::BeginListItem{label,..} = iter{
+                                        if counter == 0{
+                                            break
+                                        }
+                                        counter -= 1;
+                                        if let MarkdownListLabel::Number{digit,..} = label{
+                                            if counter == 0{
+                                                start_digit = Some(*digit+1);
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // we need to scan back 'up' to BeginListItem as many times as we popped it
+                            let digit = start_digit.unwrap_or(decoded[start..end].parse::<usize>().unwrap_or(1));
+                            let start = decoded.len();
                             // we always push a begin list item on
+                            write!(&mut decoded, "{}.", digit);
+                            let end = decoded.len();
+                            
                             nodes.push(MarkdownNode::BeginListItem{label:MarkdownListLabel::Number{
-                                digit: decoded[start..end].parse::<usize>().unwrap_or(1),
+                                digit,
                                 start,
                                 end
                             }});
                                                     
-                            state = State::Inline{kind:Kind::List(depth), bold:0, italic:0}
+                            state = State::Inline{kind:Kind::List(depth), bold:0, italic:0, underline:0}
                         }
                     }
                     else if *spaces>=4{ // its code
@@ -605,7 +680,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     }
                     else{
                         nodes.push(MarkdownNode::BeginNormal);
-                        state = State::Inline{kind:Kind::Normal, bold:0, italic:0};
+                        state = State::Inline{kind:Kind::Normal, bold:0, italic:0, underline:0};
                     }
                 }
             }
