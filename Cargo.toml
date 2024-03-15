@@ -1,6 +1,8 @@
 workspace.members = [
 #    "code_editor",
-    "experiments/websocket-tcpstream",
+#    "experiments/websocket-tcpstream",
+#   "experiments/websocket-windows",
+#   "experiments/svgloader",
     "examples/fractal_zoom", 
     "examples/ui_zoo", 
     "examples/news_feed", 
