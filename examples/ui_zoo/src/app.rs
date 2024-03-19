@@ -63,10 +63,8 @@ live_design!{
         }
         title = <Label> {
             draw_text: {
-                color: (COLOR_U_5)
                 text_style: {
-                    line_spacing:1.0
-                    font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+                    line_spacing:1.0,
                     font_size: 14
                 }
             }
@@ -79,7 +77,6 @@ live_design!{
         flow: Right,
         align: { x: 0.0, y: 0.5},
         padding: 10.,
-
         show_bg: true;
         draw_bg: { color: (COLOR_CONTAINER) }
     }
@@ -96,7 +93,6 @@ live_design!{
                 color: (COLOR_TEXT_HL)
                 text_style: {
                     line_spacing:1.0
-                    font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
                     font_size: 25
                 }
             }
@@ -107,11 +103,8 @@ live_design!{
     ZooDesc = <Label> {
         margin: {top: 10.}, padding: 0.,
         draw_text: {
-            color: (COLOR_TEXT_P)
             text_style: {
-                line_spacing:1.5
-                font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
-                font_size: 13.
+                line_spacing: 1.5
             }
         }
         text: ""
@@ -340,7 +333,6 @@ live_design!{
                                     color: (COLOR_ACCENT)
                                     text_style: {
                                         font_size: 20,
-                                        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
                                     }
                                 },
                                 text: "You can style text using colors and fonts"
@@ -355,7 +347,6 @@ live_design!{
                                     color: #ffc
                                     text_style: {
                                         font_size: 40.,
-                                        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
                                     }
                                 },
                                 text: "OR EVEN SOME PIXELSHADERS"
@@ -376,7 +367,6 @@ live_design!{
                                     height: Fit,
                                     text_style: {
                                         line_spacing: 1.5
-                                        font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
                                         font_size: (THEME_FONT_SIZE_BASE)
                                     }
                                 }
@@ -392,15 +382,6 @@ live_design!{
                                     },
                                 }
                             }
-                        }
-                    }
-
-                    <ZooHeader>{
-                        title = {text:"CheckBox"}
-                        <ZooDesc>{text:"Checkbox?"}
-                        <ZooGroup> {
-                            simplecheckbox = <CheckBox>{text:"Check me out!"}
-                            simplecheckbox_output = <Label>{text:"hmm"}
                         }
                     }
 
@@ -487,7 +468,7 @@ live_design!{
                                 // flow: RightWrap,
                                 // padding: 5,
                                 // line_spacing: 10,
-                                body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n Standard text \n\n *Italic text* \n\n **Bold text** \n\n --- \n\n - Bullet\nt - Indented Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Bullet\n 2. Another bullet\n\n 3. Third bullet\n\n `Monospaced text`\n\n [Link]('https://www.google.com')\n\n > This is a quote"
+                                body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break and a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote."
                             }
                         }
                     }
@@ -514,22 +495,102 @@ live_design!{
                     }
 
                     <ZooHeader>{
+                        title = {text:"CheckBox"}
+                        <ZooDesc>{text:"Checkbox?"}
+                        <ZooGroup> {
+                            height: Fit
+                            flow: Down,
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5}
+                                simplecheckbox = <CheckBox>{text:"Check me out!"}
+                                simplecheckbox_output = <Label>{ text:"hmm" }
+                                <CheckBox>{text:"Check me out!"}
+                                <CheckBox>{text:"Check me out!"}
+                            }
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5}
+                                <CheckBox>{text:"Check me out!"}
+                                <CheckBox>{text:"Check me out!"}
+                                <CheckBox>{text:"Check me out!"}
+                            }
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5}
+                                <CheckBox>{text:"Check me out!"}
+                                <CheckBox>{text:"Check me out!"}
+                                <CheckBox>{text:"Check me out!"}
+                            }
+                        }
+                    }
+
+                    <ZooHeader>{
                         title = {text:"RadioButton"}
                         <ZooDesc>{text:"RadioButton?"}
                         <ZooGroup> {
-                            radios_demo = <View>{
-                                width: Fit, height: Fit,
-                                radio1 = <RadioButton>{
-                                    label: "Option 1: yey"
+                            flow: Down,
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5 }
+                                radios_demo = <View>{
+                                    width: Fit, height: Fit,
+                                    radio1 = <RadioButton>{
+                                        label: "Option 1: yey"
+                                    }
+                                    radio2 = <RadioButton>{
+                                        label: "Option 2: hah"
+                                    }
+                                    radio3 = <RadioButton>{
+                                        label: "Option 3: hmm"
+                                    }
+                                    radio4 = <RadioButton>{
+                                        label: "Option 4: all of the above"
+                                    }
                                 }
-                                radio2 = <RadioButton>{
-                                    label: "Option 2: hah"
+                            }
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5 }
+                                <View>{
+                                    width: Fit, height: Fit,
+                                    <RadioButton>{
+                                        label: "Option 1: yey"
+                                    }
+                                    <RadioButton>{
+                                        label: "Option 2: hah"
+                                    }
+                                    <RadioButton>{
+                                        label: "Option 3: hmm"
+                                    }
+                                    <RadioButton>{
+                                        label: "Option 4: all of the above"
+                                    }
                                 }
-                                radio3 = <RadioButton>{
-                                    label: "Option 3: hmm"
-                                }
-                                radio4 = <RadioButton>{
-                                    label: "Option 4: all of the above"
+                            }
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5 }
+                                <View>{
+                                    width: Fit, height: Fit,
+                                    <RadioButton>{
+                                        label: "Option 1: yey"
+                                    }
+                                    <RadioButton>{
+                                        label: "Option 2: hah"
+                                    }
+                                    <RadioButton>{
+                                        label: "Option 3: hmm"
+                                    }
+                                    <RadioButton>{
+                                        label: "Option 4: all of the above"
+                                    }
                                 }
                             }
                         }
@@ -668,20 +729,6 @@ live_design!{
                     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
                     // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Tab Bar"}
-                    //     <ZooDesc>{text:"Tab Bar"}
-                    //     <ZooGroup> {
-                    //         <TabBar> {
-                    //             show_bg: true,
-                    //             draw_fill: { color: #f00 }
-                    //             width: Fill, height: 100.
-                    //             tab: <Tab> {}
-                    //         }
-                    //     }
-                    // }
-
-                    // TODO: SHOW
                     // SEEMS NOT TO WORK WITHOUT DUMMY DATA
                     // <ZooHeader>{
                     //     title = {text:"Portal List"}
@@ -697,20 +744,32 @@ live_design!{
                     // }
 
                     // TODO: SHOW
+                    // REFERENCE: https://github.com/project-robius/makepad_wonderous/blob/main/src/timeline/timeline_screen.rs#L242-L264
                     // <ZooHeader>{
-                    //     title = {text:"Expandable Panel"}
-                    //     <ZooDesc>{text:"Expandable Panel"}
+                    //     title = {text: "Expandable Panel"}
+                    //     <ZooDesc>{text: "Expandable Panel"}
                     //     <ZooGroup> {
-                    //         <ExpandablePanel> { }
-                    //     }
-                    // }
+                    //         expandable_panel = <ExpandablePanel> {
+                    //             body = {
+                    //                 flow: Down,
+                    //                 spacing: 10,
+                    //                 header = <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #0f0} }
+                    //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #f00} }
+                    //             }
 
-                    // TODO: SHOW
-                    // <ZooHeader>{
-                    //     title = {text:"Markdown"}
-                    //     <ZooDesc>{text:"Markdown"}
-                    //     <ZooGroup> {
-                    //         <Markdown>{ }
+                    //             panel = {
+                    //                 draw_bg: { color: #00f }
+
+                    //                 scroll_handler = {
+                    //                     draw_bg: {
+                    //                         color: #aaa
+                    //                         radius: 2.
+                    //                     }
+                    //                 }
+
+                    //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #ff0} }
+                    //             }
+                    //         }
                     //     }
                     // }
 
@@ -763,7 +822,6 @@ pub struct DataBindingsForApp {
     #[live] inumber: i32,
     #[live] dropdown: DropDownEnum,
 }
-
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
@@ -777,7 +835,6 @@ impl LiveRegister for App {
         crate::demofiletree::live_design(cx);
     }
 }
-
 
 
 impl MatchEvent for App{
