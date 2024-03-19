@@ -18,7 +18,7 @@ live_design! {
     MSPACE_H_2 = {top: (SPACE_0), right: (SPACE_2), bottom: (SPACE_0), left: (SPACE_2)}
     MSPACE_V_2 = {top: (SPACE_2), right: (SPACE_0), bottom: (SPACE_2), left: (SPACE_0)}
 
-    THEME_FONT_SIZE_BASE = 9.5
+    THEME_FONT_SIZE_BASE = 9.75
     THEME_FONT_SIZE_CODE = 9.0
 
     THEME_FONT_LABEL = {
@@ -89,11 +89,14 @@ live_design! {
     //    42, =78, 117
     THEME_COLOR_WHITE = #FFF
     THEME_COLOR_UP_80 = #FFFFFFCC
-    THEME_COLOR_UP_50 = #FFFFFF80
-    THEME_COLOR_UP_25 = #FFFFFF40
+    THEME_COLOR_UP_50 = #FFFFFF88
+    THEME_COLOR_UP_40 = #FFFFFF66
+    THEME_COLOR_UP_25 = #FFFFFF44
     THEME_COLOR_UP_15 = #FFFFFF26
     THEME_COLOR_UP_10 = #FFFFFF1A
     THEME_COLOR_UP_4 = #FFFFFF0A
+    THEME_COLOR_UP_0 = #FFFFFF00
+    THEME_COLOR_DOWN_0 = #00000000
     THEME_COLOR_DOWN_7 = #00000013
     THEME_COLOR_DOWN_10 = #00000030
     THEME_COLOR_DOWN_20 = #00000040
@@ -104,6 +107,9 @@ live_design! {
 
     THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
     THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
+    THEME_COLOR_SLIDES_BG = #x1A
+    THEME_COLOR_SLIDES_CHAPTER = #xFF5C39
+
 
     THEME_COLOR_BG_HEADER = (blend(
         THEME_COLOR_BG_APP,
@@ -143,7 +149,7 @@ live_design! {
     // TEXT / ICON COLORS
 
     THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_UP_50)
-    THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_80)
+    THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_50)
     THEME_COLOR_TEXT_META = (THEME_COLOR_UP_25)
     THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_UP_80)
 
@@ -179,7 +185,7 @@ live_design! {
     THEME_SPLITTER_SIZE = 5.0
     
     Html = <HtmlBase>{
-        font_size: 12,
+        font_size: (THEME_FONT_SIZE_BASE),
         flow: RightWrap,
         width:Fill,
         height:Fit,
@@ -277,7 +283,7 @@ live_design! {
     }
     
     Markdown = <MarkdownBase>{
-        font_size: 12,
+        font_size: (THEME_FONT_SIZE_BASE),
         flow: RightWrap,
         width:Fill,
         height:Fit,
@@ -458,7 +464,7 @@ live_design! {
         width: Fit
         height: Fit
         draw_text: {
-            color: #8,
+            color: (THEME_COLOR_TEXT_DEFAULT),
             text_style: <THEME_FONT_LABEL>{}
             wrap: Word
         }
@@ -466,8 +472,7 @@ live_design! {
 
     // Button
     Button = <ButtonBase> {
-        width: Fit,
-        height: Fit,
+        width: Fit, height: Fit,
         margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
         align: {x: 0.5, y: 0.5}
         padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
@@ -481,7 +486,7 @@ live_design! {
             instance hover: 0.0
             instance pressed: 0.0
             text_style: <THEME_FONT_LABEL>{
-                font_size: 11.0
+                font_size: (THEME_FONT_SIZE_BASE)
             }
             fn get_color(self) -> vec4 {
                 return mix(
@@ -597,19 +602,15 @@ live_design! {
 
     // Checkbox
      CheckBox = <CheckBoxBase> {
-
-        width: Fit,
-        height: Fit
+        width: Fit, height: Fit
+        margin: {left: 0.0, top: (SPACE_1), bottom: (SPACE_1), right: (SPACE_1)}
 
         label_walk: {
-            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
-            width: Fit,
-            height: Fit,
+            width: Fit, height: Fit,
+            margin: {left: 24.0, top: 0, bottom: 0, right: (SPACE_2)}
         }
 
-        label_align: {
-            y: 0.0
-        }
+        label_align: { x: 0.5, y: 0.0 }
 
         draw_check: {
             uniform size: 7.0;
@@ -617,18 +618,29 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 match self.check_type {
                     CheckType::Check => {
-                        let left = 3;
+                        let left = 1;
                         let sz = self.size;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 3.0); // rounding = 3rd value
-                        sdf.fill_keep(mix(mix(#x00000077, #x00000044, pow(self.pos.y, 1.)), mix(#x000000AA, #x00000066, pow(self.pos.y, 1.0)), self.hover))
-                        sdf.stroke(#x888, 1.0) // outline
+                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
+                        sdf.fill_keep(
+                            mix(
+                                mix((THEME_COLOR_DOWN_50), (THEME_COLOR_DOWN_20), pow(self.pos.y, 1.)),
+                                mix(#x000000AA, #x00000066, pow(self.pos.y, 1.0)),
+                                self.hover)
+                            )
+                        sdf.stroke(
+                            mix(
+                                mix((THEME_COLOR_UP_0), (THEME_COLOR_UP_10), self.pos.y),
+                                mix((THEME_COLOR_UP_0), (THEME_COLOR_UP_15), self.pos.y),
+                                self.hover
+                            )
+                            , 1.0)
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix(#fff0, #f, self.selected), 1.25);
+                        sdf.stroke(mix(#fff0, (THEME_COLOR_UP_50), self.selected), 1.25);
                     }
                     CheckType::Radio => {
                         let sz = self.size;
@@ -662,7 +674,6 @@ live_design! {
             }
         }
         draw_text: {
-            color: #9,
             instance focus: 0.0
             instance selected: 0.0
             instance hover: 0.0
@@ -670,16 +681,16 @@ live_design! {
                 font: {
                     //path: d"resources/IBMPlexSans-SemiBold.ttf"
                 }
-                font_size: 11.0
+                font_size: (THEME_FONT_SIZE_BASE)
             }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #fff6,
-                        #fff6,
+                        (THEME_COLOR_TEXT_DEFAULT),
+                        (THEME_COLOR_TEXT_HOVER),
                         self.hover
                     ),
-                    #fff6,
+                    (THEME_COLOR_TEXT_SELECTED),
                     self.selected
                 )
             }
@@ -887,7 +898,7 @@ live_design! {
             text_style: {
                 font_size: 6
             },
-            color: #a
+            color: (THEME_COLOR_UP_50)
         }
     }
 
@@ -955,8 +966,8 @@ live_design! {
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
             instance border_width: 1.5
-            instance color: #000
-            instance border_color: #fff
+            instance color: (THEME_COLOR_BLACK)
+            instance border_color: (THEME_COLOR_WHITE)
 
             fn get_color(self) -> vec4 {
                 return self.color
@@ -1223,7 +1234,7 @@ live_design! {
         tab: <Tab> {}
         draw_drag: {
             draw_depth: 10
-            color: #c
+            color: (THEME_COLOR_UP_50)
         }
         draw_fill: {
             color: (THEME_COLOR_BG_HEADER)
@@ -1313,8 +1324,8 @@ live_design! {
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
-            instance color: #0
-            instance color_selected: #4
+            instance color: (THEME_COLOR_BLACK)
+            instance color_selected: (THEME_COLOR_UP_25)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1393,9 +1404,9 @@ live_design! {
         height: Fit
 
         draw_bg: {
-            instance color: #0
+            instance color: (THEME_COLOR_BLACK)
             instance border_width: 0.0,
-            instance border_color: #0000,
+            instance border_color: (THEME_COLOR_DOWN_0)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
             instance radius: 4.0
 
@@ -1996,12 +2007,12 @@ live_design! {
             uniform color_unselected_hover: #xFFFFFFAA
             uniform color_selected: #xFFFFFFFF
 
-            color: #9
+            color: (THEME_COLOR_UP_50)
             text_style: {
                 font: {
                     // path: d"resources/ibmplexsans-semibold.ttf"
                 }
-                font_size: 9.5
+                font_size: (THEME_FONT_SIZE_BASE)
             }
             fn get_color(self) -> vec4 {
                 return mix(
@@ -2217,7 +2228,7 @@ live_design! {
         draw_bg: {
             instance radius: 2.0
             instance border_width: 0.0
-            instance border_color: #3
+            instance border_color: (THEME_COLOR_UP_15)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0)
 
             fn get_color(self) -> vec4 {
@@ -2338,7 +2349,7 @@ live_design! {
             }
         }
 
-        draw_text: { color: #FFFFFFFF }
+        draw_text: { color: (THEME_COLOR_WHITE) }
 
         label_walk: {
             width: Fill, height: Fill
@@ -2358,7 +2369,7 @@ live_design! {
             numeric_only: true,
             draw_bg: {
                 shape: None
-                color: #5
+                color: (THEME_COLOR_UP_25)
                 radius: 2.0
             },
 
@@ -2419,7 +2430,7 @@ live_design! {
     SlideBody = <Label> {
         margin:{top:20}
         draw_text: {
-            color: #D
+            color: (THEME_COLOR_UP_80)
             text_style: {
                 line_spacing:1.5
                 font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
@@ -2430,13 +2441,13 @@ live_design! {
     }
 
     Slide = <RoundedView> {
-        draw_bg: {color: #x1A, radius: 5.0}
+        draw_bg: {color: (THEME_COLOR_SLIDES_BG), radius: 5.0}
         width: Fill,
         height: Fill
         align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
         title = <Label> {
             draw_text: {
-                color: #f
+                color: (THEME_COLOR_WHITE)
                 text_style: {
                     line_spacing:1.0
                     font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
@@ -2448,7 +2459,7 @@ live_design! {
     }
 
     SlideChapter = <Slide> {
-        draw_bg: {color: #xFF5C39, radius: 5.0}
+        draw_bg: {color: (THEME_COLOR_SLIDES_CHAPTER), radius: 5.0}
         width: Fill,
         height: Fill
         align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
@@ -2512,7 +2523,7 @@ live_design! {
                 title = <Label> {
                     width: Fit, height: Fit
                     draw_text: {
-                        text_style: { font_size: 12. },
+                        text_style: { font_size: (THEME_FONT_SIZE_BASE) },
                         color: #000,
                     },
                     text: "Stack View Title"
