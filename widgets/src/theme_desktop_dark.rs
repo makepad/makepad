@@ -1421,6 +1421,7 @@ live_design! {
             instance border_color: #0000,
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
             instance radius: 4.0
+            instance blur: 20.0
 
             fn get_color(self) -> vec4 {
                 return self.color
@@ -1433,7 +1434,7 @@ live_design! {
             fn pixel(self) -> vec4 {
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.blur = 20.0;
+                sdf.blur = self.blur
                 sdf.box(
                     self.inset.x + self.border_width,
                     self.inset.y + self.border_width,
@@ -1442,6 +1443,9 @@ live_design! {
                     max(1.0, self.radius)
                 )
                 sdf.fill_keep(self.get_color())
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
                 return sdf.result;
             }
         }
@@ -1515,8 +1519,6 @@ live_design! {
         padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
 
         popup_menu: <PopupMenu> {}
-
-        popup_shift: vec2(-6.0, 4.0)
 
         selected_item: 0
         animator: {
