@@ -1,5 +1,3 @@
-use self::super::jni_sys;
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ANativeWindow {
