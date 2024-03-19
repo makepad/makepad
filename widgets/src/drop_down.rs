@@ -14,6 +14,13 @@ live_design!{
     DropDownBase = {{DropDown}} {}
 }
 
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum PopupMenuPosition {
+    #[pick] OnSelected,
+    BelowInput,
+}
+
 #[derive(Live, Widget)]
 pub struct DropDown {
     #[animator] animator: Animator,
@@ -31,7 +38,7 @@ pub struct DropDown {
     #[live] labels: Vec<String>,
     #[live] values: Vec<LiveValue>,
     
-    #[live] popup_shift: DVec2,
+    #[live] popup_menu_position: PopupMenuPosition,
     
     #[rust] is_open: bool,
     
@@ -126,22 +133,39 @@ impl DropDown {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             let popup_menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
-            let mut item_pos = None;
-            
+
             // we kinda need to draw it twice.
-            
             popup_menu.begin(cx);
-            
-            for (i, item) in self.labels.iter().enumerate() {
-                let node_id = LiveId(i as u64).into();
-                if i == self.selected_item {
-                    item_pos = Some(cx.turtle().pos());
+
+            match self.popup_menu_position {
+                PopupMenuPosition::OnSelected => {
+                    let mut item_pos = None;
+                    for (i, item) in self.labels.iter().enumerate() {
+                        let node_id = LiveId(i as u64).into();
+                        if i == self.selected_item {
+                            item_pos = Some(cx.turtle().pos());
+                        }
+                        popup_menu.draw_item(cx, node_id, &item);
+                    }
+
+                    // ok we shift the entire menu. however we shouldnt go outside the screen area
+                    popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0, 0.0)));
                 }
-                popup_menu.draw_item(cx, node_id, &item);
+                PopupMenuPosition::BelowInput => {
+                    for (i, item) in self.labels.iter().enumerate() {
+                        let node_id = LiveId(i as u64).into();
+                        popup_menu.draw_item(cx, node_id, &item);
+                    }
+
+                    let area = self.draw_bg.area().rect(cx);
+                    let shift = DVec2 {
+                        x: 0.0,
+                        y: area.size.y,
+                    };
+
+                    popup_menu.end(cx, self.draw_bg.area(), shift);
+                }
             }
-            
-            // ok we shift the entire menu. however we shouldnt go outside the screen area
-            popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0, 0.0)));
         }
     }
 }
