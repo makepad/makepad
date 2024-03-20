@@ -74,7 +74,7 @@ impl Cx{
             // this is the websocket thread.
             let mut sockets = HashMap::new();
             loop{
-                match rx_receiver.recv(){
+                match rx_receiver.recv(){ 
                     Ok(msg)=>match msg{
                         WebSocketThreadMsg::Open{socket_id, request, rx_sender}=>{
                             let socket = OsWebSocket::open(request, rx_sender);
@@ -94,7 +94,7 @@ impl Cx{
                             sockets.remove(&socket_id);
                         }
                     },
-                    Err(_)=>{ 
+                    Err(_)=>{
                         return
                     }
                 }
