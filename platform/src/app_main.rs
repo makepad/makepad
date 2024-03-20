@@ -102,13 +102,22 @@ macro_rules!app_main {
             cx.init_cx_os();
             Box::into_raw(cx) as u32
         }
-
+        
+                
         #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, cx_ptr: u32) -> u32 {
             let cx = &mut *(cx_ptr as *mut Cx);
             cx.process_to_wasm(msg_ptr)
         }
+        
+        #[export_name = "wasm_return_first_msg"]
+        #[cfg(target_arch = "wasm32")]
+        pub unsafe extern "C" fn wasm_return_first_msg(cx_ptr: u32) -> u32 {
+            let cx = &mut *(cx_ptr as *mut Cx); 
+            cx.os.from_wasm.take().unwrap().release_ownership()
+        }
+        
     }
 }
 

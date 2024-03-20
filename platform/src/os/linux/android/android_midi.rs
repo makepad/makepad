@@ -1,9 +1,9 @@
 #![allow(non_upper_case_globals)]
 use {
     std::sync::{Arc, Mutex, mpsc},
+    jni_sys::jobject,
     super::{
         android_jni::attach_jni_env,
-        jni_sys::jobject,
         amidi_sys::*,
     },
     crate::{

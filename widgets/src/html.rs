@@ -48,7 +48,7 @@ impl Html{
             item.set_text(node.find_text().unwrap_or(""));
             item.draw_all(cx, scope);
         }
-        *node = node.jump_to_close();
+        node.jump_to_close();
     }
     
     pub fn handle_open_tag(cx: &mut Cx2d, tf:&mut TextFlow, node:&mut HtmlWalker)->Option<LiveId>{
@@ -56,7 +56,7 @@ impl Html{
             some_id!(a)=>{
                 log!("{:?}", node.find_attr_lc(live_id!(href)));
                 log!("{:?}", node.find_text());
-                *node = node.jump_to_close();
+                node.jump_to_close();
             }
             some_id!(h1)=>{
                 tf.push_size_abs_scale(1.5)
@@ -118,9 +118,9 @@ impl Widget for Html {
         let tf = &mut self.text_flow;
         tf.begin(cx, walk); 
         // alright lets iterate the html doc and draw it
-        let mut node = self.doc.walk();
+        let mut node = self.doc.new_walker();
         let mut auto_id = 0;
-        while !node.empty(){
+        while !node.done(){
             match Self::handle_open_tag(cx, tf, &mut node){
                 Some(_)=>{
                     Self::handle_custom_widget(cx, scope, tf, &mut node, &mut auto_id); 
@@ -131,7 +131,7 @@ impl Widget for Html {
                 _=>()
             }
             Self::handle_text_node(cx, tf, &mut node);
-            node = node.walk();
+            node.walk();
         }
         tf.end(cx);
         DrawStep::done()

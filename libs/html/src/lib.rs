@@ -22,44 +22,42 @@ pub struct HtmlDoc{
  pub struct HtmlWalker<'a>{
     decoded: &'a str,
     nodes: &'a [HtmlNode],
- }
+    index: usize,
+}
  
  impl<'a> HtmlWalker<'a>{
-    pub fn walk(&self)->Self{
-        if self.nodes.len()>1{
-            for i in 1..self.nodes.len(){
+    pub fn index(&self)->usize{
+        self.index
+    }
+ 
+    pub fn walk(&mut self){
+        if self.index < self.nodes.len(){
+            for i in self.index+1..self.nodes.len(){
                 // we skip attributes
                 if let HtmlNode::Attribute{..} = &self.nodes[i]{
                     
                 }
                 else{
-                    return Self{
-                        decoded:self.decoded,
-                        nodes: &self.nodes[i..]
-                    }
+                    self.index = i;
+                    return;
                 }
             }
+            self.index = self.nodes.len();
         } 
-        Self{
-            decoded:self.decoded,
-            nodes: &self.nodes[0..0]
-        }
     }
     
-    pub fn jump_to_close(&self)->Self{
-        if self.nodes.len()>1{
+    pub fn jump_to_close(&mut self){
+        if self.index < self.nodes.len(){
             let mut depth = 0;
-            for i in 1..self.nodes.len(){
+            for i in self.index+1..self.nodes.len(){
                 match &self.nodes[i]{
                     HtmlNode::OpenTag{..}=>{
                         depth +=1;
                     }
                     HtmlNode::CloseTag{..}=>{
                         if depth == 0{
-                            return Self{
-                                decoded:self.decoded,
-                                nodes: &self.nodes[i..]
-                            }
+                            self.index = i;
+                            return;
                         }
                         depth -= 1;
                     }
@@ -67,19 +65,16 @@ pub struct HtmlDoc{
                 }
             }
         } 
-        Self{
-            decoded:self.decoded,
-            nodes: &self.nodes[0..0]
-        }
+        self.index = self.nodes.len();
     }
     
-    pub fn empty(&self)->bool{
-        self.nodes.len()==0
+    pub fn done(&self)->bool{
+        self.index >= self.nodes.len()
     }
     
     pub fn find_attr_lc(&self, flc:LiveId)->Option<&'a str>{
-        for node in self.nodes{
-            match node{
+        for i in self.index..self.nodes.len(){
+            match &self.nodes[i]{
                 HtmlNode::CloseTag{..}=>{
                     return None
                 }
@@ -93,8 +88,8 @@ pub struct HtmlDoc{
     }
     
     pub fn find_attr_nc(&self, fnc:LiveId)->Option<&'a str>{
-        for node in self.nodes{
-            match node{
+        for i in self.index..self.nodes.len(){
+            match &self.nodes[i]{
                 HtmlNode::CloseTag{..}=>{
                     return None
                 }
@@ -108,8 +103,8 @@ pub struct HtmlDoc{
     }
     
     pub fn find_text(&self)->Option<&'a str>{
-        for node in self.nodes{
-            match node{
+        for i in self.index..self.nodes.len(){
+            match &self.nodes[i]{
                 HtmlNode::CloseTag{..}=>{
                     return None
                 }
@@ -123,7 +118,7 @@ pub struct HtmlDoc{
     }
         
     pub fn text(&self)->Option<&'a str>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::Text{start,end}=>{
                 Some(&self.decoded[*start..*end])
             }
@@ -132,7 +127,7 @@ pub struct HtmlDoc{
     }
     
     pub fn open_tag_lc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::OpenTag{lc,nc:_}=>{
                 Some(*lc)
             }
@@ -140,7 +135,7 @@ pub struct HtmlDoc{
         }
     }
     pub fn open_tag_nc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::OpenTag{lc:_,nc}=>{
                 Some(*nc)
             }
@@ -148,7 +143,7 @@ pub struct HtmlDoc{
         }
     }
     pub fn open_tag(&self)->Option<(LiveId,LiveId)>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::OpenTag{lc,nc}=>{
                 Some((*lc, *nc))
             }
@@ -157,7 +152,7 @@ pub struct HtmlDoc{
     }
     
     pub fn close_tag_lc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::CloseTag{lc,nc:_}=>{
                 Some(*lc)
             }
@@ -165,7 +160,7 @@ pub struct HtmlDoc{
         }
     }
     pub fn close_tag_nc(&self)->Option<LiveId>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::CloseTag{lc:_,nc}=>{
                 Some(*nc)
             }
@@ -173,7 +168,7 @@ pub struct HtmlDoc{
         }
     }
     pub fn close_tag(&self)->Option<(LiveId,LiveId)>{
-        match &self.nodes[0]{
+        match &self.nodes[self.index]{
             HtmlNode::CloseTag{lc,nc}=>{
                 Some((*lc, *nc))
             }
@@ -183,9 +178,18 @@ pub struct HtmlDoc{
  }
  
  impl HtmlDoc{
-     pub fn walk(&self)->HtmlWalker{
+     pub fn new_walker(&self)->HtmlWalker{
          HtmlWalker{
              decoded:&self.decoded,
+             index: 0,
+             nodes:&self.nodes,
+         }
+     }
+     
+     pub fn new_walker_with_index(&self, index: usize)->HtmlWalker{
+         HtmlWalker{
+             decoded:&self.decoded,
+             index,
              nodes:&self.nodes,
          }
      }

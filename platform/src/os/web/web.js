@@ -36,6 +36,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
+
+        this.dispatch_first_msg();
     }
     
     async load_deps() {
@@ -99,7 +101,7 @@ export class WasmWebBrowser extends WasmBridge {
         req.timeout = 60000
         req.addEventListener("error", ()=>{
             setTimeout(function() {
-                location.href = location.href
+                //location.href = location.href
             }, 500)
         })
         req.responseType = 'text'
@@ -618,6 +620,28 @@ export class WasmWebBrowser extends WasmBridge {
         return new_ptr
     }
     
+
+    wasm_return_first_msg() {
+        let ret_ptr = this.exports.wasm_return_first_msg(this.wasm_app)
+        this.update_array_buffer_refs();
+        return this.new_from_wasm(ret_ptr);
+    }
+
+    dispatch_first_msg(){
+        let from_wasm = this.wasm_return_first_msg();
+        from_wasm.dispatch_on_app();
+        from_wasm.free();
+    }
+    
+    do_wasm_pump() {
+        let to_wasm = this.to_wasm;
+        this.to_wasm = this.new_to_wasm();
+        let from_wasm = this.wasm_process_msg(to_wasm);
+        from_wasm.dispatch_on_app();
+        from_wasm.free();
+    }
+    
+
     wasm_process_msg(to_wasm) {
         let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership(), this.wasm_app)
         this.update_array_buffer_refs();
