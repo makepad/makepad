@@ -11,4 +11,3 @@ pub mod android_camera;
 pub mod android_web_socket;
 pub mod ndk_utils;
 pub mod ndk_sys;
-pub mod jni_sys;
