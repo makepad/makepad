@@ -660,7 +660,7 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             let digit = start_digit.unwrap_or(decoded[start..end].parse::<usize>().unwrap_or(1));
                             let start = decoded.len();
                             // we always push a begin list item on
-                            write!(&mut decoded, "{}.", digit);
+                            write!(&mut decoded, "{}.", digit).unwrap();
                             let end = decoded.len();
                             
                             nodes.push(MarkdownNode::BeginListItem{label:MarkdownListLabel::Number{
