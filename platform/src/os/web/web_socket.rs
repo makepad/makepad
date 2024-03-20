@@ -7,10 +7,13 @@ pub struct OsWebSocket{
 
 impl OsWebSocket{
     pub fn send_message(&mut self, _message:WebSocketMessage)->Result<(),()>{
-        todo!();
+        //todo!();
+        Ok(())
     }
                 
     pub fn open(_request: HttpRequest, _rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
-        todo!();
+        // alright lets call out directly from wasm to JS
+        OsWebSocket{}
+        //todo!();
     }
 }
