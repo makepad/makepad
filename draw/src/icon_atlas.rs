@@ -206,9 +206,9 @@ impl CxIconAtlas {
                     if errors.as_ref().unwrap().len()>0{
                         log!("SVG parser returned errors {:?}", errors)
                     }
-                    let mut node = doc.walk();
+                    let mut node = doc.new_walker();
                     
-                    while !node.empty(){
+                    while !node.done(){
                         match node.open_tag_lc() 
                         {
                             some_id!(g)=>{
@@ -228,7 +228,7 @@ impl CxIconAtlas {
                             }
                             _=>()
                         }
-                        node = node.walk();
+                        node.walk();
                     }
                     
                    
