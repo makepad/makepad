@@ -60,7 +60,8 @@ use crate::studio::{AppToStudio,StudioLogItem};
 
 pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
     // lets send out our log message on the studio websocket 
-
+    
+    
     if !Cx::has_studio_web_socket() {
         #[cfg(not (target_os = "android"))]
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
@@ -76,6 +77,21 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
         }
     }
     else{
+        #[cfg(target_arch = "wasm32")]{
+            extern "C" {
+                pub fn js_console_log(chars: u32, len: u32);
+                pub fn js_console_error(chars: u32, len: u32);
+            }
+            let msg = format!("{}:{}:{} - {}", file_name, line_start, column_start, message);
+            let chars = msg.chars().collect::<Vec<char >> ();
+            if let LogLevel::Error = level{
+                unsafe{js_console_error(chars.as_ptr() as u32, chars.len() as u32)};        
+            }
+            else{
+                unsafe{js_console_log(chars.as_ptr() as u32, chars.len() as u32)};        
+            }    
+        }
+
        Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
             file_name: file_name.to_string(),
             line_start,

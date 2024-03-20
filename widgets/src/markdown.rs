@@ -44,6 +44,10 @@ impl Widget for Markdown {
                 MarkdownNode::BeginHead{level}=>{
                     tf.push_size_abs_scale(3.0 / *level as f64);
                 },
+                MarkdownNode::Separator=>{
+                    cx.turtle_new_line();
+                    tf.sep(cx);
+                }
                 MarkdownNode::EndHead=>{
                     tf.pop_size();
                     cx.turtle_new_line();
@@ -93,6 +97,12 @@ impl Widget for Markdown {
                 },
                 MarkdownNode::EndQuote=>{
                     tf.end_quote(cx);
+                },
+                MarkdownNode::BeginUnderline=>{
+                    tf.push_underline();
+                },
+                MarkdownNode::EndUnderline=>{
+                    tf.pop_underline();
                 },
                 MarkdownNode::BeginInlineCode=>{
                     tf.push_fixed();

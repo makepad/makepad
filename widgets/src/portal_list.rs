@@ -818,6 +818,18 @@ impl PortalListRef {
             inner.tail_range = tail_range
         }
     }
+
+    pub fn scrolled(&self, actions: &Actions) -> bool {
+        if let PortalListAction::Scroll = actions.find_widget_action(self.widget_uid()).cast() {
+            return true;
+        }
+        false
+    }
+
+    pub fn scroll_position(&self) -> f64 {
+        let Some(inner) = self.borrow_mut() else { return 0.0 };
+        inner.first_scroll
+    }
     
     /// A convenience wrapper around [`PortalList::item()`].
     pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {

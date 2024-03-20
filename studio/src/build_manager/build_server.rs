@@ -508,6 +508,3 @@ impl fmt::Debug for dyn MsgSender {
         write!(f, "MsgSender")
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct ConnectionId(usize);
