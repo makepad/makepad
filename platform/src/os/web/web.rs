@@ -580,7 +580,8 @@ impl CxOsApi for Cx {
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
-            FromWasmAllocTextureImage2D::to_js_code(),
+            FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
+            FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
@@ -641,11 +642,10 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 }
 
 // storage buffers for graphics API related platform
-#[derive(Default)]
 pub struct CxOs {
     pub (crate) window_geom: WindowGeom,
     
-    pub (crate) from_wasm: Option<FromWasmMsg>,
+    pub  from_wasm: Option<FromWasmMsg>,
     
     pub (crate) vertex_buffers: usize,
     pub (crate) index_buffers: usize,
@@ -659,8 +659,28 @@ pub struct CxOs {
     pub (crate) media: CxWebMedia,
 }
 
+impl Default for CxOs{
+    fn default()->Self{
+        Self{
+            window_geom: WindowGeom::default(),
+                    
+            from_wasm: Some(FromWasmMsg::new()),
+                    
+            vertex_buffers: 0,
+            index_buffers: 0,
+            vaos: 0,
+                    
+            xr_last_inputs: None,
+                    
+            to_wasm_js: Vec::new(),
+            from_wasm_js: Vec::new(),
+                    
+            media: CxWebMedia::default(),
+        }
+    }
+}
+
 impl CxOs {
-    
     pub fn append_to_wasm_js(&mut self, strs: &[String]) {
         self.to_wasm_js.extend_from_slice(strs);
     }
@@ -718,3 +738,4 @@ pub unsafe extern "C" fn init_panic_hook() {
 
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
+
