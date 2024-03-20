@@ -48,7 +48,7 @@ live_design!{
                     }  
                     body:"
                     Normal <u>underlined html</u> <s>strike</s> text hello world <br/>
-                    <li>one</li><br/>
+                    <li>one in the list!!!!! </li><br/>
                     <li>two</li><br/>
                     <code>let x = 1.0;</code>
                     <b>BOLD text</b>&nbsp;<i>italic</i><br/>
@@ -67,10 +67,11 @@ live_design!{
                     # MD H1 
                     ## H2 **Bold** *italic*
                     
+                    
                     1. aitem
                     1. item
-                      2. item  
-                      1. test   
+                      1. item  
+                      1. test  
                     4. item               
                                           
                     > block
@@ -147,8 +148,8 @@ impl Widget for MyHtml{
     fn draw_walk(&mut self, cx:&mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
         let tf = &mut self.html.text_flow;
         tf.begin(cx, walk); 
-        let mut node = self.html.doc.walk();
-        while !node.empty(){
+        let mut node = self.html.doc.new_walker();
+        while !node.done(){
             match Html::handle_open_tag(cx, tf, &mut node){
                 Some(_)=>{
                     // handle tag here
@@ -162,7 +163,7 @@ impl Widget for MyHtml{
                 _=>()
             }
             Html::handle_text_node(cx, tf, &mut node);
-            node = node.walk();
+            node.walk();
         }
         tf.end(cx);
         DrawStep::done()
