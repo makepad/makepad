@@ -629,11 +629,9 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             }
                         }
                         else{ 
-                            let mut popped = 0;
                             for i in 0..depth-1{
                                 if i < end_count{
                                     nodes.pop();
-                                    popped += 1;
                                 }
                             }
                             let mut start_digit = None;
