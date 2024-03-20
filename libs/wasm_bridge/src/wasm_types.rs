@@ -1,7 +1,5 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
-use crate::{LiveId,live_id};
-use makepad_derive_wasm_bridge::*;
 pub struct WasmDataU8(Vec<u8>);
 
 impl WasmDataU8 {
@@ -83,11 +81,22 @@ impl FromWasm for WasmDataU8 {
     fn u32_size() -> usize {2}
 }*/
 
-pub struct WasmPtrF32(u32);
+pub struct WasmPtrF32{
+    ptr:u32,
+    _len: usize
+}
 
 impl WasmPtrF32 {
-    pub fn new(ptr: *const f32) -> Self {
-        Self (ptr as u32)
+    pub fn new(data:&[f32]) -> Self {
+        if !data.is_empty(){
+            Self{
+                ptr: data.as_ptr() as u32,
+                _len: data.len()
+            }
+        }
+        else{
+            Self{ptr:0, _len:0}
+        }
     }
 }
 
@@ -97,53 +106,33 @@ impl FromWasm for WasmPtrF32 {
     }
     
     fn from_wasm_inner(self, out: &mut FromWasmMsg) {
-        out.push_u32(self.0)
+        out.push_u32(self.ptr)
     }
 }
 
 
-#[derive(FromWasm)]
-pub struct WasmDataF32 {
-    pub ptr: WasmPtrF32,
-    pub len: usize
+pub struct WasmPtrU32 {
+    pub ptr: u32,
+    pub _len: usize
 }
-
-impl WasmDataF32 {
-    pub fn new(data:&[f32]) -> Self {
-        if !data.is_empty(){
-            Self{ptr:WasmPtrF32::new(data.as_ptr()), len:data.len()}
-        }
-        else{
-            Self{ptr:WasmPtrF32::new(std::ptr::null::<f32>()), len:0}
-        }
-    }
-}
-
-#[derive(FromWasm)]
-pub struct WasmDataU32 {
-    pub ptr: WasmPtrU32,
-    pub len: usize
-}
-
-impl WasmDataU32 {
-    pub fn new(data:&[u32]) -> Self {
-        if !data.is_empty(){
-            Self{ptr:WasmPtrU32::new(data.as_ptr()), len:data.len()}
-        }
-        else{
-            Self{ptr:WasmPtrU32::new(std::ptr::null::<u32>()), len:0}
-        }
-    }
-}
-
-
-pub struct WasmPtrU32(u32);
 
 impl WasmPtrU32 {
-    pub fn new(ptr: *const u32) -> Self {
-        Self (ptr as u32)
+    pub fn new(data:&[u32]) -> Self {
+        if !data.is_empty(){
+            Self{
+                ptr: data.as_ptr() as u32, 
+                _len:data.len()
+            }
+        }
+        else{
+            Self{
+                ptr:0, 
+                _len:0
+            }
+        }
     }
 }
+
 
 impl FromWasm for WasmPtrU32 {
     fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
@@ -151,11 +140,42 @@ impl FromWasm for WasmPtrU32 {
     }
     
     fn from_wasm_inner(self, out: &mut FromWasmMsg) {
-        out.push_u32(self.0)
+        out.push_u32(self.ptr)
+    }
+}
+
+pub struct WasmPtrU8 {
+    pub ptr: u32,
+    pub _len: usize
+}
+
+impl WasmPtrU8 {
+    pub fn new(data:&[u8]) -> Self {
+        if !data.is_empty(){
+            Self{
+                ptr: data.as_ptr() as u32, 
+                _len:data.len()
+            }
+        }
+        else{
+            Self{
+                ptr:0, 
+                _len:0
+            }
+        }
     }
 }
 
 
+impl FromWasm for WasmPtrU8 {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
+        out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++];", prop));
+    }
+        
+    fn from_wasm_inner(self, out: &mut FromWasmMsg) {
+        out.push_u32(self.ptr)
+    }
+}
 
 
 

@@ -62,17 +62,17 @@ impl DrawLine
     {
         let step = 0.01;
         let mut t = 0.0;
-        let mut omt = 1.0;
+        //let mut omt = 1.0;
         let mut from = points[points.len()-1];
         while t< 1.
         {
             let nextt = t + step;
-            let nextomt = 1.0 - nextt;
+            //let nextomt = 1.0 - nextt;
             let next = self.get_bezier_point(nextt, &points, 0 , points.len())            ;
            
             self.draw_line_abs(cx, from, next, color, line_width);
             from = next;
-            omt = nextomt;
+            //omt = nextomt;
             t = nextt;
         }
 

@@ -417,7 +417,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     
     
-    FromWasmAllocTextureImage2D(args) {
+    FromWasmAllocTextureImage2D_BGRAu8_32(args) {
         var gl = this.gl;
         var gl_tex = this.textures[args.texture_id] || gl.createTexture()
         
@@ -433,6 +433,22 @@ export class WasmWebGL extends WasmWebBrowser {
         this.textures[args.texture_id] = gl_tex;
     }
     
+    FromWasmAllocTextureImage2D_Ru8(args) {
+        var gl = this.gl;
+        var gl_tex = this.textures[args.texture_id] || gl.createTexture()
+        
+        gl.bindTexture(gl.TEXTURE_2D, gl_tex)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        //gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        let data_array = new Uint8Array(this.memory.buffer, args.data.ptr, args.width * args.height);
+        //agdconsole.log(args.width, args.height);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, args.width, args.height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data_array);
+        this.textures[args.texture_id] = gl_tex;
+    }
+
     FromWasmBeginRenderTexture(args) {
         if(this.xr !== undefined){
             this.xr.in_xr_pass = false;
