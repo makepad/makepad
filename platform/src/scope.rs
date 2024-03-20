@@ -66,6 +66,7 @@ pub struct Scope<'a,'b>{
     pub path: HeapLiveIdPath,
     pub data: ScopeDataMut<'a>,
     pub props: ScopeDataRef<'b>,
+    pub index: usize
 }
 
 #[derive(Default)]
@@ -95,7 +96,8 @@ impl<'a,'b> Scope<'a,'b>{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
-            props:ScopeDataRef(None)
+            props:ScopeDataRef(None),
+            index: 0
         }
     }
         
@@ -104,6 +106,7 @@ impl<'a,'b> Scope<'a,'b>{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
             props:ScopeDataRef(Some(w)),
+            index: 0
         }
     }
         
@@ -112,6 +115,34 @@ impl<'a,'b> Scope<'a,'b>{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(None),
             props:ScopeDataRef(Some(w)),
+            index: 0
+        }
+    }
+    
+    pub fn with_data_index<T: Any>(v:&'a mut T, index:usize)->Self{
+        Self{
+            path:HeapLiveIdPath::default(),
+            data:ScopeDataMut(Some(v)),
+            props:ScopeDataRef(None),
+            index
+        }
+    }
+            
+    pub fn with_data_props_index<T: Any>(v:&'a mut T, w:&'b T, index:usize)->Self{
+        Self{
+            path:HeapLiveIdPath::default(),
+            data:ScopeDataMut(Some(v)),
+            props:ScopeDataRef(Some(w)),
+            index
+        }
+    }
+            
+    pub fn with_props_index<T: Any>( w:&'b mut T, index:usize)->Self{
+        Self{
+            path:HeapLiveIdPath::default(),
+            data:ScopeDataMut(None),
+            props:ScopeDataRef(Some(w)),
+            index
         }
     }
     
@@ -120,6 +151,7 @@ impl<'a,'b> Scope<'a,'b>{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(None),
             props:ScopeDataRef(None),
+            index: 0
         }
     }
         

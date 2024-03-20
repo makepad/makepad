@@ -421,6 +421,17 @@ live_design! {
                         sdf.fill(#7);
                         return sdf.result;
                     }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(#7);
+                        return sdf.result;
+                    }
                     FlowBlockType::Underline => {
                         sdf.box(
                             0.,
@@ -541,6 +552,28 @@ live_design! {
                             2.
                         );
                         sdf.fill(#7);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            1.5,
+                            0.5
+                        );
+                        sdf.fill(#f);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y*0.5,
+                            self.rect_size.x,
+                            1.5,
+                            0.5
+                        );
+                        sdf.fill(#f);
                         return sdf.result;
                     }
                 }
@@ -1557,6 +1590,7 @@ live_design! {
             instance border_color: (THEME_COLOR_D_0)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
             instance radius: 4.0
+            instance blur: 20.0
 
             fn get_color(self) -> vec4 {
                 return self.color
@@ -1569,7 +1603,7 @@ live_design! {
             fn pixel(self) -> vec4 {
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.blur = 20.0;
+                sdf.blur = self.blur
                 sdf.box(
                     self.inset.x + self.border_width,
                     self.inset.y + self.border_width,
@@ -1578,6 +1612,9 @@ live_design! {
                     max(1.0, self.radius)
                 )
                 sdf.fill_keep(self.get_color())
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
                 return sdf.result;
             }
         }
@@ -1647,8 +1684,6 @@ live_design! {
         }
 
         popup_menu: <PopupMenu> {}
-
-        popup_shift: vec2(-6.0, 4.0)
 
         selected_item: 0
         animator: {
