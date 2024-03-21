@@ -246,7 +246,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmHideTextIME() {
         this.update_text_area_pos({x: -3000, y: -3000});
     }
-    
+    /*
     FromWasmWebSocketOpen(args) {
         let id_lo = args.id_lo;
         let id_hi = args.id_hi;
@@ -289,7 +289,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         }
         web_socket._queue = []
-    }
+    }*/
     
     FromWasmWebSocketSend(args) {
         let web_socket = this.web_sockets[args.web_socket_id];
