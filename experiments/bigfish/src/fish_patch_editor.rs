@@ -94,7 +94,8 @@ pub struct FishPatchEditor {
     connecting: bool,
 
     #[rust]
-    selection: Vec<u64>,
+    selection: FishPatchSelection
+    
 }
 
 impl Widget for FishPatchEditor {
@@ -112,7 +113,7 @@ impl Widget for FishPatchEditor {
                 match action.as_widget_action().cast() {
                     BlockHeaderButtonAction::Select { id } => {
                         self.selection.clear();
-                        self.selection.push(id);
+                        self.selection.add(id);
                     }
                     BlockHeaderButtonAction::Move { id, x, y } => {
                         self.scroll_bars.redraw(cx);
@@ -136,6 +137,7 @@ impl Widget for FishPatchEditor {
                     }
                     BlockHeaderButtonAction::RecordDragEnd { id: _ } => {
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+
 
                         patch.undo_checkpoint_end_if_match(self.active_undo_level);
                         self.active_undo_level = 0;
@@ -190,10 +192,13 @@ impl Widget for FishPatchEditor {
             
             Hit::FingerDown(fe) => {
 //                if  fe.digit_id == live_id!(0).into() {
-                    self.selecting = true;                    
+                    self.selecting = true;              
+                    let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                            
                     // start selecting
                     self.selectstart = fe.abs.clone();
                     self.selectend = fe.abs.clone();
+                    self.selection = patch.select_rectangle(self.selectstart, self.selectend);
   //              }
                 self.scroll_bars.redraw(cx);
                 self.animator_play(cx, id!(hover.pressed));
@@ -205,6 +210,8 @@ impl Widget for FishPatchEditor {
                  self.selecting
                  {
                     self.selectend = fe.abs.clone();
+                    let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];                   
+                    self.selection = patch.select_rectangle(self.selectstart, self.selectend);                    
                     self.scroll_bars.redraw(cx);
                 }
                 
@@ -285,6 +292,11 @@ impl Widget for FishPatchEditor {
             item.draw_all(cx, &mut Scope::empty());
             let itemarea = item.area().rect(cx);
             i.h = itemarea.size.y as i32;
+            i.w = itemarea.size.x as i32;
+
+            if self.selection.blocks.contains(&i.id){
+                self.draw_selected_outline(cx,i.x,i.y, i.w,i.h);
+            }
 
             for inp in &i.input_ports {
                 let item_id = LiveId::from_num(2000 + i.id, inp.id as u64);
@@ -321,7 +333,7 @@ impl Widget for FishPatchEditor {
                     cx,
                     live! {
                         input: false,
-                        abs_pos: (dvec2(i.x as f64 + 200. - 20. + 1., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
+                        abs_pos: (dvec2(i.x as f64 + itemarea.size.x  - 20. + 1., i.y as f64 + outp.id as f64 * 20.)-scroll_pos) ,
                     },
                 );
                 item.draw_all(cx, &mut Scope::empty());
@@ -440,6 +452,20 @@ impl FishPatchEditor {
             item.draw_all(cx, &mut Scope::empty());
         }
     }
+    pub fn draw_selected_outline(&mut self, cx: &mut Cx2d, x: i32, y:i32, w: i32, h: i32){
+
+        let tl = DVec2{x: x as f64 - 1.5,y: y as f64  - 1.5};
+        let br = DVec2{x: (x+w ) as f64+1.5,y: (y+h) as f64+1.5};
+
+        let bl = DVec2{x: tl.x, y: br.y} ;
+        let tr = DVec2{x: br.x, y: tl.y} ;
+        
+        self.draw_ls.draw_line_abs(cx, tl, tr, vec4(1.,1.,0.,1.), 4.);
+        self.draw_ls.draw_line_abs(cx, tr, br, vec4(1.,1.,0.,1.), 4.);
+        self.draw_ls.draw_line_abs(cx, br, bl, vec4(1.,1.,0.,1.), 4.);
+        self.draw_ls.draw_line_abs(cx, tl, bl, vec4(1.,1.,0.,1.), 4.);
+    }
+
     pub fn draw_connections(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
         for i in patch.connections.iter() {
             let item_id = LiveId::from_num(2, i.id as u64);
@@ -450,11 +476,17 @@ impl FishPatchEditor {
 
             let blockfromopt = patch.get_block(i.from_block);
             let blocktoopt = patch.get_block(i.to_block);
+            let mut inselection = false;
+
             if blockfromopt.is_some() && blocktoopt.is_some() {
                 let blockfrom = blockfromopt.unwrap();
                 let blockto = blocktoopt.unwrap();
                 let _portfrom = blockfrom.get_output_instance(i.from_port).unwrap();
                 let _portto = blockto.get_input_instance(i.to_port).unwrap();
+                
+                if self.selection.blocks.contains(&blockfrom.id) && self.selection.blocks.contains(&blockto.id) {
+                    inselection = true;
+                }
 
                 item.apply_over( cx, live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
@@ -465,6 +497,7 @@ impl FishPatchEditor {
                     to_bottom: (blockto.y + blockto.h - scroll_pos.y as i32) ,
                     color: #x888,
                       abs_pos: (dvec2(0.,0.)),
+                      selected: (inselection)
                    },
             );
 

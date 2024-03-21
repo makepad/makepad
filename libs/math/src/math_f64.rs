@@ -52,6 +52,17 @@ impl Rect {
         }
     }
     
+    pub fn inside(&self, r:Rect) -> bool    {
+        if self.pos.x >= r.pos.x && 
+            self.pos.y >= r.pos.y && 
+            self.pos.x + self.size.x <= r.pos.x + r.size.x && 
+            self.pos.y + self.size.y <= r.pos.y + r.size.y
+        {
+            return true;
+        }
+        return false;
+    }
+    
     pub fn intersects(&self, r: Rect) -> bool {
         !(
             r.pos.x > self.pos.x + self.size.x ||
