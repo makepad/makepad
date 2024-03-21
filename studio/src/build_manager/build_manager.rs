@@ -413,7 +413,7 @@ impl BuildManager {
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
                         if let Some(id) = socket_id_to_build_id.get(&web_socket_id){
-                            if let Ok(msg) = AppToStudio::deserialize_bin(&data){
+                            if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
                                 let _ = studio_sender.send((*id,msg));
                             }
                         }
