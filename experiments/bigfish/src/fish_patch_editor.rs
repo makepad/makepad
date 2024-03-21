@@ -11,6 +11,7 @@ live_design! {
     import crate::fish_block_editor::*;
     import crate::fish_theme::*;
     import crate::fish_connection_widget::*;
+    import crate::fish_selector_widget::*;
     import crate::block_connector_button::*;
 
     FishPatchEditor = {{FishPatchEditor}} {
@@ -26,6 +27,7 @@ live_design! {
         BlockTemplateUtility = <FishBlockEditorUtility>{};
 
         ConnectorTemplate = <FishConnectionWidget>{color:  #d0d0a0ff};
+        SelectorTemplate = <FishSelectorWidget>{color:  #d0d0a0ff};
 
         AudioButtonTemplate = <BlockConnectorButton>{flow: Overlay, draw_bg: { bodytop: (CABLE_AUDIO_COLOR);}};
         ControlButtonTemplate = <BlockConnectorButton>{flow: Overlay, draw_bg: { bodytop:  (CABLE_CONTROL_COLOR);}};
@@ -63,7 +65,12 @@ pub struct FishPatchEditor {
     templates: ComponentMap<LiveId, LivePtr>,
     #[rust]
     items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
-
+    #[rust]
+    selectstart: DVec2,
+    #[rust]
+    selectend: DVec2,
+    #[rust]
+    selecting: bool,
     #[rust]
     dragstartx: i32,
     #[rust]
@@ -92,15 +99,16 @@ pub struct FishPatchEditor {
 
 impl Widget for FishPatchEditor {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        //let uid = self.widget_uid();
+        let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
-
         self.scroll_bars.handle_event(cx, event);
-
+        
+        
         for (_item_id, item) in self.items.values_mut() {
             let _item_uid = item.widget_uid();
-
+        
             for action in cx.capture_actions(|cx| item.handle_event(cx, event, scope)) {
+                
                 match action.as_widget_action().cast() {
                     BlockHeaderButtonAction::Select { id } => {
                         self.selection.clear();
@@ -175,6 +183,69 @@ impl Widget for FishPatchEditor {
                 }
             }
         }
+
+
+
+        match event.hits(cx, self.draw_bg.area()) {
+            
+            Hit::FingerDown(fe) => {
+//                if  fe.digit_id == live_id!(0).into() {
+                    self.selecting = true;                    
+                    // start selecting
+                    self.selectstart = fe.abs.clone();
+                    self.selectend = fe.abs.clone();
+  //              }
+                self.scroll_bars.redraw(cx);
+                self.animator_play(cx, id!(hover.pressed));
+            }
+            
+            Hit::FingerMove(fe) =>{
+                if 
+                //fe.digit_id == live_id!(0).into() &&
+                 self.selecting
+                 {
+                    self.selectend = fe.abs.clone();
+                    self.scroll_bars.redraw(cx);
+                }
+                
+            }
+            Hit::FingerHoverIn(_) => {
+
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => {
+
+                if 
+                //fe.digit_id == live_id!(0).into() &&
+                 self.selecting {
+                    self.selecting = false;                    
+                    // stop selecting
+                    self.scroll_bars.redraw(cx);
+                         }
+
+
+                if fe.is_over {
+                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
+                    cx.widget_action(uid, &scope.path, ButtonAction::Released);
+                    if fe.device.has_hovers() {
+                        self.animator_play(cx, id!(hover.on));
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                } else {
+                    cx.widget_action(uid, &scope.path, ButtonAction::Released);
+                    self.animator_play(cx, id!(hover.off));
+                }
+            }
+            _ => (),
+        }
+
+
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -187,6 +258,9 @@ impl Widget for FishPatchEditor {
         let scroll_pos = self.scroll_bars.get_scroll_pos();
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+
+        self.draw_connections(cx, patch, scroll_pos);
+        self.draw_selection(cx,patch, scroll_pos);
 
         for i in &mut patch.blocks.iter_mut() {
             let item_id = LiveId::from_num(1, i.id as u64);
@@ -254,7 +328,6 @@ impl Widget for FishPatchEditor {
             }
         }
 
-        self.draw_connections(cx, patch, scroll_pos);
         if self.connecting {
             self.draw_active_connection(cx, patch, scroll_pos);
         }
@@ -348,7 +421,25 @@ impl FishPatchEditor {
         }
         item.draw_all(cx, &mut Scope::empty());
     }
+    pub fn draw_selection(&mut self, cx: &mut Cx2d, _patch: &FishPatch, scroll_pos: DVec2) {
+        if self.selecting
+        {
+//            println!("drawing selection from {:?} to {:?}", self.selectstart, self.selectend);
+            let item_id = LiveId::from_str("ActiveSelectionWidget");
 
+            let templateid = live_id!(SelectorTemplate);
+            let preitem = self.item(cx, item_id, templateid);
+            let item = preitem.unwrap();
+            item.apply_over(cx, live! {
+                                start_pos: (self.selectstart - scroll_pos),
+                              end_pos: (self.selectend - scroll_pos),
+                              color: #eee,
+                              line_width: 2.0
+
+                            });
+            item.draw_all(cx, &mut Scope::empty());
+        }
+    }
     pub fn draw_connections(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
         for i in patch.connections.iter() {
             let item_id = LiveId::from_num(2, i.id as u64);
