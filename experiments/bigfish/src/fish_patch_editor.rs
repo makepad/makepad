@@ -433,12 +433,11 @@ impl FishPatchEditor {
         }
         item.draw_all(cx, &mut Scope::empty());
     }
+
     pub fn draw_selection(&mut self, cx: &mut Cx2d, _patch: &FishPatch, scroll_pos: DVec2) {
         if self.selecting
         {
-//            println!("drawing selection from {:?} to {:?}", self.selectstart, self.selectend);
             let item_id = LiveId::from_str("ActiveSelectionWidget");
-
             let templateid = live_id!(SelectorTemplate);
             let preitem = self.item(cx, item_id, templateid);
             let item = preitem.unwrap();
@@ -447,11 +446,11 @@ impl FishPatchEditor {
                               end_pos: (self.selectend - scroll_pos),
                               color: #eee,
                               line_width: 2.0
-
                             });
             item.draw_all(cx, &mut Scope::empty());
         }
     }
+
     pub fn draw_selected_outline(&mut self, cx: &mut Cx2d, x: i32, y:i32, w: i32, h: i32){
 
         let tl = DVec2{x: x as f64 - 1.5,y: y as f64  - 1.5};
@@ -459,11 +458,11 @@ impl FishPatchEditor {
 
         let bl = DVec2{x: tl.x, y: br.y} ;
         let tr = DVec2{x: br.x, y: tl.y} ;
-        
-        self.draw_ls.draw_line_abs(cx, tl, tr, vec4(1.,1.,0.,1.), 4.);
-        self.draw_ls.draw_line_abs(cx, tr, br, vec4(1.,1.,0.,1.), 4.);
-        self.draw_ls.draw_line_abs(cx, br, bl, vec4(1.,1.,0.,1.), 4.);
-        self.draw_ls.draw_line_abs(cx, tl, bl, vec4(1.,1.,0.,1.), 4.);
+        let color =         vec4(1.,1.,0.,1.);
+        self.draw_ls.draw_line_abs(cx, tl, tr, color, 4.);
+        self.draw_ls.draw_line_abs(cx, tr, br, color, 4.);
+        self.draw_ls.draw_line_abs(cx, br, bl, color, 4.);
+        self.draw_ls.draw_line_abs(cx, tl, bl, color, 4.);
     }
 
     pub fn draw_connections(&mut self, cx: &mut Cx2d, patch: &FishPatch, scroll_pos: DVec2) {
