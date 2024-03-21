@@ -13,6 +13,7 @@ mod fish_block_editor;
 mod fish_block_template;
 mod fish_connection;
 mod fish_connection_widget;
+mod fish_selector_widget;
 mod fish_doc;
 mod fish_param_storage;
 mod fish_patch;
