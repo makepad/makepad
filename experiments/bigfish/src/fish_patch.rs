@@ -48,6 +48,24 @@ pub struct FishPatch {
     pub undo: UndoState,
 }
 
+#[derive(Clone, Debug, SerRon, DeRon, Default)]
+pub struct FishPatchSelection
+{
+    pub blocks: Vec<u64>
+}
+
+impl FishPatchSelection {
+    pub fn add(&mut self, id: u64) {
+        if self.blocks.contains(&id) {
+            return;
+        }
+        self.blocks.push(id);
+    }
+
+    pub fn clear(&mut self)    {
+        self.blocks.clear();
+    }
+}
 pub trait FindBlock {
     fn find_mut(&mut self, id: u64) -> Option<&mut FishBlock>;
     fn find(&self, id: u64) -> Option<&FishBlock>;
@@ -77,6 +95,17 @@ impl FindConnection for Vec<FishConnection> {
 }
 
 impl FishPatch {
+
+    pub fn select_rectangle(&mut self, start: DVec2, end:DVec2) -> FishPatchSelection {
+        let mut blocks = Vec::new();
+        for block in self.blocks.iter() {
+            if block.is_in_rect(start, end) {
+                blocks.push(block.id);
+            }
+        }
+        FishPatchSelection { blocks }
+    }
+
     pub fn connect(&mut self, blockfrom: u64, outputfrom: u64, blockto: u64, intputto: u64) {
         // todo: check if connection exists
         self.undo_checkpoint_start();

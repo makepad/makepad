@@ -99,6 +99,10 @@ pub struct FishConnectionWidget {
     pub to_top: i32,
     #[live(-1)]
     pub to_bottom: i32,
+
+    #[live(false)]
+    pub selected: bool,
+
 }
 
 impl Widget for FishConnectionWidget {
@@ -194,10 +198,14 @@ impl FishConnectionWidget {
 
     
             }*/
+            if self.selected
+            {
+                self.draw_line.draw_bezier_abs(cx, &points, vec4(1.,1.,0.0,1.), self.line_width*1.3);
+            }
 
                 self.draw_line.draw_bezier_abs(
                     cx,
-                    points,
+                    &points,
                     self.color,
                     self.line_width,
                 );
@@ -215,9 +223,11 @@ impl FishConnectionWidget {
                 self.end_pos - dvec2(deltatomid.x, 0.),
                 self.end_pos             
             ];
-
-
-            self.draw_line.draw_bezier_abs(cx, points, self.color, self.line_width);
+            if self.selected
+            {
+                self.draw_line.draw_bezier_abs(cx, &points, vec4(1.,1.,0.0,1.), self.line_width*1.3);
+            }
+            self.draw_line.draw_bezier_abs(cx, &points, self.color, self.line_width);
             
         }
 
