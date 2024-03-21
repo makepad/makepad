@@ -72,22 +72,22 @@ pub struct FishPatchEditor {
     #[rust]
     selecting: bool,
     #[rust]
-    dragstartx: i32,
+    dragstartx: f64,
     #[rust]
-    dragstarty: i32,
+    dragstarty: f64,
     #[rust]
     active_undo_level: usize,
 
     #[rust]
     connectingid: u64,
     #[rust]
-    connectingx: i32,
+    connectingx: f64,
     #[rust]
-    connectingy: i32,
+    connectingy: f64,
     #[rust]
-    connectingcurrentx: i32,
+    connectingcurrentx: f64,
     #[rust]
-    connectingcurrenty: i32,
+    connectingcurrenty: f64,
     #[rust]
     connectinginput: bool,
     #[rust]
@@ -115,23 +115,31 @@ impl Widget for FishPatchEditor {
                         self.selection.clear();
                         self.selection.add(id);
                     }
-                    BlockHeaderButtonAction::Move { id, x, y } => {
+                    BlockHeaderButtonAction::Move { id, dx, dy } => {
                         self.scroll_bars.redraw(cx);
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
-                        patch.move_block(
-                            id,
-                            self.dragstartx as f64 + x,
-                            self.dragstarty as f64 + y,
-                        );
+                        patch.move_selection(&self.selection, dx,dy);
                     }
                     BlockHeaderButtonAction::RecordDragStart { id } => {
                         let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
                         let block = patch.blocks.find(id);
+                        
                         if block.is_some() {
+
+                            if !self.selection.blocks.contains(&id)
+                            {
+                                if self.selection.blocks.len() > 0
+                                {
+                                    self.selection.clear();
+                                }
+                                self.selection.add(id);
+                            }
+                          
+
                             let b = block.unwrap();
                             self.dragstartx = b.x;
                             self.dragstarty = b.y;
-
+                            self.scroll_bars.redraw(cx);
                             self.active_undo_level = patch.undo_checkpoint_start();
                         }
                     }
@@ -162,10 +170,10 @@ impl Widget for FishPatchEditor {
                         let scroll = self.scroll_bars.get_scroll_pos();
 
                         self.connectingid = id;
-                        self.connectingx = x as i32 + scroll.x as i32;
-                        self.connectingy = y as i32 + scroll.y as i32;
-                        self.connectingcurrentx = x as i32 + scroll.x as i32;
-                        self.connectingcurrenty = y as i32 + scroll.y as i32;
+                        self.connectingx = x + scroll.x;
+                        self.connectingy = y  + scroll.y ;
+                        self.connectingcurrentx = x + scroll.x ;
+                        self.connectingcurrenty = y  + scroll.y ;
                         self.connectinginput = frominput;
                         self.connecting = true;
                         self.scroll_bars.redraw(cx);
@@ -174,8 +182,8 @@ impl Widget for FishPatchEditor {
                         let scroll = self.scroll_bars.get_scroll_pos();
 
                         self.scroll_bars.redraw(cx);
-                        self.connectingcurrentx = x as i32 + scroll.x as i32;
-                        self.connectingcurrenty = y as i32 + scroll.y as i32;
+                        self.connectingcurrentx = x + scroll.x ;
+                        self.connectingcurrenty = y  + scroll.y ;
                     }
                     BlockConnectorButtonAction::Released => {
                         self.scroll_bars.redraw(cx);
@@ -291,8 +299,8 @@ impl Widget for FishPatchEditor {
 
             item.draw_all(cx, &mut Scope::empty());
             let itemarea = item.area().rect(cx);
-            i.h = itemarea.size.y as i32;
-            i.w = itemarea.size.x as i32;
+            i.h = itemarea.size.y;
+            i.w = itemarea.size.x;
 
             if self.selection.blocks.contains(&i.id){
                 self.draw_selected_outline(cx,i.x,i.y, i.w,i.h);
@@ -451,7 +459,7 @@ impl FishPatchEditor {
         }
     }
 
-    pub fn draw_selected_outline(&mut self, cx: &mut Cx2d, x: i32, y:i32, w: i32, h: i32){
+    pub fn draw_selected_outline(&mut self, cx: &mut Cx2d, x: f64, y:f64, w: f64, h: f64){
 
         let tl = DVec2{x: x as f64 - 1.5,y: y as f64  - 1.5};
         let br = DVec2{x: (x+w ) as f64+1.5,y: (y+h) as f64+1.5};
@@ -473,8 +481,8 @@ impl FishPatchEditor {
             let preitem = self.item(cx, item_id, templateid);
             let item = preitem.unwrap();
 
-            let blockfromopt = patch.get_block(i.from_block);
-            let blocktoopt = patch.get_block(i.to_block);
+            let blockfromopt = patch.get_block(&i.from_block);
+            let blocktoopt = patch.get_block(&i.to_block);
             let mut inselection = false;
 
             if blockfromopt.is_some() && blocktoopt.is_some() {
@@ -490,10 +498,10 @@ impl FishPatchEditor {
                 item.apply_over( cx, live! {
                     start_pos: (dvec2(blockfrom.x as f64 + 200.0, blockfrom.y as f64 + 10. + 20.  * _portfrom.id as f64) - scroll_pos),
                     end_pos: (dvec2(blockto.x as f64, blockto.y as f64+ 10. + 20. * _portto.id as f64) - scroll_pos ),
-                    from_top: (blockfrom.y- scroll_pos.y as i32),
-                    from_bottom: (blockfrom.y + blockfrom.h - scroll_pos.y as i32),
-                    to_top: (blockto.y - scroll_pos.y as i32),
-                    to_bottom: (blockto.y + blockto.h - scroll_pos.y as i32) ,
+                    from_top: (blockfrom.y- scroll_pos.y ),
+                    from_bottom: (blockfrom.y + blockfrom.h - scroll_pos.y ),
+                    to_top: (blockto.y - scroll_pos.y ),
+                    to_bottom: (blockto.y + blockto.h - scroll_pos.y ) ,
                     color: #x888,
                       abs_pos: (dvec2(0.,0.)),
                       selected: (inselection)
