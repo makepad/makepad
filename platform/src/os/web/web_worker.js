@@ -15,21 +15,38 @@ onmessage = async function(e) {
     let env = {
         memory: thread_info.memory,
         
-        js_console_error: (chars_ptr, len) => {
-            console.error(u8_to_string(chars_ptr, len))
+        js_console_error: (str_ptr, str_len) => {
+            console.error(u8_to_string(str_ptr, str_len))
         },
         
-        js_console_log: (chars_ptr, len) => {
-            console.log(u8_to_string(chars_ptr, len))
+        js_console_log: (str_ptr, str_len) => {
+            console.log(u8_to_string(str_ptr, str_len))
         },
         
         js_web_socket_send_string(id, str_ptr, str_len){
-            if(web_sockets[id] !== undefined){
-                
+            let str = u8_to_string(str_ptr, str_len);
+            let web_socket = web_sockets[id];
+            if(web_socket !== undefined){
+                if (web_socket.readyState == 0) {
+                    web_socket._queue.push(str)
+                }
+                else {
+                    web_socket.send(str);
+                }
             }
         },
 
         js_web_socket_send_binary(id, bin_ptr, bin_len){
+            let bin = u8_to_array(bin_ptr, bin_len);
+            let web_socket = web_sockets[id];
+            if(web_socket !== undefined){
+                if (web_socket.readyState == 0) {
+                    web_socket._queue.push(bin)
+                }
+                else {
+                    web_socket.send(bin);
+                }
+            }
         },
 
         js_open_web_socket:(id, url_ptr, url_len)=>{
@@ -79,6 +96,13 @@ onmessage = async function(e) {
         copy.set(u8);
         const decoder = new TextDecoder();
         return decoder.decode(copy);
+    }
+
+    function u8_to_array(ptr, len){
+        let u8 = new Uint8Array(env.memory.buffer, ptr, len);
+        let copy = new Uint8Array(len);
+        copy.set(u8);
+        return copy
     }
 
     function array_to_u8(u8_in){
