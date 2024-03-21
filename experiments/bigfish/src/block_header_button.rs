@@ -113,7 +113,7 @@ pub enum BlockHeaderButtonAction {
     Pressed,
     Released,
     Select { id: u64 },
-    Move { id: u64, x: f64, y: f64 },
+    Move { id: u64, dx: f64, dy: f64 },
     RecordDragStart { id: u64 },
     RecordDragEnd { id: u64 },
 }
@@ -150,6 +150,9 @@ pub struct BlockHeaderButton {
     pub blockid: u64,
     #[rust]
     pub dragging: bool,
+
+    #[rust]
+    pub draglast: DVec2,
 }
 
 impl Widget for BlockHeaderButton {
@@ -164,23 +167,26 @@ impl Widget for BlockHeaderButton {
                         &scope.path,
                         BlockHeaderButtonAction::Move {
                             id: self.blockid,
-                            x: fe.abs.x - fe.abs_start.x,
-                            y: fe.abs.y - fe.abs_start.y,
+                            dx: fe.abs.x - self.draglast.x,
+                            dy: fe.abs.y - self.draglast.y,
                         },
                     );
+                    self.draglast = fe.abs;
                 }
             }
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
                 self.dragging = true;
+                self.draglast = fe.abs;
+                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Pressed);
+              
                 cx.widget_action(
                     uid,
                     &scope.path,
                     BlockHeaderButtonAction::RecordDragStart { id: self.blockid },
                 );
-                cx.widget_action(uid, &scope.path, BlockHeaderButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             }
             Hit::FingerHoverIn(_) => {
