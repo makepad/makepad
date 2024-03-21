@@ -9,7 +9,7 @@ use {
             HostToStdin,
             StdinToHost,
         },
-        makepad_platform::studio::{AppToStudio,EventSample, GPUSample},
+        makepad_platform::studio::{AppToStudio,AppToStudioVec,EventSample, GPUSample},
         build_manager::{
             build_protocol::*,
             build_client::BuildClient
