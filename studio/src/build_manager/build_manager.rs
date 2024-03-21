@@ -88,7 +88,7 @@ pub struct BuildManager {
     pub binaries: Vec<BuildBinary>,
     pub active: ActiveBuilds,
     pub studio_http: String,
-    pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudio)>,
+    pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub send_file_change: FromUISender<LiveFileChange>
 }
