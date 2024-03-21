@@ -23,8 +23,9 @@ static WEBSOCKET_LIST:Mutex<RefCell<Vec<(u32,Sender<WebSocketMessage>)>>> = Mute
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_web_socket_closed(id: u32) {
     if let Ok(list) = WEBSOCKET_LIST.lock(){
-        if let Some(index) = list.borrow_mut().iter().position(|v| v.0 == id){
-            let item = list.borrow_mut().remove(index);
+        let mut list = list.borrow_mut();
+        if let Some(index) = list.iter().position(|v| v.0 == id){
+            let item = list.remove(index);
             let _ = item.1.send(WebSocketMessage::Closed);
         }
     }
