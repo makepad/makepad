@@ -124,7 +124,7 @@ impl Cx{
                 match rx_receiver.recv_timeout(cycle_time){
                     Ok(msg)=>match msg{
                         WebSocketThreadMsg::Open{socket_id, request, rx_sender}=>{
-                            let socket = OsWebSocket::open(sopcket_id, request, rx_sender);
+                            let socket = OsWebSocket::open(socket_id, request, rx_sender);
                             sockets.insert(socket_id, socket);
                         }
                         WebSocketThreadMsg::SendMessage{socket_id, message}=>{
