@@ -35,6 +35,9 @@ pub enum AppToStudio{
 }
 
 #[derive(SerBin, DeBin)]
+pub struct AppToStudioVec(pub Vec<AppToStudio>);
+
+#[derive(SerBin, DeBin)]
 pub enum StudioToApp{
     LiveChange{
         file_name: String,

@@ -603,9 +603,10 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
         let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32});
+        self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32, timer:0});
     }
     
+        
     /*
     fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
@@ -621,6 +622,14 @@ impl CxOsApi for Cx {
     }*/
 }
 
+impl Cx{
+    pub(crate) fn spawn_timer_thread<F>(&mut self, timer:u32, f: F) where F: Fn() + Send + 'static {
+        let closure_box: Box<dyn Fn() + Send + 'static> = Box::new(f);
+        let context_ptr = Box::into_raw(Box::new(closure_box));
+        self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32, timer});
+    }
+}
+
 extern "C" {
     pub fn js_post_signal(signal_hi: u32, signal_lo: u32);
 }
@@ -631,6 +640,14 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
 }
+
+#[export_name = "wasm_thread_timer_entrypoint"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
+    let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
+    closure();
+    Box::into_raw(closure);
+} 
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
 #[cfg(target_arch = "wasm32")]

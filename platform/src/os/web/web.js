@@ -461,7 +461,7 @@ export class WasmWebBrowser extends WasmBridge {
         
     }
     
-    alloc_thread_stack(context_ptr) {
+    alloc_thread_stack(context_ptr, timer) {
         let tls_size = this.exports.__tls_size.value;
         tls_size += 8 - (tls_size & 7); // align it to 8 bytes
         let stack_size = this.thread_stack_size; // 8mb
@@ -472,6 +472,7 @@ export class WasmWebBrowser extends WasmBridge {
         return {
             tls_ptr,
             stack_ptr,
+            timer,
             module: this.wasm._module,
             memory: this.wasm._memory,
             context_ptr
@@ -499,7 +500,7 @@ export class WasmWebBrowser extends WasmBridge {
             console.error("FromWasmCreateThread not available, wasm file not compiled with -C link-arg=--export=__stack_pointer");
             return
         }
-        worker.postMessage(this.alloc_thread_stack(args.context_ptr));
+        worker.postMessage(this.alloc_thread_stack(args.context_ptr, args.timer));
         
         this.workers.push(worker);
     }
