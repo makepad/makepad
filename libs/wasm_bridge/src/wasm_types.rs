@@ -28,6 +28,10 @@ impl WasmDataU8 {
     pub fn into_vec_u8(self)->Vec<u8>{
         self.0
     }
+    
+    pub fn into_utf8(self)->String{
+        String::from_utf8(self.0).unwrap()
+    }
 }
 
 impl ToWasm for WasmDataU8 {
