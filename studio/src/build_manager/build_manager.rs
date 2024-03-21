@@ -222,65 +222,67 @@ impl BuildManager {
                 self.studio_http = format!("http://{}/$studio_web_socket", addr);
             }
             
-            while let Ok((build_id, msg)) = self.recv_studio_msg.try_recv() {
-                match msg{
-                    AppToStudio::LogItem(item)=>{
-                        let start = text::Position {
-                            line_index: item.line_start as usize,
-                            byte_index: item.column_start as usize
-                        };
-                        let end = text::Position {
-                            line_index: item.line_end as usize,
-                            byte_index: item.column_end as usize
-                        };
-                        //log!("{:?} {:?}", pos, pos + loc.length);
-                        if let Some(file_id) = file_system.path_to_file_node_id(&item.file_name) {
-                            match item.level{
-                                LogLevel::Warning=>{
-                                    file_system.add_decoration(file_id, Decoration::new(
-                                        0,
-                                        start,
-                                        end,
-                                        DecorationType::Warning
-                                    ));
-                                    cx.action(AppAction::RedrawFile(file_id))
+            while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
+                for msg in msgs.0{
+                    match msg{
+                        AppToStudio::LogItem(item)=>{
+                            let start = text::Position {
+                                line_index: item.line_start as usize,
+                                byte_index: item.column_start as usize
+                            };
+                            let end = text::Position {
+                                line_index: item.line_end as usize,
+                                byte_index: item.column_end as usize
+                            };
+                            //log!("{:?} {:?}", pos, pos + loc.length);
+                            if let Some(file_id) = file_system.path_to_file_node_id(&item.file_name) {
+                                match item.level{
+                                    LogLevel::Warning=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Warning
+                                        ));
+                                        cx.action(AppAction::RedrawFile(file_id))
+                                    }
+                                    LogLevel::Error=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Error
+                                        ));
+                                        cx.action(AppAction::RedrawFile(file_id))
+                                    }
+                                    _=>()
                                 }
-                                LogLevel::Error=>{
-                                    file_system.add_decoration(file_id, Decoration::new(
-                                        0,
-                                        start,
-                                        end,
-                                        DecorationType::Error
-                                    ));
-                                    cx.action(AppAction::RedrawFile(file_id))
-                                }
-                                _=>()
                             }
+                            log.push((build_id, LogItem::Location(LogItemLocation{
+                                level: item.level,
+                                file_name: item.file_name,
+                                start,
+                                end,
+                                message: item.message
+                            })));
+                            cx.action(AppAction::RedrawLog)
                         }
-                        log.push((build_id, LogItem::Location(LogItemLocation{
-                            level: item.level,
-                            file_name: item.file_name,
-                            start,
-                            end,
-                            message: item.message
-                        })));
-                        cx.action(AppAction::RedrawLog)
-                    }
-                    AppToStudio::EventSample(sample)=>{  
-                        // ok lets push this profile sample into the profiles
-                        let values = self.profile.entry(build_id).or_default();
-                        values.event.push(sample);
-                        cx.action(AppAction::RedrawProfiler)
-                    }
-                    AppToStudio::GPUSample(sample)=>{  
-                        // ok lets push this profile sample into the profiles
-                        let values = self.profile.entry(build_id).or_default();
-                        values.gpu.push(sample);
-                        cx.action(AppAction::RedrawProfiler)
+                        AppToStudio::EventSample(sample)=>{  
+                            // ok lets push this profile sample into the profiles
+                            let values = self.profile.entry(build_id).or_default();
+                            values.event.push(sample);
+                            cx.action(AppAction::RedrawProfiler)
+                        }
+                        AppToStudio::GPUSample(sample)=>{  
+                            // ok lets push this profile sample into the profiles
+                            let values = self.profile.entry(build_id).or_default();
+                            values.gpu.push(sample);
+                            cx.action(AppAction::RedrawProfiler)
+                        }
                     }
                 }
             }
-            
+                
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv(){
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(loc)) => {

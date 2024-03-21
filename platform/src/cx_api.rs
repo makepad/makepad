@@ -28,7 +28,7 @@ pub trait CxOsApi {
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static;
-
+        
     fn start_stdin_service(&mut self) {}
     fn pre_start() -> bool {
         false
