@@ -39,6 +39,7 @@ live_design! {
     //    42, =78, 117
     THEME_COLOR_WHITE = #FFFFFFFF
     THEME_COLOR_U_8 = #FFFFFFCC
+    THEME_COLOR_U_6 = #FFFFFFAA
     THEME_COLOR_U_5 = #FFFFFF88
     THEME_COLOR_U_4 = #FFFFFF66
     THEME_COLOR_U_3 = #FFFFFF44
@@ -48,10 +49,12 @@ live_design! {
     THEME_COLOR_U_0 = #FFFFFF00
     THEME_COLOR_D_0 = #00000000
     THEME_COLOR_D_05 = #00000013
+    THEME_COLOR_D_075 = #00000022
     THEME_COLOR_D_1 = #00000033
     THEME_COLOR_D_2 = #00000044
     THEME_COLOR_D_3 = #00000066
     THEME_COLOR_D_4 = #00000088
+    THEME_COLOR_D_5 = #000000AA
     THEME_COLOR_BLACK = #000000FF
 
     // CORE BACKGROUND COLORS
@@ -116,12 +119,12 @@ live_design! {
     ))
 
     // ICON COLORS
+    THEME_COLOR_PANIC = #f0f
     THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
     THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
     THEME_COLOR_WARNING = (THEME_COLOR_MID),
     THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
-    THEME_COLOR_PANIC = #f0f
 
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
@@ -147,6 +150,7 @@ live_design! {
     THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
     THEME_FONT_SIZE_META = (THEME_FONT_SIZE_BASE + 0.5 * THEME_FONT_SIZE_CONTRAST)
 
+    THEME_FONT_LABEL = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     THEME_FONT_REGULAR = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } }
     THEME_FONT_BOLD = { font: { path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf") } }
     THEME_FONT_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-Italic.ttf") } }
@@ -169,7 +173,7 @@ live_design! {
         width: Fit, height: Fit,
         draw_text: {
             color: (THEME_COLOR_TEXT_DEFAULT),
-            text_style: <THEME_FONT_REGULAR>{},
+            text_style: <THEME_FONT_REGULAR> {},
             wrap: Word
         }
     }
@@ -352,18 +356,18 @@ live_design! {
         draw_bg: {color: (THEME_COLOR_D_05)}
     }
 
-    Html = <HtmlBase>{
+    Html = <HtmlBase> {
         width:Fill, height:Fit,
         flow: RightWrap,
 
         font_size: (THEME_FONT_SIZE_P),
         line_spacing: (THEME_FONT_LINE_SPACING),
 
-        draw_normal: {text_style: <THEME_FONT_REGULAR>{}}
-        draw_italic: {text_style: <THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style: <THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC>{}}
-        draw_fixed: {text_style: <THEME_FONT_CODE>{}}
+        draw_normal: {text_style: <THEME_FONT_REGULAR> {}}
+        draw_italic: {text_style: <THEME_FONT_ITALIC> {}}
+        draw_bold: {text_style: <THEME_FONT_BOLD> {}}
+        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC> {}}
+        draw_fixed: {text_style: <THEME_FONT_CODE> {}}
 
         code_layout: {flow: RightWrap, padding: { left:10,top:10,right:10,bottom:10}},
         code_walk: {height:Fit, width:Fill}
@@ -382,43 +386,32 @@ live_design! {
                 match self.block_type {
                     FlowBlockType::Quote => {
                         sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(#6)
-                        sdf.box(
-                            4.,
-                            3.,
-                            4.,
-                            self.rect_size.y-6,
-                            1.
-                        );
-                        sdf.fill(#8);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Sep => {
-                        sdf.box(
                             0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
                             2.
                         );
-                        sdf.fill(#8);
+                        sdf.fill((THEME_COLOR_U_1))
+                        sdf.box(
+                            (THEME_SPACE_1),
+                            (THEME_SPACE_1),
+                            (THEME_SPACE_1),
+                            self.rect_size.y - (THEME_SPACE_2),
+                            1.5
+                        );
+                        sdf.fill((THEME_COLOR_U_3));
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
                         sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
                             2.
                         );
-                        sdf.fill(#7);
+                        sdf.fill((THEME_COLOR_U_1));
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -429,7 +422,18 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(#7);
+                        sdf.fill((THEME_COLOR_U_2));
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill((THEME_COLOR_U_2));
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -437,21 +441,21 @@ live_design! {
                             0.,
                             self.rect_size.y-2,
                             self.rect_size.x,
-                            1.5,
+                            2.0,
                             0.5
                         );
-                        sdf.fill(#f);
+                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
                         sdf.box(
                             0.,
-                            self.rect_size.y*0.5,
+                            self.rect_size.y * 0.45,
                             self.rect_size.x,
-                            1.5,
+                            2.0,
                             0.5
                         );
-                        sdf.fill(#f);
+                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
                         return sdf.result;
                     }
                 }
@@ -460,18 +464,18 @@ live_design! {
         }
     }
 
-    Markdown = <MarkdownBase>{
+    Markdown = <MarkdownBase> {
         font_size: (THEME_FONT_SIZE_P),
         flow: RightWrap,
         width:Fill, height:Fit,
         padding: 5,
         line_spacing: (THEME_FONT_LINE_SPACING),
 
-        draw_normal: {text_style: <THEME_FONT_REGULAR>{}}
-        draw_italic: {text_style: <THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style: <THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC>{}}
-        draw_fixed: {text_style: <THEME_FONT_CODE>{}}
+        draw_normal: {text_style: <THEME_FONT_REGULAR> {}}
+        draw_italic: {text_style: <THEME_FONT_ITALIC> {}}
+        draw_bold: {text_style: <THEME_FONT_BOLD> {}}
+        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC> {}}
+        draw_fixed: {text_style: <THEME_FONT_CODE> {}}
 
         code_layout: {flow: RightWrap,align: {x:0.0,y:0.0}, padding: {left:10,top:10,right:10,bottom:10}},
         code_walk: {height:Fit, width:Fill}
@@ -504,21 +508,21 @@ live_design! {
                 match self.block_type {
                     FlowBlockType::Quote => {
                         sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
                             2.
                         );
-                        sdf.fill(#6)
+                        sdf.fill((THEME_COLOR_U_1))
                         sdf.box(
-                            4.,
-                            3.,
-                            4.,
-                            self.rect_size.y-6,
-                            1.
+                            (THEME_SPACE_1),
+                            (THEME_SPACE_1),
+                            (THEME_SPACE_1),
+                            self.rect_size.y - (THEME_SPACE_2),
+                            1.5
                         );
-                        sdf.fill(#8);
+                        sdf.fill((THEME_COLOR_U_3));
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -529,29 +533,29 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(#6);
+                        sdf.fill((THEME_COLOR_U_2));
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
                         sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
                             2.
                         );
-                        sdf.fill(#7);
+                        sdf.fill((THEME_COLOR_U_1));
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
                         sdf.box(
                             1.,
                             1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            self.rect_size.x,
+                            self.rect_size.y - 2.,
                             2.
                         );
-                        sdf.fill(#7);
+                        sdf.fill((THEME_COLOR_U_2));
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -559,21 +563,21 @@ live_design! {
                             0.,
                             self.rect_size.y-2,
                             self.rect_size.x,
-                            1.5,
+                            2.0,
                             0.5
                         );
-                        sdf.fill(#f);
+                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
                         sdf.box(
                             0.,
-                            self.rect_size.y*0.5,
+                            self.rect_size.y * 0.45,
                             self.rect_size.x,
-                            1.5,
+                            2.0,
                             0.5
                         );
-                        sdf.fill(#f);
+                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
                         return sdf.result;
                     }
                 }
@@ -682,7 +686,7 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: <THEME_FONT_BOLD>{
+            text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -692,7 +696,7 @@ live_design! {
                         (THEME_COLOR_U_5),
                         self.hover
                     ),
-                    (THEME_COLOR_U_3),
+                    (THEME_COLOR_U_4),
                     self.pressed
                 )
             }
@@ -718,28 +722,31 @@ live_design! {
             instance hover: 0.0
             instance pressed: 0.0
             uniform border_radius: 3.0
-            instance bodytop: #53
-            instance bodybottom: #5c
+            instance bodytop: (THEME_COLOR_U_1)
+            instance bodybottom: (THEME_COLOR_U_2)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), (THEME_COLOR_D_1), self.pressed);
                 let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let top_gradient = mix(body_transp, mix((THEME_COLOR_U_3), (THEME_COLOR_D_4), self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
-                    mix(body_transp, #5c, self.pressed),
+                    mix(body_transp, (THEME_COLOR_U_2), self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
 
                 // the little drop shadow at the bottom
-                let shift_inward = self.border_radius + 4.0;
-                sdf.move_to(shift_inward, self.rect_size.y - self.border_radius);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - self.border_radius);
+                let shift_inward = self.border_radius * 1.75;
+                sdf.move_to(shift_inward, self.rect_size.y);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                 sdf.stroke(
-                    mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
-                    self.border_radius
+                    mix(
+                        mix((THEME_COLOR_D_3), (THEME_COLOR_D_3), self.hover),
+                        (THEME_COLOR_U_2),
+                        self.pressed
+                    ), 1.
                 )
 
                 sdf.box(
@@ -821,8 +828,8 @@ live_design! {
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
                         sdf.fill_keep(
                             mix(
-                                mix((THEME_COLOR_D_4), (THEME_COLOR_D_2), pow(self.pos.y, 1.)),
-                                mix(#x000000AA, #x00000066, pow(self.pos.y, 1.0)),
+                                mix((THEME_COLOR_D_3), (THEME_COLOR_D_2), pow(self.pos.y, 1.)),
+                                mix((THEME_COLOR_D_5), (THEME_COLOR_D_4), pow(self.pos.y, 1.0)),
                                 self.hover)
                             )
                         sdf.stroke(
@@ -837,7 +844,7 @@ live_design! {
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix(#fff0, (THEME_COLOR_U_5), self.selected), 1.25);
+                        sdf.stroke(mix((THEME_COLOR_U_0), (THEME_COLOR_U_6), self.selected), 1.25);
                     }
                     CheckType::Radio => {
                         let sz = self.size;
@@ -1099,7 +1106,7 @@ live_design! {
         }
     }
 
-    WindowMenu = <WindowMenuBase>{ height: 0, width: 0, }
+    WindowMenu = <WindowMenuBase> { height: 0, width: 0, }
 
     Window = <WindowBase> {
         pass: {clear_color: (THEME_COLOR_CLEAR)}
@@ -1136,7 +1143,7 @@ live_design! {
             }
         }
 
-        window_menu = <WindowMenu>{
+        window_menu = <WindowMenu> {
             main = Main{items:[app]}
             app = Sub{name:"Makepad",items:[quit]}
             quit = Item{
@@ -1146,7 +1153,7 @@ live_design! {
                 enabled: true
             }
         }
-        body = <KeyboardView>{
+        body = <KeyboardView> {
             width: Fill, height: Fill,
             keyboard_min_shift: 30,
         }
@@ -1628,6 +1635,24 @@ live_design! {
         align: {x: 0., y: 0.}
         padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
 
+        // width: 200, height: 30,
+        // draw_text: {
+        //     fn get_color(self) -> vec4 {
+        //         return mix(
+        //             mix(
+        //                 mix(
+        //                     (#xFFF8),
+        //                     (#xFFF8),
+        //                     self.focus
+        //                 ),
+        //                 (#xFFFF),
+        //                 self.hover
+        //             ),
+        //             (#x000A),
+        //             self.pressed
+        //         )
+        //     }
+        // }
         draw_text: {
             text_style: <THEME_FONT_BOLD> {}
 
@@ -1904,7 +1929,7 @@ live_design! {
     }
 
     FileTree = <FileTreeBase> {
-        scroll_bars: <ScrollBars>{}
+        scroll_bars: <ScrollBars> {}
         node_height: (THEME_DATA_ITEM_HEIGHT),
         file_node: <FileTreeNode> {
             is_folder: false,
@@ -2115,7 +2140,7 @@ live_design! {
             wrap: Word
             instance pressed: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR>{}
+            text_style: <THEME_FONT_REGULAR> {}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(

@@ -9,7 +9,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_example_ui_zoo::demofiletree::*;
 
-    COLOR_CONTAINER = (THEME_COLOR_D_1)
+    COLOR_CONTAINER = (THEME_COLOR_D_075)
     COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
 
     ZooTitle = <View> {
@@ -31,7 +31,7 @@ live_design!{
         title = <H3> { text: "Header" }
     }
 
-    ZooGroup = <RoundedView>{
+    ZooGroup = <RoundedView> {
         height: Fit, width: Fill,
         flow: Right,
         align: { x: 0.0, y: 0.5},
@@ -57,7 +57,7 @@ live_design!{
     }
 
     App = {{App}} {
-        ui: <Window>{
+        ui: <Window> {
             width: Fill, height: Fill,
             show_bg: true,
             draw_bg: {
@@ -72,18 +72,18 @@ live_design!{
                 caption_label = { label = {text: "Makepad UI Zoo"} }
             },
 
-            body = <View>{
+            body = <View> {
                 width: Fill, height: Fill,
                 flow: Down,
                 spacing: 10.,
                 margin: 0., padding: 0.
-                scroll_bars: <ScrollBars>{}
+                scroll_bars: <ScrollBars> {}
 
-                <ZooTitle>{}
+                <ZooTitle> {}
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Typographic System"}
-                    <ZooDesc>{
+                    <ZooDesc> {
                         text:"Typographic System."
                     }
                     <View> {
@@ -108,9 +108,9 @@ live_design!{
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text: "View 1" }
-                    <ZooDesc>{text:"This is a gray view with flow set to Right\nTo show the extend, the background has been enabled using show_bg and a gray pixelshader has been provided to draw_bg."}
+                    <ZooDesc> {text:"This is a gray view with flow set to Right\nTo show the extend, the background has been enabled using show_bg and a gray pixelshader has been provided to draw_bg."}
                     <View> {
                         height: Fit
                         flow: Right,
@@ -118,12 +118,12 @@ live_design!{
                         draw_bg: { color: (COLOR_CONTAINER) }
                         padding: 10.
                         spacing: 10.
-                        <ZooBlock>{draw_bg:{color: #f00}}
-                        <ZooBlock>{draw_bg:{color: #0f0}}
-                        <ZooBlock>{draw_bg:{color: #00f}}
+                        <ZooBlock> {draw_bg:{color: #f00}}
+                        <ZooBlock> {draw_bg:{color: #0f0}}
+                        <ZooBlock> {draw_bg:{color: #00f}}
                     }
 
-                    <ZooDesc>{ text:"This is a view with flow set to Down" }
+                    <ZooDesc> { text:"This is a view with flow set to Down" }
                     <View> {
                         height: Fit,
                         flow: Down,
@@ -131,13 +131,13 @@ live_design!{
                         spacing: 10.
                         show_bg: true,
                         draw_bg: { color: (THEME_COLOR_D_2) }
-                        <ZooBlock>{draw_bg:{color: #f00}}
-                        <ZooBlock>{draw_bg:{color: #0f0}}
-                        <ZooBlock>{draw_bg:{color: #00f}}
+                        <ZooBlock> {draw_bg:{color: #f00}}
+                        <ZooBlock> {draw_bg:{color: #0f0}}
+                        <ZooBlock> {draw_bg:{color: #00f}}
                     }
 
-                    <ZooDesc>{text:"This view is bigger on the inside"}
-                    <View>{
+                    <ZooDesc> {text:"This view is bigger on the inside"}
+                    <View> {
                         width: 150, height: 150,
                         flow: Right,
                         padding: 10.
@@ -145,72 +145,72 @@ live_design!{
 
                         show_bg: true,
                         draw_bg: { color: (COLOR_CONTAINER) }
-                        scroll_bars: <ScrollBars>{}
+                        scroll_bars: <ScrollBars> {}
 
-                        <View>{
+                        <View> {
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock>{draw_bg:{color: #f00}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
-                            <ZooBlock>{draw_bg:{color: #00f}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #f00}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #00f}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
                         }
 
-                        <View>{
+                        <View> {
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock>{draw_bg:{color: #f00}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
-                            <ZooBlock>{draw_bg:{color: #00f}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #f00}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #00f}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
                         }
 
-                        <View>{
+                        <View> {
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock>{draw_bg:{color: #f00}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
-                            <ZooBlock>{draw_bg:{color: #00f}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #f00}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #00f}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
                         }
 
-                        <View>{
+                        <View> {
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock>{draw_bg:{color: #f00}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
-                            <ZooBlock>{draw_bg:{color: #00f}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #f00}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #00f}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
                         }
 
-                        <View>{
+                        <View> {
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock>{draw_bg:{color: #f00}}
-                            <ZooBlock>{draw_bg:{color: #0f0}}
-                            <ZooBlock>{draw_bg:{color: #00f}}
+                            <ZooBlock> {draw_bg:{color: #f00}}
+                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: #00f}}
                         }
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"RoundedView"}
-                    <ZooDesc>{
+                    <ZooDesc> {
                         text:"This is a Rounded View. Please note that the radius has to be represented as a float value (with a decimal point) to work. Also note that instead of replacing the main pixel shader - you now replace get_color instead so the main shader can take care of rendering the radius."
                     }
                     <RoundedView> {
@@ -223,15 +223,15 @@ live_design!{
                             color: (COLOR_CONTAINER),
                             radius: 10.
                         }
-                        <ZooBlock>{draw_bg:{color: #f00}}
-                        <ZooBlock>{draw_bg:{color: #0f0}}
-                        <ZooBlock>{draw_bg:{color: #00f}}
+                        <ZooBlock> {draw_bg:{color: #f00}}
+                        <ZooBlock> {draw_bg:{color: #0f0}}
+                        <ZooBlock> {draw_bg:{color: #00f}}
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Button"}
-                    <ZooDesc>{text:"A small clickable region"}
+                    <ZooDesc> {text:"A small clickable region"}
                     <View> {
                         flow: Right,
                         width: Fill, height: Fit,
@@ -284,10 +284,10 @@ live_design!{
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"TextInput"}
-                    <ZooDesc>{text:"Simple 1 line textbox"}
-                    <ZooGroup>{
+                    <ZooDesc> {text:"Simple 1 line textbox"}
+                    <ZooGroup> {
                         simpletextinput= <TextInput> {
                             text: "This is inside a text input!"
                         }
@@ -298,11 +298,11 @@ live_design!{
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Label"}
                     <ZooDesc> { text:"Simple 1 line textbox" }
-                    <ZooGroup>{ <Label> { text: "This is a small line of text" } }
-                    <ZooGroup>{
+                    <ZooGroup> { <Label> { text: "This is a small line of text" } }
+                    <ZooGroup> {
                         <Label> {
                             draw_text: {
                                 color: (COLOR_ACCENT)
@@ -313,8 +313,8 @@ live_design!{
                             text: "You can style text using colors and fonts"
                         }
                     }
-                    <ZooGroup>{
-                        <Label>{
+                    <ZooGroup> {
+                        <Label> {
                             draw_text: {
                                 fn get_color(self) ->vec4{
                                     return mix((COLOR_ACCENT), (THEME_COLOR_U_0), self.pos.x)
@@ -329,7 +329,7 @@ live_design!{
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = { text:"Slider" }
                     <ZooDesc> { text:"A parameter dragger" }
                     <ZooGroup> {
@@ -359,111 +359,84 @@ live_design!{
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"DropDown"}
-                    <ZooDesc>{text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
-                    <ZooGroup>{
-                        dropdown = <DropDown>{
-                            // width: 200, height: 30,
-                            // draw_text: {
-                            //     fn get_color(self) -> vec4 {
-                            //         return mix(
-                            //             mix(
-                            //                 mix(
-                            //                     (#xFFF8),
-                            //                     (#xFFF8),
-                            //                     self.focus
-                            //                 ),
-                            //                 (#xFFFF),
-                            //                 self.hover
-                            //             ),
-                            //             (#x000A),
-                            //             self.pressed
-                            //         )
-                            //     }
-                            // }
+                    <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
+                    <ZooGroup> {
+                        dropdown = <DropDown> {
                             labels: ["ValueOne", "ValueTwo", "Thrice", "FourthValue", "OptionE", "Hexagons"],
                             values: [ValueOne, ValueTwo, Thrice, FourthValue, OptionE, Hexagons]
                         }
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"DemoFileTree"}
-                    <ZooDesc>{text:"DemoFileTree?"}
-                    <ZooGroup> { <DemoFileTree>{ file_tree:{ height: 400 } } }
+                    <ZooDesc> {text:"DemoFileTree?"}
+                    <ZooGroup> { <DemoFileTree> { file_tree:{ height: 400. } } }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = { text:"FoldHeader" }
                     <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
                     <ZooGroup> {
                         thefoldheader= <FoldHeader> {
-                            header: <View>{
-                                fold_button = <FoldButton>{} <Pbold> {text: "Fold me!"}
+                            header: <View> {
+                                fold_button = <FoldButton> {} <Pbold> {text: "Fold me!"}
                             }
-                            body: <View>{
+                            body: <View> {
                                 width: Fill, height: Fit
                                 show_bg: false,
                                 padding: 5.0,
-                                <P>{ text:"This is the body that can be folded away" }
+                                <P> { text:"This is the body that can be folded away" }
                             }
                         }
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Html"}
-                    <ZooDesc>{text:"HTML Widget"}
+                    <ZooDesc> {text:"HTML Widget"}
                     <ZooGroup> {
-                        <Html>{
+                        <Html> {
                             width:Fill, height:Fit,
                             // font_size: (THEME_FONT_SIZE_BASE),
                             // flow: RightWrap,
                             // padding: 5,
-                            body:"Thhhis is <b>bold text</b>&nbsp;and&nbsp;<i>italic text</i>.<br/> <Button>Button</Button><br/> <block_quote>Blockquote<br/> <block_quote>Nested blockquote</block_quote> </block_quote> <b><i>Bold italic</i></b>"
+                            body:"This is <b>bold text</b>&nbsp;and&nbsp;<i>italic text</i>. <br/> <sep> <b><i>Bold italic</i></b>, <u>underlined</u>, and <s>strike through</s> text.<br/> <Button>Button</Button><br/> <block_quote>Blockquote<br/> <block_quote>Nested blockquote</block_quote> </block_quote><br/><code>This is a code block</code>"
                         }
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Markdown"}
-                    <ZooDesc>{text:"Markdown"}
+                    <ZooDesc> {text:"Markdown"}
                     <ZooGroup> {
-                        <Markdown>{
+                        <Markdown> {
                             width:Fill, height: Fit,
                             // font_size: (THEME_FONT_SIZE_BASE),
                             // flow: RightWrap,
                             // padding: 5,
-                            body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break and a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote."
+                            body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote.\n\nThis is `inline code`.\n\n ```code block```"
                         }
                     }
                 }
 
-                // TODO: SHOW
-                // SEEMS NOT TO WORK WITHOUT DUMMY DATA
-                // <ZooHeader>{
-                //     title = {text:"Portal List"}
-                //     <ZooDesc>{text:"Portal List"}
-                //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
-                // }
-
-                // TODO: SHOW
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Image"}
-                    <ZooDesc>{text:"A static inline image from a resource."}
+                    <ZooDesc> {text:"A static inline image from a resource."}
                     <ZooGroup> { <Image> { source: dep("crate://self/resources/ducky.png" ) } }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Link Label"}
-                    <ZooDesc>{text:"Link Label"}
+                    <ZooDesc> {text:"Link Label"}
                     <ZooGroup> { <LinkLabel> { text: "Click me!"} }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"CheckBox"}
-                    <ZooDesc>{text:"Checkbox?"}
+                    <ZooDesc> {text:"Checkbox?"}
                     <ZooGroup> {
                         height: Fit
                         flow: Down,
@@ -471,102 +444,78 @@ live_design!{
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            simplecheckbox = <CheckBox>{text:"Check me out!"}
-                            simplecheckbox_output = <Label>{ text:"hmm" }
-                            <CheckBox>{text:"Check me out!"}
-                            <CheckBox>{text:"Check me out!"}
+                            simplecheckbox = <CheckBox> {text:"Check me out!"}
+                            simplecheckbox_output = <Label> { text:"hmm" }
+                            <CheckBox> {text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
                         }
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            <CheckBox>{text:"Check me out!"}
-                            <CheckBox>{text:"Check me out!"}
-                            <CheckBox>{text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
                         }
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            <CheckBox>{text:"Check me out!"}
-                            <CheckBox>{text:"Check me out!"}
-                            <CheckBox>{text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!"}
                         }
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"RadioButton"}
-                    <ZooDesc>{text:"RadioButton?"}
+                    <ZooDesc> {text:"RadioButton?"}
                     <ZooGroup> {
                         flow: Down,
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
-                            radios_demo = <View>{
+                            radios_demo = <View> {
                                 width: Fit, height: Fit,
-                                radio1 = <RadioButton>{
-                                    label: "Option 1: yey"
-                                }
-                                radio2 = <RadioButton>{
-                                    label: "Option 2: hah"
-                                }
-                                radio3 = <RadioButton>{
-                                    label: "Option 3: hmm"
-                                }
-                                radio4 = <RadioButton>{
-                                    label: "Option 4: all of the above"
-                                }
+                                radio1 = <RadioButton> { label: "Option 1: yey" }
+                                radio2 = <RadioButton> { label: "Option 2: hah" }
+                                radio3 = <RadioButton> { label: "Option 3: hmm" }
+                                radio4 = <RadioButton> { label: "Option 4: all of the above" }
                             }
                         }
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
-                            <View>{
+                            <View> {
                                 width: Fit, height: Fit,
-                                <RadioButton>{
-                                    label: "Option 1: yey"
-                                }
-                                <RadioButton>{
-                                    label: "Option 2: hah"
-                                }
-                                <RadioButton>{
-                                    label: "Option 3: hmm"
-                                }
-                                <RadioButton>{
-                                    label: "Option 4: all of the above"
-                                }
+                                <RadioButton> { label: "Option 1: yey" }
+                                <RadioButton> { label: "Option 2: hah" }
+                                <RadioButton> { label: "Option 3: hmm" }
+                                <RadioButton> { label: "Option 4: all of the above" }
                             }
                         }
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
-                            <View>{
+                            <View> {
                                 width: Fit, height: Fit,
-                                <RadioButton>{
-                                    label: "Option 1: yey"
-                                }
-                                <RadioButton>{
-                                    label: "Option 2: hah"
-                                }
-                                <RadioButton>{
-                                    label: "Option 3: hmm"
-                                }
-                                <RadioButton>{
-                                    label: "Option 4: all of the above"
-                                }
+                                <RadioButton> { label: "Option 1: yey" }
+                                <RadioButton> { label: "Option 2: hah" }
+                                <RadioButton> { label: "Option 3: hmm" }
+                                <RadioButton> { label: "Option 4: all of the above" }
                             }
                         }
                     }
                 }
 
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Slides View"}
                     width: Fill, height: Fit,
-                    <ZooDesc>{text:"Slides View"}
+                    <ZooDesc> {text:"Slides View"}
                     <ZooGroup> {
                         <SlidesView> {
                             width: Fill, height: 400,
@@ -584,9 +533,9 @@ live_design!{
                 }
 
                 // TODO: SHOW
-                <ZooHeader>{
+                <ZooHeader> {
                     title = {text:"Dock"}
-                    <ZooDesc>{text:"Dock"}
+                    <ZooDesc> {text:"Dock"}
                     <ZooGroup> {
                         <Dock> {
                             height: 500., width: Fill
@@ -640,43 +589,48 @@ live_design!{
 
                             Container_A = <RectView> {
                                 height: Fill, width: Fill
-                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 padding: 10.,
+                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 <Label> {text: "Hallo"}
                             }
 
                             Container_B = <RectView> {
                                 height: Fill, width: Fill
-                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 padding: 10.,
+                                draw_bg: { color: (THEME_COLOR_D_3) }
+
                                 <Label> {text: "Kuckuck"}
                             }
 
                             Container_C = <RectView> {
                                 height: Fill, width: Fill
-                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 padding: 10.,
+                                draw_bg: { color: (THEME_COLOR_D_3) }
+
                                 <Label> {text: "Ahoy"}
                             }
 
                             Container_D = <RectView> {
                                 height: Fill, width: Fill
-                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 padding: 10.,
+                                draw_bg: { color: (THEME_COLOR_D_3) }
+
                                 <Label> {text: "Hi"}
                             }
 
                             Container_E = <RectView> {
                                 height: Fill, width: Fill
-                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 padding: 10.,
+                                draw_bg: { color: (THEME_COLOR_D_3) }
+
                                 <Label> {text: "Ahoy"}
                             }
 
                             Container_F = <RectView> {
                                 height: Fill, width: Fill
-                                draw_bg: { color: (THEME_COLOR_D_3) }
                                 padding: 10.,
+                                draw_bg: { color: (THEME_COLOR_D_3) }
+
                                 <Label> {text: "Hi"}
                             }
 
@@ -685,36 +639,40 @@ live_design!{
                 }
 
                 // TODO: SHOW
-                // <ZooHeader>{
-                //     title = {text:"Stack Navigation"}
-                //     <ZooDesc>{text:"Stack Navigation"}
-                //     <ZooGroup> { <StackNavigation> { width: Fill, height: 100.} }
-                // }
-
-                ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-                ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-                ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-                // TODO: SHOW
                 // SEEMS NOT TO WORK WITHOUT DUMMY DATA
-                // <ZooHeader>{
+                // <ZooHeader> {
                 //     title = {text:"Portal List"}
-                //     <ZooDesc>{text:"Portal List"}
+                //     <ZooDesc> {text:"Portal List"}
                 //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
                 // }
 
                 // TODO: SHOW
-                // <ZooHeader>{
+                // <ZooHeader> {
+                //     title = {text:"Stack Navigation"}
+                //     <ZooDesc> {text:"Stack Navigation"}
+                //     <ZooGroup> { <StackNavigation> { width: Fill, height: 100.} }
+                // }
+
+                // TODO: SHOW
+                // SEEMS NOT TO WORK WITHOUT DUMMY DATA
+                // <ZooHeader> {
+                //     title = {text:"Portal List"}
+                //     <ZooDesc> {text:"Portal List"}
+                //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
+                // }
+
+                // TODO: SHOW
+                // <ZooHeader> {
                 //     title = {text:"Flat list"}
-                //     <ZooDesc>{text:"Flat list"}
+                //     <ZooDesc> {text:"Flat list"}
                 //     <ZooGroup> { <FlatList> { width: Fill, height: 100.} }
                 // }
 
                 // TODO: SHOW
                 // REFERENCE: https://github.com/project-robius/makepad_wonderous/blob/main/src/timeline/timeline_screen.rs#L242-L264
-                // <ZooHeader>{
+                // <ZooHeader> {
                 //     title = {text: "Expandable Panel"}
-                //     <ZooDesc>{text: "Expandable Panel"}
+                //     <ZooDesc> {text: "Expandable Panel"}
                 //     <ZooGroup> {
                 //         expandable_panel = <ExpandablePanel> {
                 //             body = {
@@ -741,17 +699,17 @@ live_design!{
                 // }
 
                 //  TODO: Slidepanel appears to be buggy
-                // <ZooHeader>{
+                // <ZooHeader> {
                 //     title = {text:"SlidePanel"}
-                //     <ZooDesc>{text:"Slide panel?"}
+                //     <ZooDesc> {text:"Slide panel?"}
                 //     <ZooGroup> {
                 //         <SlidePanel> {
                 //             width: (1000 * 0.175), height: (1000 * 0.175),
                 //             margin: 0.
                 //             side: Right,
-                //             <ZooHeader>{
+                //             <ZooHeader> {
                 //                 title = {text:"Image"}
-                //                 <ZooDesc>{text:"A static inline image from a resource."}
+                //                 <ZooDesc> {text:"A static inline image from a resource."}
                 //                 <ZooGroup> {
                 //                     <Image> {
                 //                         width: (1000 * 0.175), height: (1000 * 0.175),
