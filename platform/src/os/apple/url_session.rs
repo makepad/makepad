@@ -29,8 +29,11 @@ use {
 
 pub fn define_web_socket_delegate() -> *const Class {
     
-    extern fn did_open_with_protocol(_this: &Object, _: Sel, _web_socket_task: ObjcId, _open_with_protocol: ObjcId) {
+    extern fn did_open_with_protocol(this: &Object, _: Sel, _web_socket_task: ObjcId, _open_with_protocol: ObjcId) {
         crate::log!("DID OPEN WITH PROTOCOL");
+        let sender_box: u64 = *this.get_ivar("sender_box");
+        // TODO send Open and Close websocket messages
+        // lets turn t
     }
     
     extern fn did_close_with_code(_this: &Object, _: Sel, _web_socket_task: ObjcId, _code: usize, _reason: ObjcId) {
@@ -45,7 +48,8 @@ pub fn define_web_socket_delegate() -> *const Class {
         decl.add_method(sel!(webSocketTask: didOpenWithProtocol:), did_open_with_protocol as extern fn(&Object, Sel, ObjcId, ObjcId));
         decl.add_method(sel!(webSocketTask: didCloseWithCode: reason:), did_close_with_code as extern fn(&Object, Sel, ObjcId, usize, ObjcId));
     }
-    
+    decl.add_ivar::<u64>("sender_box");
+        
     return decl.register();
 }
 
@@ -79,7 +83,6 @@ pub fn define_url_session_delegate() -> *const Class {
     unsafe {
         decl.add_method(sel!(URLSession: didReceiveChallenge: completionHandler:), did_receive_challenge as extern fn(&Object, Sel, ObjcId,ObjcId, ObjcId));
     }
-        
     return decl.register();
 }
 
@@ -145,7 +148,7 @@ impl OsWebSocket{
         } 
     }
             
-    pub fn open(request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
+    pub fn open(_socket_id:u64, request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         unsafe {
             
             //self.lazy_init_ns_url_session();
@@ -163,7 +166,8 @@ impl OsWebSocket{
             //let session  = self.ns_url_session.unwrap();
             let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
             let web_socket_delegate_instance: ObjcId = msg_send![get_apple_class_global().web_socket_delegate, new];
-                                
+            
+            
             unsafe fn set_message_receive_handler(data_task2: Arc<ObjcId>,  rx_sender: Sender<WebSocketMessage>) {
                 let data_task = data_task2.clone();
                 let handler = objc_block!(move | message: ObjcId, error: ObjcId | {

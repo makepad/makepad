@@ -33,7 +33,7 @@ impl OsWebSocket{
         Ok(())
     }
     
-    pub fn open(request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
+    pub fn open(_socket_id:u64,  request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         let request_id = LiveId::unique();
 
         let sender_ref = Arc::new(Box::new(rx_sender));

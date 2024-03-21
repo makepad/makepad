@@ -10,7 +10,7 @@ impl OsWebSocket{
         todo!();
     }
                     
-    pub fn open(_request: HttpRequest, _rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
+    pub fn open(_socket_id:u64, _request: HttpRequest, _rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         todo!();
     }
 }
