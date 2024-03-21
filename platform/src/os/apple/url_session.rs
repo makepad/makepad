@@ -31,7 +31,7 @@ pub fn define_web_socket_delegate() -> *const Class {
     
     extern fn did_open_with_protocol(this: &Object, _: Sel, _web_socket_task: ObjcId, _open_with_protocol: ObjcId) {
         crate::log!("DID OPEN WITH PROTOCOL");
-        let sender_box: u64 = *this.get_ivar("sender_box");
+        //let sender_box: u64 = *this.get_ivar("sender_box");
         // TODO send Open and Close websocket messages
         // lets turn t
     }
