@@ -440,15 +440,15 @@ live_design!{
                     <ZooGroup> {
                         height: Fit
                         flow: Down,
+                        <H4> { text: "Output demo"}
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
                             simplecheckbox = <CheckBox> {text:"Check me out!"}
                             simplecheckbox_output = <Label> { text:"hmm" }
-                            <CheckBox> {text:"Check me out!"}
-                            <CheckBox> {text:"Check me out!"}
                         }
+                        <H4> { text: "Standard Mode"}
                         <View> {
                             height: Fit
                             flow: Right
@@ -457,13 +457,74 @@ live_design!{
                             <CheckBox> {text:"Check me out!"}
                             <CheckBox> {text:"Check me out!"}
                         }
+                        <H4> { text: "Circular Checkbox Mode"}
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            <CheckBox> {text:"Check me out!"}
-                            <CheckBox> {text:"Check me out!"}
-                            <CheckBox> {text:"Check me out!"}
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Radio } }
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Radio } }
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Radio } }
+                        }
+                        <H4> { text: "Toggle Mode"}
+                        <View> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5}
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Toggle } }
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Toggle } }
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Toggle } }
+                        }
+                        <H4> { text: "Text Mode"}
+                        <View> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5}
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: None } }
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: None } }
+                            <CheckBox> {text:"Check me out!", draw_check: { check_type: None } }
+                        }
+                        <H4> { text: "Custom Icon Mode"}
+                        <View> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5}
+                            <CheckBox> {
+                                text:"Check me out!"
+                                draw_check: { check_type: None }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+
+                                icon_walk: {
+                                    width: 15, height: Fit,
+                                    margin: 0.0
+                                }
+                            }
+                            <CheckBox> {
+                                text:"Check me out!"
+                                draw_check: { check_type: None }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+
+                                icon_walk: {
+                                    width: 15, height: Fit,
+                                    margin: 0.0
+                                }
+                            }
+                            <CheckBox> {
+                                text:"Check me out!"
+                                draw_check: { check_type: None }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+
+                                icon_walk: {
+                                    width: 15, height: Fit,
+                                    margin: 0.0
+                                }
+                            }
                         }
                     }
                 }
@@ -473,6 +534,7 @@ live_design!{
                     <ZooDesc> {text:"RadioButton?"}
                     <ZooGroup> {
                         flow: Down,
+                        <H3> { text: "Radio Mode"}
                         <View> {
                             height: Fit
                             flow: Right
@@ -507,6 +569,19 @@ live_design!{
                                 <RadioButton> { label: "Option 2: hah" }
                                 <RadioButton> { label: "Option 3: hmm" }
                                 <RadioButton> { label: "Option 4: all of the above" }
+                            }
+                        }
+
+                        <H3> { text: "Tab Mode"}
+                        <View> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5 }
+                            <View> {
+                                width: Fit, height: Fit,
+                                <RadioButton> { label: "Option 1: yey", draw_radio: { radio_type: Tab } }
+                                <RadioButton> { label: "Option 1: yey", draw_radio: { radio_type: Tab } }
+                                <RadioButton> { label: "Option 1: yey", draw_radio: { radio_type: Tab } }
                             }
                         }
                     }
