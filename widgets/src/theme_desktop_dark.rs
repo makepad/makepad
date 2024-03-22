@@ -180,7 +180,7 @@ live_design! {
 
     H1 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_1 * 0.5), bottom: (THEME_FONT_SIZE_1)}
+        margin: {top: (THEME_FONT_SIZE_1), bottom: (THEME_FONT_SIZE_1 * 0.5)}
         draw_text: {
             wrap: Word
             text_style: <THEME_FONT_BOLD> {
@@ -194,7 +194,7 @@ live_design! {
 
     H1italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_1 * 0.5), bottom: (THEME_FONT_SIZE_1)}
+        margin: {top: (THEME_FONT_SIZE_1), bottom: (THEME_FONT_SIZE_1 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -207,7 +207,7 @@ live_design! {
 
     H2 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_2 * 0.5), bottom: (THEME_FONT_SIZE_2)}
+        margin: {top: (THEME_FONT_SIZE_2), bottom: (THEME_FONT_SIZE_2 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -220,7 +220,7 @@ live_design! {
 
     H2italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_2 * 0.5), bottom: (THEME_FONT_SIZE_2)}
+        margin: {top: (THEME_FONT_SIZE_2), bottom: (THEME_FONT_SIZE_2 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -233,7 +233,7 @@ live_design! {
 
     H3 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_3 * 0.5), bottom: (THEME_FONT_SIZE_3)}
+        margin: {top: (THEME_FONT_SIZE_3), bottom: (THEME_FONT_SIZE_3 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -246,7 +246,7 @@ live_design! {
 
     H3italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_3 * 0.5), bottom: (THEME_FONT_SIZE_3)}
+        margin: {top: (THEME_FONT_SIZE_3), bottom: (THEME_FONT_SIZE_3 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -259,7 +259,7 @@ live_design! {
 
     H4 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_4 * 0.5), bottom: (THEME_FONT_SIZE_4)}
+        margin: {top: (THEME_FONT_SIZE_4), bottom: (THEME_FONT_SIZE_4 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -272,7 +272,7 @@ live_design! {
 
     H4italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_4 * 0.5), bottom: (THEME_FONT_SIZE_4)}
+        margin: {top: (THEME_FONT_SIZE_4), bottom: (THEME_FONT_SIZE_4 * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -285,7 +285,7 @@ live_design! {
 
     P = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P * 0.5), bottom: (THEME_FONT_SIZE_P)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -298,7 +298,7 @@ live_design! {
 
     Pbold = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P * 0.5), bottom: (THEME_FONT_SIZE_P)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -311,7 +311,7 @@ live_design! {
 
     Pitalic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P * 0.5), bottom: (THEME_FONT_SIZE_P)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -324,7 +324,7 @@ live_design! {
 
     Pbolditalic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P * 0.5), bottom: (THEME_FONT_SIZE_P)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -337,7 +337,7 @@ live_design! {
 
     Meta = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P * 0.5), bottom: (THEME_FONT_SIZE_P)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -823,7 +823,7 @@ live_design! {
                 match self.check_type {
                     CheckType::Check => {
                         let left = 1;
-                        let sz = self.size;
+                        let sz = self.size - 0.5;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
                         sdf.fill_keep(
@@ -847,31 +847,43 @@ live_design! {
                         sdf.stroke(mix((THEME_COLOR_U_0), (THEME_COLOR_U_6), self.selected), 1.25);
                     }
                     CheckType::Radio => {
-                        let sz = self.size;
+                        let sz = self.size - 0.5;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill(#2);
+                        sdf.fill_keep((THEME_COLOR_D_3));
+                        sdf.stroke(
+                            mix(
+                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_1), self.pos.y),
+                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_2), self.pos.y),
+                                self.hover
+                            )
+                            , 1.0)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
-                        sdf.fill(mix(#fff0, #f, self.selected));
+                        sdf.fill(mix((THEME_COLOR_U_0), (THEME_COLOR_U_5), self.selected));
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                        sdf.fill(#2);
+                        sdf.fill(
+                            mix(
+                                mix((THEME_COLOR_D_3), (THEME_COLOR_D_2), pow(self.pos.y, 1.)),
+                                mix((THEME_COLOR_D_5), (THEME_COLOR_D_4), pow(self.pos.y, 1.0)),
+                                self.hover)
+                            )
                         let isz = sz * 0.5;
                         sdf.circle(left + sz + self.selected * sz, c.y, isz);
                         sdf.circle(left + sz + self.selected * sz, c.y, 0.5 * isz);
                         sdf.subtract();
                         sdf.circle(left + sz + self.selected * sz, c.y, isz);
                         sdf.blend(self.selected)
-                        sdf.fill(#f);
+                        sdf.fill((THEME_COLOR_U_5));
                     }
                     CheckType::None => {
-                        return #0000
+                        return (THEME_COLOR_D_0)
                     }
                 }
                 return sdf.result
@@ -881,10 +893,7 @@ live_design! {
             instance focus: 0.0
             instance selected: 0.0
             instance hover: 0.0
-            text_style: {
-                font: {
-                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
-                }
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -907,11 +916,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        #009,
+                        #0c0,
                         self.hover
                     ),
-                    #f,
+                    #f00,
                     self.selected
                 )
             }
@@ -1331,12 +1340,7 @@ live_design! {
         width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
 
         align: {x: 0.0, y: 0.5}
-        padding: {
-            left: 10.0,
-            top: 2.0,
-            right: 15.0,
-            bottom: 0.0,
-        },
+        padding: { left: 10.0, top: 2.0, right: 15.0, bottom: 0.0 },
 
         close_button: <TabCloseButton> {}
         draw_name: {
@@ -1363,14 +1367,10 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return mix(
-                    mix(
-                        THEME_COLOR_BG_HEADER,
-                        THEME_COLOR_BG_EDITOR,
-                        self.selected
-                    ),
-                    #f,
-                    0.0 //mix(self.hover * 0.05, self.hover * -0.025, self.selected)
-                );
+                    THEME_COLOR_BG_HEADER,
+                    THEME_COLOR_BG_EDITOR,
+                    self.selected
+                )
                 /*sdf.clear(color)
                 sdf.move_to(0.0, 0.0)
                 sdf.line_to(0.0, self.rect_size.y)
@@ -2162,7 +2162,7 @@ live_design! {
 
         draw_radio: {
             uniform size: 7.0;
-            uniform color_active: #00000000
+            uniform color_active: #FF0000FF
             uniform color_inactive: #x99EEFF
 
             fn pixel(self) -> vec4 {
@@ -2173,7 +2173,14 @@ live_design! {
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill(#2);
+                        sdf.fill_keep((THEME_COLOR_D_3));
+                        sdf.stroke(
+                            mix(
+                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_1), self.pos.y),
+                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_2), self.pos.y),
+                                self.hover
+                            )
+                            , 1.0)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(mix(#fff0, #f, self.selected));
