@@ -45,7 +45,7 @@ live_design! {
     THEME_COLOR_U_3 = #FFFFFF44
     THEME_COLOR_U_2 = #FFFFFF26
     THEME_COLOR_U_1 = #FFFFFF1A
-    THEME_COLOR_U_04 = #FFFFFF0A
+    THEME_COLOR_U_04 = #FFFFFF0D
     THEME_COLOR_U_0 = #FFFFFF00
     THEME_COLOR_D_0 = #00000000
     THEME_COLOR_D_05 = #00000013
@@ -99,10 +99,10 @@ live_design! {
 
     // TEXT / ICON COLORS
 
-    THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_6)
     THEME_COLOR_TEXT_HOVER = (THEME_COLOR_U_5)
     THEME_COLOR_TEXT_META = (THEME_COLOR_U_3)
-    THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_U_8)
+    THEME_COLOR_SELECTED = (THEME_COLOR_U_8)
 
     // SPLITTER AND SCROLLBAR
 
@@ -137,7 +137,7 @@ live_design! {
     THEME_COLOR_SLIDES_CHAPTER = (THEME_COLOR_MAKEPAD)
     THEME_COLOR_SLIDES_BG = (THEME_COLOR_D_4)
 
-    THEME_FONT_SIZE_BASE = 8.0
+    THEME_FONT_SIZE_BASE = 7.5
     THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
 
     THEME_FONT_SIZE_CODE = 9.0
@@ -722,8 +722,8 @@ live_design! {
             instance hover: 0.0
             instance pressed: 0.0
             uniform border_radius: 3.0
-            instance bodytop: (THEME_COLOR_U_1)
-            instance bodybottom: (THEME_COLOR_U_2)
+            instance bodytop: (THEME_COLOR_U_04)
+            instance bodybottom: (THEME_COLOR_U_1)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
@@ -808,7 +808,7 @@ live_design! {
      CheckBox = <CheckBoxBase> {
         width: Fit, height: Fit,
         margin: {left: 0.0, top: (THEME_SPACE_1), bottom: (THEME_SPACE_1), right: (THEME_SPACE_1)}
-
+        align: { x: 0.0, y: 0.5 }
         label_walk: {
             width: Fit, height: Fit,
             margin: {left: 24.0, top: 0, bottom: 0, right: (THEME_SPACE_2)}
@@ -903,7 +903,7 @@ live_design! {
                         (THEME_COLOR_TEXT_HOVER),
                         self.hover
                     ),
-                    (THEME_COLOR_TEXT_SELECTED),
+                    (THEME_COLOR_SELECTED),
                     self.selected
                 )
             }
@@ -916,15 +916,17 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #009,
-                        #0c0,
+                        (THEME_COLOR_D_5),
+                        (THEME_COLOR_U_3),
                         self.hover
                     ),
-                    #f00,
+                    (THEME_COLOR_SELECTED),
                     self.selected
                 )
             }
         }
+
+        icon_walk: { width: 13.0, height: Fit }
 
         animator: {
             hover = {
@@ -1351,7 +1353,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_SELECTED,
+                        THEME_COLOR_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -1503,7 +1505,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_SELECTED,
+                        THEME_COLOR_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -1794,7 +1796,7 @@ live_design! {
                 return sdf.fill(mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_TEXT_SELECTED,
+                        THEME_COLOR_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -1808,7 +1810,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_TEXT_SELECTED,
+                        THEME_COLOR_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -2359,17 +2361,20 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
-            text_style: <THEME_FONT_REGULAR> {}
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return
                 mix(
                     mix(
                         mix(
-                            #xFFFFFF55,
-                            #xFFFFFF88,
+                            (THEME_COLOR_U_4),
+                            (THEME_COLOR_U_5),
                             self.hover
                         ),
-                        #xFFFFFFCC,
+                        (THEME_COLOR_U_6),
                         self.focus
                     ),
                     #3,
@@ -2390,7 +2395,7 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix(#ccc0, #f, self.focus));
+                sdf.fill(mix((THEME_COLOR_U_0), (THEME_COLOR_WHITE), self.focus));
                 return sdf.result
             }
         }
@@ -2409,7 +2414,7 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix(#5550, #xFFFFFF40, self.focus)); // Pad color
+                sdf.fill(mix((THEME_COLOR_U_1), (THEME_COLOR_U_2), self.focus)); // Pad color
                 return sdf.result
             }
         }
@@ -2426,9 +2431,11 @@ live_design! {
             instance border_width: 0.0
             instance border_color: (THEME_COLOR_U_2)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+            instance ccolor: (THEME_COLOR_D_075)
 
             fn get_color(self) -> vec4 {
-                return self.color
+                // return #f00
+                return self.ccolor
             }
 
             fn get_border_color(self) -> vec4 {
@@ -2499,6 +2506,10 @@ live_design! {
         min: 0.0,
         max: 1.0,
         step: 0.0,
+        label_align: { y: 0.0 }
+        margin: <THEME_MSPACE_1> {}
+        precision: 2,
+        height: Fit
 
         draw_slider: {
             instance hover: float
@@ -2507,20 +2518,25 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
-                let nub_size = mix(3, 4, self.hover);
-                let nubbg_size = 18
+                let nub_size = mix(3, 5, self.hover);
+                let nubbg_size = mix(0, 13, self.hover)
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let slider_bg_color = mix(#28, #20, self.focus);
-                let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
-                let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
-                let nubbg_color = mix(#eee0, #8, self.drag);
+                let slider_bg_color = mix((THEME_COLOR_D_3), (THEME_COLOR_D_5), self.focus);
+                let slider_color = mix(mix((THEME_COLOR_U_3), (THEME_COLOR_U_3), self.hover), (THEME_COLOR_U_4), self.focus);
+                let nub_color = (THEME_COLOR_WHITE);
+                // let nub_color = mix(mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.hover), mix(#c, #f, self.drag), self.focus);
+                let nubbg_color = mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.drag);
 
                 match self.slider_type {
                     SliderType::Horizontal => {
+
                         sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
+
+                        sdf.rect(0, self.rect_size.y - slider_height * 0.25, self.rect_size.x, slider_height)
+                        sdf.fill((THEME_COLOR_U_3));
 
                         sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
                         sdf.fill(slider_color);
@@ -2546,15 +2562,7 @@ live_design! {
         }
 
         draw_text: { color: (THEME_COLOR_WHITE) }
-
-        label_walk: {
-            width: Fill, height: Fill,
-            margin: {left: 4.0, top: 3.0}
-        }
-
-        label_align: { y: 0.0 }
-
-        precision: 2,
+        label_walk: { width: Fill, height: Fill, }
 
         text_input: <TextInput> {
             cursor_margin_bottom: 3.0,
@@ -2571,7 +2579,7 @@ live_design! {
 
             padding: <THEME_MSPACE_0> {},
             label_align: {y: 0.},
-            margin: {top: 3, right: 3}
+            margin: {top: (THEME_SPACE_0), right: (THEME_SPACE_0), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
         }
 
         animator: {
@@ -2633,7 +2641,7 @@ live_design! {
         align: { x: 0.0, y: 0.5 }
         padding: 50.
 
-        draw_bg: {color: (THEME_COLOR_SLIDES_BG), radius: 5.0}
+        draw_bg: { color: (THEME_COLOR_SLIDES_BG), radius: 5.0 }
         title = <H1> {
             text: "SlideTitle",
             draw_text: {color: (THEME_COLOR_U_8) }

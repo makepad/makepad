@@ -333,29 +333,26 @@ live_design!{
                     title = { text:"Slider" }
                     <ZooDesc> { text:"A parameter dragger" }
                     <ZooGroup> {
-                        <Slider> {
-                            text: "Parameter"
-                            align: { x: 0.0, y: 0.0}
-                            height: 25.,
-                            text_input: {
-                                draw_text: {
-                                    height: Fit,
-                                    text_style: {
-                                        line_spacing: 1.2
-                                        font_size: (THEME_FONT_SIZE_P)
-                                    }
-                                }
-                                cursor_margin_bottom: (THEME_SPACE_1),
-                                cursor_margin_top: (THEME_SPACE_1),
-                                select_pad_edges: (THEME_SPACE_1),
-                                cursor_size: (THEME_SPACE_1),
-                                empty_message: "0",
-                                numeric_only: true,
-                                draw_bg: {
-                                    color: (THEME_COLOR_D_0)
-                                },
-                            }
-                        }
+                        width: Fill, height: Fit,
+                        flow: Down,
+                        <View> {
+                            width: Fill, height: Fit,
+                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Parameter" }
+                        } 
+                        <View> {
+                            width: Fill, height: Fit,
+                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Parameter" }
+                        } 
+                        <View> {
+                            width: Fill, height: Fit,
+                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Parameter" }
+                        } 
                     }
                 }
 
@@ -495,11 +492,6 @@ live_design!{
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
-
-                                icon_walk: {
-                                    width: 15, height: Fit,
-                                    margin: 0.0
-                                }
                             }
                             <CheckBox> {
                                 text:"Check me out!"
@@ -507,22 +499,12 @@ live_design!{
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
-
-                                icon_walk: {
-                                    width: 15, height: Fit,
-                                    margin: 0.0
-                                }
                             }
                             <CheckBox> {
                                 text:"Check me out!"
                                 draw_check: { check_type: None }
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-
-                                icon_walk: {
-                                    width: 15, height: Fit,
-                                    margin: 0.0
                                 }
                             }
                         }
