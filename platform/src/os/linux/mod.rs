@@ -10,6 +10,9 @@ pub mod gl_sys;
 pub mod libc_sys;
 pub mod opengl;
 
+#[cfg(target_os="linux")]
+pub mod url_session;
+
 #[cfg(not(target_os="android"))]
 pub mod dma_buf;
 #[cfg(not(target_os="android"))]

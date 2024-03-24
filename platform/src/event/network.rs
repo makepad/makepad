@@ -191,6 +191,7 @@ pub enum HttpMethod{
 }
 
 impl HttpMethod {
+    // to_string returns a &str ?
     pub fn to_string(&self) -> &str {
         match self {
             Self::GET => "GET",

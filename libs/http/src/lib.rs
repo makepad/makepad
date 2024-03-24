@@ -2,3 +2,4 @@
  pub mod utils;
  pub mod server;
  pub mod websocket;
+ pub mod client;
