@@ -6,3 +6,10 @@ edition = "2021"
 description = "Makepad http utils"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "kWH3whvtKxZm5SPPZmvzKa4dNe0="
+
+[dependencies]
+makepad-url = { path = "../url" }
+makepad-net = { path = "../net" }
+
+[dev-dependencies]
+async-std = { version = "1.12.0", features = [ "attributes" ] }
