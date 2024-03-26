@@ -13,6 +13,8 @@ use {
 const BULLET: &str = "•";
 
 live_design!{
+    import makepad_widgets::link_label::LinkLabelBase;
+
     HtmlBase = {{Html}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
@@ -25,7 +27,7 @@ live_design!{
     // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
     const LINK_COLOR = #x155EEF
 
-    HtmlLink = {{HtmlLink}}<LinkLabel> {
+    HtmlLink = {{HtmlLink}}<LinkLabelBase> {
         width: Fit,
         draw_text: {
             color: (LINK_COLOR),
@@ -61,7 +63,6 @@ impl LiveHook for Html {
         }
     }
 }
-
 
 impl Html {
     fn handle_open_tag(
@@ -442,7 +443,7 @@ enum ListKind {
 ///
 /// See the ["type" attribute docs](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/ol#attributes)
 /// for more info.
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
 pub enum OrderedListType {
     #[pick] // must be the top-most attribute
     /// Decimal integers: 1, 2, 3, 4, ...
