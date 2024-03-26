@@ -89,34 +89,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
-        this.start_live_change_watch();
         var loaders = document.getElementsByClassName('canvas_loader');
         for (var i = 0; i < loaders.length; i ++) {
             loaders[i].parentNode.removeChild(loaders[i])
         }
-    }
-    
-    start_live_change_watch(){
-        var req = new XMLHttpRequest()
-        req.timeout = 60000
-        req.addEventListener("error", ()=>{
-            setTimeout(function() {
-                //location.href = location.href
-            }, 500)
-        })
-        req.responseType = 'text'
-        req.addEventListener("load", ()=>{
-            if (req.status === 201) return this.start_live_change_watch();
-            if (req.status === 200) {
-                if (req.response.length > 0){
-                    this.to_wasm.ToWasmLiveFileChange({body:req.response});
-                    this.do_wasm_pump();
-                }
-                this.start_live_change_watch();
-            }
-        })
-        req.open("GET", "/$live_file_change?" + ('' + Math.random()).slice(2))
-        req.send()
     }
     
     FromWasmLoadDeps(args) {
