@@ -58,7 +58,7 @@ impl DrawLine
     }
 
 
-    pub fn draw_bezier_abs(&mut self,  cx: &mut Cx2d, points: Vec<DVec2>, color: Vec4, line_width: f64 )
+    pub fn draw_bezier_abs(&mut self,  cx: &mut Cx2d, points: &Vec<DVec2>, color: Vec4, line_width: f64 )
     {
         let step = 0.01;
         let mut t = 0.0;
