@@ -2371,6 +2371,8 @@ live_design! {
     TextInput = <TextInputBase> {
         width: 200, height: Fit,
         padding: <THEME_MSPACE_2> {}
+
+        label_align: {y: 0.}
         cursor_margin_bottom: 3.0,
         cursor_margin_top: 4.0,
         select_pad_edges: 3.0
@@ -2378,9 +2380,7 @@ live_design! {
         numeric_only: false,
         on_focus_select_all: false,
         empty_message: "0",
-        clip_x: false,
-        clip_y: false,
-        label_align: {y: 0.}
+        clip_x: false, clip_y: false,
 
         draw_text: {
             instance hover: 0.0
