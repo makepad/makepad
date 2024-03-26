@@ -359,10 +359,10 @@ live_design! {
             draw_bg: { color: (THEME_COLOR_D_2) }
         }
         <View> {
-            width: Fill, height: 1.,
+            width: Fill, height: 0.5,
             margin: 0.,
             show_bg: true,
-            draw_bg: { color: (THEME_COLOR_U_2) }
+            draw_bg: { color: (THEME_COLOR_U_3) }
         }
     }
 
