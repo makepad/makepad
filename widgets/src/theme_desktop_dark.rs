@@ -162,7 +162,10 @@ live_design! {
     const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     const THEME_SPLITTER_SIZE = 5.0
     
-    const LINK_COLOR = #x155EEF
+    // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1, #x155EEF, // #0a84ff
+    const LINK_COLOR = #F00
+    const LINK_COLOR_HOVER = #FF0
+    const LINK_COLOR_PRESSED = #00F
         
     HtmlLink = <HtmlLinkBase> {
         width: Fit,
@@ -174,9 +177,6 @@ live_design! {
         label_walk: {
             width: Fit,
             height: Fit
-        }
-        draw_text: {
-            color : (LINK_COLOR),
         }
                         
         draw_icon: {
@@ -249,17 +249,20 @@ live_design! {
                         
         draw_text: {
             wrap: Word
+            color: (LINK_COLOR),
+            instance color_hover: (LINK_COLOR_HOVER),
+            instance color_pressed: (LINK_COLOR_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
             text_style: <THEME_FONT_LABEL>{}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_META,
-                        THEME_COLOR_TEXT_DEFAULT,
+                        self.color,
+                        self.color_hover,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_META,
+                    self.color_pressed,
                     self.pressed
                 )
             }
@@ -292,7 +295,11 @@ live_design! {
         sep_walk:{height:4, width: Fill},
                 
         a = <HtmlLink> {
-            text: "missing link"
+            draw_text: {
+                text_style: {
+                    font_size: 12,
+                }
+            }
         }
         
         draw_block:{

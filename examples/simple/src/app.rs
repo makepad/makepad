@@ -3,7 +3,6 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
-    //import makepad_widgets::html::HtmlLink;
     
     App = {{App}} {
 
@@ -34,14 +33,20 @@ live_design!{
                     text: "Click to count"
                 }
                 label1 = <Label> {
-                    draw_text: {d
+                    draw_text: {
                         color: #f
                     },
                     text: "Counter: 0"
                 }
                 <Html>{
+                    // a = {
+                    //     draw_text: {
+                    //         // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1, #x155EEF, // #0a84ff
+                    //         // color: #1a0dab,
+                    //     }
+                    // }
 
-                    Button = <TextInput> {
+                    Button = <Button> {
                         text: "Helloworld"
                     }  
                     body:"
