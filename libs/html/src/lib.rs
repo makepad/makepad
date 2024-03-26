@@ -33,8 +33,8 @@ pub struct HtmlAttribute {
  
 pub struct HtmlWalker<'a>{
     decoded: &'a str,
-    nodes: &'a [HtmlNode],
-    index: usize,
+    pub nodes: &'a [HtmlNode],
+    pub index: usize,
 }
  
 impl<'a> HtmlWalker<'a>{
