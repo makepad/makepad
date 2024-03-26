@@ -687,11 +687,12 @@ live_design! {
     // Button
     Button = <ButtonBase> {
         width: Fit, height: Fit,
-        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
+        margin: 0.
+        spacing: 7.5,
         align: {x: 0.5, y: 0.5},
-        padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0},
+        padding: {left: 15.0, right: 15.0, top: 10.0, bottom: 10.0},
 
-        label_walk: { width: Fit, height: Fit },
+        label_walk: { width: Fit, height: Fit, margin: 0. },
 
         draw_text: {
             instance hover: 0.0,
@@ -710,6 +711,11 @@ live_design! {
                     self.pressed
                 )
             }
+        }
+
+        icon_walk: {
+            width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
+            margin: 0.
         }
 
         draw_icon: {
@@ -2074,26 +2080,44 @@ live_design! {
 
     LinkLabel = <LinkLabelBase> {
         width: Fit, height: Fit,
-        margin: 0,
-        padding: <THEME_MSPACE_0> {},
+        margin: 0.
+        spacing: 7.5,
         align: {x: 0., y: 0.}
+        padding: <THEME_MSPACE_2> {},
 
-        label_walk: { width: Fit, height: Fit }
+        label_walk: { width: Fit, height: Fit, margin: 0. },
 
-        draw_icon: {
-            instance hover: 0.0
-            instance pressed: 0.0
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        (THEME_COLOR_U_5),
+                        (THEME_COLOR_U_5),
                         self.hover
                     ),
-                    #9,
+                    (THEME_COLOR_U_4),
                     self.pressed
                 )
             }
+        }
+
+        instance hover: 0.0
+        instance pressed: 0.0
+        fn get_color(self) -> vec4 {
+            return mix(
+                mix(
+                    (THEME_COLOR_TEXT_DEFAULT),
+                    (THEME_COLOR_TEXT_HOVER),
+                    self.hover
+                ),
+                (THEME_COLOR_D_5),
+                self.pressed
+            )
         }
 
         animator: {

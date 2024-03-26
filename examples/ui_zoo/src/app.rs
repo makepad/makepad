@@ -272,7 +272,7 @@ live_design!{
                             }
                             draw_text: {
                                 fn get_color(self) -> vec4 {
-                                    return (THEME_COLOR_U_6) - vec4(0., 0.1, 0.4, 0.) * self.hover - self.pressed * vec4(1., 1., 1., 0.);
+                                    return (THEME_COLOR_U_5) - vec4(0., 0.1, 0.4, 0.) * self.hover - self.pressed * vec4(1., 1., 1., 0.);
                                 }
                             }
                             text: "I can be styled!"
@@ -424,7 +424,53 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"Link Label"}
                     <ZooDesc> {text:"Link Label"}
-                    <ZooGroup> { <LinkLabel> { text: "Click me!"} }
+                    <ZooGroup> {
+                        width: Fill, height: Fit,
+                        flow: Down,
+                        <View> {
+                            width: Fill, height: Fit,
+                            <LinkLabel> { text: "Click me!"}
+                            <LinkLabel> { text: "Click me!"}
+                            <LinkLabel> { text: "Click me!"}
+                        }
+                        <View> {
+                            width: Fill, height: Fit,
+                            <LinkLabel> {
+                                text: "Click me!"
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+
+                                icon_walk: {
+                                    width: 15, height: Fit,
+                                    margin: 0.0
+                                }
+                            }
+                            <LinkLabel> {
+                                text: "Click me!"
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+
+                                icon_walk: {
+                                    width: 15, height: Fit,
+                                    margin: 0.0
+                                }
+                            }
+                            <LinkLabel> {
+                                text: "Click me!"
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+
+                                icon_walk: {
+                                    width: 15, height: Fit,
+                                    margin: 0.0
+                                }
+                            }
+
+                        }
+                    }
                 }
 
                 <ZooHeader> {
