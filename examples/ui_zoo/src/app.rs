@@ -261,22 +261,18 @@ live_design!{
                                 width: 15, height: Fit,
                                 margin: 0.0
                             }
-                            draw_bg: {
-                                fn pixel(self) -> vec4 {
-                                    return #00000000;
-                                }
-                            }
+                            draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_0) } }
                         }
 
                         styledbutton = <Button> {
                             draw_bg: {
                                 fn pixel(self) -> vec4 {
-                                    return #f40 + self.pressed * vec4(1., 1., 1., 1.)
+                                    return (THEME_COLOR_MAKEPAD) + self.pressed * vec4(1., 1., 1., 1.)
                                 }
                             }
                             draw_text: {
                                 fn get_color(self) -> vec4 {
-                                    return #fff - vec4(0., 0.1, 0.4, 0.) * self.hover - self.pressed * vec4(1., 1., 1., 0.);
+                                    return (THEME_COLOR_U_6) - vec4(0., 0.1, 0.4, 0.) * self.hover - self.pressed * vec4(1., 1., 1., 0.);
                                 }
                             }
                             text: "I can be styled!"
@@ -286,7 +282,7 @@ live_design!{
 
                 <ZooHeader> {
                     title = {text:"TextInput"}
-                    <ZooDesc> {text:"Simple 1 line textbox"}
+                    <ZooDesc> { text:"Simple 1 line textbox" }
                     <ZooGroup> {
                         simpletextinput= <TextInput> {
                             text: "This is inside a text input!"
@@ -319,7 +315,7 @@ live_design!{
                                 fn get_color(self) ->vec4{
                                     return mix((COLOR_ACCENT), (THEME_COLOR_U_0), self.pos.x)
                                 }
-                                color: #ffc
+                                color: (THEME_COLOR_MAKEPAD) 
                                 text_style: {
                                     font_size: 40.,
                                 }
