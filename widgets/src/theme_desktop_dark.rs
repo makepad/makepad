@@ -353,7 +353,21 @@ live_design! {
         width: Fill,
         margin: <THEME_MSPACE_V_2> {}
         show_bg: true
-        draw_bg: {color: (THEME_COLOR_D_05)}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    5.,
+                    // self.rect_size.y,
+                    10.,
+                    5.,
+                    // self.rect_size.y,
+                    1.0
+                );
+                return sdf.fill(#f00);
+            }
+        }
     }
 
     Html = <HtmlBase> {
@@ -2355,8 +2369,19 @@ live_design! {
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 
     TextInput = <TextInputBase> {
-        width: Fit, height: Fit,
+        width: 200, height: Fit,
         padding: <THEME_MSPACE_2> {}
+        cursor_margin_bottom: 3.0,
+        cursor_margin_top: 4.0,
+        select_pad_edges: 3.0
+        cursor_size: 2.0,
+        numeric_only: false,
+        on_focus_select_all: false,
+        empty_message: "0",
+        clip_x: false,
+        clip_y: false,
+        label_align: {y: 0.}
+
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
@@ -2369,15 +2394,11 @@ live_design! {
                 return
                 mix(
                     mix(
-                        mix(
-                            (THEME_COLOR_U_4),
-                            (THEME_COLOR_U_5),
-                            self.hover
-                        ),
+                        (THEME_COLOR_U_4),
                         (THEME_COLOR_U_6),
                         self.focus
                     ),
-                    #3,
+                    (THEME_COLOR_U_4),
                     self.is_empty
                 )
             }
@@ -2419,23 +2440,17 @@ live_design! {
             }
         }
 
-        cursor_margin_bottom: 3.0,
-        cursor_margin_top: 4.0,
-        select_pad_edges: 3.0
-        cursor_size: 2.0,
-        numeric_only: false,
-        on_focus_select_all: false,
-        empty_message: "0",
         draw_bg: {
             instance radius: 2.0
             instance border_width: 0.0
             instance border_color: (THEME_COLOR_U_2)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance ccolor: (THEME_COLOR_D_075)
+            instance focus: 0.0,
+            color: (THEME_COLOR_D_1)
+            instance color_selected: (THEME_COLOR_D_3)
 
             fn get_color(self) -> vec4 {
-                // return #f00
-                return self.ccolor
+                return mix(self.color, self.color_selected, self.focus)
             }
 
             fn get_border_color(self) -> vec4 {
@@ -2458,9 +2473,6 @@ live_design! {
                 return sdf.result;
             }
         },
-        clip_x: false,
-        clip_y: false,
-        label_align: {y: 0.}
 
         animator: {
             hover = {
@@ -2483,9 +2495,10 @@ live_design! {
             focus = {
                 default: off
                 off = {
-                    from: {all: Snap}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_cursor: {focus: 0.0},
+                        draw_bg: {focus: 0.0},
                         draw_select: {focus: 0.0}
                         draw_text: {focus: 0.0}
                     }
@@ -2494,6 +2507,7 @@ live_design! {
                     from: {all: Snap}
                     apply: {
                         draw_cursor: {focus: 1.0},
+                        draw_bg: {focus: 1.0},
                         draw_select: {focus: 1.0}
                         draw_text: {focus: 1.0}
                     }
@@ -2561,10 +2575,11 @@ live_design! {
             }
         }
 
-        draw_text: { color: (THEME_COLOR_WHITE) }
-        label_walk: { width: Fill, height: Fill, }
+        draw_text: { color: #f00 }
+        label_walk: { width: 50., height: 30. }
 
         text_input: <TextInput> {
+            width: Fit,
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
             select_pad_edges: 3.0
