@@ -51,6 +51,10 @@ live_design! {
                         text_style: <H2_TEXT_BOLD> {}
                     }
                 }
+                padding = <View>
+                {
+                    width: 20
+                }
             }
         }
         body = <View>

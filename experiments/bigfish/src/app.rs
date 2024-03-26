@@ -10,11 +10,13 @@ live_design! {
     import crate::homescreen::BigFishHomeScreen;
     import crate::fish_theme::*;
     import crate::fish_connection_widget::*;
+    import crate::fish_selector_widget::*;
     import crate::lua_console::*;
 
     App = {{App}} {
 
         ui: <Window> {
+
             show_bg: true
             width: Fill,
             height: Fill,
@@ -27,7 +29,7 @@ live_design! {
                     return vec4(0.03,0.03,0.03,1);
                 }
             }
-
+            
             caption_bar = {
                 visible: true,
                 caption_label = {label ={text: "TiNRS BigFish" }}
@@ -220,6 +222,7 @@ impl LiveRegister for App {
         crate::fish_theme::live_design(cx);
         crate::homescreen::live_design(cx);
         crate::fish_connection_widget::live_design(cx);
+        crate::fish_selector_widget::live_design(cx);
         crate::lua_console::live_design(cx);
     }
     // after_new_from_doc
