@@ -393,6 +393,16 @@ impl TextFlow{
         }
         None 
     }
+
+    pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+                WidgetRef::new_from_ptr_with_scope(cx, scope, Some(*ptr))
+            });
+            return Some(entry.clone())
+        }
+        None 
+    }
      
     pub fn draw_text(&mut self, cx:&mut Cx2d, text:&str){
         if let Some(DrawState::Drawing) = self.draw_state.get(){

@@ -12,20 +12,32 @@ pub struct HtmlDoc{
     pub nodes: Vec<HtmlNode>,
 }
 
- pub enum HtmlNode{
-     OpenTag{lc:LiveId, nc:LiveId},
-     CloseTag{lc:LiveId, nc:LiveId},
-     Attribute{lc:LiveId, nc:LiveId, start:usize, end:usize},
-     Text{start: usize, end:usize}
- }
+#[derive(Debug)]
+pub enum HtmlNode{
+    OpenTag{lc:LiveId, nc:LiveId},
+    CloseTag{lc:LiveId, nc:LiveId},
+    Attribute{lc:LiveId, nc:LiveId, start:usize, end:usize},
+    Text{start: usize, end:usize}
+}
+
+/// A standalone owned copy of an HTML attribute.
+#[derive(Debug, Clone)]
+pub struct HtmlAttribute {
+    /// The LiveID of this attribute's key converted to lowercase.
+    pub lc: LiveId,
+    /// The LiveID of this attribute's key in its original normal case.
+    pub nc: LiveId,
+    /// The value of this attribute.
+    pub value: String,
+}
  
- pub struct HtmlWalker<'a>{
+pub struct HtmlWalker<'a>{
     decoded: &'a str,
     nodes: &'a [HtmlNode],
     index: usize,
 }
  
- impl<'a> HtmlWalker<'a>{
+impl<'a> HtmlWalker<'a>{
     pub fn index(&self)->usize{
         self.index
     }
@@ -71,7 +83,30 @@ pub struct HtmlDoc{
     pub fn done(&self)->bool{
         self.index >= self.nodes.len()
     }
+
+    /// Iterates over and returns a list of all attributes for the current open HTML tag.
+    pub fn collect_attributes(&self) -> Vec<HtmlAttribute> {
+        let mut attrs = Vec::new();
+        for node in &self.nodes[self.index ..] {
+            match node {
+                HtmlNode::Attribute { lc, nc, start, end } => {
+                    attrs.push(HtmlAttribute {
+                        lc: *lc,
+                        nc: *nc,
+                        value: String::from(&self.decoded[*start..*end]),
+                    });
+                }
+                HtmlNode::CloseTag { .. } => break,
+                _ => continue,
+            }
+        }
+        attrs
+    }
     
+    /// Returns the first attribute of the currently-opened Html tag
+    /// whose key matches the given `flc` LiveId, which should be all lowercase.
+    ///
+    /// Matching is done after converting all attribute keys to lowercase.
     pub fn find_attr_lc(&self, flc:LiveId)->Option<&'a str>{
         for i in self.index..self.nodes.len(){
             match &self.nodes[i]{
@@ -87,6 +122,10 @@ pub struct HtmlDoc{
         None
     }
     
+    /// Returns the first attribute of the currently-opened Html tag 
+    /// whose key matches the given `fnc` LiveId, which is case-sensitive.
+    ///
+    /// Matching is done in a case-sensitive manner.
     pub fn find_attr_nc(&self, fnc:LiveId)->Option<&'a str>{
         for i in self.index..self.nodes.len(){
             match &self.nodes[i]{
