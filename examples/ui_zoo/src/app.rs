@@ -130,7 +130,7 @@ live_design!{
                         padding: 10.
                         spacing: 10.
                         show_bg: true,
-                        draw_bg: { color: (THEME_COLOR_D_2) }
+                        draw_bg: { color: (COLOR_CONTAINER) }
                         <ZooBlock> {draw_bg:{color: #f00}}
                         <ZooBlock> {draw_bg:{color: #0f0}}
                         <ZooBlock> {draw_bg:{color: #00f}}
@@ -442,7 +442,7 @@ live_design!{
                                 }
 
                                 icon_walk: {
-                                    width: 15, height: Fit,
+                                    width: 12.5, height: Fit,
                                     margin: 0.0
                                 }
                             }
@@ -453,7 +453,7 @@ live_design!{
                                 }
 
                                 icon_walk: {
-                                    width: 15, height: Fit,
+                                    width: 12.5,height: Fit,
                                     margin: 0.0
                                 }
                             }
@@ -464,7 +464,7 @@ live_design!{
                                 }
 
                                 icon_walk: {
-                                    width: 15, height: Fit,
+                                    width: 12.5, height: Fit,
                                     margin: 0.0
                                 }
                             }
@@ -495,15 +495,6 @@ live_design!{
                             <CheckBox> {text:"Check me out!"}
                             <CheckBox> {text:"Check me out!"}
                             <CheckBox> {text:"Check me out!"}
-                        }
-                        <H4> { text: "Circular Checkbox Mode"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5}
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Radio } }
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Radio } }
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Radio } }
                         }
                         <H4> { text: "Toggle Mode"}
                         <View> {
@@ -577,10 +568,15 @@ live_design!{
                             align: { x: 0.0, y: 0.5 }
                             <View> {
                                 width: Fit, height: Fit,
-                                <RadioButton> { label: "Option 1: yey" }
-                                <RadioButton> { label: "Option 2: hah" }
-                                <RadioButton> { label: "Option 3: hmm" }
-                                <RadioButton> { label: "Option 4: all of the above" }
+                                <RadioButton> {
+                                    label: "Option 2: yey"
+                                    icon_walk: {
+                                        width: 12.5, height: Fit,
+                                    }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                }
                             }
                         }
                         <View> {
