@@ -2580,7 +2580,7 @@ live_design! {
         }
 
         draw_text: {
-            color: mix(THEME_COLOR_TEXT_DEFAULT),
+            color: (THEME_COLOR_TEXT_DEFAULT),
             text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
