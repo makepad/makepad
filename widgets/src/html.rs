@@ -15,10 +15,13 @@ const BULLET: &str = "•";
 live_design!{
     import makepad_widgets::link_label::LinkLabelBase;
 
-    // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
-    
-
     HtmlLinkBase = {{HtmlLink}} {
+        link = {
+            draw_text = {
+                // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
+                color: #1a0dab
+            }
+        }
     }
 
     HtmlBase = {{Html}} {
