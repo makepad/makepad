@@ -22,7 +22,7 @@ pub enum SliderType {
 }
 
 impl LiveHook for Slider{
-    fn after_new_from_doc(&mut self, cx:&mut Cx){
+    fn after_new_from_doc(&mut self, _cx:&mut Cx){
         self.set_internal(self.default);
         self.update_text_input();
     }

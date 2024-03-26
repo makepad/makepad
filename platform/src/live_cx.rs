@@ -229,7 +229,7 @@ impl Cx {
         if let Some(studio_socket) = &mut self.studio_web_socket{
             while let Ok(msg) = studio_socket.try_recv(){
                 match msg {
-                    WebSocketMessage::Binary(bin)=>{
+                    WebSocketMessage::Binary(_bin)=>{
                         
                     }
                     _=>()
