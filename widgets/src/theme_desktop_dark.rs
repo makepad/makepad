@@ -26,6 +26,8 @@ live_design! {
     THEME_DATA_ICON_HEIGHT = 24.0
     // ABSOLUTE DEFS
 
+    THEME_DOCK_BORDER_SIZE: 0.0
+
     THEME_BRIGHTNESS = #x40
     THEME_COLOR_MAKEPAD = #FF5C39FF
     // THEME_COLOR_MAKEPAD = #x1A
@@ -683,8 +685,6 @@ live_design! {
         scroll_bar_y: <ScrollBar> {}
     }
 
-
-    // Button
     Button = <ButtonBase> {
         width: Fit, height: Fit,
         margin: 0.
@@ -819,9 +819,7 @@ live_design! {
         }
     }
 
-
-    // Checkbox
-     CheckBox = <CheckBoxBase> {
+    CheckBox = <CheckBoxBase> {
         width: Fit, height: Fit,
         margin: {left: 0.0, top: (THEME_SPACE_1), bottom: (THEME_SPACE_1), right: (THEME_SPACE_1)}
         align: { x: 0.0, y: 0.5 }
@@ -1004,7 +1002,6 @@ live_design! {
             }
         }
     }
-
 
     DesktopButton = <DesktopButtonBase> {
         draw_bg: {
@@ -1218,10 +1215,6 @@ live_design! {
         }
     }
 
-
-    // Dock
-
-
     Splitter = <SplitterBase> {
         draw_splitter: {
             uniform border_radius: 1.0
@@ -1305,7 +1298,6 @@ live_design! {
             }
         }
     }
-
 
     TabCloseButton = <TabCloseButtonBase> {
         height: 10.0, width: 10.0,
@@ -1465,8 +1457,6 @@ live_design! {
         }
     }
 
-
-    BORDER_SIZE: 6.0
     Dock = <DockBase> {
         round_corner: {
             draw_depth: 6.0
@@ -1492,10 +1482,10 @@ live_design! {
                 return sdf.fill(THEME_COLOR_BG_APP);
             }
         }
-        border_size: (BORDER_SIZE)
+        border_size: (THEME_DOCK_BORDER_SIZE)
 
         flow: Down
-        padding: {left: (BORDER_SIZE), top: (0), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: (0), right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
         padding_fill: {color: (THEME_COLOR_BG_APP)}
         drag_quad: {
             draw_depth: 10.0
@@ -1504,9 +1494,6 @@ live_design! {
         tab_bar: <TabBar> {}
         splitter: <Splitter> {}
     }
-
-
-
 
     PopupMenuItem = <PopupMenuItemBase> {
         width: Fill, height: Fit,
@@ -1644,8 +1631,6 @@ live_design! {
             }
         }
     }
-
-
 
     DropDown = <DropDownBase> {
         width: Fill, height: Fit,
@@ -2077,13 +2062,14 @@ live_design! {
         }
     }
 
-
     LinkLabel = <LinkLabelBase> {
+        instance hover: 0.0
+        instance pressed: 0.0
+
         width: Fit, height: Fit,
-        margin: 0.
+        margin: 0., padding: <THEME_MSPACE_2> {},
         spacing: 7.5,
         align: {x: 0., y: 0.}
-        padding: <THEME_MSPACE_2> {},
 
         label_walk: { width: Fit, height: Fit, margin: 0. },
 
@@ -2106,8 +2092,6 @@ live_design! {
             }
         }
 
-        instance hover: 0.0
-        instance pressed: 0.0
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -2118,6 +2102,40 @@ live_design! {
                 (THEME_COLOR_D_5),
                 self.pressed
             )
+        }
+
+        draw_bg: {
+            instance pressed: 0.0
+            instance hover: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_META,
+                    self.pressed
+                ), mix(0.0, 0.8, self.hover));
+            }
+        }
+
+        draw_text: {
+            wrap: Word
+            instance pressed: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR> {}
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_META,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_META,
+                    self.pressed
+                )
+            }
         }
 
         animator: {
@@ -2155,46 +2173,11 @@ live_design! {
             }
         }
 
-
-        draw_bg: {
-            instance pressed: 0.0
-            instance hover: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_META,
-                    self.pressed
-                ), mix(0.0, 0.8, self.hover));
-            }
-        }
-
-        draw_text: {
-            wrap: Word
-            instance pressed: 0.0
-            instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR> {}
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_META,
-                        THEME_COLOR_TEXT_DEFAULT,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_META,
-                    self.pressed
-                )
-            }
-        }
-
     }
-
 
     RadioButton = <RadioButtonBase> {
         width: Fit, height: Fit,
+        align: {x: 0.0, y: 0.5}
 
         draw_radio: {
             uniform size: 7.0;
@@ -2237,6 +2220,7 @@ live_design! {
                 return sdf.result
             }
         }
+
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
@@ -2283,9 +2267,13 @@ live_design! {
             }
         }
 
+        icon_walk: {
+            margin: {top: 0., right: 0., bottom: 0., left: 20.}
+        }
+
         label_walk: {
             width: Fit, height: Fit,
-            margin: {top: 4.5, bottom: 4.5, left: 20, right: 10}
+            margin: {top: 4.5, bottom: 4.5, left: 20, right: 0}
         }
 
         label_align: {
@@ -2355,8 +2343,6 @@ live_design! {
             }
         }
     }
-
-
 
     PortalList = <PortalListBase> {
         width: Fill, height: Fill,
@@ -2743,7 +2729,6 @@ live_design! {
         text: "Body of the slide"
             draw_text: {color: (THEME_COLOR_U_8) }
     }
-
 
     DrawScrollShadow = <DrawScrollShadowBase> {
 
