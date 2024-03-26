@@ -2435,7 +2435,11 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix((THEME_COLOR_U_1), (THEME_COLOR_U_2), self.focus)); // Pad color
+                sdf.fill(
+                    mix((THEME_COLOR_U_0),
+                    (THEME_COLOR_U_2),
+                    self.focus)
+                ); // Pad color
                 return sdf.result
             }
         }
@@ -2446,8 +2450,8 @@ live_design! {
             instance border_color: (THEME_COLOR_U_2)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0)
             instance focus: 0.0,
-            color: (THEME_COLOR_D_1)
-            instance color_selected: (THEME_COLOR_D_3)
+            color: (THEME_COLOR_D_0)
+            instance color_selected: (THEME_COLOR_D_0)
 
             fn get_color(self) -> vec4 {
                 return mix(self.color, self.color_selected, self.focus)
@@ -2576,11 +2580,8 @@ live_design! {
         }
 
         draw_text: {
-            instance focus: 0.0
-            instance hover: 0.0
-            // color: mix(#f00, #00f, self.focus),
             color: (THEME_COLOR_TEXT_DEFAULT),
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
         }
@@ -2597,7 +2598,6 @@ live_design! {
             numeric_only: true,
             draw_bg: {
                 shape: None
-                color: (THEME_COLOR_U_3)
                 radius: 2.0
             },
 
@@ -2613,7 +2613,7 @@ live_design! {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_slider: {hover: 0.0}
-                        //text_input: {animator: {hover = off}}
+                        // text_input: { draw_bg: { hover: 0.0}}
                     }
                 }
                 on = {
@@ -2621,7 +2621,7 @@ live_design! {
                     from: {all: Snap}
                     apply: {
                         draw_slider: {hover: 1.0}
-                        //text_input: {animator: {hover = on}}
+                        // text_input: { draw_bg: { hover: 1.0}}
                     }
                 }
             }
