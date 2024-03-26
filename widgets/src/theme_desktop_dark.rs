@@ -2450,8 +2450,8 @@ live_design! {
             instance border_color: (THEME_COLOR_U_2)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0)
             instance focus: 0.0,
-            color: (THEME_COLOR_D_0)
-            instance color_selected: (THEME_COLOR_D_0)
+            color: (THEME_COLOR_D_1)
+            instance color_selected: (THEME_COLOR_D_3)
 
             fn get_color(self) -> vec4 {
                 return mix(self.color, self.color_selected, self.focus)
@@ -2580,7 +2580,7 @@ live_design! {
         }
 
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT),
+            color: mix(THEME_COLOR_TEXT_DEFAULT),
             text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -2604,6 +2604,39 @@ live_design! {
             padding: <THEME_MSPACE_0> {},
             label_align: {y: 0.},
             margin: {top: (THEME_SPACE_0), right: (THEME_SPACE_0), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
+            draw_bg: {
+                instance radius: 2.0
+                instance border_width: 0.0
+                instance border_color: (THEME_COLOR_U_2)
+                instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+                instance focus: 0.0,
+                color: (THEME_COLOR_D_0)
+                instance color_selected: (THEME_COLOR_D_0)
+
+                fn get_color(self) -> vec4 {
+                    return mix(self.color, self.color_selected, self.focus)
+                }
+
+                fn get_border_color(self) -> vec4 {
+                    return self.border_color
+                }
+
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    sdf.box(
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        max(1.0, self.radius)
+                    )
+                    sdf.fill_keep(self.get_color())
+                    if self.border_width > 0.0 {
+                        sdf.stroke(self.get_border_color(), self.border_width)
+                    }
+                    return sdf.result;
+                }
+            },
         }
 
         animator: {
