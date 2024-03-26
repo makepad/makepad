@@ -1,4 +1,4 @@
-use makepad_http::websocket::{ MessageHeader, WebSocket, WebSocketMessage, PONG_MESSAGE};
+use makepad_http::websocket::{  WebSocket, WebSocketMessage, PONG_MESSAGE};
 use std::{
      convert::TryInto, io::{self, BufRead, BufReader, Read, Write}, net::TcpStream, sync::MutexGuard, time
 };
