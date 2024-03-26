@@ -9,7 +9,6 @@ use {
         to_wasm::*,
     },
     crate::{
-        makepad_live_compiler::LiveFileChange,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         thread::SignalToUI,
@@ -295,7 +294,7 @@ impl Cx {
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
                 }*/
-                live_id!(ToWasmLiveFileChange)=>{
+                /*live_id!(ToWasmLiveFileChange)=>{
                     let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
                     // live file change. lets do it.
                     if tw.body.len()>0 {
@@ -308,7 +307,7 @@ impl Cx {
                             }]);
                         }
                     }
-                }
+                }*/
                 live_id!(ToWasmAudioDeviceList)=>{
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
                     self.os.web_audio().lock().unwrap().to_wasm_audio_device_list(tw);
@@ -553,7 +552,6 @@ impl CxOsApi for Cx {
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
             ToWasmAudioDeviceList::to_js_code(),
-            ToWasmLiveFileChange::to_js_code()
         ]);
         
         self.os.append_from_wasm_js(&[

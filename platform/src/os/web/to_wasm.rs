@@ -137,11 +137,6 @@ pub struct ToWasmTimerFired {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmLiveFileChange {
-    pub body: String,
-}
-
-#[derive(ToWasm)]
 pub struct ToWasmSignal {
 }
 

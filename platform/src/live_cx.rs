@@ -16,6 +16,7 @@ use {
             /*LiveTokenId,*/
             LiveFileId,
         },
+        web_socket::WebSocketMessage,
         makepad_live_compiler::LiveTypeInfo,
         /*makepad_math::*,*/
         cx::Cx,
@@ -222,11 +223,25 @@ impl Cx {
     }
     
     pub fn handle_live_edit(&mut self)->bool{
+        // lets poll our studio connection
+        let mut all_changes = Vec::new();
+        
+        if let Some(studio_socket) = &mut self.studio_web_socket{
+            while let Ok(msg) = studio_socket.try_recv(){
+                match msg {
+                    WebSocketMessage::Binary(bin)=>{
+                        
+                    }
+                    _=>()
+                }
+            }
+            
+        }
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
         // then find the token-slice we need
-        let mut all_changes = Vec::new();
+        
         while let Ok(changes) = self.live_file_change_receiver.try_recv(){
             all_changes.extend(changes);
         }
