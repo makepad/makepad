@@ -46,6 +46,7 @@ live_design!{
     import crate::keyboard_view::KeyboardViewBase;
     import crate::window_menu::WindowMenuBase;
     import crate::html::HtmlBase;
+    import crate::html::HtmlLinkBase;
     import crate::markdown::MarkdownBase,
     
     import makepad_draw::shader::std::*;
@@ -687,6 +688,7 @@ live_design!{
     // todo fix this by allowing reexporting imports
     // for now this works too
     HtmlBase = <HtmlBase>{}
+    HtmlLinkBase = <HtmlLinkBase>{}
     MarkdownBase = <MarkdownBase>{}
     KeyboardViewBase = <KeyboardViewBase>{}
     PageFlipBase = <PageFlipBase>{}

@@ -16,24 +16,14 @@ live_design!{
     import makepad_widgets::link_label::LinkLabelBase;
 
     // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
-    const LINK_COLOR = #x155EEF
+    
 
-    HtmlLink = {{HtmlLink}}<LinkLabelBase> {
-        width: Fit,
-        draw_text: {
-            color: (LINK_COLOR),
-        }
+    HtmlLinkBase = {{HtmlLink}} {
     }
-
 
     HtmlBase = {{Html}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
-
-        a = <HtmlLink> {
-            text: "missing link"
-        }
-
         ul_markers: ["•", "-"],
         ol_markers: [Numbers, LowerAlpha, LowerRoman],
         ol_separator: ".",
@@ -293,6 +283,7 @@ impl Widget for Html {
         while !node.done() {
             match Self::handle_open_tag(cx, tf, &mut node, &mut self.list_stack, &self.ul_markers, &self.ol_markers, &self.ol_separator) {
                 Some(_)=>{
+                    
                     handle_custom_widget(cx, scope, tf, &mut node, &mut auto_id); 
                 }
                 _=>()
