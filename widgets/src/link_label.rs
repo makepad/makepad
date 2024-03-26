@@ -1,10 +1,8 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        widget::*,
-        makepad_draw::*,
-        button::{Button, ButtonAction}
-    }
+use crate::{
+    makepad_derive_widget::*,
+    widget::*,
+    makepad_draw::*,
+    button::Button,
 };
 
 live_design!{
@@ -39,26 +37,42 @@ impl Widget for LinkLabel {
     }
 }
 
+impl LinkLabel {
+    pub fn clicked(&self, actions:&Actions) -> bool {
+        self.button.clicked(actions)
+    }
+
+    pub fn pressed(&self, actions:&Actions) -> bool {
+        self.button.pressed(actions)
+    }
+
+    pub fn released(&self, actions:&Actions) -> bool {
+        self.button.released(actions)
+    }
+}
+
 impl LinkLabelRef {
     pub fn clicked(&self, actions:&Actions) -> bool {
         if let Some(inner) = self.borrow(){ 
-            if let Some(item) = actions.find_widget_action(inner.button.widget_uid()) {
-                if let ButtonAction::Clicked = item.cast() {
-                    return true
-                }
-            }
+            inner.clicked(actions)
+        } else {
+            false
         }
-        false
     }
     
     pub fn pressed(&self, actions:&Actions) -> bool {
         if let Some(inner) = self.borrow(){ 
-            if let Some(item) = actions.find_widget_action(inner.button.widget_uid()) {
-                if let ButtonAction::Pressed = item.cast() {
-                    return true
-                }
-            }
+            inner.pressed(actions)
+        } else {
+            false
         }
-        false
+    }
+
+    pub fn released(&self, actions:&Actions) -> bool {
+        if let Some(inner) = self.borrow(){ 
+            inner.released(actions)
+        } else {
+            false
+        }
     }
 }
