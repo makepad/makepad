@@ -318,16 +318,6 @@ impl Cx {
         }
         false
     }
-    #[cfg(not(apple_sim))]
-    fn poll_studio_http(&self) {
-        let studio_http: Option<&'static str> = std::option_env!("MAKEPAD_STUDIO_HTTP");
-        if studio_http.is_none() {
-            return
-        }
-        let url = format!("http://{}/$live_file_change", studio_http.unwrap());
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        make_http_request(live_id!(live_reload), request, self.os.network_response.sender.clone());
-    }
     
 }
 

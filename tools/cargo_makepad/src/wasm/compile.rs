@@ -11,7 +11,7 @@ pub fn build(args: &[String]) -> Result<(), String> {
         "-Z", 
         "build-std=panic_abort,std", 
     ];
-    
+`11`
     let cwd = std::env::current_dir().unwrap();
     
     let mut args_out = Vec::new();

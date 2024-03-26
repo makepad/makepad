@@ -46,7 +46,22 @@ live_design!{
     COLOR_PANEL_BG = (COLOR_DOWN_2)
     COLOR_TEXT_INPUT = (COLOR_DOWN_2)
     COLOR_LABEL = #xFFF9
+    COLOR_DOWN_0 = #x00000000
+    COLOR_DOWN_1 = #x00000011
+    COLOR_DOWN_2 = #x00000022
+    COLOR_DOWN_3 = #x00000044
+    COLOR_DOWN_4 = #x00000066
+    COLOR_DOWN_5 = #x000000AA
+    COLOR_DOWN_6 = #x000000CC
     
+    COLOR_UP_0 = #xFFFFFF00
+    COLOR_UP_1 = #xFFFFFF0A
+    COLOR_UP_2 = #xFFFFFF10
+    COLOR_UP_3 = #xFFFFFF20
+    COLOR_UP_4 = #xFFFFFF40
+    COLOR_UP_5 = #xFFFFFF66
+    COLOR_UP_6 = #xFFFFFFCC
+    COLOR_UP_FULL = #xFFFFFFFF
     
     SdxlDropDown = <DropDown> {
         width: Fit
@@ -199,21 +214,92 @@ live_design!{
         }
     }
     
+    FishSlider = <Slider> {
+        height: 36
+        text: "CutOff1"
+        draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
+        text_input: {
+            cursor_margin_bottom: (SSPACING_1),
+            cursor_margin_top: (SSPACING_1),
+            select_pad_edges: (SSPACING_1),
+            cursor_size: (SSPACING_1),
+            empty_message: "0",
+            numeric_only: true,
+            draw_bg: {
+                color: (COLOR_DOWN_0)
+            },
+        }
+        draw_slider: {
+            instance line_color: #8
+            instance bipolar: 0.0
+            fn pixel(self) -> vec4 {
+                let nub_size = 3
+                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let top = 20.0;
+                
+                sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
+                sdf.fill_keep(
+                    mix(
+                        mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((COLOR_DOWN_4) * 1.75, (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 1.0)),
+                        self.drag
+                    )
+                ) // Control backdrop gradient
+                
+                sdf.stroke(mix(mix(#x00000060, #x00000070, self.drag), #xFFFFFF10, pow(self.pos.y, 10.0)), 1.0) // Control outline
+                let in_side = 5.0;
+                let in_top = 5.0; // Ridge: vertical position
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(mix((COLOR_DOWN_4), #00000088, self.drag)); // Ridge color
+                let in_top = 7.0;
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(#FFFFFF18); // Ridge: Rim light catcher
+                
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
+                sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
+                
+                sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
+                sdf.stroke_keep(mix((COLOR_UP_0), self.line_color, self.drag), 1.5)
+                sdf.stroke(
+                    mix(mix(self.line_color * 0.85, self.line_color, self.hover), #xFFFFFF80, self.drag),
+                    1
+                )
+                
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 3) - 3;
+                sdf.box(nub_x + in_side, top + 1.0, 12, 12, 1.)
+                
+                sdf.fill_keep(mix(mix(#x7, #x8, self.hover), #3, self.pos.y)); // Nub background gradient
+                sdf.stroke(
+                    mix(
+                        mix(#xa, #xC, self.hover),
+                        #0,
+                        pow(self.pos.y, 1.5)
+                    ),
+                    1.
+                ); // Nub outline gradient
+                
+                
+                return sdf.result
+            }
+        }
+    }
+    
     SettingsSlider = <View> {
-        width: 250,
+        width: 130,
         height: Fit,
-        margin: {top: 10},
-        label = <BarLabel> {
+        margin: {top: 0},
+       /* label = <BarLabel> {
             width: Fit,
             margin: {left: 5},
             align: {x: 1.0}
-        }
-        input = <Slider> {
+        }*/
+        input = <FishSlider> {
             padding: 0
-            height: Fit,
+            height: 37,
             width: 125,
             margin: {top: 1, left: 2}
-            text: "1344"
+            text: "HELLO WOLD"
         }
     }
     
@@ -526,8 +612,7 @@ live_design!{
         draw_bg: {
             uniform image_size: vec2
             uniform is_rgb: 0.0
-            uniform dial1: 0.0,
-            uniform dial2: 0.0,
+            
             fn yuv_to_rgb(y: float, u: float, v: float) -> vec4 {
                 return vec4(
                     y + 1.14075 * (v - 0.5),
@@ -552,11 +637,7 @@ live_design!{
             }
                         
             fn pixel(self) -> vec4 {
-                let d1 = (self.dial1-0.5)*2.0;
-                let d2 = pow(self.dial2*5.0,2.0);
-                let shift = vec4(d1,d1,d1,0.0)
-                let scale = vec4(d2,d2,d2,1.0)
-                let c = (self.get_video_pixel(self.pos)-shift)*scale + shift;
+                let c = self.get_video_pixel(self.pos);
                 return c;// mix(vec4(c.x, c.x,c.x, 1.0), c, 1.0-self.dial2)
             }
         }
@@ -583,7 +664,7 @@ live_design!{
                                     
             split1 = Splitter {
                 axis: Vertical,
-                align: FromB(200.0),
+                align: FromB(400.0),
                 a: image_view,
                 b: input_panel
             }
@@ -628,15 +709,33 @@ live_design!{
                     width: Fill
                     align: {x: 0.0, y: 0.5}
                     padding: 5
-                                                    
+                    /*                                
                     <BarLabel> {
                         text: "Workflow"
+                    }*/
+                    
+                    settings_cfg = <SettingsSlider> {input = {text: "Config", default: 4.0, min:1.0, max:8.0, step:0.01}}
+                    
+                    settings_steps = <SettingsSlider> {input = {text: "Steps", default: 10.0, min:1, max: 10, step:1}}
+                                                
+                    settings_denoise = <SettingsSlider> {input = {text: "Denoise", default: 0.5, min:0.2, max:1.0, step:0.01}}
+                      
+                    //workflow_dropdown = <SdxlDropDown> {}
+                    random_check_box = <SdxlCheckBox> {
+                        text: "Random"
                     }
-                                                    
-                    workflow_dropdown = <SdxlDropDown> {}
-                   
+                                    
+                    render_check_box = <SdxlCheckBox> {
+                        text: "Render"
+                    }
+                    trim_button = <BarButton> {
+                        text: "Trim"
+                    }
+                    clear_button = <BarButton> {
+                        text: "Clear"
+                    }
                     <BarLabel> {
-                        text: "Seed"
+                        text: "Seed:"
                     }
                     seed_input = <TextInput> {
                         draw_text: {text_style: <TEXT_BOLD> {}}
@@ -644,39 +743,97 @@ live_design!{
                         width: Fit,
                         margin: {bottom: 0, left: 0}
                     }
-                                                    
-                    take_photo = <BarButton> {
-                        text: "Photo"
-                    }
-                    render_single = <BarButton> {
-                        text: "Render"
-                    }
-
-                    random_check_box = <SdxlCheckBox> {
-                        text: "Random"
-                    }                      
-                    <DividerH> {}
-                    auto_check_box = <SdxlCheckBox> {
-                        text: "Auto"
-                    }
-                          
-                    <DividerH> {}
-                    clear_toodo = <BarButton> {
-                        text: "Clear Todo"
-                    }
                     <FillerH> {}
-                    progress1 = <ProgressCircle> {}
-                    todo_label = <BarLabel> {
-                        margin: {right: 5.0}
-                        text: "Todo 0"
-                    }
                 }
                 <View> {
+                    <View>{
+                        flow: Down
+                        <RoundedView>{
+                            draw_bg:{
+                                color: (COLOR_DOWN_2)
+                                border_width: 1.0
+                                border_color: #x00000044
+                            }
+                            margin:{top:0, left:0, right: 0, bottom:5}
+                            align: {x:0.5},
+                            padding: 2
+                            width: Fill,
+                            height: Fill
+                            llm_chat = <PortalList>{  
+                                auto_tail:true,
+                                width: Fill,
+                                height: Fill,
+                                margin: {top: 0},
+                                AI = <TextInput> {
+                                    ascii_only: true,
+                                    width: Fill,
+                                    height: Fill,
+                                    margin: {top: 0.0, left: 20.0, bottom: 5.0, right: 0.0},
+                                    text: "LLM Output"
+                                    draw_text: {
+                                        text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
+                                    }
+                                    draw_bg: {
+                                        color: (#335)
+                                        border_width: 1.0
+                                        border_color: #x00000044
+                                    }
+                                }
+                                Human = <TextInput> {
+                                    ascii_only: true,
+                                    width: Fill,
+                                    height: Fill,
+                                    margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 0.0},
+                                    text: "LLM Output"
+                                    draw_text: {
+                                        text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
+                                    }
+                                    draw_bg: {
+                                        color: (#353)
+                                        border_width: 1.0
+                                        border_color: #x00000044
+                                    }
+                                }
+                            }
+                        }
+                       
+                        chat = <TextInput> {
+                            height: Fit,
+                            width: Fill,
+                            margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
+                            margin: {bottom: 0}
+                            empty_message: "Talk here"
+                            draw_bg: {
+                                color: (COLOR_TEXT_INPUT)
+                                border_width: 1.0
+                                border_color: #x00000044
+                            }
+                            draw_text: {
+                                text_style: {font_size: (TEXT_BIG)}
+                                fn get_color(self) -> vec4 {
+                                    return
+                                    mix(
+                                        mix(
+                                            mix(
+                                                #xFFFFFF55,
+                                                #xFFFFFF88,
+                                                self.hover
+                                            ),
+                                            #xFFFFFFCC,
+                                            self.focus
+                                        ),
+                                        #xFFFFFF66,
+                                        self.is_empty
+                                    )
+                                }
+                            }
+                        }
+                    }
                     positive = <TextInput> {
                         ascii_only: true,
                         width: Fill,
                         height: Fill,
-                        margin: {top: 0.0, left: 10.0, bottom: 10.0, right: 5.0},
+                        margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
                         text: "Positive"
                         draw_text: {
                             text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
@@ -687,93 +844,38 @@ live_design!{
                             border_color: #x00000044
                         }
                     }
-                    negative = <TextInput> {
-                        ascii_only: true,
-                        width: 200,
-                        height: Fill,
-                        margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
-                        draw_text: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
-                        text: "text, watermark, cartoon"
-                        draw_bg: {
-                            color: (COLOR_TEXT_INPUT)
-                            border_width: 1.0
-                            border_color: #x00000044
+                    <View>{
+                        visible: false,
+                        negative = <TextInput> {
+                            ascii_only: true,
+                            width: 200,
+                            height: Fill,
+                            margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
+                            draw_text: {text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}}
+                            text: "text, watermark, cartoon"
+                            draw_bg: {
+                                color: (COLOR_TEXT_INPUT)
+                                border_width: 1.0
+                                border_color: #x00000044
+                            }
                         }
                     }
                     <View> {
+                        visible: false,
                         width: Fill,
                         height: Fill
                         flow: Right
                         <View> {
                             width: 200,
                             height: Fit,
+                            
                             margin: {top: 10, right: 20},
                             flow: Down
                             settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
                             settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-                            settings_steps = <SettingsSlider> {label = {text: "steps:"}, input = {text: "10", min:1, max: 10, step:1}}
-                            settings_cfg = <SettingsSlider> {label = {text: "cfg:"}, input = {text: "2.0", min:1.0, max:8.0, step:0.01}}
-                            settings_denoise = <SettingsSlider> {label = {text: "denoise:"}, input = {text: "0.85", min:0.2, max:1.0, step:0.01}}
+
                         }
-                        <View>{ 
-                            width: Fit,
-                            height: Fit,
-                            margin: {top: 10},
-                            video_input0 = <VideoFrame>{}
-                            video_input1 = <VideoFrame>{}
-                        }
-                        /* <View> {
-                            width: Fit,
-                            height: Fit,
-                            margin: {top: 10},
-                            flow: Down
-                            settings_base_cfg = <SettingsInput> {label = {text: "base_cfg:"}, input = {text: "8.5"}}
-                            settings_refiner_cfg = <SettingsInput> {label = {text: "refiner_cfg:"}, input = {text: "9.5"}}
-                            settings_pos_score = <SettingsInput> {label = {text: "pos_score:"}, input = {text: "6"}}
-                            settings_neg_score = <SettingsInput> {label = {text: "neg_score:"}, input = {text: "2"}}
-                        }
-                        <View> {
-                            width: Fit,
-                            height: Fit,
-                            margin: {top: 10},
-                            flow: Down
-                            settings_base_start_step = <SettingsInput> {label = {text: "base_start_step:"}, input = {text: "0"}}
-                            settings_base_end_step = <SettingsInput> {label = {text: "base_end_step:"}, input = {text: "20"}}
-                            settings_refiner_start_step = <SettingsInput> {label = {text: "refiner_start_step:"}, input = {text: "20"}}
-                            settings_refiner_end_step = <SettingsInput> {label = {text: "refiner_end_step:"}, input = {text: "1000"}}
-                        }
-                        <View> {
-                            width: Fit,
-                            height: Fit,
-                            margin: {top: 10},
-                            flow: Down
-                            settings_upscale_steps = <SettingsInput> {label = {text: "upscale_steps:"}, input = {text: "31"}}
-                            settings_upscale_start_step = <SettingsInput> {label = {text: "upscale_start_step:"}, input = {text: "29"}}
-                            settings_upscale_end_step = <SettingsInput> {label = {text: "upscale_end_step:"}, input = {text: "1000"}}
-                        }*/
-                        /*
-                        <View> {
-                            width: Fill, height: Fit, margin: {top: 10},
-                            <BarLabel> {text: "base_cfg:"}
-                            base_cfg_input = <SettingsInput> {text: "1344"}
-                            <BarLabel> {text: "refiner_cfg:"}
-                            refiner_cfg_input = <SettingsInput> {text: "768"}
-                            <BarLabel> {text: "pos_score:"}
-                            positive_score_input = <SettingsInput> {text: "6.0"}
-                            <BarLabel> {text: "neg_score:"}
-                            negative_score_input = <SettingsInput> {text: "2.0"}
-                        }
-                        <View> {
-                            width: Fill, height: Fit, margin: {top: 10},
-                            <BarLabel> {text: "base_start_step:"}
-                            base_cfg_input = <SettingsInput> {text: "1344"}
-                            <BarLabel> {text: "base_end_step:"}
-                            refiner_cfg_input = <SettingsInput> {text: "768"}
-                            <BarLabel> {text: "refiner_start_step:"}
-                            positive_score_input = <SettingsInput> {text: "6.0"}
-                            <BarLabel> {text: "refiner_end_step:"}
-                            negative_score_input = <SettingsInput> {text: "2.0"}
-                        }*/
+                        
                     }
                 }
             }
@@ -838,26 +940,25 @@ live_design!{
                         flow: Right
                         row1 = <ImageTile> {}
                     }
-                    ImageRow2 = <View> {
-                        height: Fit,
-                        width: Fill,
-                        margin: {bottom: 10}
-                        spacing: 20,
-                        flow: Right
-                        row1 = <ImageTile> {}
-                        row2 = <ImageTile> {}
+                }
+                <RoundedView>{
+                    draw_bg:{
+                        color:#2
                     }
-                    ImageRow3 = <View> {
+                    margin:{top:0, left:10, right: 10, bottom:10}
+                    align: {x:0.5},
+                    padding: 2
+                    width: Fill,
+                    height: 164
+                    <View>{  
+                        width: Fit,
                         height: Fit,
-                        width: Fill,
-                        margin: {bottom: 10}
-                        spacing: 20,
-                        flow: Right
-                        row1 = <ImageTile> {}
-                        row2 = <ImageTile> {}
-                        row3 = <ImageTile> {}
+                        margin: {top: 0},
+                        video_input0 = <VideoFrame>{}
+                        video_input1 = <VideoFrame>{}
                     }
                 }
+                
             }
         }
                             
