@@ -2575,7 +2575,16 @@ live_design! {
             }
         }
 
-        draw_text: { color: (THEME_COLOR_WHITE) }
+        draw_text: {
+            instance focus: 0.0
+            instance hover: 0.0
+            // color: mix(#f00, #00f, self.focus),
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+        }
+
         label_walk: { width: Fill, height: Fill, }
 
         text_input: <TextInput> {
