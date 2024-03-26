@@ -349,24 +349,20 @@ live_design! {
     }
 
     Hr = <View> {
-        height: 2.
-        width: Fill,
+        width: Fill, height: Fit,
+        flow: Down,
+        spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
-        show_bg: true
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    1.,
-                    5.,
-                    // self.rect_size.y,
-                    10.,
-                    5.,
-                    // self.rect_size.y,
-                    1.0
-                );
-                return sdf.fill(#f00);
-            }
+        <View> {
+            width: Fill, height: 2.,
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_D_2) }
+        }
+        <View> {
+            width: Fill, height: 1.,
+            margin: 0.,
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_U_2) }
         }
     }
 
