@@ -2575,8 +2575,8 @@ live_design! {
             }
         }
 
-        draw_text: { color: #f00 }
-        label_walk: { width: 50., height: 30. }
+        draw_text: { color: (THEME_COLOR_WHITE) }
+        label_walk: { width: Fill, height: Fill, }
 
         text_input: <TextInput> {
             width: Fit,
