@@ -15,15 +15,6 @@ const BULLET: &str = "•";
 live_design!{
     import makepad_widgets::link_label::LinkLabelBase;
 
-    HtmlBase = {{Html}} {
-        // ok so we can use one drawtext
-        // change to italic, change bold (SDF), strikethrough
-
-        ul_markers: ["•", "-"],
-        ol_markers: [Numbers, LowerAlpha, LowerRoman],
-        ol_separator: ".",
-    }
-
     // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
     const LINK_COLOR = #x155EEF
 
@@ -32,6 +23,20 @@ live_design!{
         draw_text: {
             color: (LINK_COLOR),
         }
+    }
+
+
+    HtmlBase = {{Html}} {
+        // ok so we can use one drawtext
+        // change to italic, change bold (SDF), strikethrough
+
+        a = <HtmlLink> {
+            text: "missing link"
+        }
+
+        ul_markers: ["•", "-"],
+        ol_markers: [Numbers, LowerAlpha, LowerRoman],
+        ol_separator: ".",
     }
 }
 
@@ -396,7 +401,7 @@ impl Widget for HtmlLink {
         event: &Event,
         scope: &mut Scope,
     ) {
-        log!("HtmlLink::handle_event(): event: {:?}", event);
+        // log!("HtmlLink::handle_event(): event: {:?}", event);
         self.link.handle_event(cx, event, scope);
         self.match_event(cx, event)
     }
@@ -443,7 +448,8 @@ enum ListKind {
 ///
 /// See the ["type" attribute docs](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/ol#attributes)
 /// for more info.
-#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
 pub enum OrderedListType {
     #[pick] // must be the top-most attribute
     /// Decimal integers: 1, 2, 3, 4, ...
