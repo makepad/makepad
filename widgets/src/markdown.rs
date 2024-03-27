@@ -26,7 +26,11 @@ pub struct Markdown{
 // alright lets parse the HTML
 impl LiveHook for Markdown{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
-       self.doc = parse_markdown(&*self.body);
+        let new_doc = parse_markdown(&*self.body);
+        if new_doc != self.doc{
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+        }
     }
 }
  
