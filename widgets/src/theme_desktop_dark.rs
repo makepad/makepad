@@ -2450,8 +2450,8 @@ live_design! {
             instance radius: 3.0
             instance hover: 0.0
             instance focus: 0.0
-            instance bodytop: (THEME_COLOR_D_075)
-            instance bodybottom: (THEME_COLOR_D_2)
+            instance bodytop: (THEME_COLOR_U_04)
+            instance bodybottom: (THEME_COLOR_U_1)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -2464,18 +2464,18 @@ live_design! {
                     self.focus
                 );
 
-                let body_transp = vec4(body.xyz, 0.0);
+                let body_transp = (THEME_COLOR_D_0)
 
                 let top_gradient = mix(
                     body_transp,
-                    mix((THEME_COLOR_D_4), (THEME_COLOR_D_5), self.focus),
+                    mix((THEME_COLOR_D_2), (THEME_COLOR_D_3), self.focus),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
 
                 let bot_gradient = mix(
-                    mix((THEME_COLOR_U_1), (THEME_COLOR_U_2), self.focus),
+                    mix((THEME_COLOR_U_4), (THEME_COLOR_U_5), self.focus),
                     top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.4, 1.0)
                 );
 
                 // some rim-light at the bottom
