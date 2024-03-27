@@ -357,7 +357,7 @@ live_design!{
                     <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
                     <ZooGroup> {
                         dropdown = <DropDown> {
-                            labels: ["ValueOne", "ValueTwo", "Thrice", "FourthValue", "OptionE", "Hexagons"],
+                            labels: ["Value One", "Value Two", "Thrice", "Fourth Value", "Option E", "Hexagons"],
                             values: [ValueOne, ValueTwo, Thrice, FourthValue, OptionE, Hexagons]
                         }
                     }
