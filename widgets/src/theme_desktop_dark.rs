@@ -2001,7 +2001,6 @@ live_design! {
 
     FoldButton = <FoldButtonBase> {
         width: 12., height: 12.,
-        padding: 20.
 
         draw_bg: {
             instance open: 0.0
