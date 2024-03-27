@@ -1745,7 +1745,6 @@ live_design! {
                 sdf.line_to(c.x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
 
-
                 sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
 
                 return sdf.result
@@ -2001,36 +2000,37 @@ live_design! {
     }
 
     FoldButton = <FoldButtonBase> {
-        width: 12, height: 12,
+        width: 12., height: 12.,
+        padding: 20.
 
         draw_bg: {
             instance open: 0.0
             instance hover: 0.0
-
             uniform fade: 1.0
 
             fn pixel(self) -> vec4 {
-
-                let sz = 3.;
-                let c = vec2(5.0, 0.5 * self.rect_size.y);
+                let sz = 2.5;
+                let c = vec2(5.0, 0.6 * self.rect_size.y);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.clear(vec4(0.));
+
                 // we have 3 points, and need to rotate around its center
                 sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
                 sdf.move_to(c.x - sz, c.y + sz);
                 sdf.line_to(c.x, c.y - sz);
                 sdf.line_to(c.x + sz, c.y + sz);
                 sdf.close_path();
-                sdf.fill(mix(#a, #f, self.hover));
+                sdf.fill(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+                );
                 return sdf.result * self.fade;
             }
         }
 
-        abs_size: vec2(32, 12)
-        abs_offset: vec2(4., 0.)
-
         animator: {
-
             hover = {
                 default: off
                 off = {
