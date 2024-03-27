@@ -1595,12 +1595,12 @@ live_design! {
     PopupMenu = <PopupMenuBase> {
         width: 100, height: Fit,
         flow: Down,
-        padding: 5
+        padding: 5.
 
         menu_item: <PopupMenuItem> {}
 
         draw_bg: {
-            instance color: (THEME_COLOR_BLACK)
+            instance color: (THEME_COLOR_U_4)
             instance border_width: 0.0,
             instance border_color: (THEME_COLOR_D_0)
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
@@ -1638,8 +1638,8 @@ live_design! {
     DropDown = <DropDownBase> {
         width: Fit, height: Fit,
         margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
-        align: {x: 0., y: 0.}
         padding: {left: 9.0, top: 5.0, right: 19.0, bottom: 5.0}
+        align: {x: 0., y: 0.}
 
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
@@ -1663,45 +1663,9 @@ live_design! {
             }
         }
 
-        // draw_bg: {
-        //     instance hover: 0.0
-        //     instance pressed: 0.0
-        //     instance focus: 0.0,
-        //     uniform border_radius: 3.0
-
-        //     fn get_bg(self, inout sdf: Sdf2d) {
-        //         sdf.box(
-        //             0.,
-        //             0.,
-        //             self.rect_size.x,
-        //             self.rect_size.y,
-        //             self.border_radius
-        //         )
-        //         sdf.fill(mix(
-        //             THEME_COLOR_D_0,
-        //             THEME_COLOR_U_2,
-        //             self.hover));
-        //     }
-
-        //     fn pixel(self) -> vec4 {
-        //         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-        //         self.get_bg(sdf);
-        //         // lets draw a little triangle in the corner
-        //         let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-        //         let sz = 2.5;
-
-        //         sdf.move_to(c.x - sz, c.y - sz);
-        //         sdf.line_to(c.x + sz, c.y - sz);
-        //         sdf.line_to(c.x, c.y + sz * 0.75);
-        //         sdf.close_path();
-
-        //         sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
-
-        //         return sdf.result
-        //     }
-        // }
         draw_bg: {
             instance hover: 0.0
+            instance focus: 0.0
             instance pressed: 0.0
             uniform border_radius: 3.0
             instance bodytop: (THEME_COLOR_U_0)
@@ -1711,19 +1675,23 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), (THEME_COLOR_D_1), self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), self.bodybottom, self.focus);
                 let body_transp = vec4(body.xyz, 0.0);
 
                 let top_gradient = mix(
                     body_transp,
                     mix(
                         mix(
-                            (THEME_COLOR_U_0),
-                            (THEME_COLOR_U_3),
-                            self.hover
+                            mix(
+                                THEME_COLOR_U_0,
+                                THEME_COLOR_U_3,
+                                self.hover
+                            ),
+                            THEME_COLOR_U_3,
+                            self.pressed
                         ),
                         THEME_COLOR_U_3,
-                        self.pressed
+                        self.focus
                     ),
                     max(0.0, grad_top - sdf.pos.y) / grad_top);
 
@@ -1739,9 +1707,17 @@ live_design! {
                 sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                 sdf.stroke(
                     mix(
-                        mix((THEME_COLOR_D_0), (THEME_COLOR_D_3), self.hover),
-                        (THEME_COLOR_D_3),
-                        self.pressed
+                        mix(
+                            mix(
+                                THEME_COLOR_D_0,
+                                THEME_COLOR_D_3,
+                                self.hover
+                            ),
+                            THEME_COLOR_D_3,
+                            self.pressed
+                        ),
+                        THEME_COLOR_D_3,
+                        self.focus
                     ), 1.
                 )
 
@@ -1812,7 +1788,7 @@ live_design! {
             focus = {
                 default: off
                 off = {
-                    from: {all: Snap}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {focus: 0.0},
                         draw_text: {focus: 0.0}
