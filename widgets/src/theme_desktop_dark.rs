@@ -69,15 +69,18 @@ live_design! {
         THEME_COLOR_D_1
     ))
 
-    THEME_COLOR_BG_EDITOR = (blend(
-        THEME_COLOR_BG_HEADER,
-        THEME_COLOR_D_1
-    ))
+    THEME_COLOR_BG_EDITOR = (THEME_COLOR_D_075)
 
-    THEME_COLOR_BG_ODD = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_D_05
-    ))
+    // THEME_COLOR_BG_EDITOR = (blend(
+    //     THEME_COLOR_BG_HEADER,
+    //     THEME_COLOR_D_1
+    // ))
+
+    THEME_COLOR_BG_ODD = (THEME_COLOR_D_1)
+    // THEME_COLOR_BG_ODD = (blend(
+    //     THEME_COLOR_BG_EDITOR,
+    //     THEME_COLOR_D_05
+    // ))
 
     THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
 
@@ -102,7 +105,7 @@ live_design! {
     // TEXT / ICON COLORS
 
     THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_6)
-    THEME_COLOR_TEXT_HOVER = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
     THEME_COLOR_TEXT_META = (THEME_COLOR_U_3)
     THEME_COLOR_SELECTED = (THEME_COLOR_U_8)
 
@@ -1767,22 +1770,17 @@ live_design! {
     FileTreeNode = <FileTreeNodeBase> {
         align: {y: 0.5}
         padding: {left: 5.0, bottom: 0,},
+        is_folder: false,
+        indent_width: 10.0
+        min_drag_distance: 10.0
 
         draw_bg: {
             fn pixel(self) -> vec4 {
                 return mix(
-                    mix(
-                        THEME_COLOR_BG_EDITOR,
-                        THEME_COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    mix(
-                        THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
-                        self.focussed
-                    ),
-                    self.selected
-                );
+                    THEME_COLOR_BG_EDITOR * 0.75,
+                    THEME_COLOR_BG_EDITOR * 1.25,
+                    self.is_even
+                )
             }
         }
 
@@ -1820,6 +1818,7 @@ live_design! {
             }
 
             text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
                 top_drop: 1.2,
             }
         }
@@ -1926,9 +1925,6 @@ live_design! {
                 }
             }
         }
-        is_folder: false,
-        indent_width: 10.0
-        min_drag_distance: 10.0
     }
 
     FileTree = <FileTreeBase> {
