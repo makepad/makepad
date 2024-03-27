@@ -217,7 +217,6 @@ impl Widget for TextFlow {
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
-            entry.handle_event(cx, event, scope);
         }
     }
 }
