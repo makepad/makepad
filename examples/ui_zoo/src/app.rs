@@ -366,7 +366,11 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"DemoFileTree"}
                     <ZooDesc> {text:"DemoFileTree?"}
-                    <ZooGroup> { <DemoFileTree> { file_tree:{ height: 400. } } }
+                    <ZooGroup> {
+                        padding: 0.
+                        show_bg: false,
+                        <DemoFileTree> { file_tree:{ height: 400. } }
+                    }
                 }
 
                 <ZooHeader> {
