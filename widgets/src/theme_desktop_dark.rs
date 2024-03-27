@@ -2063,7 +2063,7 @@ live_design! {
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        margin: 0., padding: <THEME_MSPACE_2> {},
+        margin: 0., padding: <THEME_MSPACE_V_1> {},
         spacing: 7.5,
         align: {x: 0., y: 0.}
 
@@ -2468,14 +2468,14 @@ live_design! {
 
                 let top_gradient = mix(
                     body_transp,
-                    mix((THEME_COLOR_D_2), (THEME_COLOR_D_3), self.focus),
+                    mix((THEME_COLOR_D_5), (THEME_COLOR_BLACK), self.focus),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
 
                 let bot_gradient = mix(
-                    mix((THEME_COLOR_U_4), (THEME_COLOR_U_5), self.focus),
+                    mix((THEME_COLOR_U_3), (THEME_COLOR_U_3), self.focus),
                     top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.4, 1.0)
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
 
                 // some rim-light at the bottom
@@ -2495,7 +2495,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    1.0
+                    0.6
                 )
 
                 return sdf.result
