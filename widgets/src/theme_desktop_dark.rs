@@ -407,7 +407,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_1))
+                        sdf.fill((THEME_COLOR_U_04))
                         sdf.box(
                             (THEME_SPACE_1),
                             (THEME_SPACE_1),
@@ -426,7 +426,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_1));
+                        sdf.fill((THEME_COLOR_U_04));
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -529,7 +529,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_1))
+                        sdf.fill((THEME_COLOR_U_04))
                         sdf.box(
                             (THEME_SPACE_1),
                             (THEME_SPACE_1),
@@ -559,7 +559,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_1));
+                        sdf.fill((THEME_COLOR_U_04));
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
