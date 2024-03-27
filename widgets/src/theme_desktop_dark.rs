@@ -1636,79 +1636,141 @@ live_design! {
     }
 
     DropDown = <DropDownBase> {
-        width: Fill, height: Fit,
+        width: Fit, height: Fit,
         margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
         align: {x: 0., y: 0.}
-        padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
+        padding: {left: 9.0, top: 5.0, right: 19.0, bottom: 5.0}
 
-        // width: 200, height: 30,
-        // draw_text: {
-        //     fn get_color(self) -> vec4 {
-        //         return mix(
-        //             mix(
-        //                 mix(
-        //                     (#xFFF8),
-        //                     (#xFFF8),
-        //                     self.focus
-        //                 ),
-        //                 (#xFFFF),
-        //                 self.hover
-        //             ),
-        //             (#x000A),
-        //             self.pressed
-        //         )
-        //     }
-        // }
         draw_text: {
-            text_style: <THEME_FONT_BOLD> {}
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
 
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         mix(
-                            #9,
-                            #b,
+                            THEME_COLOR_TEXT_DEFAULT,
+                            THEME_COLOR_TEXT_DEFAULT,
                             self.focus
                         ),
-                        #c,
+                        THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
-                    #9,
+                    THEME_COLOR_TEXT_META,
                     self.pressed
                 )
             }
         }
 
+        // draw_bg: {
+        //     instance hover: 0.0
+        //     instance pressed: 0.0
+        //     instance focus: 0.0,
+        //     uniform border_radius: 3.0
+
+        //     fn get_bg(self, inout sdf: Sdf2d) {
+        //         sdf.box(
+        //             0.,
+        //             0.,
+        //             self.rect_size.x,
+        //             self.rect_size.y,
+        //             self.border_radius
+        //         )
+        //         sdf.fill(mix(
+        //             THEME_COLOR_D_0,
+        //             THEME_COLOR_U_2,
+        //             self.hover));
+        //     }
+
+        //     fn pixel(self) -> vec4 {
+        //         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+        //         self.get_bg(sdf);
+        //         // lets draw a little triangle in the corner
+        //         let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+        //         let sz = 2.5;
+
+        //         sdf.move_to(c.x - sz, c.y - sz);
+        //         sdf.line_to(c.x + sz, c.y - sz);
+        //         sdf.line_to(c.x, c.y + sz * 0.75);
+        //         sdf.close_path();
+
+        //         sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+
+        //         return sdf.result
+        //     }
+        // }
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            instance focus: 0.0,
-            uniform border_radius: 0.5
-
-            fn get_bg(self, inout sdf: Sdf2d) {
-                sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-                sdf.fill(mix(#2, #3, self.hover));
-            }
+            uniform border_radius: 3.0
+            instance bodytop: (THEME_COLOR_U_0)
+            instance bodybottom: (THEME_COLOR_U_1)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                self.get_bg(sdf);
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), (THEME_COLOR_D_1), self.pressed);
+                let body_transp = vec4(body.xyz, 0.0);
+
+                let top_gradient = mix(
+                    body_transp,
+                    mix(
+                        mix(
+                            (THEME_COLOR_U_0),
+                            (THEME_COLOR_U_3),
+                            self.hover
+                        ),
+                        THEME_COLOR_U_3,
+                        self.pressed
+                    ),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top);
+
+                let bot_gradient = mix(
+                    mix(body_transp, (THEME_COLOR_U_2), self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                // the little drop shadow at the bottom
+                let shift_inward = self.border_radius * 1.75;
+                sdf.move_to(shift_inward, self.rect_size.y);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+                sdf.stroke(
+                    mix(
+                        mix((THEME_COLOR_D_0), (THEME_COLOR_D_3), self.hover),
+                        (THEME_COLOR_D_3),
+                        self.pressed
+                    ), 1.
+                )
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    1.0
+                )
+
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 2.5;
+                let sz = 3.;
+                let offset = 1.;
 
-                sdf.move_to(c.x - sz, c.y - sz);
-                sdf.line_to(c.x + sz, c.y - sz);
-                sdf.line_to(c.x, c.y + sz * 0.75);
+                sdf.move_to(c.x - sz, c.y - sz + offset);
+                sdf.line_to(c.x + sz, c.y - sz + offset);
+                sdf.line_to(c.x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
 
-                sdf.fill(mix(#8, #c, self.hover));
+
+                sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
 
                 return sdf.result
             }
