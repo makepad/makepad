@@ -1380,16 +1380,10 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return mix(
-                    THEME_COLOR_BG_HEADER,
-                    THEME_COLOR_BG_EDITOR,
+                    THEME_COLOR_D_1,
+                    THEME_COLOR_U_1,
                     self.selected
                 )
-                /*sdf.clear(color)
-                sdf.move_to(0.0, 0.0)
-                sdf.line_to(0.0, self.rect_size.y)
-                sdf.move_to(self.rect_size.x, 0.0)
-                sdf.line_to(self.rect_size.x, self.rect_size.y)
-                return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
             }
         }
 
@@ -1444,7 +1438,7 @@ live_design! {
             color: (THEME_COLOR_U_5)
         }
         draw_fill: {
-            color: (THEME_COLOR_BG_HEADER)
+            color: (THEME_COLOR_D_1)
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
@@ -1504,9 +1498,11 @@ live_design! {
         padding: {left: 15, top: 5, bottom: 5},
 
         draw_name: {
-            text_style: <THEME_FONT_REGULAR> {}
             instance selected: 0.0
             instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -1523,8 +1519,8 @@ live_design! {
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
-            instance color: (THEME_COLOR_BLACK)
-            instance color_selected: (THEME_COLOR_U_3)
+            instance color: (THEME_COLOR_U_3)
+            instance color_selected: (THEME_COLOR_U_5)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1593,19 +1589,19 @@ live_design! {
     }
 
     PopupMenu = <PopupMenuBase> {
-        width: 100, height: Fit,
+        width: 150., height: Fit,
         flow: Down,
         padding: 5.
 
         menu_item: <PopupMenuItem> {}
 
         draw_bg: {
-            instance color: (THEME_COLOR_U_4)
-            instance border_width: 0.0,
-            instance border_color: (THEME_COLOR_D_0)
+            instance color: (THEME_COLOR_D_5),
+            instance border_width: 5.0,
+            instance border_color: #f00,
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
-            instance radius: 4.0
-            instance blur: 20.0
+            instance radius: 5.0
+            instance blur: 40.0
 
             fn get_color(self) -> vec4 {
                 return self.color
@@ -1616,7 +1612,6 @@ live_design! {
             }
 
             fn pixel(self) -> vec4 {
-
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.blur = self.blur
                 sdf.box(
