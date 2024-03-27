@@ -6,13 +6,13 @@ pub struct HtmlError{
     pub position:usize,
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct HtmlDoc{
     pub decoded: String,
     pub nodes: Vec<HtmlNode>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum HtmlNode{
     OpenTag{lc:LiveId, nc:LiveId},
     CloseTag{lc:LiveId, nc:LiveId},

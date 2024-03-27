@@ -392,6 +392,11 @@ impl TextFlow{
         }
         None 
     }
+        
+    pub fn clear_items(&mut self){
+        self.items.clear();
+    }
+        
 
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
