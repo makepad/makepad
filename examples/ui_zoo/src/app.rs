@@ -439,7 +439,7 @@ live_design!{
                         }
                         <View> {
                             width: Fill, height: Fit,
-                            <LinkLabel> {
+                            <LinkLabelIcon> {
                                 text: "Click me!"
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
@@ -450,7 +450,7 @@ live_design!{
                                     margin: 0.0
                                 }
                             }
-                            <LinkLabel> {
+                            <LinkLabelIcon> {
                                 text: "Click me!"
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
@@ -461,7 +461,7 @@ live_design!{
                                     margin: 0.0
                                 }
                             }
-                            <LinkLabel> {
+                            <LinkLabelIcon> {
                                 text: "Click me!"
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),

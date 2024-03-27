@@ -31,7 +31,7 @@ live_design! {
     THEME_BRIGHTNESS = #x40
     THEME_COLOR_MAKEPAD = #FF5C39FF
     // THEME_COLOR_MAKEPAD = #x1A
-    THEME_COLOR_HIGHLIGHT = #42
+    THEME_COLOR_HIGHLIGHT = #FFFFFF88
     THEME_COLOR_HIGH = #C00
     THEME_COLOR_MID = #FA0
     THEME_COLOR_LOW = #8A0
@@ -1777,10 +1777,13 @@ live_design! {
         draw_bg: {
             fn pixel(self) -> vec4 {
                 return mix(
+                    mix(
                     THEME_COLOR_BG_EDITOR * 0.75,
                     THEME_COLOR_BG_EDITOR * 1.25,
                     self.is_even
-                )
+                ),
+                THEME_COLOR_D_3,
+                self.selected)
             }
         }
 
@@ -1793,13 +1796,9 @@ live_design! {
                 sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                 sdf.union();
                 return sdf.fill(mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_SELECTED,
-                        self.selected
-                    ),
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_SELECTED,
+                    self.selected
                 ));
             }
         }
@@ -1807,13 +1806,9 @@ live_design! {
         draw_name: {
             fn get_color(self) -> vec4 {
                 return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_SELECTED,
-                        self.selected
-                    ),
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_SELECTED,
+                    self.selected
                 )
             }
 
@@ -1928,18 +1923,26 @@ live_design! {
     }
 
     FileTree = <FileTreeBase> {
+        flow: Down,
+
         scroll_bars: <ScrollBars> {}
+        scroll_bars: {}
         node_height: (THEME_DATA_ITEM_HEIGHT),
+        clip_x: true,
+        clip_y: true
+
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
             draw_name: {is_folder: 0.0}
         }
+
         folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
             draw_name: {is_folder: 1.0}
         }
+
         filler: {
             fn pixel(self) -> vec4 {
                 return mix(
@@ -1957,10 +1960,6 @@ live_design! {
                 );
             }
         }
-        flow: Down,
-        clip_x: true,
-        clip_y: true
-        scroll_bars: {}
     }
 
     FoldButton = <FoldButtonBase> {
@@ -2063,42 +2062,11 @@ live_design! {
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        margin: 0., padding: <THEME_MSPACE_V_1> {},
+        margin: 0., padding: {top: 2., right: 0., bottom: 2., left: 0.}
         spacing: 7.5,
         align: {x: 0., y: 0.}
 
         label_walk: { width: Fit, height: Fit, margin: 0. },
-
-        draw_text: {
-            instance hover: 0.0,
-            instance pressed: 0.0,
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        (THEME_COLOR_U_5),
-                        (THEME_COLOR_U_5),
-                        self.hover
-                    ),
-                    (THEME_COLOR_U_4),
-                    self.pressed
-                )
-            }
-        }
-
-        fn get_color(self) -> vec4 {
-            return mix(
-                mix(
-                    (THEME_COLOR_TEXT_DEFAULT),
-                    (THEME_COLOR_TEXT_HOVER),
-                    self.hover
-                ),
-                (THEME_COLOR_D_5),
-                self.pressed
-            )
-        }
 
         draw_bg: {
             instance pressed: 0.0
@@ -2112,7 +2080,7 @@ live_design! {
                     THEME_COLOR_TEXT_DEFAULT,
                     THEME_COLOR_TEXT_META,
                     self.pressed
-                ), mix(0.0, 0.8, self.hover));
+                ), mix(.7, 1., self.hover));
             }
         }
 
@@ -2124,8 +2092,8 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_META,
                         THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
                     THEME_COLOR_TEXT_META,
@@ -2169,6 +2137,27 @@ live_design! {
             }
         }
 
+    }
+
+    LinkLabelIcon = <LinkLabel> {
+        margin: 0., padding: {top: 2., right: 0., bottom: 2., left: 0.}
+        label_walk: { margin: {top: 0., right: 0., bottom: 0., left: -5.} },
+        draw_icon: {
+            instance focus: 0.0
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        (THEME_COLOR_TEXT_DEFAULT),
+                        (THEME_COLOR_TEXT_HOVER),
+                        self.hover
+                    ),
+                    (THEME_COLOR_TEXT_META),
+                    self.pressed
+                )
+            }
+        }
     }
 
     RadioButton = <RadioButtonBase> {
