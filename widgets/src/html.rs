@@ -55,7 +55,11 @@ pub struct Html {
 impl LiveHook for Html {
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(&*self.body, &mut errors);
+        let new_doc = parse_html(&*self.body, &mut errors);
+        if new_doc != self.doc{
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+        }
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -358,15 +362,15 @@ impl LiveHook for HtmlLink {
     // After an HtmlLink instance has been instantiated ("applied"),
     // populate its struct fields from the `<a>` tag's attributes.
     fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        log!("HtmlLink::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
+        //log!("HtmlLink::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
         match apply.from {
-            ApplyFrom::New | ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
+            ApplyFrom::NewFromDoc {..}=> {
                 let scope_attrs: Option<&Vec<HtmlAttribute>> = apply.scope.as_ref()
                     .and_then(|scope| scope.props.get());
-                log!("HtmlLink::after_apply(): SCOPE ATTRS: {:?}", scope_attrs);
+                //log!("HtmlLink::after_apply(): SCOPE ATTRS: {:?}", scope_attrs);
                 if let Some(attrs) = scope_attrs {
                     if let Some(html_attr) = attrs.iter().find(|attr| attr.lc == live_id!(href)) {
-                        log!("HtmlLink::after_apply(): found href attr: {:?}", html_attr);
+                        //log!("HtmlLink::after_apply(): found href attr: {:?}", html_attr);
                         self.href = String::from(&html_attr.value)
                     }
                 }
