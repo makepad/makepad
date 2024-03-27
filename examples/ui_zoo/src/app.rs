@@ -379,6 +379,8 @@ live_design!{
                     <ZooGroup> {
                         thefoldheader= <FoldHeader> {
                             header: <View> {
+                                height: Fit
+                                align: {x: 0., y: 0.5}
                                 fold_button = <FoldButton> {} <Pbold> {text: "Fold me!"}
                             }
                             body: <View> {
