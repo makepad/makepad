@@ -2447,38 +2447,60 @@ live_design! {
         }
 
         draw_bg: {
-            instance radius: 2.0
-            instance border_width: 0.0
-            instance border_color: (THEME_COLOR_U_2)
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance focus: 0.0,
-            color: (THEME_COLOR_D_1)
-            instance color_selected: (THEME_COLOR_D_3)
-
-            fn get_color(self) -> vec4 {
-                return mix(self.color, self.color_selected, self.focus)
-            }
-
-            fn get_border_color(self) -> vec4 {
-                return self.border_color
-            }
+            instance radius: 3.0
+            instance hover: 0.0
+            instance focus: 0.0
+            instance bodytop: (THEME_COLOR_D_075)
+            instance bodybottom: (THEME_COLOR_D_2)
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 1.5;
+
+                let body = mix(
+                    mix(self.bodytop, (THEME_COLOR_D_1), self.hover),
+                    (self.bodybottom),
+                    self.focus
+                );
+
+                let body_transp = vec4(body.xyz, 0.0);
+
+                let top_gradient = mix(
+                    body_transp,
+                    mix((THEME_COLOR_D_4), (THEME_COLOR_D_5), self.focus),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+
+                let bot_gradient = mix(
+                    mix((THEME_COLOR_U_1), (THEME_COLOR_U_2), self.focus),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                // some rim-light at the bottom
+                let shift_inward = self.radius * 1.75;
+                sdf.move_to(shift_inward, self.rect_size.y);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+
                 sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    max(1.0, self.radius)
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.radius
                 )
-                sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
-                }
-                return sdf.result;
+
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    1.0
+                )
+
+                return sdf.result
             }
-        },
+        }
 
         animator: {
             hover = {
@@ -2545,7 +2567,7 @@ live_design! {
 
                 let slider_bg_color = mix((THEME_COLOR_D_3), (THEME_COLOR_D_5), self.focus);
                 let slider_color = mix(mix((THEME_COLOR_U_3), (THEME_COLOR_U_3), self.hover), (THEME_COLOR_U_4), self.focus);
-                let nub_color = (THEME_COLOR_WHITE);
+                let nub_color = (THEME_COLOR_U_4);
                 // let nub_color = mix(mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.hover), mix(#c, #f, self.drag), self.focus);
                 let nubbg_color = mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.drag);
 
