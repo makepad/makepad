@@ -2565,7 +2565,7 @@ live_design! {
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let slider_bg_color = mix((THEME_COLOR_D_2), (THEME_COLOR_D_5), self.focus);
+                let slider_bg_color = mix((THEME_COLOR_D_2), (THEME_COLOR_D_4), self.focus);
                 let slider_color = mix(mix((THEME_COLOR_U_3), (THEME_COLOR_U_3), self.hover), (THEME_COLOR_U_4), self.focus);
                 let nub_color = (THEME_COLOR_U_4);
                 // let nub_color = mix(mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.hover), mix(#c, #f, self.drag), self.focus);
