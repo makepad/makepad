@@ -407,15 +407,15 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_04))
+                        sdf.fill(THEME_COLOR_U_04)
                         sdf.box(
-                            (THEME_SPACE_1),
-                            (THEME_SPACE_1),
-                            (THEME_SPACE_1),
-                            self.rect_size.y - (THEME_SPACE_2),
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
                             1.5
                         );
-                        sdf.fill((THEME_COLOR_U_3));
+                        sdf.fill(THEME_COLOR_U_3);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
@@ -426,7 +426,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_04));
+                        sdf.fill(THEME_COLOR_U_04);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -437,7 +437,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_2));
+                        sdf.fill(THEME_COLOR_U_2);
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -448,7 +448,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_2));
+                        sdf.fill(THEME_COLOR_U_2);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -459,7 +459,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
@@ -470,7 +470,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                 }
@@ -529,15 +529,15 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_04))
+                        sdf.fill(THEME_COLOR_U_04)
                         sdf.box(
-                            (THEME_SPACE_1),
-                            (THEME_SPACE_1),
-                            (THEME_SPACE_1),
-                            self.rect_size.y - (THEME_SPACE_2),
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
                             1.5
                         );
-                        sdf.fill((THEME_COLOR_U_3));
+                        sdf.fill(THEME_COLOR_U_3);
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -548,7 +548,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_2));
+                        sdf.fill(THEME_COLOR_U_2);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
@@ -559,7 +559,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_04));
+                        sdf.fill(THEME_COLOR_U_04);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -570,7 +570,7 @@ live_design! {
                             self.rect_size.y - 2.,
                             2.
                         );
-                        sdf.fill((THEME_COLOR_U_2));
+                        sdf.fill(THEME_COLOR_U_2);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -581,7 +581,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
@@ -592,7 +592,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill((THEME_COLOR_TEXT_DEFAULT));
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                 }
@@ -706,11 +706,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        (THEME_COLOR_U_5),
-                        (THEME_COLOR_U_5),
+                        THEME_COLOR_U_5,
+                        THEME_COLOR_U_5,
                         self.hover
                     ),
-                    (THEME_COLOR_U_4),
+                    THEME_COLOR_U_4,
                     self.pressed
                 )
             }
@@ -727,11 +727,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        (THEME_COLOR_U_5),
-                        (THEME_COLOR_U_5),
+                        THEME_COLOR_U_5,
+                        THEME_COLOR_U_5,
                         self.hover
                     ),
-                    (THEME_COLOR_U_3),
+                    THEME_COLOR_U_3,
                     self.pressed
                 )
             }
@@ -747,11 +747,11 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), (THEME_COLOR_D_1), self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_1, self.pressed);
                 let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(body_transp, mix((THEME_COLOR_U_3), (THEME_COLOR_D_4), self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let top_gradient = mix(body_transp, mix(THEME_COLOR_U_3, THEME_COLOR_D_4, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
-                    mix(body_transp, (THEME_COLOR_U_2), self.pressed),
+                    mix(body_transp, THEME_COLOR_U_2, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -762,8 +762,8 @@ live_design! {
                 sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                 sdf.stroke(
                     mix(
-                        mix((THEME_COLOR_D_3), (THEME_COLOR_D_3), self.hover),
-                        (THEME_COLOR_U_2),
+                        mix(THEME_COLOR_D_3, THEME_COLOR_D_3, self.hover),
+                        THEME_COLOR_U_2,
                         self.pressed
                     ), 1.
                 )
@@ -845,40 +845,39 @@ live_design! {
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
                         sdf.fill_keep(
                             mix(
-                                mix((THEME_COLOR_D_3), (THEME_COLOR_D_2), pow(self.pos.y, 1.)),
-                                mix((THEME_COLOR_D_5), (THEME_COLOR_D_4), pow(self.pos.y, 1.0)),
+                                mix(THEME_COLOR_D_3, THEME_COLOR_D_2, pow(self.pos.y, 1.)),
+                                mix(THEME_COLOR_D_5, THEME_COLOR_D_4, pow(self.pos.y, 1.0)),
                                 self.hover)
                             )
                         sdf.stroke(
                             mix(
-                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_1), self.pos.y),
-                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_2), self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
-                            )
-                            , 1.0)
+                            ), 1.0)
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix((THEME_COLOR_U_0), (THEME_COLOR_U_6), self.selected), 1.25);
+                        sdf.stroke(mix(THEME_COLOR_U_0, THEME_COLOR_U_6, self.selected), 1.25);
                     }
                     CheckType::Radio => {
                         let sz = self.size - 0.5;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep((THEME_COLOR_D_3));
+                        sdf.fill_keep(THEME_COLOR_D_3);
                         sdf.stroke(
                             mix(
-                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_1), self.pos.y),
-                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_2), self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             )
                             , 1.0)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
-                        sdf.fill(mix((THEME_COLOR_U_0), (THEME_COLOR_U_5), self.selected));
+                        sdf.fill(mix(THEME_COLOR_U_0, THEME_COLOR_U_5, self.selected));
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
@@ -887,8 +886,8 @@ live_design! {
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
                         sdf.fill(
                             mix(
-                                mix((THEME_COLOR_D_3), (THEME_COLOR_D_2), pow(self.pos.y, 1.)),
-                                mix((THEME_COLOR_D_5), (THEME_COLOR_D_4), pow(self.pos.y, 1.0)),
+                                mix(THEME_COLOR_D_3, THEME_COLOR_D_2, pow(self.pos.y, 1.)),
+                                mix(THEME_COLOR_D_5, THEME_COLOR_D_4, pow(self.pos.y, 1.0)),
                                 self.hover)
                             )
                         let isz = sz * 0.5;
@@ -897,10 +896,10 @@ live_design! {
                         sdf.subtract();
                         sdf.circle(left + sz + self.selected * sz, c.y, isz);
                         sdf.blend(self.selected)
-                        sdf.fill((THEME_COLOR_U_5));
+                        sdf.fill(THEME_COLOR_U_5);
                     }
                     CheckType::None => {
-                        return (THEME_COLOR_D_0)
+                        return THEME_COLOR_D_0
                     }
                 }
                 return sdf.result
@@ -916,11 +915,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        (THEME_COLOR_TEXT_DEFAULT),
-                        (THEME_COLOR_TEXT_HOVER),
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    (THEME_COLOR_SELECTED),
+                    THEME_COLOR_SELECTED,
                     self.selected
                 )
             }
@@ -933,11 +932,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        (THEME_COLOR_D_5),
-                        (THEME_COLOR_U_3),
+                        THEME_COLOR_D_5,
+                        THEME_COLOR_U_3,
                         self.hover
                     ),
-                    (THEME_COLOR_SELECTED),
+                    THEME_COLOR_SELECTED,
                     self.selected
                 )
             }
@@ -1691,7 +1690,7 @@ live_design! {
                     max(0.0, grad_top - sdf.pos.y) / grad_top);
 
                 let bot_gradient = mix(
-                    mix(body_transp, (THEME_COLOR_U_2), self.pressed),
+                    mix(body_transp, THEME_COLOR_U_2, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -2181,11 +2180,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        (THEME_COLOR_TEXT_DEFAULT),
-                        (THEME_COLOR_TEXT_HOVER),
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    (THEME_COLOR_TEXT_META),
+                    THEME_COLOR_TEXT_META,
                     self.pressed
                 )
             }
@@ -2209,11 +2208,11 @@ live_design! {
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep((THEME_COLOR_D_3));
+                        sdf.fill_keep(THEME_COLOR_D_3);
                         sdf.stroke(
                             mix(
-                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_1), self.pos.y),
-                                mix((THEME_COLOR_U_0), (THEME_COLOR_U_2), self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             )
                             , 1.0)
@@ -2417,11 +2416,11 @@ live_design! {
                 return
                 mix(
                     mix(
-                        (THEME_COLOR_U_4),
-                        (THEME_COLOR_U_6),
+                        THEME_COLOR_U_4,
+                        THEME_COLOR_U_6,
                         self.focus
                     ),
-                    (THEME_COLOR_U_4),
+                    THEME_COLOR_U_4,
                     self.is_empty
                 )
             }
@@ -2439,7 +2438,7 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix((THEME_COLOR_U_0), (THEME_COLOR_WHITE), self.focus));
+                sdf.fill(mix(THEME_COLOR_U_0, THEME_COLOR_WHITE, self.focus));
                 return sdf.result
             }
         }
@@ -2459,8 +2458,8 @@ live_design! {
                     self.border_radius
                 )
                 sdf.fill(
-                    mix((THEME_COLOR_U_0),
-                    (THEME_COLOR_U_2),
+                    mix(THEME_COLOR_U_0,
+                    THEME_COLOR_U_2,
                     self.focus)
                 ); // Pad color
                 return sdf.result
@@ -2480,7 +2479,7 @@ live_design! {
                 let grad_bot = 1.5;
 
                 let body = mix(
-                    mix(self.bodytop, (THEME_COLOR_D_1), self.hover),
+                    mix(self.bodytop, THEME_COLOR_D_1, self.hover),
                     (self.bodybottom),
                     self.focus
                 );
@@ -2489,12 +2488,12 @@ live_design! {
 
                 let top_gradient = mix(
                     body_transp,
-                    mix((THEME_COLOR_D_5), (THEME_COLOR_BLACK), self.focus),
+                    mix(THEME_COLOR_D_5, THEME_COLOR_BLACK, self.focus),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
 
                 let bot_gradient = mix(
-                    mix((THEME_COLOR_U_3), (THEME_COLOR_U_3), self.focus),
+                    mix(THEME_COLOR_U_3, THEME_COLOR_U_3, self.focus),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -2586,11 +2585,11 @@ live_design! {
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let slider_bg_color = mix((THEME_COLOR_D_2), (THEME_COLOR_D_4), self.focus);
-                let slider_color = mix(mix((THEME_COLOR_U_3), (THEME_COLOR_U_3), self.hover), (THEME_COLOR_U_4), self.focus);
+                let slider_bg_color = mix(THEME_COLOR_D_2, THEME_COLOR_D_4, self.focus);
+                let slider_color = mix(mix(THEME_COLOR_U_3, THEME_COLOR_U_3, self.hover), THEME_COLOR_U_4, self.focus);
                 let nub_color = (THEME_COLOR_U_4);
                 // let nub_color = mix(mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.hover), mix(#c, #f, self.drag), self.focus);
-                let nubbg_color = mix((THEME_COLOR_WHITE), (THEME_COLOR_WHITE), self.drag);
+                let nubbg_color = mix(THEME_COLOR_WHITE, THEME_COLOR_WHITE, self.drag);
 
                 match self.slider_type {
                     SliderType::Horizontal => {
@@ -2599,7 +2598,7 @@ live_design! {
                         sdf.fill(slider_bg_color);
 
                         sdf.rect(0, self.rect_size.y - slider_height * 0.25, self.rect_size.x, slider_height)
-                        sdf.fill((THEME_COLOR_U_3));
+                        sdf.fill(THEME_COLOR_U_3);
 
                         sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
                         sdf.fill(slider_color);
@@ -2824,7 +2823,7 @@ live_design! {
                     }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/back.svg"),
-                        color: (THEME_COLOR_BLACK);
+                        color: THEME_COLOR_BLACK;
                         brightness: 0.8;
                     }
                 }
