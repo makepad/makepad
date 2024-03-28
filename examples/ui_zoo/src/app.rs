@@ -556,7 +556,7 @@ live_design!{
                     <ZooGroup> {
                         flow: Down,
                         spacing: (THEME_SPACE_2)
-                        <H3> { text: "Radios"}
+                        <H4> { text: "Default"}
                         <View> {
                             height: Fit
                             flow: Right
@@ -571,7 +571,7 @@ live_design!{
                             }
                         }
 
-                        <H3> { text: "Radios with Icons"}
+                        <H4> { text: "Custom Radios"}
                         <View> {
                             height: Fit
                             flow: Right
@@ -580,7 +580,7 @@ live_design!{
                             width: Fit, height: Fit,
                             spacing: (THEME_SPACE_2)
                             flow: Down,
-                            radio1 = <RadioButtonIcon> {
+                            radio1 = <RadioButtonCustom> {
                                 label: "Option 2: yey"
                                 icon_walk: {
                                     width: 12.5, height: Fit,
@@ -590,7 +590,7 @@ live_design!{
                                 }
                             }
 
-                            radio2 = <RadioButtonIcon> {
+                            radio2 = <RadioButtonCustom> {
                                 label: "Option 2: yey"
                                 icon_walk: {
                                     width: 12.5, height: Fit,
@@ -599,7 +599,7 @@ live_design!{
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
                             }
-                            radio3 = <RadioButtonIcon> {
+                            radio3 = <RadioButtonCustom> {
                                 label: "Option 2: yey"
                                 icon_walk: {
                                     width: 12.5, height: Fit,
@@ -608,7 +608,7 @@ live_design!{
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
                             }
-                            radio4 = <RadioButtonIcon> {
+                            radio4 = <RadioButtonCustom> {
                                     label: "Option 2: yey"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
@@ -620,8 +620,24 @@ live_design!{
                             }
                         }
 
+                        <H4> { text: "Text only"}
+                        <View> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5 }
+                            textonlyradios_demo = <View> {
+                                width: Fit, height: Fit,
+                                flow: Right,
+                                spacing: (THEME_SPACE_2)
+                                radio1 = <RadioButtonTextual> { label: "Option 1" }
+                                radio2 = <RadioButtonTextual> { label: "Option 2" }
+                                radio3 = <RadioButtonTextual> { label: "Option 3" }
+                                radio4 = <RadioButtonTextual> { label: "Option 4" }
+                            }
+                        }
 
-                        <H3> { text: "Button Group"}
+
+                        <H4> { text: "Button Group"}
                         <ButtonGroup> {
                             height: Fit
                             flow: Right
@@ -899,6 +915,9 @@ impl MatchEvent for App{
 
         ui.radio_button_set(ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4))
             .selected_to_visible(cx, &ui, actions, ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4));
+
+        ui.radio_button_set(ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4))
+            .selected_to_visible(cx, &ui, actions, ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4));
 
         if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
             log!("TEXTBOX CHANGED {}", self.counter);
