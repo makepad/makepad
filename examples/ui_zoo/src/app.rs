@@ -315,7 +315,7 @@ live_design!{
                                 fn get_color(self) ->vec4{
                                     return mix((COLOR_ACCENT), (THEME_COLOR_U_0), self.pos.x)
                                 }
-                                color: (THEME_COLOR_MAKEPAD) 
+                                color: (THEME_COLOR_MAKEPAD)
                                 text_style: {
                                     font_size: 40.,
                                 }
@@ -336,19 +336,19 @@ live_design!{
                             <Slider> { text: "Parameter" }
                             <Slider> { text: "Parameter" }
                             <Slider> { text: "Parameter" }
-                        } 
+                        }
                         <View> {
                             width: Fill, height: Fit,
                             <Slider> { text: "Parameter" }
                             <Slider> { text: "Parameter" }
                             <Slider> { text: "Parameter" }
-                        } 
+                        }
                         <View> {
                             width: Fill, height: Fit,
                             <Slider> { text: "Parameter" }
                             <Slider> { text: "Parameter" }
                             <Slider> { text: "Parameter" }
-                        } 
+                        }
                     }
                 }
 
@@ -555,12 +555,14 @@ live_design!{
                     <ZooDesc> {text:"RadioButton?"}
                     <ZooGroup> {
                         flow: Down,
-                        <H3> { text: "Radio Mode"}
+                        spacing: (THEME_SPACE_2)
+                        <H3> { text: "Radios"}
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
                             radios_demo = <View> {
+                                spacing: (THEME_SPACE_2)
                                 width: Fit, height: Fit,
                                 radio1 = <RadioButton> { label: "Option 1: yey" }
                                 radio2 = <RadioButton> { label: "Option 2: hah" }
@@ -568,13 +570,45 @@ live_design!{
                                 radio4 = <RadioButton> { label: "Option 4: all of the above" }
                             }
                         }
+
+                        <H3> { text: "Radios with Icons"}
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
-                            <View> {
-                                width: Fit, height: Fit,
-                                <RadioButton> {
+                            iconradios_demo = <View> {
+                            width: Fit, height: Fit,
+                            spacing: (THEME_SPACE_2)
+                            flow: Down,
+                            radio1 = <RadioButtonIcon> {
+                                label: "Option 2: yey"
+                                icon_walk: {
+                                    width: 12.5, height: Fit,
+                                }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                            }
+
+                            radio2 = <RadioButtonIcon> {
+                                label: "Option 2: yey"
+                                icon_walk: {
+                                    width: 12.5, height: Fit,
+                                }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                            }
+                            radio3 = <RadioButtonIcon> {
+                                label: "Option 2: yey"
+                                icon_walk: {
+                                    width: 12.5, height: Fit,
+                                }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                            }
+                            radio4 = <RadioButtonIcon> {
                                     label: "Option 2: yey"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
@@ -585,18 +619,7 @@ live_design!{
                                 }
                             }
                         }
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                            <View> {
-                                width: Fit, height: Fit,
-                                <RadioButton> { label: "Option 1: yey" }
-                                <RadioButton> { label: "Option 2: hah" }
-                                <RadioButton> { label: "Option 3: hmm" }
-                                <RadioButton> { label: "Option 4: all of the above" }
-                            }
-                        }
+
 
                         <H3> { text: "Button Group"}
                         <ButtonGroup> {
@@ -611,6 +634,7 @@ live_design!{
                                 radio4 = <RadioButtonTab> { label: "Option 4" }
                             }
                         }
+
                     }
                 }
 
@@ -662,7 +686,7 @@ live_design!{
                             tab_a = Tab {
                                 name: "Tab A"
                                 kind: Container_A
-                            }   
+                            }
 
                             tab_b = Tab {
                                 name: "Tab B"
@@ -672,7 +696,7 @@ live_design!{
                             tab_c = Tab {
                                 name: "Tab C"
                                 kind: Container_C
-                            }   
+                            }
 
                             tab_d = Tab {
                                 name: "Tab D"
@@ -682,7 +706,7 @@ live_design!{
                             tab_e = Tab {
                                 name: "Tab E"
                                 kind: Container_E
-                            }   
+                            }
 
                             tab_f = Tab {
                                 name: "Tab F"
@@ -869,6 +893,9 @@ impl MatchEvent for App{
 
         ui.radio_button_set(ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4))
             .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
+
+        ui.radio_button_set(ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4))
+            .selected_to_visible(cx, &ui, actions, ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4));
 
         ui.radio_button_set(ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4))
             .selected_to_visible(cx, &ui, actions, ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4));
