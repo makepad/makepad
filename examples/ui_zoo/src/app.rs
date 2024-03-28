@@ -12,6 +12,10 @@ live_design!{
     COLOR_CONTAINER = (THEME_COLOR_D_075)
     COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
 
+    DEMO_COLOR_1 = #8f0
+    DEMO_COLOR_2 = #0f8
+    DEMO_COLOR_3 = #80f
+
     ZooTitle = <View> {
         width: Fill, height: Fit,
         flow: Down,
@@ -118,9 +122,9 @@ live_design!{
                         draw_bg: { color: (COLOR_CONTAINER) }
                         padding: 10.
                         spacing: 10.
-                        <ZooBlock> {draw_bg:{color: #f00}}
-                        <ZooBlock> {draw_bg:{color: #0f0}}
-                        <ZooBlock> {draw_bg:{color: #00f}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
                     }
 
                     <ZooDesc> { text:"This is a view with flow set to Down" }
@@ -131,9 +135,9 @@ live_design!{
                         spacing: 10.
                         show_bg: true,
                         draw_bg: { color: (COLOR_CONTAINER) }
-                        <ZooBlock> {draw_bg:{color: #f00}}
-                        <ZooBlock> {draw_bg:{color: #0f0}}
-                        <ZooBlock> {draw_bg:{color: #00f}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
                     }
 
                     <ZooDesc> {text:"This view is bigger on the inside"}
@@ -153,10 +157,10 @@ live_design!{
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock> {draw_bg:{color: #f00}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
-                            <ZooBlock> {draw_bg:{color: #00f}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                         }
 
                         <View> {
@@ -165,10 +169,10 @@ live_design!{
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock> {draw_bg:{color: #f00}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
-                            <ZooBlock> {draw_bg:{color: #00f}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                         }
 
                         <View> {
@@ -177,10 +181,10 @@ live_design!{
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock> {draw_bg:{color: #f00}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
-                            <ZooBlock> {draw_bg:{color: #00f}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                         }
 
                         <View> {
@@ -189,10 +193,10 @@ live_design!{
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock> {draw_bg:{color: #f00}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
-                            <ZooBlock> {draw_bg:{color: #00f}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                         }
 
                         <View> {
@@ -201,9 +205,9 @@ live_design!{
                             show_bg: false,
                             padding: 0
                             spacing: 10
-                            <ZooBlock> {draw_bg:{color: #f00}}
-                            <ZooBlock> {draw_bg:{color: #0f0}}
-                            <ZooBlock> {draw_bg:{color: #00f}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
                         }
                     }
                 }
@@ -223,9 +227,9 @@ live_design!{
                             color: (COLOR_CONTAINER),
                             radius: 10.
                         }
-                        <ZooBlock> {draw_bg:{color: #f00}}
-                        <ZooBlock> {draw_bg:{color: #0f0}}
-                        <ZooBlock> {draw_bg:{color: #00f}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
                     }
                 }
 
@@ -433,14 +437,17 @@ live_design!{
                     <ZooGroup> {
                         width: Fill, height: Fit,
                         flow: Down,
+                        spacing: (THEME_SPACE_2)
                         <View> {
                             width: Fill, height: Fit,
+                            spacing: (THEME_SPACE_2)
                             <LinkLabel> { text: "Click me!"}
                             <LinkLabel> { text: "Click me!"}
                             <LinkLabel> { text: "Click me!"}
                         }
                         <View> {
                             width: Fill, height: Fit,
+                            spacing: (THEME_SPACE_2)
                             <LinkLabelIcon> {
                                 text: "Click me!"
                                 draw_icon: {
@@ -551,8 +558,8 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"RadioButton"}
-                    <ZooDesc> {text:"RadioButton?"}
+                    title = {text:"RadioButtons"}
+                    <ZooDesc> {text:"RadioButtons"}
                     <ZooGroup> {
                         flow: Down,
                         spacing: (THEME_SPACE_2)
@@ -564,10 +571,10 @@ live_design!{
                             radios_demo = <View> {
                                 spacing: (THEME_SPACE_2)
                                 width: Fit, height: Fit,
-                                radio1 = <RadioButton> { label: "Option 1: yey" }
-                                radio2 = <RadioButton> { label: "Option 2: hah" }
-                                radio3 = <RadioButton> { label: "Option 3: hmm" }
-                                radio4 = <RadioButton> { label: "Option 4: all of the above" }
+                                radio1 = <RadioButton> { label: "Option 1" }
+                                radio2 = <RadioButton> { label: "Option 2" }
+                                radio3 = <RadioButton> { label: "Option 3" }
+                                radio4 = <RadioButton> { label: "Option 4" }
                             }
                         }
 
@@ -577,39 +584,39 @@ live_design!{
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
                             iconradios_demo = <View> {
-                            width: Fit, height: Fit,
-                            spacing: (THEME_SPACE_2)
-                            flow: Down,
-                            radio1 = <RadioButtonCustom> {
-                                label: "Option 2: yey"
-                                icon_walk: {
-                                    width: 12.5, height: Fit,
-                                }
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                            }
+                                width: Fit, height: Fit,
+                                spacing: (THEME_SPACE_2)
+                                flow: Down,
 
-                            radio2 = <RadioButtonCustom> {
-                                label: "Option 2: yey"
-                                icon_walk: {
-                                    width: 12.5, height: Fit,
+                                radio1 = <RadioButtonCustom> {
+                                    label: "Option 1"
+                                    icon_walk: {
+                                        width: 12.5, height: Fit,
+                                    }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
                                 }
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                radio2 = <RadioButtonCustom> {
+                                    label: "Option 2"
+                                    icon_walk: {
+                                        width: 12.5, height: Fit,
+                                    }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
                                 }
-                            }
-                            radio3 = <RadioButtonCustom> {
-                                label: "Option 2: yey"
-                                icon_walk: {
-                                    width: 12.5, height: Fit,
+                                radio3 = <RadioButtonCustom> {
+                                    label: "Option 3"
+                                    icon_walk: {
+                                        width: 12.5, height: Fit,
+                                    }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
                                 }
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                            }
-                            radio4 = <RadioButtonCustom> {
-                                    label: "Option 2: yey"
+                                radio4 = <RadioButtonCustom> {
+                                    label: "Option 4"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
                                     }
@@ -820,12 +827,12 @@ live_design!{
                 //             body = {
                 //                 flow: Down,
                 //                 spacing: 10,
-                //                 header = <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #0f0} }
-                //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #f00} }
+                //                 header = <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_2)} }
+                //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_1)} }
                 //             }
 
                 //             panel = {
-                //                 draw_bg: { color: #00f }
+                //                 draw_bg: { color: (DEMO_COLOR_3) }
 
                 //                 scroll_handler = {
                 //                     draw_bg: {
