@@ -2271,18 +2271,14 @@ live_design! {
 
         draw_text: {
             instance hover: 0.0
-            instance focus: 0.0
             instance selected: 0.0
 
-            uniform color_unselected: #xFFFFFF66
-            uniform color_unselected_hover: #xFFFFFFAA
-            uniform color_selected: #xFFFFFFFF
+            uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
 
             color: (THEME_COLOR_U_5)
-            text_style: {
-                font: {
-                    // path: d"resources/ibmplexsans-semibold.ttf"
-                }
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -2299,14 +2295,13 @@ live_design! {
         }
 
         draw_icon: {
-            instance focus: 0.0
             instance hover: 0.0
             instance selected: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         THEME_COLOR_D_3,
-                        THEME_COLOR_U_1,
+                        THEME_COLOR_U_2,
                         self.hover
                     ),
                     THEME_COLOR_U_5,
@@ -2348,25 +2343,6 @@ live_design! {
                     }
                 }
             }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_radio: {focus: 0.0}
-                        draw_text: {focus: 0.0}
-                        draw_icon: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_radio: {focus: 1.0}
-                        draw_text: {focus: 1.0}
-                        draw_icon: {focus: 1.0}
-                    }
-                }
-            }
             selected = {
                 default: off
                 off = {
@@ -2392,10 +2368,55 @@ live_design! {
         }
     }
 
-    RadioButtonIcon = <RadioButton> {
+    RadioButtonCustom = <RadioButton> {
+        draw_radio: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                return sdf.result
+            }
+        }
+        margin: { left: -17.5}
         label_walk: {
             width: Fit, height: Fit,
-            margin: { top: 0., right: 0., bottom: 0., left: 5.}
+            margin: { top: 0., right: 0., bottom: 0., left: 6.}
+        }
+    }
+
+    RadioButtonTextual = <RadioButton> {
+        draw_radio: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                return sdf.result
+            }
+        }
+        margin: { left: -4.}
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { top: 0., right: 0., bottom: 0., left: 6.}
+        }
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+
+            uniform color_unselected: (THEME_COLOR_U_4)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_WHITE)
+
+            color: (THEME_COLOR_U_5)
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
         }
     }
 
@@ -2404,6 +2425,27 @@ live_design! {
         draw_radio: { radio_type: Tab }
         padding: <THEME_MSPACE_2> {}
         label_walk: { margin: 0.  }
+
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+
+            uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
+
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
+        }
     }
 
     ButtonGroup = <CachedRoundedView> {
