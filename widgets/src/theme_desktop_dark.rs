@@ -185,7 +185,7 @@ live_design! {
 
     H1 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_1), bottom: (THEME_FONT_SIZE_1 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_1), bottom: 0.}
         draw_text: {
             wrap: Word
             text_style: <THEME_FONT_BOLD> {
@@ -199,7 +199,7 @@ live_design! {
 
     H1italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_1), bottom: (THEME_FONT_SIZE_1 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_1), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -212,7 +212,7 @@ live_design! {
 
     H2 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_2), bottom: (THEME_FONT_SIZE_2 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_2), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -225,7 +225,7 @@ live_design! {
 
     H2italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_2), bottom: (THEME_FONT_SIZE_2 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_2), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -238,7 +238,7 @@ live_design! {
 
     H3 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_3), bottom: (THEME_FONT_SIZE_3 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_3), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -251,7 +251,7 @@ live_design! {
 
     H3italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_3), bottom: (THEME_FONT_SIZE_3 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_3), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -264,7 +264,7 @@ live_design! {
 
     H4 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_4), bottom: (THEME_FONT_SIZE_4 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_4), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -277,7 +277,7 @@ live_design! {
 
     H4italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_4), bottom: (THEME_FONT_SIZE_4 * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_4), bottom: 0.}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -601,6 +601,8 @@ live_design! {
         }
     }
 
+    Spacer = <View> { width: Fill, height: Fill } 
+
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
@@ -707,7 +709,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
+                        THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
                     THEME_COLOR_U_4,
@@ -2216,7 +2218,7 @@ live_design! {
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep(THEME_COLOR_D_3);
+                        sdf.fill_keep(THEME_COLOR_D_3); 
                         sdf.stroke(
                             mix(
                                 mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
@@ -2226,7 +2228,17 @@ live_design! {
                             , 1.0)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
-                        sdf.fill(mix(#fff0, #f, self.selected));
+                        sdf.fill(
+                            mix(
+                                mix(
+                                    THEME_COLOR_D_0,
+                                    THEME_COLOR_U_3,
+                                    self.hover
+                                ),
+                                THEME_COLOR_U_5,
+                                self.selected
+                            )
+                        );
                     }
                     RadioType::Tab => {
                         let grad_top = 5.0;
@@ -2287,10 +2299,12 @@ live_design! {
                 return mix(
                     mix(
                         self.color_unselected,
-                        self.color_unselected_hover,
+                        self.color_unselected,
+                        // self.color_unselected_hover,
                         self.hover
                     ),
-                    self.color_selected,
+                    self.color_unselected,
+                    // self.color_selected,
                     self.selected
                 )
             }
@@ -2440,7 +2454,8 @@ live_design! {
                 return mix(
                     mix(
                         self.color_unselected,
-                        self.color_unselected_hover,
+                        self.color_unselected,
+                        // self.color_unselected_hover,
                         self.hover
                     ),
                     self.color_selected,
