@@ -4,7 +4,7 @@ use {
         io::prelude::*,
         mem,
         ptr,
-        ffi::{c_char, CStr},
+        ffi::{c_char, CStr, CString},
     },
     self::super::gl_sys,
     crate::{
@@ -69,11 +69,11 @@ impl Cx {
                         self.os_type.get_cache_dir().as_ref()
                     ));
                 }
-                let shgl = shp.gl_shader.as_ref().unwrap();
+                let shgl = shp.gl_shader.as_mut().unwrap();
                 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none(){
                     draw_call.instance_dirty = false;
-                    draw_item.os.inst_vb.update_with_f32_data(draw_item.instances.as_ref().unwrap());
+                    draw_item.os.inst_vb.update_with_f32_vertex_data(draw_item.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -93,8 +93,8 @@ impl Cx {
                 
                 let geometry = &mut self.geometries[geometry_id];
                 if geometry.dirty || geometry.os.vb.gl_buffer.is_none() || geometry.os.ib.gl_buffer.is_none() {
-                    geometry.os.vb.update_with_f32_data(&geometry.vertices);
-                    geometry.os.ib.update_with_u32_data(&geometry.indices);
+                    geometry.os.vb.update_with_f32_vertex_data(&geometry.vertices);
+                    geometry.os.ib.update_with_u32_index_data(&geometry.indices);
                     geometry.dirty = false;
                 }
                 
@@ -168,19 +168,20 @@ impl Cx {
                     gl_sys::BindVertexArray(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                     
-                    let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                    let pass = &mut self.passes[pass_id];
+                    let pass_uniforms = pass.pass_uniforms.as_slice();
                     let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                     let draw_uniforms = draw_call.draw_uniforms.as_slice();
                     
-                    GlShader::set_uniform_array(&shgl.pass_uniforms, pass_uniforms);
-                    GlShader::set_uniform_array(&shgl.view_uniforms, draw_list_uniforms);
-                    GlShader::set_uniform_array(&shgl.draw_uniforms, draw_uniforms);
-                    GlShader::set_uniform_array(&shgl.user_uniforms, &draw_call.user_uniforms);
-                    GlShader::set_uniform_array(&shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
+                    shgl.pass_uniform_block.update_and_bind_buffer(&mut pass.os.pass_uniforms, pass_uniforms);
+                    shgl.view_uniform_block.update_and_bind_buffer(&mut draw_list.os.view_uniforms, draw_list_uniforms);
+                    shgl.draw_uniform_block.update_and_bind_buffer(&mut draw_item.os.draw_uniforms, draw_uniforms);
+                    shgl.user_uniform_block.update_and_bind_buffer(&mut draw_item.os.user_uniforms, &draw_call.user_uniforms);
+                    shgl.live_uniform_block.update_and_bind_buffer(&mut shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
                     
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
-                        GlShader::set_uniform_array(&shgl.const_table_uniform, ct);
+                        shgl.const_table_uniform_block.update_and_bind_buffer(&mut shgl.const_table_uniforms, ct);
                     }
                     
                     // lets set our textures
@@ -229,7 +230,7 @@ impl Cx {
                                 _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0)     
                             }
                         }
-                        gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
+                        gl_sys::Uniform1i(shgl.textures[i].location, i as i32);
                     }
                     
                     gl_sys::DrawElementsInstanced(
@@ -489,16 +490,6 @@ impl Cx {
         }
         self.draw_shaders.compile_set.clear();
     }
-
-    pub fn maybe_warn_hardware_support(&self) {
-        // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
-        let gpu_renderer = get_gl_string(gl_sys::RENDERER);
-        if gpu_renderer.contains("Adreno") {
-            crate::log!("WARNING: This device is using {gpu_renderer} renderer.
-            OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
-            This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
-        }
-    }
 }
 
 
@@ -512,15 +503,21 @@ pub struct CxOsDrawShader {
 #[derive(Clone)]
 pub struct GlShader {
     pub program: u32,
+
     pub geometries: Vec<OpenglAttribute>,
     pub instances: Vec<OpenglAttribute>,
-    pub textures: Vec<OpenglUniform>,
-    pub pass_uniforms: OpenglUniform,
-    pub view_uniforms: OpenglUniform,
-    pub draw_uniforms: OpenglUniform,
-    pub user_uniforms: OpenglUniform,
-    pub live_uniforms: OpenglUniform,
-    pub const_table_uniform: OpenglUniform,
+
+    textures: Vec<OpenglUniform>,
+
+    pass_uniform_block: OpenglUniformBlock,
+    view_uniform_block: OpenglUniformBlock,
+    draw_uniform_block: OpenglUniformBlock,
+    user_uniform_block: OpenglUniformBlock,
+    live_uniform_block: OpenglUniformBlock,
+    const_table_uniform_block: OpenglUniformBlock,
+
+    pub live_uniforms: OpenglBuffer,
+    pub const_table_uniforms: OpenglBuffer,
 }
 
 impl GlShader{
@@ -599,34 +596,21 @@ impl GlShader{
 
             Self{
                 program,
+
                 geometries:Self::opengl_get_attributes(program, "packed_geometry_", mapping.geometries.total_slots),
                 instances: Self::opengl_get_attributes(program, "packed_instance_", mapping.instances.total_slots),
-                textures: Self::opengl_get_texture_slots(program, &mapping.textures),
-                pass_uniforms: Self::opengl_get_uniform(program, "pass_table"),
-                view_uniforms: Self::opengl_get_uniform(program, "view_table"),
-                draw_uniforms: Self::opengl_get_uniform(program, "draw_table"),
-                user_uniforms: Self::opengl_get_uniform(program, "user_table"),
-                live_uniforms: Self::opengl_get_uniform(program, "live_table"),
-                const_table_uniform: Self::opengl_get_uniform(program, "const_table"),
-            }
-        }
-    }
 
-    
-    pub fn set_uniform_array(loc: &OpenglUniform, array: &[f32]) {
-        unsafe {
-            gl_sys::Uniform1fv(loc.loc as i32, array.len() as i32, array.as_ptr());
-        }
-    }
-    
-    pub fn opengl_get_uniform(program: u32, name: &str) -> OpenglUniform {
-        let mut name0 = String::new();
-        name0.push_str(name);
-        name0.push_str("\0");
-        unsafe {
-            OpenglUniform {
-                loc: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
-                //name: name.to_string(),
+                textures: Self::opengl_get_texture_slots(program, &mapping.textures),
+
+                pass_uniform_block: OpenglUniformBlock::from_program_by_name(program, "UniformBlock_pass"),
+                view_uniform_block: OpenglUniformBlock::from_program_by_name(program, "UniformBlock_view"),
+                draw_uniform_block: OpenglUniformBlock::from_program_by_name(program, "UniformBlock_draw"),
+                user_uniform_block: OpenglUniformBlock::from_program_by_name(program, "UniformBlock_user"),
+                live_uniform_block: OpenglUniformBlock::from_program_by_name(program, "UniformBlock_live"),
+                const_table_uniform_block: OpenglUniformBlock::from_program_by_name(program, "UniformBlock_const"),
+
+                live_uniforms: OpenglBuffer::default(),
+                const_table_uniforms: OpenglBuffer::default(),
             }
         }
     }
@@ -722,7 +706,7 @@ impl GlShader{
     }
     
     
-    pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<DrawShaderTextureInput>) -> Vec<OpenglUniform> {
+    fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<DrawShaderTextureInput>) -> Vec<OpenglUniform> {
         let mut gl_texture_slots = Vec::new();
         
         for slot in texture_slots {
@@ -731,14 +715,16 @@ impl GlShader{
             name0.push_str("\0");
             unsafe {
                 gl_texture_slots.push(OpenglUniform {
-                    loc: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
+                    location: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
                 })
             }
         }
         gl_texture_slots
     }
 
-    pub fn free_resources(self){
+    pub fn free_resources(mut self){
+        self.live_uniforms.free_resources();
+        self.const_table_uniforms.free_resources();
         unsafe{
             gl_sys::DeleteShader(self.program);
         }
@@ -747,53 +733,44 @@ impl GlShader{
 
 impl CxOsDrawShader {
     pub fn new(vertex: &str, pixel: &str, os_type: &OsType) -> Self {
-        // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
+        // Check if OES_EGL_image_external_essl3 extension is available in the current device, otherwise do not attempt to use in the shaders.
         let available_extensions = get_gl_string(gl_sys::EXTENSIONS);
-        let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
+        let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "OES_EGL_image_external_essl3");
 
         let mut maybe_ext_tex_extension_import = String::new();
         let mut maybe_ext_tex_extension_sampler = String::new();
 
-        // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
+        // NOTE(eddyb) the below claim has not been re-tested after switching to `#version 300 es`.
+        // OES_EGL_image_external_essl3 is not well supported on Android emulators with macOS hosts.
         // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
         let is_emulator = match os_type {
             Android(params) => params.is_emulator,
             _ => false,
         };
 
-        // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions. 
-        // This seems like a driver bug (no confirmation from Qualcomm yet).
-        // Therefore we're disabling the external texture support for Adreno until this is fixed.
-        let is_vendor_adreno = get_gl_string(gl_sys::RENDERER).contains("Adreno"); 
-        if is_external_texture_supported && !is_vendor_adreno && !is_emulator {
-            maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
-            maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
+        if is_external_texture_supported && !is_emulator {
+            maybe_ext_tex_extension_import = "#extension OES_EGL_image_external_essl3 : require\n".to_string();
+            maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture(sampler, vec2(pos.x, pos.y));}}".to_string();
         }
         
         let vertex = format!("
-            #version 100
+            #version 300 es
             {}
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} 
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", maybe_ext_tex_extension_import, vertex);
 
         let pixel = format!("
-            #version 100
+            #version 300 es
             #extension GL_OES_standard_derivatives : enable
             {}
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
             {}\0", maybe_ext_tex_extension_import, maybe_ext_tex_extension_sampler, pixel);
         
             // lets fetch the uniform positions for our uniforms
@@ -828,11 +805,50 @@ pub struct OpenglAttribute {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct OpenglUniform {
-    pub loc: i32,
-    //pub name: String,
+struct OpenglUniform {
+    location: i32,
 }
 
+#[derive(Debug, Default, Clone)]
+struct OpenglUniformBlock {
+    binding: u32,
+}
+
+impl OpenglUniformBlock {
+    fn from_program_by_name(program: u32, name: &str) -> Self {
+        let c_name = CString::new(name).unwrap();
+        let index = unsafe {
+            gl_sys::GetUniformBlockIndex(program, c_name.as_ptr())
+        };
+
+        // HACK(eddyb) 1:1 mappings from index to binding isn't the best idea,
+        // but `#version 300 es` doesn't have access to `layout(binding = ...)`.
+        let binding = index;
+
+        // This step injects the `index`->`binding` relationship into `program`,
+        // *as if* the uniform block had itself used `layout(binding = index)`.
+        unsafe {
+            gl_sys::UniformBlockBinding(program, index, binding);
+        }
+
+        Self {
+            binding,
+        }
+    }
+
+    fn update_and_bind_buffer(&self, buf: &mut OpenglBuffer, data: &[f32]) {
+        buf.update_with_f32_uniform_data(data);
+        unsafe {
+            gl_sys::BindBufferRange(
+                gl_sys::UNIFORM_BUFFER,
+                self.binding,
+                buf.gl_buffer.unwrap(),
+                0,
+                (data.len() * mem::size_of::<f32>()) as gl_sys::types::GLsizeiptr,
+            );
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct CxOsGeometry {
@@ -857,6 +873,13 @@ pub struct OpenglTextureSlot {
 */
 #[derive(Clone, Default)]
 pub struct CxOsView {
+    view_uniforms: OpenglBuffer,
+}
+
+impl CxOsView {
+    pub fn free_resources(&mut self){
+        self.view_uniforms.free_resources();
+    }
 }
 
 #[derive(Default, Clone)]
@@ -878,12 +901,16 @@ impl CxOsDrawCallVao {
 
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
+    pub draw_uniforms: OpenglBuffer,
+    pub user_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
 }
 
 impl CxOsDrawCall {
     pub fn free_resources(&mut self){
+        self.draw_uniforms.free_resources();
+        self.user_uniforms.free_resources();
         self.inst_vb.free_resources();
         if let Some(vao) = self.vao.take(){
             vao.free();
@@ -1169,12 +1196,14 @@ impl CxTexture {
 
 #[derive(Default, Clone)]
 pub struct CxOsPass {
-    pub gl_framebuffer: Option<u32>,
+    pass_uniforms: OpenglBuffer,
+    gl_framebuffer: Option<u32>,
 }
 
 impl CxOsPass{
     
     pub fn free_resources(&mut self){
+        self.pass_uniforms.free_resources();
         if let Some(gl_framebuffer) = self.gl_framebuffer.take(){
             unsafe{gl_sys::DeleteFramebuffers(1, &gl_framebuffer)};
         }
@@ -1183,7 +1212,7 @@ impl CxOsPass{
 
 #[derive(Default, Clone)]
 pub struct OpenglBuffer {
-    pub gl_buffer: Option<u32>
+    gl_buffer: Option<u32>
 }
 
 impl OpenglBuffer {
@@ -1196,33 +1225,37 @@ impl OpenglBuffer {
         }
     }
     
-    pub fn update_with_f32_data(&mut self, data: &Vec<f32>) {
+    // NOTE(eddyb) `unsafe` due to a lack of a trait like those in `bytemuck`.
+    unsafe fn update_with_data<T: Copy>(&mut self, target: gl_sys::types::GLenum, data: &[T]) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer();
         }
         unsafe {
-            gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
+            gl_sys::BindBuffer(target, self.gl_buffer.unwrap());
             gl_sys::BufferData(
-                gl_sys::ARRAY_BUFFER,
-                (data.len() * mem::size_of::<f32>()) as gl_sys::types::GLsizeiptr,
+                target,
+                (data.len() * mem::size_of::<T>()) as gl_sys::types::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW
             );
         }
     }
     
-    pub fn update_with_u32_data(&mut self, data: &Vec<u32>) {
-        if self.gl_buffer.is_none() {
-            self.alloc_gl_buffer();
-        }
+    pub fn update_with_u32_index_data(&mut self, data: &[u32]) {
         unsafe {
-            gl_sys::BindBuffer(gl_sys::ELEMENT_ARRAY_BUFFER, self.gl_buffer.unwrap());
-            gl_sys::BufferData(
-                gl_sys::ELEMENT_ARRAY_BUFFER,
-                (data.len() * mem::size_of::<u32>()) as gl_sys::types::GLsizeiptr,
-                data.as_ptr() as *const _,
-                gl_sys::STATIC_DRAW
-            );
+            self.update_with_data(gl_sys::ELEMENT_ARRAY_BUFFER, data);
+        }
+    }
+    
+    pub fn update_with_f32_vertex_data(&mut self, data: &[f32]) {
+        unsafe {
+            self.update_with_data(gl_sys::ARRAY_BUFFER, data);
+        }
+    }
+    
+    pub fn update_with_f32_uniform_data(&mut self, data: &[f32]) {
+        unsafe {
+            self.update_with_data(gl_sys::UNIFORM_BUFFER, data);
         }
     }
     

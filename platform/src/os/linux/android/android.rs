@@ -495,8 +495,6 @@ impl Cx {
                 panic!();
             }
 
-            cx.maybe_warn_hardware_support();
-
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
                 egl_display,

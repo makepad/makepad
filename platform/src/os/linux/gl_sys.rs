@@ -16,6 +16,7 @@ pub mod types {
     pub type GLboolean = raw::c_uchar;
     pub type GLchar = raw::c_char;
     pub type GLubyte = raw::c_uchar;
+    pub type GLintptr = isize; 
     pub type GLsizeiptr = isize; 
 }
 pub use types::*; 
@@ -23,6 +24,7 @@ pub use types::*;
 pub const TRUE: types::GLboolean = 1;
 pub const ARRAY_BUFFER: types::GLenum = 0x8892;
 pub const ELEMENT_ARRAY_BUFFER: types::GLenum = 0x8893;
+pub const UNIFORM_BUFFER: types::GLenum = 0x8A11;
 pub const TEXTURE0: types::GLenum = 0x84C0;
 pub const TEXTURE_2D: types::GLenum = 0x0DE1;
 pub const TRIANGLES: types::GLenum = 0x0004;
@@ -78,6 +80,7 @@ pub const RENDERER: types::GLenum = 0x1F01;
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}
 #[inline] pub unsafe fn BindBuffer(target: types::GLenum, buffer: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLuint) -> ()>(storage::BindBuffer.f)(target, buffer) }
+#[inline] pub unsafe fn BindBufferRange(target: types::GLenum, index: types::GLuint, buffer: types::GLuint, offset: types::GLintptr, size: types::GLsizeiptr) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLuint, types::GLuint, types::GLintptr, types::GLsizeiptr) -> ()>(storage::BindBufferRange.f)(target, index, buffer, offset, size) }
 #[inline] pub unsafe fn VertexAttribPointer(index: types::GLuint, size: types::GLint, type_: types::GLenum, normalized: types::GLboolean, stride: types::GLsizei, pointer: *const raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLint, types::GLenum, types::GLboolean, types::GLsizei, *const raw::c_void) -> ()>(storage::VertexAttribPointer.f)(index, size, type_, normalized, stride, pointer) }
 #[inline] pub unsafe fn EnableVertexAttribArray(index: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::EnableVertexAttribArray.f)(index) }
 #[inline] pub unsafe fn VertexAttribDivisor(index: types::GLuint, divisor: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLuint) -> ()>(storage::VertexAttribDivisor.f)(index, divisor) }
@@ -107,6 +110,8 @@ pub const RENDERER: types::GLenum = 0x1F01;
 #[inline] pub unsafe fn GetProgramInfoLog(program: types::GLuint, bufSize: types::GLsizei, length: *mut types::GLsizei, infoLog: *mut types::GLchar) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLsizei, *mut types::GLsizei, *mut types::GLchar) -> ()>(storage::GetProgramInfoLog.f)(program, bufSize, length, infoLog) }
 #[inline] pub unsafe fn GetAttribLocation(program: types::GLuint, name: *const types::GLchar) -> types::GLint { mem::transmute::<_, extern "system" fn(types::GLuint, *const types::GLchar) -> types::GLint>(storage::GetAttribLocation.f)(program, name) }
 #[inline] pub unsafe fn GetUniformLocation(program: types::GLuint, name: *const types::GLchar) -> types::GLint { mem::transmute::<_, extern "system" fn(types::GLuint, *const types::GLchar) -> types::GLint>(storage::GetUniformLocation.f)(program, name) }
+#[inline] pub unsafe fn GetUniformBlockIndex(program: types::GLuint, name: *const types::GLchar) -> types::GLuint { mem::transmute::<_, extern "system" fn(types::GLuint, *const types::GLchar) -> types::GLuint>(storage::GetUniformBlockIndex.f)(program, name) }
+#[inline] pub unsafe fn UniformBlockBinding(program: types::GLuint, uniform_block_index: types::GLuint, uniform_block_binding: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLuint, types::GLuint) -> ()>(storage::UniformBlockBinding.f)(program, uniform_block_index, uniform_block_binding) }
 #[inline] pub unsafe fn CreateShader(type_: types::GLenum) -> types::GLuint { mem::transmute::<_, extern "system" fn(types::GLenum) -> types::GLuint>(storage::CreateShader.f)(type_) }            
 #[inline] pub unsafe fn ShaderSource(shader: types::GLuint, count: types::GLsizei, string: *const *const types::GLchar, length: *const types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLsizei, *const *const types::GLchar, *const types::GLint) -> ()>(storage::ShaderSource.f)(shader, count, string, length) }
 #[inline] pub unsafe fn CompileShader(shader: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::CompileShader.f)(shader) }
@@ -114,7 +119,6 @@ pub const RENDERER: types::GLenum = 0x1F01;
 #[inline] pub unsafe fn AttachShader(program: types::GLuint, shader: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLuint) -> ()>(storage::AttachShader.f)(program, shader) }
 #[inline] pub unsafe fn LinkProgram(program: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::LinkProgram.f)(program) }
 #[inline] pub unsafe fn DeleteShader(shader: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::DeleteShader.f)(shader) }
-#[inline] pub unsafe fn Uniform1fv(location: types::GLint, count: types::GLsizei, value: *const types::GLfloat) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLsizei, *const types::GLfloat) -> ()>(storage::Uniform1fv.f)(location, count, value) }
 #[inline] pub unsafe fn GenTextures(n: types::GLsizei, textures: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenTextures.f)(n, textures) }
 #[inline] pub unsafe fn TexParameteri(target: types::GLenum, pname: types::GLenum, param: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLenum, types::GLint) -> ()>(storage::TexParameteri.f)(target, pname, param) }
 #[inline] pub unsafe fn TexImage2D(target: types::GLenum, level: types::GLint, internalformat: types::GLint, width: types::GLsizei, height: types::GLsizei, border: types::GLint, format: types::GLenum, type_: types::GLenum, pixels: *const raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLint, types::GLint, types::GLsizei, types::GLsizei, types::GLint, types::GLenum, types::GLenum, *const raw::c_void) -> ()>(storage::TexImage2D.f)(target, level, internalformat, width, height, border, format, type_, pixels) }
@@ -139,6 +143,7 @@ mod storage {
     pub static mut GenVertexArrays: FnPtr = FnPtr::default();
     pub static mut BindVertexArray: FnPtr = FnPtr::default();
     pub static mut BindBuffer: FnPtr = FnPtr::default();
+    pub static mut BindBufferRange: FnPtr = FnPtr::default();
     pub static mut VertexAttribPointer: FnPtr = FnPtr::default();
     pub static mut EnableVertexAttribArray: FnPtr = FnPtr::default();
     pub static mut VertexAttribDivisor: FnPtr = FnPtr::default();
@@ -169,6 +174,8 @@ mod storage {
     pub static mut GetProgramInfoLog: FnPtr = FnPtr::default();
     pub static mut GetAttribLocation: FnPtr = FnPtr::default();
     pub static mut GetUniformLocation: FnPtr = FnPtr::default();
+    pub static mut GetUniformBlockIndex: FnPtr = FnPtr::default();
+    pub static mut UniformBlockBinding: FnPtr = FnPtr::default();
     pub static mut CreateShader: FnPtr = FnPtr::default();
     pub static mut ShaderSource: FnPtr = FnPtr::default();
     pub static mut CompileShader: FnPtr = FnPtr::default();
@@ -176,7 +183,6 @@ mod storage {
     pub static mut AttachShader: FnPtr = FnPtr::default();
     pub static mut LinkProgram: FnPtr = FnPtr::default();
     pub static mut DeleteShader: FnPtr = FnPtr::default();
-    pub static mut Uniform1fv: FnPtr = FnPtr::default();
     pub static mut GenTextures: FnPtr = FnPtr::default();
     pub static mut TexParameteri: FnPtr = FnPtr::default();
     pub static mut TexImage2D: FnPtr = FnPtr::default();
@@ -201,6 +207,7 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::GenVertexArrays = FnPtr::new(metaloadfn(&mut loadfn, "glGenVertexArrays", &["glGenVertexArraysAPPLE", "glGenVertexArraysOES"]));
     storage::BindVertexArray = FnPtr::new(metaloadfn(&mut loadfn, "glBindVertexArray", &["glBindVertexArrayOES"]));
     storage::BindBuffer = FnPtr::new(metaloadfn(&mut loadfn, "glBindBuffer", &["glBindBufferARB"]));
+    storage::BindBufferRange = FnPtr::new(metaloadfn(&mut loadfn, "glBindBufferRange", &["glBindBufferRangeARB"]));
     storage::VertexAttribPointer = FnPtr::new(metaloadfn(&mut loadfn, "glVertexAttribPointer", &["glVertexAttribPointerARB"]));
     storage::EnableVertexAttribArray = FnPtr::new(metaloadfn(&mut loadfn, "glEnableVertexAttribArray", &["glEnableVertexAttribArrayARB"]));
     storage::VertexAttribDivisor = FnPtr::new(metaloadfn(&mut loadfn, "glVertexAttribDivisor", &["glVertexAttribDivisorANGLE", "glVertexAttribDivisorARB", "glVertexAttribDivisorEXT", "glVertexAttribDivisorNV"]));
@@ -230,6 +237,8 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::GetProgramInfoLog = FnPtr::new(metaloadfn(&mut loadfn, "glGetProgramInfoLog", &[]));
     storage::GetAttribLocation = FnPtr::new(metaloadfn(&mut loadfn, "glGetAttribLocation", &["glGetAttribLocationARB"]));
     storage::GetUniformLocation = FnPtr::new(metaloadfn(&mut loadfn, "glGetUniformLocation", &["glGetUniformLocationARB"]));
+    storage::GetUniformBlockIndex = FnPtr::new(metaloadfn(&mut loadfn, "glGetUniformBlockIndex", &["glGetUniformBlockIndexARB"]));
+    storage::UniformBlockBinding = FnPtr::new(metaloadfn(&mut loadfn, "glUniformBlockBinding", &["glUniformBlockBindingARB"]));
     storage::CreateShader = FnPtr::new(metaloadfn(&mut loadfn, "glCreateShader", &["glCreateShaderObjectARB"]));
     storage::ShaderSource = FnPtr::new(metaloadfn(&mut loadfn, "glShaderSource", &["glShaderSourceARB"]));
     storage::CompileShader = FnPtr::new(metaloadfn(&mut loadfn, "glCompileShader", &["glCompileShaderARB"]));
@@ -237,7 +246,6 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::AttachShader = FnPtr::new(metaloadfn(&mut loadfn, "glAttachShader", &["glAttachObjectARB"]));
     storage::LinkProgram = FnPtr::new(metaloadfn(&mut loadfn, "glLinkProgram", &["glLinkProgramARB"]));
     storage::DeleteShader = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteShader", &[]));
-    storage::Uniform1fv = FnPtr::new(metaloadfn(&mut loadfn, "glUniform1fv", &["glUniform1fvARB"]));
     storage::GenTextures = FnPtr::new(metaloadfn(&mut loadfn, "glGenTextures", &[]));
     storage::TexParameteri = FnPtr::new(metaloadfn(&mut loadfn, "glTexParameteri", &[]));
     storage::TexImage2D = FnPtr::new(metaloadfn(&mut loadfn, "glTexImage2D", &[]));

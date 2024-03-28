@@ -84,9 +84,11 @@ impl<'a> DrawShaderGenerator<'a> {
         let packed_instances_slots = self.compute_packed_instances_slots();
         let packed_varyings_slots = self.compute_packed_varyings_slots();
         self.generate_decls(
-            Some(packed_geometries_slots),
-            Some(packed_instances_slots),
-            packed_varyings_slots,
+            &[
+                ("packed_geometry", packed_geometries_slots),
+                ("packed_instance", packed_instances_slots),
+            ],
+            &[("packed_varying", packed_varyings_slots)],
         );
         for field in &self.draw_shader_def.fields {
             match field.kind {
@@ -247,7 +249,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     pub fn generate_pixel_shader(&mut self) {
         let packed_varyings_slots = self.compute_packed_varyings_slots();
-        self.generate_decls(None, None, packed_varyings_slots);
+        self.generate_decls(&[("packed_varying", packed_varyings_slots)], &[("packed_frag_color", 4)]);
         for field in &self.draw_shader_def.fields {
             match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
@@ -314,7 +316,7 @@ impl<'a> DrawShaderGenerator<'a> {
         // we need to collect all consts
         let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         write!(self.string, "\n").unwrap();
-        writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+        writeln!(self.string, "    packed_frag_color_0 = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();
     }
     
@@ -357,19 +359,23 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_decls(
         &mut self,
-        packed_attributes_size: Option<usize>,
-        packed_instances_size: Option<usize>,
-        packed_varyings_size: usize,
+        packed_inputs_name_and_size: &[(&str, usize)],
+        packed_outputs_name_and_size: &[(&str, usize)],
     ) {
+        let decl_uniform_block = |this: &mut Self, name: &str, slots| {
+            writeln!(this.string, "layout(std140) uniform UniformBlock_{name} {{").unwrap();
+            writeln!(this.string, "    vec4 {name}_table[{}];", (slots + 3) / 4).unwrap();
+            writeln!(this.string, "}};").unwrap();
+        };
         
         if self.const_table.table.len()>0 {
-            writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap();
+            decl_uniform_block(self, "const", self.const_table.table.len());
         }
         write!(self.string, "\n").unwrap();
         
         let live_slots = self.calc_live_slots();
         if live_slots >0 {
-            writeln!(self.string, "uniform float live_table[{}];", live_slots).unwrap();
+            decl_uniform_block(self, "live", live_slots);
         }
         
         for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
@@ -386,8 +392,8 @@ impl<'a> DrawShaderGenerator<'a> {
                 let field = &self.draw_shader_def.fields[*index];
                 slots += field.ty_expr.ty.borrow().as_ref().unwrap().slots();
             }
-            
-            writeln!(self.string, "uniform float {}_table[{}];", ident, slots).unwrap();
+
+            ident.to_id().as_string(|name| decl_uniform_block(self, name.unwrap(), slots));
             
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[index];
@@ -409,24 +415,12 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         write!(self.string, "\n").unwrap();
         
-        if let Some(packed_attributes_size) = packed_attributes_size {
-            self.generate_packed_var_decls(
-                "attribute",
-                "packed_geometry",
-                packed_attributes_size,
-            );
+        for &(name, size) in packed_inputs_name_and_size {
+            self.generate_packed_var_decls("in", name, size);
         }
-        write!(self.string, "\n").unwrap();
-        if let Some(packed_instances_size) = packed_instances_size {
-            self.generate_packed_var_decls(
-                "attribute",
-                "packed_instance",
-                packed_instances_size,
-            );
+        for &(name, size) in packed_outputs_name_and_size {
+            self.generate_packed_var_decls("out", name, size);
         }
-        write!(self.string, "\n").unwrap();
-        self.generate_packed_var_decls("varying", "packed_varying", packed_varyings_size);
-        write!(self.string, "\n").unwrap();
     }
     
     fn generate_struct_def(&mut self, struct_ptr: StructPtr, struct_def: &StructDef) {
@@ -515,8 +509,8 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_packed_var_decls(
         &mut self,
-        packed_var_qualifier: &'a str,
-        packed_var_name: &'a str,
+        packed_var_qualifier: &str,
+        packed_var_name: &str,
         mut packed_vars_size: usize,
     ) {
         let mut packed_var_index = 0;
@@ -543,27 +537,33 @@ impl<'a> DrawShaderGenerator<'a> {
         }
     }
     
-    fn write_uniform_ty_unpack(&mut self, ty: &Ty, prefix: &str, s: usize) {
-        match ty {
-            Ty::Bool => write!(self.string, "{}[{}]>0.5?true:false", prefix, s),
-            Ty::Int => write!(self.string, "int({}[{}])", prefix, s),
-            Ty::Float => write!(self.string, "{}[{}]", prefix, s),
-            Ty::Bvec2 => write!(self.string, "bvec2({0}[{1}]>0.5?true:false, {0}[{2}]>0.5?true:false)", prefix, s, s + 1),
-            Ty::Bvec3 => write!(self.string, "bvec3({0}[{1}]>0.5?true:false, {0}[{2}]>0.5?true:false, {0}[{3}]>0.5?true:false)", prefix, s, s + 1, s + 2),
-            Ty::Bvec4 => write!(self.string, "bvec4({0}[{1}]>0.5?true:false, {0}[{2}]>0.5?true:false, {0}[{3}]>0.5?true:false, {0}[{4}]>0.5?true:false)", prefix, s, s + 1, s + 2, s + 3),
-            Ty::Ivec2 => write!(self.string, "ivec2(int({0}[{1}]), int({0}[{2}]))", prefix, s, s + 1),
-            Ty::Ivec3 => write!(self.string, "ivec3(int({0}[{1}]), int({0}[{2}]), int({0}[{3}]))", prefix, s, s + 1, s + 2),
-            Ty::Ivec4 => write!(self.string, "ivec4(int({0}[{1}]), int({0}[{2}]), int({0}[{3}]), int({0}[{4}]))", prefix, s, s + 1, s + 2, s + 3),
-            Ty::Vec2 => write!(self.string, "vec2({0}[{1}], {0}[{2}])", prefix, s, s + 1),
-            Ty::Vec3 => write!(self.string, "vec3({0}[{1}], {0}[{2}], {0}[{3}])", prefix, s, s + 1, s + 2),
-            Ty::Vec4 => write!(self.string, "vec4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
-            Ty::Mat2 => write!(self.string, "mat2({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
-            Ty::Mat3 => write!(self.string, "mat3({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8),
-            Ty::Mat4 => write!(self.string, "mat4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}], {0}[{10}], {0}[{11}], {0}[{12}], {0}[{13}], {0}[{14}], {0}[{15}], {0}[{16}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8, s + 9, s + 10, s + 11, s + 12, s + 13, s + 14, s + 15,),
-            //Ty::Mat4 => write!(self.string, "mat4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}], {0}[{10}], {0}[{11}], {0}[{12}], {0}[{13}], {0}[{14}], {0}[{15}], {0}[{16}])", prefix, s, s + 4, s + 8, s + 12, s + 1, s + 5, s + 9, s + 13, s + 2, s + 6, s + 10, s + 14, s + 3, s + 7, s + 11, s + 15,),
-            Ty::Enum {..} => write!(self.string, "{}[{}]", prefix, s),
+    fn write_uniform_ty_unpack(&mut self, ty: &Ty, uniform_array: &str, s: usize) {
+        let (conv_prefix, conv_suffix) = match ty {
+            Ty::Bool | Ty::Bvec2 | Ty::Bvec3 | Ty::Bvec4 => ("", ">0.5?true:false"),
+            Ty::Int | Ty::Ivec2 | Ty::Ivec3 | Ty::Ivec4 => ("int(", ")"),
+            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat2 | Ty::Mat3 | Ty::Mat4 | Ty::Enum {..} => ("", ""),
             _ => panic!("unexpected as initializeable type {:?}", ty),
-        }.unwrap()
+        };
+
+        let components = ty.slots();
+        if components > 1 {
+            self.write_ty_lit(ty.maybe_ty_lit().unwrap());
+            write!(self.string, "(").unwrap();
+        }
+        for i in 0..components {
+            if i > 0 {
+                write!(self.string, ", ").unwrap();
+            }
+            write!(
+                self.string,
+                "{conv_prefix}{uniform_array}[{}].{}{conv_suffix}",
+                (s + i) / 4,
+                b"xyzw"[(s + i) % 4] as char,
+            ).unwrap();
+        }
+        if components > 1 {
+            write!(self.string, ")").unwrap();
+        }
     }
     
     fn generate_expr(&mut self, expr: &Expr) {
@@ -790,7 +790,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     }
     
     fn const_table_is_vec4(&self) -> bool {
-        false
+        true
     }
     
     fn use_cons_fn(&self, _what: &str) -> bool {

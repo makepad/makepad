@@ -432,44 +432,30 @@ pub struct ExprGenerator<'a> {
 
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, in_expr: &Expr) {
-        fn const_table_index_to_vec4(string: &mut String, index: usize) {
-            let base = index >> 2;
-            let sub = index - (base << 2);
-            match sub {
-                0 => write!(string, "[{}].x", base).unwrap(),
-                1 => write!(string, "[{}].y", base).unwrap(),
-                2 => write!(string, "[{}].z", base).unwrap(),
-                _ => write!(string, "[{}].w", base).unwrap(),
-            };
-        }
+        let const_table_index = |this: &mut Self, index: usize| {
+            write!(this.string, "const_table").unwrap();
+            if this.backend_writer.const_table_is_vec4() {
+                write!(this.string, "[{}].{}", index / 4, b"xyzw"[index % 4] as char).unwrap();
+            } else {
+                write!(this.string, "[{}]", index).unwrap();
+            }
+        };
         match (in_expr.const_val.borrow().as_ref(), in_expr.const_index.get()) {
-            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.const_table_offset.is_some() => {
+            (Some(Some(Val::Vec4(_))), Some(index)) if self.const_table_offset.is_some() => {
                 let const_table_offset = self.const_table_offset.unwrap();
                 self.write_ty_lit(TyLit::Vec4);
                 write!(self.string, "(").unwrap();
-                let mut sep = "";
-                for _ in 0..4 {
-                    write!(self.string, "{}const_table", sep).unwrap();
-                    if self.backend_writer.const_table_is_vec4() {
-                        const_table_index_to_vec4(self.string, index + const_table_offset);
+                for i in 0..4 {
+                    if i > 0 {
+                        write!(self.string, ", ").unwrap();
                     }
-                    else {
-                        write!(self.string, "[{}]", index + const_table_offset).unwrap();
-                    }
-                    sep = ", ";
-                    index += 1;
+                    const_table_index(self, const_table_offset + index + i);
                 }
                 write!(self.string, ")").unwrap();
             },
             (Some(Some(Val::Float(_))), Some(index)) if self.const_table_offset.is_some() => {
                 let const_table_offset = self.const_table_offset.unwrap();
-                write!(self.string, "const_table").unwrap();
-                if self.backend_writer.const_table_is_vec4() {
-                    const_table_index_to_vec4(self.string, index + const_table_offset);
-                }
-                else {
-                    write!(self.string, "[{}]", index + const_table_offset).unwrap();
-                }
+                const_table_index(self, const_table_offset + index);
             }
             // TODO: Extract the next three cases into a write_val function
             (Some(Some(Val::Vec4(val))), _) => {
