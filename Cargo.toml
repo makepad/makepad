@@ -10,6 +10,7 @@ workspace.members = [
     "examples/ironfish",
     "experiments/bigfish",
     "experiments/teamtalk",
+    "experiments/sdxl_remote",
     "examples/simple",
     "examples/simple_shader",
     "examples/chatgpt",

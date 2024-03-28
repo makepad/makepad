@@ -2,10 +2,15 @@ use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
-use std::time::{Instant, Duration};
+use std::time::{Instant};
 use crate::database::*; 
 use crate::comfyui::*; 
- 
+use makepad_http::server::*;
+use std::net::{SocketAddr};
+use std::sync::mpsc;
+use std::cell::RefCell;
+use std::sync::{Arc,Mutex};
+
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -98,7 +103,7 @@ pub struct App {
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
-    
+    #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64,mpsc::Sender<Vec<u8>>)>>>>,
     #[rust(vec![(
         LLMMsg::Human,
         "This is a conversation between AI and User. AI provides the answer as a short 2 line description of an image.".to_string(),
@@ -381,8 +386,14 @@ impl App {
     }
     
     fn set_current_image(&mut self, _cx: &mut Cx, image_id: ImageId) {
+        if let Ok(data) = fs::read(format!("{}/{}",self.db.image_path, image_id.as_file_name())) {
+            for (id, sender) in self.remote_screens.lock().unwrap().borrow_mut().iter(){
+                let _= sender.send(data.clone());
+            }
+        }
         self.current_image = Some(image_id);
         let prompt_hash = self.prompt_hash_from_current_image();
+        
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
             self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.positive);
         }
@@ -469,7 +480,38 @@ impl App {
             self.send_camera_to_machine(cx, machine_id, prompt_state);
         }
     }
-
+    
+    pub fn start_http_server(&mut self) {
+        let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), 8009);
+        let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
+        start_http_server(HttpServer {
+            listen_address: addr,
+            post_max_size: 1024 * 1024,
+            request: tx_request
+        });
+        let remote_screens = self.remote_screens.clone();
+        std::thread::spawn(move || {
+            while let Ok(message) = rx_request.recv() {
+                // only store last change, fix later
+                match message {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender,headers} => {
+                        log!("CONNECT SOCKET {:?} {:?}",web_socket_id, headers);
+                        remote_screens.lock().unwrap().borrow_mut().push((web_socket_id,response_sender));
+                    },
+                    HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
+                        remote_screens.lock().unwrap().borrow_mut().retain(|v| v.0 != web_socket_id);
+                    },
+                    HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
+                        //log!("GOT MESSAGE {} {}", web_socket_id, data.len());
+                    }
+                    HttpServerRequest::Get {headers, response_sender} => {
+                    }
+                    HttpServerRequest::Post {..} => { //headers, body, response}=>{
+                    }
+                }
+            }
+        });
+    }
 }
 
 impl MatchEvent for App {
@@ -487,6 +529,7 @@ impl MatchEvent for App {
         cx.start_interval(0.016);
         self.update_seed_display(cx);
         self.start_video_inputs(cx);
+        self.start_http_server();
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
