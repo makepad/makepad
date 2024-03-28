@@ -2197,8 +2197,14 @@ live_design! {
 
         draw_radio: {
             uniform size: 7.0;
-            uniform color_active: #FF0000FF
-            uniform color_inactive: #x99EEFF
+            uniform color_active: (THEME_COLOR_U_1)
+            uniform color_inactive: (THEME_COLOR_D_1)
+
+            instance pressed: 0.0
+            uniform border_radius: 3.0
+            instance bodytop: (THEME_COLOR_U_04)
+            instance bodybottom: (THEME_COLOR_D_1)
+
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -2221,16 +2227,42 @@ live_design! {
                         sdf.fill(mix(#fff0, #f, self.selected));
                     }
                     RadioType::Tab => {
-                        let sz = self.size;
-                        let left = 0.;
-                        let c = vec2(left, self.rect_size.y);
-                        sdf.rect(
-                            -1.,
-                            0.,
-                            self.rect_size.x + 2.0,
-                            self.rect_size.y
+                        let grad_top = 5.0;
+                        let grad_bot = 1.0;
+                        let body = mix(mix(self.bodytop, THEME_COLOR_U_2, self.hover), self.bodybottom, self.selected);
+                        let body_transp = vec4(body.xyz, 0.0);
+                        let top_gradient = mix(body_transp, mix(THEME_COLOR_U_3, THEME_COLOR_D_4, self.selected), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                        let bot_gradient = mix(
+                            mix(body_transp, THEME_COLOR_U_2, self.selected),
+                            top_gradient,
+                            clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                         );
-                        sdf.fill(mix(self.color_inactive, self.color_active, self.selected));
+
+                        // the little drop shadow at the bottom
+                        let shift_inward = 0. * 1.75;
+                        sdf.move_to(shift_inward, self.rect_size.y);
+                        sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+                        sdf.stroke(
+                            mix(
+                                mix(THEME_COLOR_D_3, THEME_COLOR_D_3, self.hover),
+                                THEME_COLOR_U_2,
+                                self.selected
+                            ), 1.
+                        )
+
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x - 2.0,
+                            self.rect_size.y - 2.0,
+                            1.
+                        )
+                        sdf.fill_keep(body)
+
+                        sdf.stroke(
+                            bot_gradient,
+                            0.75
+                        )
                     }
                 }
                 return sdf.result
@@ -2360,6 +2392,27 @@ live_design! {
         }
     }
 
+    RadioButtonTab = <RadioButton> {
+        margin: 0.,
+        draw_radio: { radio_type: Tab }
+        padding: <THEME_MSPACE_2> {}
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: 0.
+        }
+
+    }
+
+    ButtonGroup = <CachedRoundedView> {
+        height: Fit, width: Fit,
+        spacing: 0.0,
+        flow: Right
+        align: { x: 0.0, y: 0.5 }
+        draw_bg: {
+            radius: 4.
+        }
+    }
+
     PortalList = <PortalListBase> {
         width: Fill, height: Fill,
         capture_overload: true
@@ -2467,7 +2520,7 @@ live_design! {
         }
 
         draw_bg: {
-            instance radius: 3.0
+            instance radius: 2.0
             instance hover: 0.0
             instance focus: 0.0
             instance bodytop: (THEME_COLOR_U_04)
@@ -2823,7 +2876,7 @@ live_design! {
                     }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/back.svg"),
-                        color: THEME_COLOR_BLACK;
+                        color: (THEME_COLOR_BLACK);
                         brightness: 0.8;
                     }
                 }
