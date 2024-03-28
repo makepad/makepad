@@ -2305,11 +2305,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        THEME_COLOR_D_3,
+                        THEME_COLOR_U_1,
                         self.hover
                     ),
-                    #9,
+                    THEME_COLOR_U_5,
                     self.selected
                 )
             }
@@ -2392,15 +2392,18 @@ live_design! {
         }
     }
 
+    RadioButtonIcon = <RadioButton> {
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { top: 0., right: 0., bottom: 0., left: 5.}
+        }
+    }
+
     RadioButtonTab = <RadioButton> {
         margin: 0.,
         draw_radio: { radio_type: Tab }
         padding: <THEME_MSPACE_2> {}
-        label_walk: {
-            width: Fit, height: Fit,
-            margin: 0.
-        }
-
+        label_walk: { margin: 0.  }
     }
 
     ButtonGroup = <CachedRoundedView> {
