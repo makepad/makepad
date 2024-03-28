@@ -6,6 +6,7 @@ use {
         sync::Arc,
     },
     crate::{
+        thread::SignalToUI,
         makepad_live_id::*,
         makepad_objc_sys::{objc_block, objc_block_invoke},
         os::{
@@ -123,6 +124,7 @@ impl OsWebSocket{
             let handler = objc_block!(move | error: ObjcId | {
                 if error != ptr::null_mut() {
                     let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+                    println!("WEBSOCKET ERROR {}", error_str);
                     rx_sender.send(WebSocketMessage::Error(error_str)).unwrap();
                 }
             });
@@ -167,14 +169,15 @@ impl OsWebSocket{
             let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
             let web_socket_delegate_instance: ObjcId = msg_send![get_apple_class_global().web_socket_delegate, new];
             
-            
+            let () = msg_send![data_task, setMaximumMessageSize:5*1024*1024];
+             
             unsafe fn set_message_receive_handler(data_task2: Arc<ObjcId>,  rx_sender: Sender<WebSocketMessage>) {
                 let data_task = data_task2.clone();
                 let handler = objc_block!(move | message: ObjcId, error: ObjcId | {
                     if error != ptr::null_mut() {
-                        
                         let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                         rx_sender.send(WebSocketMessage::Error(error_str)).unwrap();
+                        SignalToUI::set_ui_signal();
                         return;
                     }
                     let ty: usize = msg_send![message, type];
@@ -185,11 +188,13 @@ impl OsWebSocket{
                         let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
                         let message = WebSocketMessage::Binary(data_bytes.to_vec());
                         rx_sender.send(message).unwrap();
+                        SignalToUI::set_ui_signal();
                     }
                     else { // string
                         let string: ObjcId = msg_send![message, string];
                         let message = WebSocketMessage::String(nsstring_to_string(string));
                         rx_sender.send(message).unwrap();
+                        SignalToUI::set_ui_signal();
                     }
                     set_message_receive_handler(data_task.clone(), rx_sender.clone())
                 });
