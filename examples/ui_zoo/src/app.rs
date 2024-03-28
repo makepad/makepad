@@ -381,7 +381,7 @@ live_design!{
                             header: <View> {
                                 height: Fit
                                 align: {x: 0., y: 0.5}
-                                fold_button = <FoldButton> {} <Pbold> {text: "Fold me!"}
+                                fold_button = <FoldButton> {} <P> {text: "Fold me!"}
                             }
                             body: <View> {
                                 width: Fill, height: Fit

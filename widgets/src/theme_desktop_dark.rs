@@ -700,14 +700,14 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: <THEME_FONT_BOLD> {
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_U_5,
-                        THEME_COLOR_U_5,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
                     THEME_COLOR_U_4,
@@ -2119,7 +2119,9 @@ live_design! {
             wrap: Word
             instance pressed: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR> {}
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -2514,11 +2516,11 @@ live_design! {
                 return
                 mix(
                     mix(
-                        THEME_COLOR_U_4,
-                        THEME_COLOR_U_6,
+                        THEME_COLOR_TEXT_META,
+                        THEME_COLOR_TEXT_DEFAULT,
                         self.focus
                     ),
-                    THEME_COLOR_U_4,
+                    THEME_COLOR_TEXT_META,
                     self.is_empty
                 )
             }
@@ -2723,7 +2725,7 @@ live_design! {
 
         draw_text: {
             color: (THEME_COLOR_TEXT_DEFAULT),
-            text_style: <THEME_FONT_BOLD> {
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
         }
