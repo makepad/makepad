@@ -598,16 +598,17 @@ live_design!{
                             }
                         }
 
-                        <H3> { text: "Tab Mode"}
-                        <View> {
+                        <H3> { text: "Button Group"}
+                        <ButtonGroup> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5 }
-                            <View> {
+                            radiotabs_demo = <View> {
                                 width: Fit, height: Fit,
-                                <RadioButton> { label: "Option 1: yey", draw_radio: { radio_type: Tab } }
-                                <RadioButton> { label: "Option 1: yey", draw_radio: { radio_type: Tab } }
-                                <RadioButton> { label: "Option 1: yey", draw_radio: { radio_type: Tab } }
+                                radio1 = <RadioButtonTab> { label: "Option 1" }
+                                radio2 = <RadioButtonTab> { label: "Option 2" }
+                                radio3 = <RadioButtonTab> { label: "Option 3" }
+                                radio4 = <RadioButtonTab> { label: "Option 4" }
                             }
                         }
                     }
@@ -868,6 +869,9 @@ impl MatchEvent for App{
 
         ui.radio_button_set(ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4))
             .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
+
+        ui.radio_button_set(ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4))
+            .selected_to_visible(cx, &ui, actions, ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4));
 
         if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
             log!("TEXTBOX CHANGED {}", self.counter);
