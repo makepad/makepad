@@ -4,8 +4,7 @@ use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::io::prelude::*;
 use std::sync::{mpsc, mpsc::{RecvTimeoutError}};
 use std::time::Duration;
-
-use crate::websocket::{PONG_MESSAGE, WebSocket, WebSocketMessage, MessageFormat, MessageHeader, PING_MESSAGE};
+pub use crate::websocket::{SERVER_WEB_SOCKET_PONG_MESSAGE, ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PING_MESSAGE};
 use crate::utils::*;
 
 #[derive(Clone)]
@@ -133,7 +132,7 @@ fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: Http
 }
 
 fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders, web_socket_id: u64) {
-    let upgrade_response = WebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
+    let upgrade_response = ServerWebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
 
     write_bytes_to_tcp_stream_no_error(&mut tcp_stream, upgrade_response.as_bytes());
     
@@ -148,12 +147,13 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                     if data.is_empty(){
                         break
                     }
-                    let header = MessageHeader::from_len(data.len(), MessageFormat::Binary, false);
+                    println!("SENDING DATA {}", data.len());
+                    let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, header.as_slice());
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
                 },
                 Err(RecvTimeoutError::Timeout)=>{ 
-                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &PING_MESSAGE);
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &SERVER_WEB_SOCKET_PING_MESSAGE);
                 }
                 Err(RecvTimeoutError::Disconnected)=>{
                     break
@@ -172,7 +172,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
         return
     };
     
-    let mut web_socket = WebSocket::new();
+    let mut web_socket = ServerWebSocket::new();
     loop {
         let mut data = [0u8; 65535];
         match tcp_stream.read(&mut data) {
@@ -184,14 +184,14 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                 }
                 web_socket.parse(&data[0..n], | result | {
                     match result {
-                        Ok(WebSocketMessage::Ping(_)) => {
-                            let _ = tx_socket.send(PONG_MESSAGE.to_vec());
+                        Ok(ServerWebSocketMessage::Ping(_)) => {
+                            let _ = tx_socket.send(SERVER_WEB_SOCKET_PONG_MESSAGE.to_vec());
                         },
-                        Ok(WebSocketMessage::Pong(_)) => {
+                        Ok(ServerWebSocketMessage::Pong(_)) => {
                         },
-                        Ok(WebSocketMessage::Text(_text)) => {
+                        Ok(ServerWebSocketMessage::Text(_text)) => {
                         }
-                        Ok(WebSocketMessage::Binary(data)) => {
+                        Ok(ServerWebSocketMessage::Binary(data)) => {
                             if http_server.request.send(HttpServerRequest::BinaryMessage {
                                 web_socket_id,
                                 response_sender: tx_socket.clone(),
@@ -202,7 +202,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                                 let _ = tx_socket.send(Vec::new());
                             };
                         },
-                        Ok(WebSocketMessage::Close) => {
+                        Ok(ServerWebSocketMessage::Close) => {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                         Err(e) => {
