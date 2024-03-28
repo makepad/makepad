@@ -284,7 +284,7 @@ impl Widget for LogList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = step.as_portal_list().borrow_mut(){
-                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().unwrap().build_manager)
             }
         }
         DrawStep::done()
@@ -293,7 +293,7 @@ impl Widget for LogList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        let data = scope.data.get::<AppData>();
+        let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {

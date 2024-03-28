@@ -35,12 +35,6 @@ use {
         cx::{Cx, OsType},
     }
 };
-#[cfg(not(apple_sim))]
-use crate::makepad_live_compiler::LiveFileChange;
-#[cfg(not(apple_sim))]
-use crate::event::{NetworkResponse, HttpRequest, HttpMethod};
-#[cfg(not(apple_sim))]
-use crate::makepad_live_id::*;
 
 impl Cx {
     
@@ -100,10 +94,7 @@ impl Cx {
             out.push(event);
         }
         if out.len()>0{
-            let mut e = Event::NetworkResponses(out);
-            if self.studio_http_connection(&mut e){
-                self.call_event_handler(&e)
-            }
+            self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
     
@@ -279,45 +270,6 @@ impl Cx {
         }
     }
 
-    #[cfg(apple_sim)]
-    pub fn studio_http_connection(&mut self, _event: &mut Event) -> bool {
-        true
-    }
-    
-    #[cfg(not(apple_sim))]
-    pub fn studio_http_connection(&mut self, event: &mut Event) -> bool {
-        if let Event::NetworkResponses(res) = event {
-            res.retain( | res | {
-                if res.request_id == live_id!(live_reload) {
-                    // alright lets see if we need to live reload from the body
-                    if let NetworkResponse::HttpResponse(res) = &res.response {
-                        // lets check our response
-                        if let Some(body) = res.get_string_body() {
-                            if body.len()>0 {
-                                let mut parts = body.split("$$$makepad_live_change$$$");
-                                if let Some(file_name) = parts.next() {
-                                    let content = parts.next().unwrap().to_string();
-                                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                        file_name:file_name.to_string(),
-                                        content
-                                    }]);
-                                }
-                            }
-                        }
-                        self.poll_studio_http();
-                    }
-                    false
-                }
-                else {
-                    true
-                }
-            });
-            if res.len()>0 {
-                return true
-            }
-        }
-        false
-    }
     
 }
 
@@ -332,9 +284,6 @@ impl CxOsApi for Cx {
 
         #[cfg(apple_sim)]
         self.start_disk_live_file_watcher(50);
-        
-        #[cfg(not(apple_sim))]
-        self.poll_studio_http();
         
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]

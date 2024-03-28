@@ -114,7 +114,7 @@ impl ProfilerEventChart{
 impl Widget for ProfilerEventChart {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         self.draw_bg.begin(cx, walk, Layout::default());
-        let bm = &scope.data.get::<AppData>().build_manager;
+        let bm = &scope.data.get::<AppData>().unwrap().build_manager;
         let mut label = String::new();
         
         let rect = cx.turtle().rect(); 
