@@ -88,7 +88,7 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"Typographic System"}
                     <ZooDesc> {
-                        text:"TODO: EXPLAIN HOW BASE SIZE AND CONTRAST WORK."
+                        text:"Explain: typographic sizes, base size and contrast."
                     }
                     <View> {
                         width: Fill, height: Fit,
@@ -243,29 +243,33 @@ live_design!{
                         spacing: 10.,
                         basicbutton = <Button> { text: "I can be clicked" }
 
-                        iconbutton = <Button> {
+                        iconbutton = <ButtonIcon> {
                             draw_icon: {
                                 svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                             }
                             text: "I can have a lovely icon!"
-
-                            icon_walk: {
-                                width: 15, height: Fit,
-                                margin: {top: 0., right: 0., bottom: 0., left: 7.5},
-                            }
                         }
 
-                        <Button> {
-                            margin: 5., padding: 0.,
+                        <ButtonFlat> {
                             draw_icon: {
                                 svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                             }
+                            text: "I can have a lovely icon!"
+                        }
 
-                            icon_walk: {
-                                width: 15, height: Fit,
-                                margin: 0.0
+                        <ButtonFlat> {
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                             }
-                            draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_0) } }
+                        }
+
+                        <ButtonFlat> {
+                            flow: Down,
+                            icon_walk: { width: 15. }
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                            }
+                            text: "Vertical Layout"
                         }
 
                         styledbutton = <Button> {
@@ -559,7 +563,7 @@ live_design!{
 
                 <ZooHeader> {
                     title = {text:"RadioButtons"}
-                    <ZooDesc> {text:"RadioButtons"}
+                    <ZooDesc> {text:"Todo: List the different radio button templates."}
                     <ZooGroup> {
                         flow: Down,
                         spacing: (THEME_SPACE_2)
