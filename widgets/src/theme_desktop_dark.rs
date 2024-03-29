@@ -806,7 +806,7 @@ live_design! {
         }
 
         icon_walk: {
-            width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
+            width: (THEME_DATA_ICON_WIDTH), height: Fit,
             margin: 0.
         }
 
@@ -907,6 +907,56 @@ live_design! {
                         draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
+            }
+        }
+    }
+
+    ButtonIcon = <Button> {
+        icon_walk: {
+            width: 12.
+            margin: <THEME_MSPACE_0> { left: 0. }
+        }
+    }
+
+    ButtonFlat = <ButtonIcon> {
+        height: Fill, width: Fit,
+        margin: <THEME_MSPACE_H_1> { }, padding: <THEME_MSPACE_0> {},
+        align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: 12. }
+        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_0) } }
+
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_META,
+                    self.pressed
+                )
+            }
+        }
+
+        draw_icon: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_META,
+                    self.pressed
+                )
             }
         }
     }
