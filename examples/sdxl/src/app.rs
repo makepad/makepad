@@ -6,11 +6,11 @@ use std::time::{Instant};
 use crate::database::*; 
 use crate::comfyui::*; 
 use makepad_http::server::*;
-use std::net::{SocketAddr};
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::cell::RefCell;
 use std::sync::{Arc,Mutex};
-
+ 
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -85,8 +85,8 @@ impl Workflow {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-        //Machine::new("10.0.0.111:8188", id_lut!(m1)),
-        Machine::new("192.168.8.231:8188", id_lut!(m1)),
+       Machine::new("10.0.0.111:8188", id_lut!(m1)),
+        //Machine::new("192.168.8.231:8188", id_lut!(m1)),
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
@@ -103,12 +103,13 @@ pub struct App {
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
-    #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64,mpsc::Sender<Vec<u8>>)>>>>,
+    #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
     #[rust(vec![(
         LLMMsg::Human,
         "This is a conversation between AI and User. AI provides the answer as a short 2 line description of an image.".to_string(),
     )])] llm_chat: Vec<(LLMMsg,String)>,
-    //#[rust(Instant::now())] last_flip: Instant
+    
+    #[rust] delay_timer: Timer,
 }
 
 enum LLMMsg{
@@ -386,11 +387,36 @@ impl App {
     }
     
     fn set_current_image(&mut self, _cx: &mut Cx, image_id: ImageId) {
-        if let Ok(data) = fs::read(format!("{}/{}",self.db.image_path, image_id.as_file_name())) {
-            for (id, sender) in self.remote_screens.lock().unwrap().borrow_mut().iter(){
-                let _= sender.send(data.clone());
+        // lets send the remote screens the 3 images below the current selection
+        pub fn get_data_for_index(db:&Database, current:usize, id:usize)->Option<Vec<u8>>{
+            let id = if db.image_files[current].prompt_hash != db.image_files[id].prompt_hash{
+                current
+            }
+            else{
+                id
+            };
+            if let Some(image) = db.image_files.get(id){
+                if let Ok(data) = fs::read(format!("{}/{}",db.image_path, image.image_id.as_file_name())) {
+                    return Some(data)
+                }
+            }
+            None
+        }
+        // lets find our current image id, and we should set all to the same if the prompt hash is the same
+        if let Some(current) = self.db.image_files.iter().position(|v| v.image_id == image_id){
+            for (_id, ip, sender) in self.remote_screens.lock().unwrap().borrow_mut().iter(){
+                let index = if *ip == Ipv4Addr::new(10,0,0,116){3}
+                else if *ip == Ipv4Addr::new(10,0,0,117){2}
+                else {1};
+                if let Some(data) = get_data_for_index(&self.db, current, current+index){
+                    let _= sender.send(data);
+                }
             }
         }
+        /*
+        */
+        
+        
         self.current_image = Some(image_id);
         let prompt_hash = self.prompt_hash_from_current_image();
         
@@ -458,6 +484,11 @@ impl App {
         }
     }
     
+    fn next_render_delay(&mut self, cx:&mut Cx){
+        let delay = self.ui.text_input(id!(settings_delay.input)).text().parse::<f64>().unwrap_or(1.0);
+        self.delay_timer = cx.start_timeout(delay);
+    }
+        
     fn render(&mut self, cx: &mut Cx) {
         let randomise = self.ui.check_box(id!(random_check_box)).selected(cx);
         let positive = self.ui.text_input(id!(positive)).text();
@@ -495,16 +526,21 @@ impl App {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender,headers} => {
-                        log!("CONNECT SOCKET {:?} {:?}",web_socket_id, headers);
-                        remote_screens.lock().unwrap().borrow_mut().push((web_socket_id,response_sender));
+                        let ip = if let IpAddr::V4(addr) = headers.addr.ip(){
+                            addr
+                        }
+                        else{
+                            Ipv4Addr::new(0,0,0,0)
+                        };
+                        remote_screens.lock().unwrap().borrow_mut().push((web_socket_id,ip,response_sender));
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
                         remote_screens.lock().unwrap().borrow_mut().retain(|v| v.0 != web_socket_id);
                     },
-                    HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
+                    HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender: _, data:_} => {
                         //log!("GOT MESSAGE {} {}", web_socket_id, data.len());
                     }
-                    HttpServerRequest::Get {headers, response_sender} => {
+                    HttpServerRequest::Get {headers:_, response_sender:_} => {
                     }
                     HttpServerRequest::Post {..} => { //headers, body, response}=>{
                     }
@@ -530,6 +566,12 @@ impl MatchEvent for App {
         self.update_seed_display(cx);
         self.start_video_inputs(cx);
         self.start_http_server();
+    }
+    
+    fn handle_timer(&mut self, cx: &mut Cx, e:&TimerEvent){
+        if self.delay_timer.is_timer(e).is_some(){
+            self.next_render(cx);
+        }
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
@@ -566,7 +608,7 @@ impl MatchEvent for App {
                                                     //self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     //Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
                                                     self.fetch_image(cx, self.machines[m].id, &image.filename);
-                                                    self.next_render(cx);
+                                                    self.next_render_delay(cx);
                                                 }
                                             }
                                         }
@@ -763,7 +805,7 @@ impl MatchEvent for App {
             }
             let image_size = [vfb.format.width as f32, vfb.format.height as f32];
             let v = self.ui.image(id!(video_input0));
-            v.set_texture(Some(self.video_input[id].clone()));
+            v.set_texture(cx, Some(self.video_input[id].clone()));
             v.set_uniform(cx, id!(image_size), &image_size);
             v.set_uniform(cx, id!(is_rgb), &[0.0]);
             v.redraw(cx);
@@ -846,9 +888,9 @@ impl MatchEvent for App {
         if let Some(current_image) = &self.current_image {
             let tex = self.db.image_texture(current_image);
             if tex.is_some() {
-                self.ui.image(id!(image_view.image)).set_texture(tex.clone());
-                self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
-                self.ui.image(id!(second_image.image1)).set_texture(tex);
+                self.ui.image_blend(id!(image_view.image)).set_texture(cx, tex.clone());
+                self.ui.image_blend(id!(big_image.image1)).set_texture(cx, tex.clone());
+                self.ui.image_blend(id!(second_image.image1)).set_texture(cx, tex);
             }
         }
         
@@ -894,7 +936,7 @@ impl MatchEvent for App {
                                     if index >= *image_count {break}
                                     // alright we need to query our png cache for an image.
                                     let tex = self.db.image_texture(&image_files[index]);
-                                    row.image(id!(img)).set_texture(tex);
+                                    row.image(id!(img)).set_texture(cx, tex);
                                 }
                                 item.draw_all(cx, &mut Scope::empty());
                             }
