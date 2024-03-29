@@ -1044,6 +1044,7 @@ live_design! {
                 return sdf.result
             }
         }
+
         draw_text: {
             instance focus: 0.0
             instance selected: 0.0
@@ -1055,7 +1056,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
+                        THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
                     THEME_COLOR_SELECTED,
@@ -1143,6 +1144,43 @@ live_design! {
             }
         }
     }
+
+    CheckBoxToggle = <CheckBox> {
+        margin: <THEME_MSPACE_0> {}
+        draw_check: { check_type: Toggle }
+        label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
+    }
+
+    CheckBoxTextual = <CheckBox> {
+        draw_check: { check_type: None }
+        label_walk: { margin: <THEME_MSPACE_0> {} }
+
+        draw_text: {
+            instance focus: 0.0
+            instance selected: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_U_4,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_SELECTED,
+                    self.selected
+                )
+            }
+        }
+    }
+
+    CheckBoxCustom = <CheckBox> {
+        draw_check: { check_type: None }
+        label_walk: { margin: <THEME_MSPACE_H_1> {} }
+    }
+
 
     DesktopButton = <DesktopButtonBase> {
         draw_bg: {
