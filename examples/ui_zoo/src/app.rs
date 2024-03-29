@@ -88,7 +88,7 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"Typographic System"}
                     <ZooDesc> {
-                        text:"Typographic System."
+                        text:"TODO: EXPLAIN HOW BASE SIZE AND CONTRAST WORK."
                     }
                     <View> {
                         width: Fill, height: Fit,
