@@ -836,7 +836,7 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_1, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_075, self.pressed);
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(body_transp, mix(THEME_COLOR_U_3, THEME_COLOR_D_4, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
@@ -2344,7 +2344,7 @@ live_design! {
             instance pressed: 0.0
             uniform border_radius: 3.0
             instance bodytop: (THEME_COLOR_U_04)
-            instance bodybottom: (THEME_COLOR_D_1)
+            instance bodybottom: (THEME_COLOR_D_075)
 
 
             fn pixel(self) -> vec4 {
@@ -2380,7 +2380,11 @@ live_design! {
                     RadioType::Tab => {
                         let grad_top = 5.0;
                         let grad_bot = 1.0;
-                        let body = mix(mix(self.bodytop, THEME_COLOR_U_2, self.hover), self.bodybottom, self.selected);
+                        let body = mix(
+                            mix(self.bodytop, THEME_COLOR_U_2, self.hover),
+                            self.bodybottom,
+                            self.selected
+                        );
                         let body_transp = vec4(body.xyz, 0.0);
                         let top_gradient = mix(body_transp, mix(THEME_COLOR_U_3, THEME_COLOR_D_4, self.selected), max(0.0, grad_top - sdf.pos.y) / grad_top);
                         let bot_gradient = mix(
