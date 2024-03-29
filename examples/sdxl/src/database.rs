@@ -225,6 +225,15 @@ impl Database {
         None
     }
     
+    pub fn get_data_for_index(&self, id:usize)->Option<Vec<u8>>{
+        if let Some(image) = self.image_files.get(id){
+            if let Ok(data) = fs::read(format!("{}/{}",self.image_path, image.image_id.as_file_name())) {
+                return Some(data)
+            }
+        }
+        None
+    }
+    
     pub fn load_database(&mut self) -> std::io::Result<()> {
         // alright lets read the entire directory list
         let entries = fs::read_dir(&self.image_path) ?;

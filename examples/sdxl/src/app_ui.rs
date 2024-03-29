@@ -691,7 +691,7 @@ live_design!{
                 flow: Down,
                 align: {x: 0.5, y: 0.5}
                 cursor: Hand,
-                image = <Image> {
+                image = <ImageBlend> {
                     fit: Smallest,
                     width: Fill,
                     height: Fill
@@ -719,7 +719,9 @@ live_design!{
                     settings_steps = <SettingsSlider> {input = {text: "Steps", default: 10.0, min:1, max: 10, step:1}}
                                                 
                     settings_denoise = <SettingsSlider> {input = {text: "Denoise", default: 0.5, min:0.2, max:1.0, step:0.01}}
-                      
+                    
+                    settings_delay = <SettingsSlider> {input = {text: "Delay", default: 0., min:0., max:5.0, step:0.01}}                    
+                                          
                     //workflow_dropdown = <SdxlDropDown> {}
                     random_check_box = <SdxlCheckBox> {
                         text: "Random"
@@ -971,7 +973,7 @@ live_design!{
             abs_pos: vec2(0.0, 0.0)
             flow: Overlay,
             align: {x: 0.5, y: 0.5}
-            image1 = <Image> {
+            image1 = <ImageBlend> {
                 draw_bg: {draw_depth: 11.0}
                 fit: Smallest,
                 width: Fill,
@@ -988,7 +990,8 @@ live_design!{
             width: Fill
             flow: Overlay,
             align: {x: 0.5, y: 0.5}
-            image1 = <Image> {
+            image1 = <ImageBlend> {
+                breathe: true,
                 fit: Smallest,
                 width: Fill,
                 height: Fill
