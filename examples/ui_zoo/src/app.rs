@@ -495,6 +495,7 @@ live_design!{
                     <ZooDesc> {text:"Checkbox?"}
                     <ZooGroup> {
                         height: Fit
+                        spacing: (THEME_SPACE_2)
                         flow: Down,
                         <H4> { text: "Output demo"}
                         <View> {
@@ -518,39 +519,32 @@ live_design!{
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Toggle } }
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Toggle } }
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: Toggle } }
+                            <CheckBoxToggle> {text:"Check me out!" }
+                            <CheckBoxToggle> {text:"Check me out!" }
+                            <CheckBoxToggle> {text:"Check me out!" }
                         }
                         <H4> { text: "Text Mode"}
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: None } }
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: None } }
-                            <CheckBox> {text:"Check me out!", draw_check: { check_type: None } }
+                            <CheckBoxTextual> {text:"Check me out!" }
+                            <CheckBoxTextual> {text:"Check me out!" }
+                            <CheckBoxTextual> {text:"Check me out!" }
                         }
                         <H4> { text: "Custom Icon Mode"}
                         <View> {
                             height: Fit
                             flow: Right
                             align: { x: 0.0, y: 0.5}
-                            <CheckBox> {
+                            <CheckBoxCustom> {
                                 text:"Check me out!"
                                 draw_check: { check_type: None }
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
                             }
-                            <CheckBox> {
-                                text:"Check me out!"
-                                draw_check: { check_type: None }
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                            }
-                            <CheckBox> {
+                            <CheckBoxCustom> {
                                 text:"Check me out!"
                                 draw_check: { check_type: None }
                                 draw_icon: {
