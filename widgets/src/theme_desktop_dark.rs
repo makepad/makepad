@@ -372,28 +372,72 @@ live_design! {
     }
 
     Html = <HtmlBase> {
-        width:Fill, height:Fit,
+        width: Fill, height: Fit,
         flow: RightWrap,
 
         font_size: (THEME_FONT_SIZE_P),
         line_spacing: (THEME_FONT_LINE_SPACING),
 
-        draw_normal: {text_style: <THEME_FONT_REGULAR> {}}
-        draw_italic: {text_style: <THEME_FONT_ITALIC> {}}
-        draw_bold: {text_style: <THEME_FONT_BOLD> {}}
-        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC> {}}
-        draw_fixed: {text_style: <THEME_FONT_CODE> {}}
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
 
-        code_layout: {flow: RightWrap, padding: { left:10,top:10,right:10,bottom:10}},
-        code_walk: {height:Fit, width:Fill}
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
 
-        quote_layout: {flow: RightWrap, padding: <THEME_MSPACE_3> {} },
-        quote_walk: {height:Fit, width:Fill}
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
 
-        list_item_layout: {flow: RightWrap, padding: {left:0,top:0,right:10,bottom:0}},
-        list_item_walk: {height:Fit, width:Fill}
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
 
-        sep_walk: {height:4, width: Fill},
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> {}
+        }
+
+        code_walk: { width: Fill, height: Fit }
+
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_3> {}
+        }
+
+        quote_walk: { width: Fill, height: Fit }
+
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_0> { right: 10 }
+        }
+
+        list_item_walk: { width: Fill, height: Fit }
+
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_3> {}
+        }
 
         draw_block: {
             fn pixel(self) -> vec4 {
@@ -448,7 +492,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_U_2);
+                        sdf.fill(THEME_COLOR_D_2);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -480,42 +524,85 @@ live_design! {
     }
 
     Markdown = <MarkdownBase> {
-        font_size: (THEME_FONT_SIZE_P),
-        flow: RightWrap,
         width:Fill, height:Fit,
-        padding: 5,
+        flow: RightWrap,
+        padding: <THEME_MSPACE_1> {}
+
         line_spacing: (THEME_FONT_LINE_SPACING),
+        font_size: (THEME_FONT_SIZE_P),
 
-        draw_normal: {text_style: <THEME_FONT_REGULAR> {}}
-        draw_italic: {text_style: <THEME_FONT_ITALIC> {}}
-        draw_bold: {text_style: <THEME_FONT_BOLD> {}}
-        draw_bold_italic: {text_style: <THEME_FONT_BOLD_ITALIC> {}}
-        draw_fixed: {text_style: <THEME_FONT_CODE> {}}
-
-        code_layout: {flow: RightWrap,align: {x:0.0,y:0.0}, padding: {left:10,top:10,right:10,bottom:10}},
-        code_walk: {height:Fit, width:Fill}
-
-        inline_code_layout: {flow: RightWrap, padding: {left:3,top:2,right:3,bottom:2}},
-        inline_code_walk: {
-            height: Fit, width: Fit,
-            margin: {top:-4}
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
         }
 
-        quote_layout: {flow: RightWrap, padding: {left:15, top:10, right:10, bottom:10}},
-        quote_walk: {height:Fit, width:Fill}
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
 
-        list_item_layout: {
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        code_layout: {
             flow: RightWrap,
-            line_spacing: (THEME_FONT_LINE_SPACING),
-            padding: {left: 15., top: 0., right: 10., bottom: 0.}
-        },
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+
+        code_walk: { width: Fill, height: Fit }
+
+        inline_code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_0> { left: (THEME_SPACE_1), right: (THEME_SPACE_1) }
+        }
+
+        inline_code_walk: {
+            width: Fit, height: Fit,
+            margin: { top: -2. }
+        }
+
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+
+        quote_walk: { width: Fill, height: Fit, }
 
         list_item_walk: {
             height: Fit, width: Fill,
-            margin: {top:0},
         }
 
-        sep_walk: {height:4, width: Fill},
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_3> {}
+        }
 
         draw_block: {
             fn pixel(self) -> vec4 {
