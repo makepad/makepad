@@ -367,11 +367,11 @@ impl Widget for Video {
 }
 
 impl ImageCacheImpl for Video {
-    fn get_texture(&self) -> &Option<Texture> {
+    fn get_texture(&self, _id:usize) -> &Option<Texture> {
         &self.thumbnail_texture
     }
 
-    fn set_texture(&mut self, texture: Option<Texture>) {
+    fn set_texture(&mut self, texture: Option<Texture>, _id:usize) {
         self.thumbnail_texture = texture;
     }
 }
@@ -538,7 +538,7 @@ impl Video {
             let path_str = path.as_str();
 
             if path_str.len() > 0 {
-                let _ = self.load_image_dep_by_path(cx, path_str);
+                let _ = self.load_image_dep_by_path(cx, path_str, 0);
             }
         }
     }

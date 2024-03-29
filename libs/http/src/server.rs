@@ -147,7 +147,6 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                     if data.is_empty(){
                         break
                     }
-                    println!("SENDING DATA {}", data.len());
                     let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, header.as_slice());
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
