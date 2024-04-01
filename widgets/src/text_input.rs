@@ -650,6 +650,13 @@ impl TextInputRef {
         }
         None
     }
+
+    pub fn returned(&self, actions: &Actions) -> Option<String> {
+        if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(val);
+        }
+        None
+    }
     
     pub fn return_key(&self, actions: &Actions) -> Option<String> {
         if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
