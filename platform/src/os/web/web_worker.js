@@ -107,7 +107,7 @@ onmessage = async function(e) {
 
     function array_to_u8(u8_in){
         let u8_out = wasm_new_data_u8(u8_in.length);
-        u8_out.set(u8_in);
+        u8_out.array.set(u8_in);
         return u8_out;
     }
 
@@ -115,7 +115,7 @@ onmessage = async function(e) {
         let ptr = wasm.exports.wasm_new_data_u8(len);
         return {
             ptr,
-            array: new Uint8Array(env.buffer, ptr, len),
+            array: new Uint8Array(env.memory.buffer, ptr, len),
             len
         }
     }
