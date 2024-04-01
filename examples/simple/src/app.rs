@@ -6,11 +6,11 @@ live_design!{
     
     App = {{App}} {
 
-        ui: <Window>{
+        ui: <Window>{      
             show_bg: true
             width: Fill,
             height: Fill
-            
+            /*
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     // test
@@ -26,7 +26,7 @@ live_design!{
                     y: 0.5
                 },
                 button1 = <Button> {
-                    text: "Hello world 112341234"
+                    text: "Hello world 1"
                 }
                 input1 = <TextInput> {
                     width: 100, height: 30
@@ -120,7 +120,7 @@ live_design!{
                     123
                     "
                 }
-            }
+            }*/
         }
     }
 }  
