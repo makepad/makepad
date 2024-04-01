@@ -3,6 +3,7 @@ workspace.members = [
 #    "experiments/websocket-tcpstream",
 #   "experiments/websocket-windows",
 #   "experiments/svgloader",
+#    "experiments/html_experiment",
     "examples/fractal_zoom", 
     "examples/ui_zoo", 
     "examples/news_feed", 
