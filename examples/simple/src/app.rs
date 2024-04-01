@@ -26,7 +26,7 @@ live_design!{
                     y: 0.5
                 },
                 button1 = <Button> {
-                    text: "Hello world"
+                    text: "Hello world 112341234"
                 }
                 input1 = <TextInput> {
                     width: 100, height: 30

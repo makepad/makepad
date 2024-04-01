@@ -5,6 +5,7 @@ use std::sync::mpsc::{Sender};
 use std::sync::Mutex;
 use std::cell::RefCell;
 use makepad_wasm_bridge::WasmDataU8;
+use crate::thread::SignalToUI;
 
 pub struct OsWebSocket{
     id: u64
@@ -27,6 +28,7 @@ pub unsafe extern "C" fn wasm_web_socket_closed(id: u32) {
         if let Some(index) = list.iter().position(|v| v.0 == id){
             let item = list.remove(index);
             let _ = item.1.send(WebSocketMessage::Closed);
+            SignalToUI::set_ui_signal();
         }
     }
 }
@@ -37,6 +39,7 @@ pub unsafe extern "C" fn wasm_web_socket_opened(id: u32) {
     if let Ok(list) = WEBSOCKET_LIST.lock(){
         if let Some(item) = list.borrow_mut().iter().find(|v| v.0 == id){
             let _ = item.1.send(WebSocketMessage::Opened);
+            SignalToUI::set_ui_signal();
         }
     }
 }
@@ -48,6 +51,7 @@ pub unsafe extern "C" fn wasm_web_socket_error(id: u32, err_ptr:u32, err_len:u32
     if let Ok(list) = WEBSOCKET_LIST.lock(){
         if let Some(item) = list.borrow_mut().iter().find(|v| v.0 == id){
             let _ = item.1.send(WebSocketMessage::Error(err));
+            SignalToUI::set_ui_signal();
         }
     }
 }
@@ -59,6 +63,7 @@ pub unsafe extern "C" fn wasm_web_socket_string(id: u32, str_ptr:u32, str_len:u3
     if let Ok(list) = WEBSOCKET_LIST.lock(){
         if let Some(item) = list.borrow_mut().iter().find(|v| v.0 == id){
             let _ = item.1.send(WebSocketMessage::String(str));
+            SignalToUI::set_ui_signal();
         }
     }
 }
@@ -70,6 +75,7 @@ pub unsafe extern "C" fn wasm_web_socket_binary(id: u32, u8_ptr:u32, u8_len:u32)
     if let Ok(list) = WEBSOCKET_LIST.lock(){
         if let Some(item) = list.borrow_mut().iter().find(|v| v.0 == id){
             let _ = item.1.send(WebSocketMessage::Binary(bin));
+            SignalToUI::set_ui_signal();
         }
     }
 }
