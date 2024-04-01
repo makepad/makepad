@@ -106,7 +106,7 @@ pub struct App {
     #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
     #[rust(vec![(
         LLMMsg::Human,
-        "This is a conversation between AI and User. AI provides the answer as a short 2 line description of an image.".to_string(),
+        "You are an AI that generates prompts for an image generator. Respond in short, terse answers.".to_string(),
     )])] llm_chat: Vec<(LLMMsg,String)>,
     
     #[rust] delay_timer: Timer,
@@ -268,7 +268,7 @@ impl App {
             }
         }
         
-        prompt = prompt.replace("\"", "\\\"").replace("\"", "\\\"").replace("\n","\\n");
+        prompt = prompt.replace("\\","").replace("\"", "\\\"").replace("\n","\\n");
         
         let body = format!("{{
             \"stream\":false,
@@ -386,10 +386,23 @@ impl App {
         }
     }
     
-    fn set_current_image(&mut self, _cx: &mut Cx, image_id: ImageId) {
+    fn update_textures(&mut self, cx: &mut Cx) {
+        if let Some(current_image) = &self.current_image {
+            let tex = self.db.image_texture(current_image);
+            if tex.is_some() {
+                self.ui.image_blend(id!(image_view.image)).set_texture(cx, tex.clone());
+                //self.ui.image_blend(id!(big_image.image1)).set_texture(cx, tex.clone());
+                self.ui.image_blend(id!(second_image.image1)).set_texture(cx, tex);
+            }
+        }
+    }
+    
+    fn set_current_image(&mut self, cx: &mut Cx, image_id: ImageId) {
         // lets send the remote screens the 3 images below the current selection
-        pub fn get_data_for_index(db:&Database, current:usize, id:usize)->Option<Vec<u8>>{
-            let id = if db.image_files[current].prompt_hash != db.image_files[id].prompt_hash{
+        let single =  self.ui.check_box(id!(single_check_box)).selected(cx);
+            
+        pub fn get_data_for_index(db:&Database, current:usize, id:usize, single:bool)->Option<Vec<u8>>{
+            let id = if single || db.image_files[current].prompt_hash != db.image_files[id].prompt_hash{
                 current
             }
             else{
@@ -405,17 +418,21 @@ impl App {
         // lets find our current image id, and we should set all to the same if the prompt hash is the same
         if let Some(current) = self.db.image_files.iter().position(|v| v.image_id == image_id){
             for (_id, ip, sender) in self.remote_screens.lock().unwrap().borrow_mut().iter(){
-                let index = if *ip == Ipv4Addr::new(10,0,0,116){3}
-                else if *ip == Ipv4Addr::new(10,0,0,117){2}
-                else {1};
-                if let Some(data) = get_data_for_index(&self.db, current, current+index){
+                log!("{:?}", ip);
+                let index = if *ip == Ipv4Addr::new(10,0,0,116){4} //tv1
+                else if *ip == Ipv4Addr::new(10,0,0,117){3} //tv2
+                else if *ip == Ipv4Addr::new(10,0,0,114){2} //tv5
+                else if *ip == Ipv4Addr::new(10,0,0,101){1} //tv3
+                else{0}; // tv4
+                if let Some(data) = get_data_for_index(&self.db, current, current+index, single){
                     let _= sender.send(data);
                 }
             }
         }
         /*
         */
-        
+        self.update_textures(cx);
+                
         
         self.current_image = Some(image_id);
         let prompt_hash = self.prompt_hash_from_current_image();
@@ -575,6 +592,11 @@ impl MatchEvent for App {
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
+        if self.db.handle_decoded_images(cx) {
+            self.update_textures(cx);
+            self.ui.redraw(cx);
+        }
+        
         for m in 0..self.machines.len(){
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){
@@ -822,14 +844,19 @@ impl MatchEvent for App {
                         live_id!(llm)=>if let Some(res) = res.get_string_body() {
                             // lets parse it as json
                             if let Ok(val) = JsonValue::deserialize_json(&res){
-                                 log!("{}", res);
-                                let val = val.key("content").string();
-                                if let Some((LLMMsg::Progress,_)) = self.llm_chat.last(){
-                                    self.llm_chat.pop();
+                                if let Some(val) = val.key("content"){
+                                    if let Some(val) = val.string(){
+                                        if let Some((LLMMsg::Progress,_)) = self.llm_chat.last(){
+                                            self.llm_chat.pop();
+                                        }
+                                        self.ui.text_input(id!(positive)).set_text(&val);
+                                        self.llm_chat.push((LLMMsg::AI,val.into()));
+                                        self.ui.widget(id!(llm_chat)).redraw(cx);
+                                    }
                                 }
-                                self.ui.text_input(id!(positive)).set_text(&val);
-                                self.llm_chat.push((LLMMsg::AI,val.into()));
-                                self.ui.widget(id!(llm_chat)).redraw(cx);
+                                else{
+                                    log!("{}", res);
+                                }
                             }
                             else{
                                 log!("{}", res);
@@ -885,14 +912,6 @@ impl MatchEvent for App {
     }
     
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
-        if let Some(current_image) = &self.current_image {
-            let tex = self.db.image_texture(current_image);
-            if tex.is_some() {
-                self.ui.image_blend(id!(image_view.image)).set_texture(cx, tex.clone());
-                self.ui.image_blend(id!(big_image.image1)).set_texture(cx, tex.clone());
-                self.ui.image_blend(id!(second_image.image1)).set_texture(cx, tex);
-            }
-        }
         
         let image_list = self.ui.portal_list(id!(image_list));
         let llm_chat = self.ui.portal_list(id!(llm_chat));
@@ -1113,9 +1132,6 @@ impl AppMain for App {
             return
         }
         
-        if self.db.handle_decoded_images(cx) {
-            self.ui.redraw(cx);
-        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
