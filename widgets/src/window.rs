@@ -77,6 +77,8 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
+                //self.view(id!(caption_bar)).set_visible(true);
+                //self.view(id!(windows_buttons)).set_visible(true);
                 /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     self.apply_over(cx, live!{
                         caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
