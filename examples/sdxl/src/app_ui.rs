@@ -730,6 +730,9 @@ live_design!{
                     render_check_box = <SdxlCheckBox> {
                         text: "Render"
                     }
+                    single_check_box = <SdxlCheckBox> {
+                        text: "Single"
+                    }
                     trim_button = <BarButton> {
                         text: "Trim"
                     }
