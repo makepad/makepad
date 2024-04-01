@@ -439,7 +439,7 @@ impl Cx {
         let doc = live_registry.ptr_to_doc(live_ptr);
         
         let next_index = cb(self, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
-        if next_index <= live_ptr.index as usize + 2 {
+        if next_index <= live_ptr.index as usize + 1 {
             self.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);
         }
     }
