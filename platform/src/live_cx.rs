@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_micro_serde::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
             LiveFileChange,
@@ -16,6 +17,7 @@ use {
             /*LiveTokenId,*/
             LiveFileId,
         },
+        studio::{StudioToAppVec,StudioToApp},
         web_socket::WebSocketMessage,
         makepad_live_compiler::LiveTypeInfo,
         /*makepad_math::*,*/
@@ -186,7 +188,7 @@ impl Cx {
     
     pub fn start_disk_live_file_watcher(&mut self, milis:u64){
         let live_registry = self.live_registry.borrow();
-
+        
         let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
             if let Some(start) = file.file_name.find("src/"){
@@ -229,13 +231,20 @@ impl Cx {
         if let Some(studio_socket) = &mut self.studio_web_socket{
             while let Ok(msg) = studio_socket.try_recv(){
                 match msg {
-                    WebSocketMessage::Binary(_bin)=>{
-                        
+                    WebSocketMessage::Binary(bin)=>{
+                        if let Ok(data) = StudioToAppVec::deserialize_bin(&bin){
+                            for data in data.0{
+                                match data{
+                                    StudioToApp::LiveChange{file_name, content}=>{
+                                        all_changes.push(LiveFileChange{file_name, content})
+                                    }
+                                }
+                            }
+                        }
                     }
                     _=>()
                 }
             }
-            
         }
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.

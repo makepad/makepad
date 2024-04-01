@@ -420,10 +420,10 @@ pub enum HostToStdin{
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     Scroll(StdinScroll),
-    ReloadFile{
+    /*ReloadFile{
         file:String,
         contents:String
-    },
+    },*/
 }
 
 /// After a successful client-side draw, all the host needs to know, so it can
