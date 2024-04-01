@@ -348,10 +348,12 @@ impl CxOsApi for Cx {
         }
         
         self.live_expand();
-
-        #[cfg(apple_sim)]
-        self.start_disk_live_file_watcher(50);
         
+        if !Self::has_studio_web_socket() {
+            #[cfg(apple_sim)]
+            self.start_disk_live_file_watcher(50);
+        }
+            
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
         #[cfg(apple_sim)]
