@@ -567,7 +567,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
         self.live_expand();
-        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+        if !Self::has_studio_web_socket() {
             self.start_disk_live_file_watcher(100);
         }
         self.live_scan_dependencies();
