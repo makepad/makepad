@@ -437,6 +437,12 @@ impl WidgetRef {
         DrawStep::done()
     }
     
+    pub fn draw_walk_all(&self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk)  {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.draw_walk_all(cx, scope, walk)
+        }
+    }
+    
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
         if let Some(nd) = inner.widget.draw(cx, scope).step() {

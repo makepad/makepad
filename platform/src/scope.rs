@@ -137,7 +137,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
             
-    pub fn with_props_index<T: Any>( w:&'b mut T, index:usize)->Self{
+    pub fn with_props_index<T: Any>( w:&'b T, index:usize)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(None),
