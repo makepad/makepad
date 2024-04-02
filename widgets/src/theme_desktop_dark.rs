@@ -962,7 +962,7 @@ live_design! {
     }
 
     CheckBox = <CheckBoxBase> {
-        width: Fit, height: Fit,
+        width: Fit, height: 20,
         margin: {left: 0.0, top: (THEME_SPACE_1), bottom: (THEME_SPACE_1), right: (THEME_SPACE_1)}
         align: { x: 0.0, y: 0.5 }
         label_walk: {
@@ -970,10 +970,8 @@ live_design! {
             margin: {left: 20.0, top: 0, bottom: 0, right: (THEME_SPACE_2)}
         }
 
-        label_align: { x: 0.5, y: 0.0 }
-
         draw_check: {
-            uniform size: 7.0;
+            uniform size: 7.5;
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 match self.check_type {
@@ -984,13 +982,13 @@ live_design! {
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
                         sdf.fill_keep(
                             mix(
-                                mix(THEME_COLOR_D_3, THEME_COLOR_D_2, pow(self.pos.y, 1.)),
+                                mix(THEME_COLOR_D_4, THEME_COLOR_D_1, pow(self.pos.y, 1.)),
                                 mix(THEME_COLOR_D_5, THEME_COLOR_D_4, pow(self.pos.y, 1.0)),
                                 self.hover)
                             )
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             ), 1.0)
@@ -999,7 +997,11 @@ live_design! {
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix(THEME_COLOR_U_0, THEME_COLOR_U_6, self.selected), 1.25);
+                        sdf.stroke(mix(
+                            mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.hover),
+                            THEME_COLOR_U_6,
+                            self.selected), 1.25
+                        );
                     }
                     CheckType::Radio => {
                         let sz = self.size - 0.5;
@@ -2393,10 +2395,15 @@ live_design! {
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep(THEME_COLOR_D_3); 
+                        sdf.fill_keep(
+                            mix(
+                                mix(THEME_COLOR_D_4, THEME_COLOR_D_1, pow(self.pos.y, 1.)),
+                                mix(THEME_COLOR_D_5, THEME_COLOR_D_4, pow(self.pos.y, 1.0)),
+                                self.hover)
+                            )
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
+                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             )

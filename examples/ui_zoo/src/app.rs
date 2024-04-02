@@ -537,15 +537,6 @@ live_design!{
                             <CheckBoxToggle> {text:"Check me out!" }
                             <CheckBoxToggle> {text:"Check me out!" }
                         }
-                        <H4> { text: "Text Mode"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5}
-                            <CheckBoxTextual> {text:"Check me out!" }
-                            <CheckBoxTextual> {text:"Check me out!" }
-                            <CheckBoxTextual> {text:"Check me out!" }
-                        }
                         <H4> { text: "Custom Icon Mode"}
                         <View> {
                             height: Fit
