@@ -1,5 +1,5 @@
 use makepad_widgets::{
-    makepad_html::HtmlAttribute,
+    makepad_html::{HtmlDoc},
     *,
 };
 
@@ -44,13 +44,11 @@ live_design!{
     //     }
     // }
 
-    TextOrImage = {{TextOrImage}}<View> {
-        width: Fit, height: Fit,
-        flow: Overlay
-
-        text_view = <View> {
-            visible: true,
-            tv_label = <Label> {
+    TextOrImage = {{TextOrImage}}{
+        text_view: <View>{ 
+            width: Fill,
+            height: Fill,
+            label = <Label> {
                 width: Fit, height: Fit,
                 draw_text: {
                     draw_call_group: other_tv_label
@@ -62,17 +60,18 @@ live_design!{
                 text: "Loading image..."
             }
         }
-
-        img_view = <View> {
-            visible: true,
-            iv_img = <Image> {
-                fit: Size,
+        image_view:  <View>{ 
+            width: Fill,
+            height: Fill,
+            image = <Image> {
+                width: Fill,
+                height: Fill,
+                fit: Stretch,
             }
         }
     }
-
-    HtmlImageTemplate = {{HtmlImage}}<TextOrImage> {
-    }
+    
+    HtmlImage = {{HtmlImage}}<TextOrImage>{}
 
     // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
     const LINK_COLOR = #x155EEF
@@ -133,7 +132,7 @@ live_design!{
                     Button = <Button> {
                         text: "Hello world"
                     }
-                    img = <HtmlImageTemplate> {
+                    img = <HtmlImage> {
                     }
 
                     body: "
@@ -295,39 +294,133 @@ impl AppMain for App {
 /// This is useful for displaying alternate text when an image is not (yet) available
 /// or fails to load. It can also be used to display a loading message while an image
 /// is being fetched.
-#[derive(Live, Widget)]
-pub struct TextOrImage {
-    #[deref] view: View,
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TextOrImageStatus {
+    Text,
+    Image,
 }
 
-impl LiveHook for TextOrImage{
-    fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        //_nodes.debug_print(_index, 100);
-    }
+#[derive(Live, Widget, LiveHook)]
+pub struct TextOrImage {
+    /// The URL of the image to display.
+    #[redraw] #[live] text_view: WidgetRef,
+    #[redraw] #[live] image_view: WidgetRef,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+    #[rust(TextOrImageStatus::Text)] status: TextOrImageStatus,
+    #[rust] pixel_width: f64,
+    #[rust] pixel_height: f64,    
 }
 
 impl Widget for TextOrImage {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope)
+        self.image_view.handle_event(cx, event, scope);
+        self.text_view.handle_event(cx, event, scope);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-       // log!("TextOrImage::draw_walk(): displaying: {:?}, walk: {:?}", self.status(), walk);
-        self.view.draw_walk(cx, scope, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, mut walk: Walk) -> DrawStep {
+        walk.width = Size::Fixed(self.pixel_width / cx.current_dpi_factor());
+        walk.height = Size::Fixed(self.pixel_height / cx.current_dpi_factor());
+        cx.begin_turtle(walk, self.layout);
+        match self.status{
+            TextOrImageStatus::Image=>self.image_view.draw_walk_all(cx, scope, walk),
+            TextOrImageStatus::Text=>self.text_view.draw_walk_all(cx, scope, walk)
+        }
+        cx.end_turtle();
+        DrawStep::done()
     }
 }
 
-impl TextOrImage {
+#[derive(Live, Widget)]
+pub struct HtmlImage {
+    /// The URL of the image to display.
+    #[deref] toi: TextOrImage,
+    #[rust] src: String,
+    #[rust] alt: String,
+    #[rust] title: String,    
+}
+
+
+impl Widget for HtmlImage {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.toi.handle_event(cx, event, scope);
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.toi.draw_walk(cx, scope, walk)
+    }
+}
+
+impl LiveHook for HtmlImage {
+    // After an HtmlImage instance has been instantiated ("applied"),
+    // populate its struct fields from the `<img>` tag's attributes.
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+                
+        //log!("HtmlImage::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
+        match apply.from {
+            ApplyFrom::NewFromDoc {..} => {
+                // lets get the scope props
+                let scope = apply.scope.as_ref().unwrap();
+                let doc =  scope.props.get::<HtmlDoc>().unwrap();
+                let mut walker = doc.new_walker_with_index(scope.index);
+                while let Some((lc, attr)) = walker.while_attr_lc(){
+                    match lc {
+                        live_id!(src) => self.src = attr.into(),
+                        live_id!(alt) => self.alt = attr.into(),
+                        live_id!(title) => self.title = attr.into(),
+                        live_id!(width) => {
+                            if let Ok(width) = attr.parse::<f64>() {
+                                self.pixel_width = width
+                            }
+                        }
+                        live_id!(height) => {
+                            if let Ok(height) = attr.parse::<f64>() {
+                                self.pixel_height = height
+                            }
+                        }
+                        _ => ()
+                    }
+                }
+                // At first, set the image to display the alternate/title text
+                // until the image has been fetched and is ready to be displayed.
+                self.status = TextOrImageStatus::Text;
+                
+                let text = if !self.alt.is_empty() {
+                    self.alt.as_str()
+                } else if !self.title.is_empty() {
+                    self.title.as_str()
+                } else {
+                    "Loading image..."
+                };
+                
+                self.text_view.label(id!(label)).set_text(text.as_ref());
+                
+                if !self.src.is_empty() {
+                    // temp: just assume a local path URL only for now
+                    let mut path = std::env::current_dir().unwrap();
+                    path.push(&self.src);
+                    //log!("HtmlImage::after_apply(): loading image from path: {:?}", path.to_str().unwrap());
+                    let image_ref = self.image_view.image(id!(image));
+                    image_ref.load_image_file_by_path(cx, path.to_str().unwrap()).unwrap();
+                    self.status = TextOrImageStatus::Image;
+                }
+            }
+            _ => ()
+        }
+    }
+}
+
+/*
+impl HtmlImage {
     /// Sets the text content, making the text visible and the image invisible.
     ///
     /// ## Arguments
     /// * `text`: the text that will be displayed in this `TextOrImage`, e.g.,
     ///   a message like "Loading..." or an error message.
     pub fn show_text<T: AsRef<str>>(&mut self, text: T) {
-        //log!("TextOrImage::show_text(): text: {:?}", text.as_ref());
-        self.view.view(id!(img_view)).set_visible(false);
-        self.view.view(id!(text_view)).set_visible(true);
-        self.view.label(id!(text_view.tv_label)).set_text(text.as_ref());
+        self.status = DisplayStatus::Text;
+        self.text_view.label(id!(tv_label)).set_text(text.as_ref());
     }
 
     /// Sets the image content, making the image visible and the text invisible.
@@ -340,26 +433,20 @@ impl TextOrImage {
     pub fn show_image<F, E>(&mut self, image_set_function: F) -> Result<(), E>
         where F: FnOnce(ImageRef) -> Result<(), E>
     {
-        let img_ref = self.view.image(id!(img_view.iv_img));
-        self.view.debug_print_children();
+        let img_ref = self.img_view.image(id!(iv_img));
         let res = image_set_function(img_ref);
         if res.is_ok() {
-            self.view.view(id!(img_view)).set_visible(true);
-            self.view.view(id!(text_view)).set_visible(false);
+            self.status = DisplayStatus::Image;
         }
         res
     }
 
     /// Returns whether this `TextOrImage` is currently displaying an image or text.
     pub fn status(&mut self) -> DisplayStatus {
-        if self.view.view(id!(img_view)).is_visible() {
-            return DisplayStatus::Image;
-        } else {
-            DisplayStatus::Text
-        }
+        self.status
     }
-}
-
+}*/
+/*
 impl TextOrImageRef {
     /// See [TextOrImage::show_text()].
     pub fn show_text<T: AsRef<str>>(&self, text: T) {
@@ -387,28 +474,11 @@ impl TextOrImageRef {
             DisplayStatus::Text
         }
     }
-}
+}*/
 
-/// Whether a `TextOrImage` instance is currently displaying text or an image.
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum DisplayStatus {
-    Text,
-    Image,
-}
+// Whether a `TextOrImage` instance is currently displaying text or an image.
 
-
-#[derive(Live, Widget)]
-struct HtmlImage {
-    #[deref] toi: TextOrImage,
-    /// The URL of the image to display.
-    #[rust] src: String,
-    /// Alternate text for the image that should be displayed for
-    /// accessibility purposes or in case the image cannot be loaded.
-    #[rust] alt: String,
-    /// The title of the image, which is displayed as a tooltip upon hover.
-    #[rust] title: String,
-}
-
+/*
 impl LiveHook for HtmlImage {
     // After an HtmlImage instance has been instantiated ("applied"),
     // populate its struct fields from the `<img>` tag's attributes.
@@ -508,7 +578,7 @@ impl Widget for HtmlImage {
             log!("Error: an HTML <img> tag should not have any text value, but we got {v:?}.");
         }
     }
-}
+}*/
 
 
     /*
