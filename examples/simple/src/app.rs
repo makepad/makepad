@@ -6,11 +6,11 @@ live_design!{
     
     App = {{App}} {
 
-        ui: <Window>{      
+        ui: <Window>{ 
             show_bg: true
             width: Fill,
             height: Fill
-            /*
+            
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     // test
@@ -120,7 +120,7 @@ live_design!{
                     123
                     "
                 }
-            }*/
+            }
         }
     }
 }  
