@@ -9,7 +9,7 @@ use {
             HostToStdin,
             StdinToHost,
         },
-        makepad_platform::studio::{AppToStudio,EventSample, GPUSample},
+        makepad_platform::studio::{AppToStudio,AppToStudioVec,EventSample, GPUSample, StudioToAppVec, StudioToApp},
         build_manager::{
             build_protocol::*,
             build_client::BuildClient
@@ -21,17 +21,20 @@ use {
     makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
+        sync::{Arc,Mutex},
+        cell::RefCell,
         collections::HashMap,
         io::prelude::*,
         path::PathBuf,
         path::Path,
         fs::File,
+        sync::mpsc,
+        thread,
+        time,
+        net::{UdpSocket, SocketAddr},
+        time::{Instant, Duration},
     },
-    std::sync::mpsc,
-    std::thread,
-    std::time,
-    std::net::{UdpSocket, SocketAddr},
-    std::time::{Instant, Duration},
+    
 };
 
 pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
@@ -88,9 +91,10 @@ pub struct BuildManager {
     pub binaries: Vec<BuildBinary>,
     pub active: ActiveBuilds,
     pub studio_http: String,
-    pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudio)>,
+    pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
-    pub send_file_change: FromUISender<LiveFileChange>
+    //pub send_file_change: FromUISender<LiveFileChange>,
+    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, mpsc::Sender<Vec<u8>>)>>>>,
 }
 
 pub struct BuildBinary {
@@ -202,13 +206,21 @@ impl BuildManager {
     
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
-       for item_id in self.active.builds.keys() {
+       /*for item_id in self.active.builds.keys() {
             self.clients[0].send_cmd_with_id(*item_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
                 file: live_file_change.file_name.clone(),
                 contents: live_file_change.content.clone()
             }.to_json()));
+        }*/
+        if let Ok(d)= self.active_build_websockets.lock(){
+            let data = StudioToAppVec(vec![StudioToApp::LiveChange{
+                file_name:live_file_change.file_name.clone(),
+                content:live_file_change.content.clone()
+            }]).serialize_bin();
+            for node in d.borrow_mut().iter_mut(){
+                let _ = node.1.send(data.clone());
+            }
         }
-        let _ = self.send_file_change.send(live_file_change);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
@@ -222,65 +234,67 @@ impl BuildManager {
                 self.studio_http = format!("http://{}/$studio_web_socket", addr);
             }
             
-            while let Ok((build_id, msg)) = self.recv_studio_msg.try_recv() {
-                match msg{
-                    AppToStudio::LogItem(item)=>{
-                        let start = text::Position {
-                            line_index: item.line_start as usize,
-                            byte_index: item.column_start as usize
-                        };
-                        let end = text::Position {
-                            line_index: item.line_end as usize,
-                            byte_index: item.column_end as usize
-                        };
-                        //log!("{:?} {:?}", pos, pos + loc.length);
-                        if let Some(file_id) = file_system.path_to_file_node_id(&item.file_name) {
-                            match item.level{
-                                LogLevel::Warning=>{
-                                    file_system.add_decoration(file_id, Decoration::new(
-                                        0,
-                                        start,
-                                        end,
-                                        DecorationType::Warning
-                                    ));
-                                    cx.action(AppAction::RedrawFile(file_id))
+            while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
+                for msg in msgs.0{
+                    match msg{
+                        AppToStudio::LogItem(item)=>{
+                            let start = text::Position {
+                                line_index: item.line_start as usize,
+                                byte_index: item.column_start as usize
+                            };
+                            let end = text::Position {
+                                line_index: item.line_end as usize,
+                                byte_index: item.column_end as usize
+                            };
+                            //log!("{:?} {:?}", pos, pos + loc.length);
+                            if let Some(file_id) = file_system.path_to_file_node_id(&item.file_name) {
+                                match item.level{
+                                    LogLevel::Warning=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Warning
+                                        ));
+                                        cx.action(AppAction::RedrawFile(file_id))
+                                    }
+                                    LogLevel::Error=>{
+                                        file_system.add_decoration(file_id, Decoration::new(
+                                            0,
+                                            start,
+                                            end,
+                                            DecorationType::Error
+                                        ));
+                                        cx.action(AppAction::RedrawFile(file_id))
+                                    }
+                                    _=>()
                                 }
-                                LogLevel::Error=>{
-                                    file_system.add_decoration(file_id, Decoration::new(
-                                        0,
-                                        start,
-                                        end,
-                                        DecorationType::Error
-                                    ));
-                                    cx.action(AppAction::RedrawFile(file_id))
-                                }
-                                _=>()
                             }
+                            log.push((build_id, LogItem::Location(LogItemLocation{
+                                level: item.level,
+                                file_name: item.file_name,
+                                start,
+                                end,
+                                message: item.message
+                            })));
+                            cx.action(AppAction::RedrawLog)
                         }
-                        log.push((build_id, LogItem::Location(LogItemLocation{
-                            level: item.level,
-                            file_name: item.file_name,
-                            start,
-                            end,
-                            message: item.message
-                        })));
-                        cx.action(AppAction::RedrawLog)
-                    }
-                    AppToStudio::EventSample(sample)=>{  
-                        // ok lets push this profile sample into the profiles
-                        let values = self.profile.entry(build_id).or_default();
-                        values.event.push(sample);
-                        cx.action(AppAction::RedrawProfiler)
-                    }
-                    AppToStudio::GPUSample(sample)=>{  
-                        // ok lets push this profile sample into the profiles
-                        let values = self.profile.entry(build_id).or_default();
-                        values.gpu.push(sample);
-                        cx.action(AppAction::RedrawProfiler)
+                        AppToStudio::EventSample(sample)=>{  
+                            // ok lets push this profile sample into the profiles
+                            let values = self.profile.entry(build_id).or_default();
+                            values.event.push(sample);
+                            cx.action(AppAction::RedrawProfiler)
+                        }
+                        AppToStudio::GPUSample(sample)=>{  
+                            // ok lets push this profile sample into the profiles
+                            let values = self.profile.entry(build_id).or_default();
+                            values.gpu.push(sample);
+                            cx.action(AppAction::RedrawProfiler)
+                        }
                     }
                 }
             }
-            
+                
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv(){
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(loc)) => {
@@ -364,10 +378,11 @@ impl BuildManager {
             post_max_size: 1024 * 1024,
             request: tx_request
         });
-        
+        /*
         let rx_file_change = self.send_file_change.receiver();
         //let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
         
+        let active_build_websockets = self.active_build_websockets.clone();
         // livecoding observer
         std::thread::spawn(move || {
             loop{
@@ -375,8 +390,10 @@ impl BuildManager {
                     // lets send this change to all our websocket connections
                 }
             }
-        });
+        });*/
+        
         let studio_sender = self.recv_studio_msg.sender();
+        let active_build_websockets = self.active_build_websockets.clone();
         std::thread::spawn(move || {
             // TODO fix this proper:
             let makepad_path = "./".to_string();
@@ -399,19 +416,21 @@ impl BuildManager {
             while let Ok(message) = rx_request.recv() {
                 // only store last change, fix later
                 match message {
-                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender: _,headers} => {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender,headers} => {
                         if let Some(id) = headers.path.rsplit("/").next(){
                             if let Ok(id) = id.parse::<u64>(){
                                 socket_id_to_build_id.insert(web_socket_id, LiveId(id));
+                                active_build_websockets.lock().unwrap().borrow_mut().push((web_socket_id,response_sender));
                             }
                         }
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
                         socket_id_to_build_id.remove(&web_socket_id);
+                        active_build_websockets.lock().unwrap().borrow_mut().retain(|v| v.0 != web_socket_id);
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
                         if let Some(id) = socket_id_to_build_id.get(&web_socket_id){
-                            if let Ok(msg) = AppToStudio::deserialize_bin(&data){
+                            if let Ok(msg) = AppToStudioVec::deserialize_bin(&data){
                                 let _ = studio_sender.send((*id,msg));
                             }
                         }

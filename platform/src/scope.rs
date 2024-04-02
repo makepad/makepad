@@ -76,23 +76,23 @@ pub struct ScopeDataRef<'a>(Option<&'a dyn Any>);
 pub struct ScopeDataMut<'a>(Option<&'a mut dyn Any>);
 
 impl <'a> ScopeDataRef<'a>{
-    pub fn get<T: Any>(&mut self) -> &T {
-        self.0.as_ref().unwrap().downcast_ref::<T>().unwrap()
+    pub fn get<T: Any>(&self) -> Option<&T> {
+        self.0.as_ref().and_then(|r| r.downcast_ref())
     }
 }
 
 impl <'a> ScopeDataMut<'a>{
-    pub fn get<T: Any>(&mut self) -> &T {
-        self.0.as_ref().unwrap().downcast_ref::<T>().unwrap()
+    pub fn get<T: Any>(&mut self) -> Option<&T> {
+        self.0.as_ref().and_then(|r| r.downcast_ref())
     }
                     
-    pub fn get_mut<T: Any>(&mut self) -> &mut T {
-        self.0.as_mut().unwrap().downcast_mut::<T>().unwrap()
+    pub fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.0.as_mut().and_then(|r| r.downcast_mut())
     }
 }
 
 impl<'a,'b> Scope<'a,'b>{
-    pub fn with_data<T: Any>(v:&'a mut T)->Self{
+    pub fn with_data<T: Any>(v: &'a mut T)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
@@ -101,7 +101,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
         
-    pub fn with_data_props<T: Any>(v:&'a mut T, w:&'b T)->Self{
+    pub fn with_data_props<T: Any>(v: &'a mut T, w: &'b T)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
@@ -110,7 +110,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
         
-    pub fn with_props<T: Any>( w:&'b mut T)->Self{
+    pub fn with_props<T: Any>(w: &'b T)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(None),
@@ -137,7 +137,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
             
-    pub fn with_props_index<T: Any>( w:&'b mut T, index:usize)->Self{
+    pub fn with_props_index<T: Any>( w:&'b T, index:usize)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(None),

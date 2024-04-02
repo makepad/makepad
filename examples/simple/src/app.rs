@@ -1,15 +1,12 @@
 use makepad_widgets::*;
-  
+   
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
     
-    MyHtml = {{MyHtml}}<Html>{
-    }
-    
     App = {{App}} {
 
-        ui: <Window>{
+        ui: <Window>{ 
             show_bg: true
             width: Fill,
             height: Fill
@@ -29,36 +26,60 @@ live_design!{
                     y: 0.5
                 },
                 button1 = <Button> {
-                    text: "Hello world"
+                    text: "Hello world 1"
+                    draw_text:{color:#f00}
                 }
                 input1 = <TextInput> {
                     width: 100, height: 30
                     text: "Click to count"
                 }
                 label1 = <Label> {
-                    draw_text: {d
+                    draw_text: {
                         color: #f
                     },
                     text: "Counter: 0"
                 }
                 <Html>{
-                    
-                    Button = <TextInput> {
+                    // a = {
+                    //     draw_text: {
+                    //         // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1, #x155EEF, // #0a84ff
+                    //         // color: #1a0dab,
+                    //     }
+                    // }
+
+                    Button = <Button> {
                         text: "Helloworld"
                     }  
                     body:"
                     Normal <u>underlined html</u> <s>strike</s> text hello world <br/>
-                    <li>one in the list!!!!! </li><br/>
-                    <li>two</li><br/>
+                    <ol>
+                        <li>one in the list!!!!! </li>
+                        <li>two</li>
+                        <li>three
+                            <ol>
+                                <li>sub one</li>
+                                <li>sub two</li>
+                                <li>sub three
+                                    <ol>
+                                        <li>sub sub one</li>
+                                        <li>sub sub two</li>
+                                        <li>sub sub three</li>
+                                    </ol>
+                                </li>
+                            </ol>
+                        </li>
+                    </ol>
                     <code>let x = 1.0;</code>
                     <b>BOLD text</b>&nbsp;<i>italic</i><br/>
                     <sep/>
+                    Testing a link: <a href=\"https://www.google.com\">Click to Google</a><br/>
                     Next line normal text button:<Button>Hi</Button><br/>
-                    <block_quote>block<b>quote</b><br/><block_quote>blockquote</block_quote><br/>
+                    <blockquote>block<b>quote</b><br/><blockquote>blockquote</blockquote><br/>
                     Next line <br/>
                     <sep/>
-                    </block_quote><b><i>Bold italic</i><br/>
+                    </blockquote><b><i>Bold italic</i><br/>
                     <sep/></br>
+                    <pre>this is a preformatted code block</pre>
                     "
                 }
                 <Markdown>{
@@ -139,40 +160,6 @@ impl AppMain for App {
 
 
 
-#[derive(Live, LiveHook, Widget)]
-struct MyHtml{ 
-    #[deref] html:Html
-}
-
-impl Widget for MyHtml{
-    fn draw_walk(&mut self, cx:&mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
-        let tf = &mut self.html.text_flow;
-        tf.begin(cx, walk); 
-        let mut node = self.html.doc.new_walker();
-        while !node.done(){
-            match Html::handle_open_tag(cx, tf, &mut node){
-                Some(_)=>{
-                    // handle tag here
-                }
-                _=>()
-            }
-            match Html::handle_close_tag(cx, tf, &mut  node){
-                Some(_)=>{
-                    // handle tag here
-                }
-                _=>()
-            }
-            Html::handle_text_node(cx, tf, &mut node);
-            node.walk();
-        }
-        tf.end(cx);
-        DrawStep::done()
-    }
-    
-    fn handle_event(&mut self, cx:&mut Cx, event:&Event, scope:&mut Scope){
-        self.html.handle_event(cx, event, scope)
-    }
-}
 /*
 // This is our custom allocator!
 use std::{

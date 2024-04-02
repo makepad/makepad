@@ -21,6 +21,14 @@ pub enum SliderType {
     Rotary = shader_enum(3),
 }
 
+impl LiveHook for Slider{
+    fn after_new_from_doc(&mut self, _cx:&mut Cx){
+        self.set_internal(self.default);
+        self.update_text_input();
+    }
+}
+
+
 #[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawSlider {
@@ -29,7 +37,7 @@ pub struct DrawSlider {
     #[live] slider_type: SliderType
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Live, Widget)]
 pub struct Slider {
     #[redraw] #[live] draw_slider: DrawSlider,
     
@@ -50,6 +58,7 @@ pub struct Slider {
     #[live] min: f64,
     #[live] max: f64,
     #[live] step: f64,
+    #[live] default: f64,
     
     #[live] bind: String,
     

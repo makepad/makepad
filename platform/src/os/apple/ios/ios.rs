@@ -297,9 +297,11 @@ impl Cx {
                 },
                 CxOsOp::SetCursor(_cursor) => { 
                 },
-                CxOsOp::StartTimer {timer_id:_, interval:_, repeats:_} => {
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    get_ios_app_global().start_timer(timer_id, interval, repeats);
                 },
-                CxOsOp::StopTimer(_timer_id) => {
+                CxOsOp::StopTimer(timer_id) => {
+                    get_ios_app_global().stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(_) => {
                 }
@@ -346,10 +348,12 @@ impl CxOsApi for Cx {
         }
         
         self.live_expand();
-
-        #[cfg(apple_sim)]
-        self.start_disk_live_file_watcher(50);
         
+        if !Self::has_studio_web_socket() {
+            #[cfg(apple_sim)]
+            self.start_disk_live_file_watcher(50);
+        }
+            
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
         #[cfg(apple_sim)]

@@ -119,7 +119,7 @@ live_design!{
                 
             log_tabs = Tabs {
                 tabs: [log_list, profiler],
-                selected: 1
+                selected: 0
             }
                 
             run_tabs = Tabs {
