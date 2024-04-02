@@ -7,8 +7,8 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
-
-    // ARIAL_FONT = {
+ 
+    // ARIAL_FONT = { 
     //     font_size: 9.4,
     //     top_drop: 1.2,
     //     font: {
@@ -106,7 +106,7 @@ live_design!{
                     source: dep("crate://self/resources/img/google_logo.png"),
                 }
                 button1 = <Button> {
-                    text: "Hello world"
+                    text: "Hello world "
                 }
                 input1 = <TextInput> {
                     width: 100, height: 30
@@ -360,7 +360,7 @@ impl LiveHook for HtmlImage {
                 // lets get the scope props
                 let scope = apply.scope.as_ref().unwrap();
                 let doc =  scope.props.get::<HtmlDoc>().unwrap();
-                let mut walker = doc.new_walker_with_index(scope.index);
+                let mut walker = doc.new_walker_with_index(scope.index + 1);
                 while let Some((lc, attr)) = walker.while_attr_lc(){
                     match lc {
                         live_id!(src) => self.src = attr.into(),

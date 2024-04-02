@@ -337,7 +337,7 @@ fn handle_custom_widget(
 
     let template = node.open_tag_nc().unwrap();
     // lets grab the nodes+index from the walker
-    let mut scope_with_attrs = Scope::with_props_index(doc, node.index + 1);
+    let mut scope_with_attrs = Scope::with_props_index(doc, node.index);
     // log!("FOUND CUSTOM WIDGET! template: {template:?}, id: {id:?}, attrs: {attrs:?}");
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
@@ -365,7 +365,7 @@ impl LiveHook for HtmlLink {
             ApplyFrom::NewFromDoc {..}=> {
                 let scope = apply.scope.as_ref().unwrap();
                 let doc =  scope.props.get::<HtmlDoc>().unwrap();
-                let mut walker = doc.new_walker_with_index(scope.index);
+                let mut walker = doc.new_walker_with_index(scope.index + 1);
                 
                 if let Some((lc, attr)) = walker.while_attr_lc(){
                     match lc {
