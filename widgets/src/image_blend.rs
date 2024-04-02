@@ -81,6 +81,10 @@ impl ImageBlend {
                 
         let aspect = width / height;
         match self.fit {
+            ImageFit::Size=>{
+                walk.width = Size::Fixed(width);
+                walk.height = Size::Fixed(height);
+            }
             ImageFit::Stretch => {
             }
             ImageFit::Horizontal => {
