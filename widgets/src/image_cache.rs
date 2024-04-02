@@ -263,7 +263,7 @@ pub trait ImageCacheImpl {
             Ok(())
         }
         else{
-            match cx.get_dependency(image_path) {
+            match cx.take_dependency(image_path) {
                 Ok(data) => {
                     if image_path.ends_with(".jpg") {
                         match ImageBuffer::from_jpg(&*data){

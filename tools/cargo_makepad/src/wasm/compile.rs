@@ -25,11 +25,17 @@ pub fn build(args: &[String]) -> Result<(), String> {
         ("MAKEPAD", "lines"),
     ], &cwd, "rustup", &args_out) ?;
     
-    println!("WebAssembly build completed");
+    // we should collect all our deps and put it in a folder
+    // 
     
     Ok(())
 }
 
-pub fn run(_args: &[String]) -> Result<(), String> {
+pub fn run(port:u16, _args: &[String]) -> Result<(), String> {
+    // first we build
+    // and then we run a webserver on what port tho.
+    // just 8080+process id
+    // 
+    
     return Err("Run is not implemented yet".into());
 }

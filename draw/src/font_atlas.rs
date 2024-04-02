@@ -161,7 +161,7 @@ impl LiveHook for Font {
 }
 
 impl CxFontsAtlas {
-    pub fn get_font_by_path(&mut self, cx: &Cx, path: &str) -> usize {
+    pub fn get_font_by_path(&mut self, cx: &mut Cx, path: &str) -> usize {
         if path.len() == 0{
             return 0
         }
@@ -172,7 +172,7 @@ impl CxFontsAtlas {
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
         
-        match cx.get_dependency(path) {
+        match cx.take_dependency(path) {
             // FIXME(eddyb) this clones the `data` `Vec<u8>`, in order to own it
             // inside a `owned_font_face::OwnedFace`.
             Ok(data) => match CxFont::load_from_ttf_bytes(data) {
