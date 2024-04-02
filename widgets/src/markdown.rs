@@ -46,7 +46,7 @@ impl Widget for Markdown {
         for node in &self.doc.nodes{
             match node{
                 MarkdownNode::BeginHead{level}=>{
-                    tf.push_size_abs_scale(3.0 / *level as f64);
+                    tf.push_size_abs_scale(4.5 / *level as f64);
                     tf.push_bold();
                 },
                 MarkdownNode::Separator=>{
