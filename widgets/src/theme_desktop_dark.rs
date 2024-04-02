@@ -2541,7 +2541,7 @@ live_design! {
             selected = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.0}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_radio: {selected: 0.0}
                         draw_icon: {selected: 0.0}
