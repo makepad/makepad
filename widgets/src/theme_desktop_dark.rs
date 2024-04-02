@@ -371,6 +371,10 @@ live_design! {
         }
     }
 
+    Filler = <View> {
+        width: Fill, height: Fill
+    }
+
     Html = <HtmlBase> {
         width: Fill, height: Fit,
         flow: RightWrap,
@@ -963,7 +967,7 @@ live_design! {
 
     CheckBox = <CheckBoxBase> {
         width: Fit, height: 20,
-        margin: {left: 0.0, top: (THEME_SPACE_1), bottom: (THEME_SPACE_1), right: (THEME_SPACE_1)}
+        margin: {left: 0.0, top: (THEME_SPACE_1), bottom: (THEME_SPACE_1), right: (THEME_SPACE_0)}
         align: { x: 0.0, y: 0.5 }
         label_walk: {
             width: Fit, height: Fit,
@@ -1025,19 +1029,29 @@ live_design! {
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
+
+                        sdf.stroke_keep(
+                            mix(
+                                mix(THEME_COLOR_D_3, THEME_COLOR_D_4, self.hover),
+                                mix(THEME_COLOR_U_2, THEME_COLOR_U_3, self.hover),
+                                clamp(self.pos.y - 0.2, 0, 1)),
+                            1.
+                        )
+
                         sdf.fill(
                             mix(
-                                mix(THEME_COLOR_D_3, THEME_COLOR_D_2, pow(self.pos.y, 1.)),
-                                mix(THEME_COLOR_D_5, THEME_COLOR_D_4, pow(self.pos.y, 1.0)),
-                                self.hover)
+                                mix(THEME_COLOR_D_4, THEME_COLOR_D_4 * 0.1, pow(self.pos.y, 1.0)),
+                                mix(THEME_COLOR_D_4 * 1.75, THEME_COLOR_D_4 * 0.1, pow(self.pos.y, 1.0)),
+                                self.hover
                             )
-                        let isz = sz * 0.5;
-                        sdf.circle(left + sz + self.selected * sz, c.y, isz);
-                        sdf.circle(left + sz + self.selected * sz, c.y, 0.5 * isz);
+                        )
+                        let isz = sz * 0.65;
+                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
                         sdf.subtract();
-                        sdf.circle(left + sz + self.selected * sz, c.y, isz);
+                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
                         sdf.blend(self.selected)
-                        sdf.fill(THEME_COLOR_U_5);
+                        sdf.fill(mix(THEME_COLOR_U_4, THEME_COLOR_U_5, self.hover));
                     }
                     CheckType::None => {
                         return THEME_COLOR_D_0
@@ -1151,29 +1165,66 @@ live_design! {
         margin: <THEME_MSPACE_0> { left: -8.}
         draw_check: { check_type: Toggle }
         label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
-    }
 
-    CheckBoxTextual = <CheckBox> {
-        draw_check: { check_type: None }
-        label_walk: { margin: <THEME_MSPACE_0> {} }
-
-        draw_text: {
-            instance focus: 0.0
-            instance selected: 0.0
-            instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.25}}
+                    apply: {
+                        draw_check: {hover: 0.0}
+                        draw_text: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_check: {hover: 1.0}
+                        draw_text: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    }
+                }
             }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_U_4,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_SELECTED,
-                    self.selected
-                )
+            focus = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_check: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_check: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                    }
+                }
+            }
+            selected = {
+                default: off
+                off = {
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_check: {selected: 0.0},
+                        draw_text: {selected: 0.0},
+                        draw_icon: {selected: 0.0},
+                    }
+                }
+                on = {
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_check: {selected: 1.0}
+                        draw_text: {selected: 1.0}
+                        draw_icon: {selected: 1.0},
+                    }
+                }
             }
         }
     }
