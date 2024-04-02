@@ -56,7 +56,6 @@ impl std::ops::Index<DrawListId> for CxDrawListPool {
     fn index(&self, index: DrawListId) -> &Self::Output {
         let d = &self.0.pool[index.0];
         if d.generation != index.1 {
-            panic!();
             error!("Drawlist id generation wrong {} {} {}", index.0, d.generation, index.1)
         }
         &d.item
