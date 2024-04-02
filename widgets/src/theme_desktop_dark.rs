@@ -2594,7 +2594,7 @@ live_design! {
             instance selected: 0.0
 
             uniform color_unselected: (THEME_COLOR_U_4)
-            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_unselected_hover: (THEME_COLOR_U_5)
             uniform color_selected: (THEME_COLOR_WHITE)
 
             color: (THEME_COLOR_U_5)
