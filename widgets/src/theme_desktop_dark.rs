@@ -293,7 +293,7 @@ live_design! {
         list_item_walk:{height:Fit,width:Fill}
         
         inline_code_layout:{flow: RightWrap,  padding:{left:3,top:2,right:3,bottom:2}},
-        inline_code_walk:{height:Fit,width:Fit,margin:{top:-4}} 
+        inline_code_walk:{height:Fit,width:Fit,margin:{top:-2}} 
                   
         sep_walk:{height:4, width: Fill},
                 
