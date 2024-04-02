@@ -226,7 +226,7 @@ impl Cx {
     
     pub fn handle_live_edit(&mut self)->bool{
         // lets poll our studio connection
-        let mut all_changes = Vec::new();
+        let mut all_changes:Vec<LiveFileChange> = Vec::new();
         
         if let Some(studio_socket) = &mut self.studio_web_socket{
             while let Ok(msg) = studio_socket.try_recv(){
@@ -236,6 +236,7 @@ impl Cx {
                             for data in data.0{
                                 match data{
                                     StudioToApp::LiveChange{file_name, content}=>{
+                                        all_changes.retain(|v| v.file_name != file_name); 
                                         all_changes.push(LiveFileChange{file_name, content})
                                     }
                                 }
