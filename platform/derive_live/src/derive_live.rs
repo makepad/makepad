@@ -282,7 +282,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        } else {");
         
         if let Some(deref_field) = deref_field {
-            tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply, index, nodes)");
+            tb.add("        self.").ident(&deref_field.name).add(".apply_value(cx, apply, index, nodes)");
         }
         else {
             tb.add("        <Self as LiveHook>::apply_value_instance(self, cx, apply, index, nodes)");
