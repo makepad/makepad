@@ -53,7 +53,7 @@ live_design! {
             width: Fit,
             height: Fit
         }
-        text: "XXX",
+        text: "X",
         draw_text: {
             instance hover: 0.0
             instance pressed: 0.0

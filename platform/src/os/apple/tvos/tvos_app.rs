@@ -76,7 +76,7 @@ impl TvosClasses {
             mtk_view: define_mtk_view(),
             mtk_view_delegate: define_mtk_view_delegate(),
             //textfield_delegate: define_textfield_delegate(),
-            timer_delegate: define_ios_timer_delegate()
+            timer_delegate: define_tvos_timer_delegate()
         }
     }
 }

@@ -246,7 +246,7 @@ impl RunList{
 
 impl WidgetMatchEvent for RunList{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope){
-        let build_manager = &mut scope.data.get_mut::<AppData>().build_manager;
+        let build_manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
         let run_list = self.view.flat_list(id!(list));
         for (item_id, item) in run_list.items_with_actions(&actions) {
             for binary in &mut build_manager.binaries {
@@ -297,7 +297,7 @@ impl Widget for RunList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = item.as_flat_list().borrow_mut(){
-                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+                self.draw_run_list(cx, &mut *list, &mut scope.data.get_mut::<AppData>().unwrap().build_manager)
             }
         }
         DrawStep::done()

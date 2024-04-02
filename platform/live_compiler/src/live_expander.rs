@@ -318,7 +318,7 @@ impl<'a> LiveExpander<'a> {
                                 
                                 let mut index = 1;
                                 let mut found = None;
-                                while index < doc.nodes.len() - 1 {
+                                while index < doc.nodes.len() {
                                     if let LiveValue::Class {live_type, ..} = &doc.nodes[index].value {
                                         if *live_type == live_type_info.live_type {
                                             found = Some(index);

@@ -26,7 +26,11 @@ pub struct Markdown{
 // alright lets parse the HTML
 impl LiveHook for Markdown{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
-       self.doc = parse_markdown(&*self.body);
+        let new_doc = parse_markdown(&*self.body);
+        if new_doc != self.doc{
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+        }
     }
 }
  
@@ -42,13 +46,15 @@ impl Widget for Markdown {
         for node in &self.doc.nodes{
             match node{
                 MarkdownNode::BeginHead{level}=>{
-                    tf.push_size_abs_scale(5.0 / *level as f64);
+                    tf.push_size_abs_scale(3.0 / *level as f64);
+                    tf.push_bold();
                 },
                 MarkdownNode::Separator=>{
                     cx.turtle_new_line();
                     tf.sep(cx);
                 }
                 MarkdownNode::EndHead=>{
+                    tf.pop_bold();
                     tf.pop_size();
                     cx.turtle_new_line();
                 },

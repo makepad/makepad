@@ -79,16 +79,16 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
     else{
         #[cfg(target_arch = "wasm32")]{
             extern "C" {
-                pub fn js_console_log(chars: u32, len: u32);
-                pub fn js_console_error(chars: u32, len: u32);
+                pub fn js_console_log(u8_ptr: u32, len: u32);
+                pub fn js_console_error(u8_ptr: u32, len: u32);
             }
             let msg = format!("{}:{}:{} - {}", file_name, line_start, column_start, message);
-            let chars = msg.chars().collect::<Vec<char >> ();
+            let buf = msg.as_bytes();
             if let LogLevel::Error = level{
-                unsafe{js_console_error(chars.as_ptr() as u32, chars.len() as u32)};        
+                unsafe{js_console_error(buf.as_ptr() as u32, buf.len() as u32)};        
             }
             else{
-                unsafe{js_console_log(chars.as_ptr() as u32, chars.len() as u32)};        
+                unsafe{js_console_log(buf.as_ptr() as u32, buf.len() as u32)};        
             }    
         }
 

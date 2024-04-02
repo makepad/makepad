@@ -373,9 +373,9 @@ impl App {
             let value = JsonValue::deserialize_json(&data).unwrap();
             // lets push these ids into a vec
             let mut lights = Vec::new();
-            for (id,light) in value.key("lights").object(){
+            for (id,light) in value.key("lights").unwrap().object().unwrap(){
                 let id = id.parse::<u64>().unwrap();
-                lights.push((id, light.key("name").string(), light.key("uniqueid").string()));
+                lights.push((id, light.key("name").unwrap().string().unwrap(), light.key("uniqueid").unwrap().string().unwrap()));
             }
             lights.sort_by(|a,b| a.0.cmp(&b.0));
             for (id, name, _unique) in lights{
