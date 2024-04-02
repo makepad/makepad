@@ -54,8 +54,8 @@ impl Widget for Markdown {
                     tf.sep(cx);
                 }
                 MarkdownNode::EndHead=>{
-                    tf.pop_size();
                     tf.pop_bold();
+                    tf.pop_size();
                     cx.turtle_new_line();
                 },
                 MarkdownNode::NewLine=>{
