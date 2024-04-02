@@ -1209,7 +1209,7 @@ live_design! {
                 default: off
                 off = {
                     ease: OutQuad
-                    from: {all: Forward {duration: 0.15}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_check: {selected: 0.0},
                         draw_text: {selected: 0.0},
@@ -1218,7 +1218,7 @@ live_design! {
                 }
                 on = {
                     ease: OutQuad
-                    from: {all: Forward {duration: 0.15}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_check: {selected: 1.0}
                         draw_text: {selected: 1.0}
