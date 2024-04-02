@@ -127,6 +127,20 @@ live_design!{
                         <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
                     }
 
+                    <ZooDesc> {text:"This utlizes a <Filler> to separate items."}
+                    <View> {
+                        height: Fit
+                        flow: Right,
+                        show_bg: true,
+                        draw_bg: { color: (COLOR_CONTAINER) }
+                        padding: 10.
+                        spacing: 10.
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
+                        <Filler> {}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
+                    }
+
                     <ZooDesc> { text:"This is a view with flow set to Down" }
                     <View> {
                         height: Fit,
