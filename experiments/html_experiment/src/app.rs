@@ -51,13 +51,11 @@ live_design!{
             label = <Label> {
                 width: Fit, height: Fit,
                 draw_text: {
-                    draw_call_group: other_tv_label
                     text_style: <GO_NOTO_CURRENT_REGULAR>{
                         font_size: 12, 
                     }
                     draw_text:{color: #00f}
                 }
-                text: "Loading image..."
             }
         }
         image_view:  <View>{ 
@@ -304,8 +302,8 @@ pub enum TextOrImageStatus {
 #[derive(Live, Widget, LiveHook)]
 pub struct TextOrImage {
     /// The URL of the image to display.
-    #[redraw] #[live] text_view: WidgetRef,
-    #[redraw] #[live] image_view: WidgetRef,
+    #[redraw] #[live] text_view: View,
+    #[redraw] #[live] image_view: View,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[rust(TextOrImageStatus::Text)] status: TextOrImageStatus,
@@ -340,7 +338,6 @@ pub struct HtmlImage {
     #[rust] alt: String,
     #[rust] title: String,    
 }
-
 
 impl Widget for HtmlImage {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -394,7 +391,7 @@ impl LiveHook for HtmlImage {
                     "Loading image..."
                 };
                 
-                self.text_view.label(id!(label)).set_text(text.as_ref());
+                self.toi.text_view.label(id!(label)).set_text(text);
                 
                 if !self.src.is_empty() {
                     // temp: just assume a local path URL only for now
