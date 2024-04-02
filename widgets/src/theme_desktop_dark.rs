@@ -967,7 +967,7 @@ live_design! {
         align: { x: 0.0, y: 0.5 }
         label_walk: {
             width: Fit, height: Fit,
-            margin: {left: 24.0, top: 0, bottom: 0, right: (THEME_SPACE_2)}
+            margin: {left: 20.0, top: 0, bottom: 0, right: (THEME_SPACE_2)}
         }
 
         label_align: { x: 0.5, y: 0.0 }
@@ -1146,7 +1146,7 @@ live_design! {
     }
 
     CheckBoxToggle = <CheckBox> {
-        margin: <THEME_MSPACE_0> {}
+        margin: <THEME_MSPACE_0> { left: -8.}
         draw_check: { check_type: Toggle }
         label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
     }
