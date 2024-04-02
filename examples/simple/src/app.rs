@@ -26,7 +26,7 @@ live_design!{
                     y: 0.5
                 },
                 button1 = <Button> {
-                    text: "Hello world 11231"
+                    text: "Hello world 3123414234312"
                     draw_text:{color:#f00}
                 }
                 input1 = <TextInput> {
@@ -51,6 +51,7 @@ live_design!{
                         text: "Helloworld"
                     }  
                     body:"
+                    
                     Normal <u>underlined html</u> <s>strike</s> text hello world <br/>
                     <ol>
                         <li>one in the list!!!!! </li>
@@ -69,7 +70,7 @@ live_design!{
                             </ol>
                         </li>
                     </ol>
-                    <code>let x = 1.0;</code>
+                    inline <code>let x = 1.0;</code> code
                     <b>BOLD text</b>&nbsp;<i>italic</i><br/>
                     <sep/>
                     Testing a link: <a href=\"https://www.google.com\">Click to Google</a><br/>
