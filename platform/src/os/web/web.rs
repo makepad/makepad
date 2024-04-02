@@ -181,10 +181,6 @@ impl Cx {
                 
                 live_id!(ToWasmSignal) =>{
                     self.handle_media_signals();
-                    if self.handle_live_edit(){
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
                     self.call_event_handler(&Event::Signal);
                 }
                 
@@ -350,7 +346,12 @@ impl Cx {
         if network_responses.len() != 0 {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
-
+        
+        if self.handle_live_edit(){ 
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+        
         self.handle_platform_ops();
         self.handle_media_signals();
         

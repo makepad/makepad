@@ -153,7 +153,7 @@ impl BuildManager {
             }
         }
     }
-    
+     
     pub fn handle_tab_close(&mut self, tab_id: LiveId) -> bool {
         let len = self.active.builds.len();
         if self.active.builds.remove(&tab_id).is_some(){
