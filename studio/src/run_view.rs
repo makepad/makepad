@@ -297,7 +297,7 @@ impl Widget for RunView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let run_view_id = scope.path.get(0);
-        let manager = &mut scope.data.get_mut::<AppData>().build_manager;
+        let manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         DrawStep::done()
     }
@@ -305,7 +305,7 @@ impl Widget for RunView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         
         let run_view_id = scope.path.get(0);
-        let manager = &scope.data.get::<AppData>().build_manager;
+        let manager = &scope.data.get::<AppData>().unwrap().build_manager;
         
         self.animator_handle_event(cx, event);
         // lets send mouse events

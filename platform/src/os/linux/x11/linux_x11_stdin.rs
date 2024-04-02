@@ -8,7 +8,6 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         makepad_micro_serde::*,
-        makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
         event::WindowGeom,
@@ -113,13 +112,6 @@ impl Cx {
 
         while let Ok(msg) = json_msg_rx.recv(){
             match msg {
-                HostToStdin::ReloadFile{file, contents}=>{
-                    // alright lets reload this file in our DSL system
-                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                        file_name: file,
-                        content: contents
-                    }]);
-                }
                 HostToStdin::KeyDown(e) => {
                     self.call_event_handler(&Event::KeyDown(e));
                 }

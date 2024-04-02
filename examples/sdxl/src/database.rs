@@ -32,19 +32,6 @@ pub struct PromptPreset {
     pub steps: u32,
     pub cfg: f64,
     pub denoise: f64,
-    /*
-    pub refiner_cfg: f64,
-    pub positive_score: f64,
-    pub negative_score: f64,
-    pub base_start_step: u32,
-    pub base_end_step: u32,
-    pub refiner_start_step: u32,
-    pub refiner_end_step: u32,
-    pub upscale_steps: u32,
-    pub upscale_start_step: u32,
-    pub upscale_end_step: u32,
-    pub scale: f64,
-    pub total_steps: u32*/
 }
 
 
@@ -65,16 +52,6 @@ impl Prompt {
             .bytes_append(&self.preset.steps.to_be_bytes())
             .bytes_append(&self.preset.cfg.to_be_bytes())
             .bytes_append(&self.preset.denoise.to_be_bytes())
-            /*.bytes_append(&self.preset.positive_score.to_be_bytes())
-            .bytes_append(&self.preset.negative_score.to_be_bytes())
-            .bytes_append(&self.preset.base_start_step.to_be_bytes())
-            .bytes_append(&self.preset.base_end_step.to_be_bytes())
-            .bytes_append(&self.preset.refiner_start_step.to_be_bytes())
-            .bytes_append(&self.preset.refiner_end_step.to_be_bytes())
-            .bytes_append(&self.preset.upscale_steps.to_be_bytes())
-            .bytes_append(&self.preset.upscale_start_step.to_be_bytes())
-            .bytes_append(&self.preset.upscale_end_step.to_be_bytes())
-            .bytes_append(&self.preset.scale.to_be_bytes())*/
     }
 }
 
@@ -245,6 +222,15 @@ impl Database {
             }
             let _ = to_ui.send(DecoderToUI::Error(image_id));
         });
+        None
+    }
+    
+    pub fn get_data_for_index(&self, id:usize)->Option<Vec<u8>>{
+        if let Some(image) = self.image_files.get(id){
+            if let Ok(data) = fs::read(format!("{}/{}",self.image_path, image.image_id.as_file_name())) {
+                return Some(data)
+            }
+        }
         None
     }
     

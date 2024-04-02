@@ -48,6 +48,24 @@ pub struct FishPatch {
     pub undo: UndoState,
 }
 
+#[derive(Clone, Debug, SerRon, DeRon, Default)]
+pub struct FishPatchSelection
+{
+    pub blocks: Vec<u64>
+}
+
+impl FishPatchSelection {
+    pub fn add(&mut self, id: u64) {
+        if self.blocks.contains(&id) {
+            return;
+        }
+        self.blocks.push(id);
+    }
+
+    pub fn clear(&mut self)    {
+        self.blocks.clear();
+    }
+}
 pub trait FindBlock {
     fn find_mut(&mut self, id: u64) -> Option<&mut FishBlock>;
     fn find(&self, id: u64) -> Option<&FishBlock>;
@@ -77,6 +95,17 @@ impl FindConnection for Vec<FishConnection> {
 }
 
 impl FishPatch {
+
+    pub fn select_rectangle(&mut self, start: DVec2, end:DVec2) -> FishPatchSelection {
+        let mut blocks = Vec::new();
+        for block in self.blocks.iter() {
+            if block.is_in_rect(start, end) {
+                blocks.push(block.id);
+            }
+        }
+        FishPatchSelection { blocks }
+    }
+
     pub fn connect(&mut self, blockfrom: u64, outputfrom: u64, blockto: u64, intputto: u64) {
         // todo: check if connection exists
         self.undo_checkpoint_start();
@@ -171,7 +200,7 @@ impl FishPatch {
                 UndoableThing::Block => match item.1 {
                     IdAction::Create { id } => {
                         // undo of create = delete
-                        let b = self.get_block(id).expect("find block");
+                        let b = self.get_block(&id).expect("find block");
                         let b_string = b.serialize_ron();
 
                         let index = self.blocks.iter().position(|x| x.id == id).unwrap();
@@ -185,7 +214,7 @@ impl FishPatch {
                     }
                     IdAction::Modify { id } => {
                         // deserialize old state in to existing block
-                        let b = self.get_block(id).expect("find block");
+                        let b = self.get_block(&id).expect("find block");
                         let b_string = b.serialize_ron();
                         self.get_undo_pair(undo).1.push((
                             UndoableThing::Block,
@@ -265,7 +294,7 @@ impl FishPatch {
 
     pub fn add_block(&mut self, lib: &FishBlockLibrary) {
         self.undo_checkpoint_start();
-        self.create_block(lib, String::from("Utility"), 100, 100);
+        self.create_block(lib, String::from("Utility"), 100., 100.);
         self.undo_checkpoint_end();
     }
 
@@ -303,7 +332,7 @@ impl FishPatch {
         for i in 0..deleteconns.len() {
             self.remove_connection(deleteconns[i]);
         }
-        let b = self.get_block(id).expect("find block");
+        let b = self.get_block(&id).expect("find block");
         let bstring = b.serialize_ron();
 
         let index = self.blocks.iter().position(|x| x.id == id).unwrap();
@@ -316,15 +345,15 @@ impl FishPatch {
         self.undo_checkpoint_end();
     }
 
-    pub fn get_block(&self, id: u64) -> Option<&FishBlock> {
-        self.blocks.iter().find(|&x| x.id == id)
+    pub fn get_block(&self, id: &u64) -> Option<&FishBlock> {
+        self.blocks.iter().find(|&x| x.id == *id)
     }
 
     pub fn get_connection(&self, id: u64) -> Option<&FishConnection> {
         self.connections.iter().find(|&x| x.id == id)
     }
 
-    pub fn undo_save_block_before_modify(&mut self, id: u64) {
+    pub fn undo_save_block_before_modify(&mut self, id: &u64) {
         let bopt = self.get_block(id);
         if bopt.is_some() == false {
             return;
@@ -334,13 +363,13 @@ impl FishPatch {
 
         self.undo
             .undo_things
-            .push((UndoableThing::Block, IdAction::Modify { id: id }, bstring));
+            .push((UndoableThing::Block, IdAction::Modify { id: *id }, bstring));
     }
 
-    pub fn move_block(&mut self, id: u64, x: f64, y: f64) {
+    pub fn move_block(&mut self, id: &u64, x: f64, y: f64) {
         self.undo_checkpoint_start();
         self.undo_save_block_before_modify(id);
-        let g = self.blocks.iter_mut().find(|x| x.id == id);
+        let g = self.blocks.iter_mut().find(|x| x.id == *id);
 
         if g.is_none() {
             return;
@@ -348,15 +377,39 @@ impl FishPatch {
 
         let b = g.unwrap();
         //let g = self.get_block(id).unwrap();
-        let mult = 1;
+        let mult = 1.;
         let div = 1. / (mult as f64);
-        b.x = ((x * div) as i32).max(0) * mult;
-        b.y = ((y * div) as i32).max(0) * mult;
+        b.x = floor(x * div ).max(0.) * mult;
+        b.y = floor(y * div ).max(0.) * mult;
 
         self.undo_checkpoint_end();
     }
 
-    pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: i32, y: i32) {
+
+    pub fn move_selection(&mut self, selection: &FishPatchSelection, dx: f64, dy: f64) {
+        self.undo_checkpoint_start();
+
+        for id in selection.blocks.iter(){
+            self.undo_save_block_before_modify(id);
+            let g = self.blocks.iter_mut().find(|x| x.id == *id);
+
+            if g.is_none() {
+                return;
+            }
+
+            let b = g.unwrap();
+            //let g = self.get_block(id).unwrap();
+            let mult = 1.;
+            let div = 1. / (mult );
+            b.x += dx;//floor(((b.x as f64 + dx) * div) ).max(0.) * mult;
+            b.y += dy;//floor(((b.y as f64 + dy) * div) ).max(0.) * mult;
+
+        }
+
+        self.undo_checkpoint_end();
+    }
+
+    pub fn create_block(&mut self, lib: &FishBlockLibrary, name: String, x: f64, y: f64) {
         self.undo_checkpoint_start();
         let mut b = lib.create_instance_from_template(&name);
         b.x = x;
@@ -379,42 +432,42 @@ impl FishPatch {
         patch.name = String::from(format!("Test Patch {:?}", id));
         patch.id = id;
         patch.undo_checkpoint_start();
-        let mut i = 0;
+        let mut i = 0.;
 
         patch.create_block(
             lib,
             String::from("Oscillator"),
-            i % 3 * 300,
-            i / 3 * 300 + 100,
+            i % 3. * 300.,
+            i / 3. * 300. + 100.,
         );
 
-        i = i + 1;
-        patch.create_block(lib, String::from("Filter"), i % 3 * 300, i / 3 * 300 + 100);
+        i = i + 1.;
+        patch.create_block(lib, String::from("Filter"), i % 3. * 300., i / 3. * 300. + 100.);
 
-        i = i + 1;
-        patch.create_block(lib, String::from("Effect"), i % 3 * 300, i / 3 * 300 + 100);
+        i = i + 1.;
+        patch.create_block(lib, String::from("Effect"), i % 3. * 300., i / 3. * 300. + 100.);
 
-        i = i + 1;
-        patch.create_block(lib, String::from("Meta"), i % 3 * 300, i / 3 * 300 + 100);
+        i = i + 1.;
+        patch.create_block(lib, String::from("Meta"), i % 3. * 300., i / 3. * 300. + 100.);
 
-        i = i + 1;
+        i = i + 1.;
         patch.create_block(
             lib,
             String::from("Envelope"),
-            i % 3 * 300,
-            i / 3 * 300 + 100,
+            i % 3. * 300.,
+            i / 3. * 300. + 100.,
         );
 
-        i = i + 1;
+        i = i + 1.;
         patch.create_block(
             lib,
             String::from("Modulator"),
-            i % 3 * 300,
-            i / 3 * 300 + 100,
+            i % 3. * 300.,
+            i / 3. * 300. + 100.,
         );
-        i = i + 1;
+        i = i + 1.;
 
-        patch.create_block(lib, String::from("Utility"), 0, i / 3 * 300 + 100); //i=i+1;
+        patch.create_block(lib, String::from("Utility"), 0., i / 3. * 300. + 100.); //i=i+1;
 
         for i in 0..7 {
             patch.presets.push(FishPreset::create_test_preset(i));

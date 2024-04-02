@@ -2,19 +2,19 @@
 use std::str::Chars;
 use std::fmt::Write;
 
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct MarkdownDoc{
     pub decoded: String,
     pub nodes: Vec<MarkdownNode>,
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MarkdownListLabel{
     Plus,
     Minus,
     Star,
     Number{digit:usize, start:usize, end:usize},
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MarkdownNode{
     BeginHead{level:usize},
     EndHead,

@@ -64,7 +64,7 @@ impl App {
 }
 
 #[derive(Default)]
-pub struct AppData{
+pub struct AppData{ 
     pub build_manager: BuildManager,
     pub file_system: FileSystem,
 }

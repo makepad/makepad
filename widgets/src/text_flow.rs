@@ -217,7 +217,6 @@ impl Widget for TextFlow {
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
-            entry.handle_event(cx, event, scope);
         }
     }
 }
@@ -388,6 +387,21 @@ impl TextFlow{
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
+            });
+            return Some(entry.clone())
+        }
+        None 
+    }
+        
+    pub fn clear_items(&mut self){
+        self.items.clear();
+    }
+        
+
+    pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+                WidgetRef::new_from_ptr_with_scope(cx, scope, Some(*ptr))
             });
             return Some(entry.clone())
         }

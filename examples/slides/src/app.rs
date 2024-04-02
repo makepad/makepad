@@ -2,7 +2,7 @@ use crate::{
     makepad_widgets::*,
 }; 
  
-live_design!{
+live_design!{ 
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     App = {{App}} {
@@ -12,155 +12,76 @@ live_design!{
             width: Fill,
             height: Fill
             body = {
-                <SlidesView> {/*
-                    <SlideChapter> {
-                        title = {text: "Realtime generation\nWith Stable diffusion"},
-                        <SlideBody> {text: "Rik Arends\n"}
-                    }
+                <SlidesView> {
                     <Slide> {
-                        title = {text: "Who am i"},
-                        <SlideBody> {text: "Cloud9 IDE\nMakepad\nCreative tools"}
-                    }
-                    <Slide> {
-                        title = {text: "Makepad: Creative IDE"},
-                        <SlideBody> {text: "GPU accelerated\nFun examples"}
-                    }
-                    <Slide> {
-                        title = {text: "Generative AI"},
-                        <SlideBody> {text: "Moving very fast\nOne week is one year"}
-                    }
-                    <Slide> {
-                        title = {text: "AI"},
-                        <SlideBody> {text: "Not the industrial revolution\nAI commoditises intelligence\nJust the beginning"}
-                    } 
-                    <Slide> {
-                        title = {text: "Model types"},
-                        <SlideBody> {text: "Diffusion models\nLarge language models"}
-                    }
-                    <Slide> {
-                        title = {text: "Faster and faster"},
-                        <SlideBody> {text: "SDXL: 30 steps\nSDXL turbo: 5-10 steps"}
-                    }
-                    <Slide> {
-                        title = {text: "Demo"},
-                        <SlideBody> {text: "AI Image surfing"}
-                    }
-                    <Slide> {
-                        title = {text: "Thank you"},
-                        <SlideBody> {text: "twitter: @rikarends\ngithub.com/makepad/makepad"}
-                    }*/
-                    <Slide> {
-                        title = {text: " Hello world"},
+                        title = {text: " Hello Exec(ut)"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "WHAT IS UP\nWITH MAKEPAD"},
+                        title = {text: "Playing with local AI"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
-                        title = {text:"What we lost"},
-                        <SlideBody> {text: "- Visual Basic\n- Delphi\n"}
+                        title = {text:"Makepad"},
+                        <SlideBody> {text: "- Rebuilding VB/Delphi\n   in Rust"}
                     }                    
                     <Slide> {
-                        title = {text: "A long long time ago …"},
-                        <SlideBody> {text: "Cloud9 IDE & ACE"}
+                        title = {text: "10 years is a long time"},
+                        <SlideBody> {text: "- Whole stack from scratch"}
                     }
                     <Slide> {
-                        title = {text: "HTML as an IDE UI?\nMadness!"},
-                        <SlideBody> {text: "- Integrating design and code was hard\n- Could not innovate editing: folding\n- Too slow, too hard to control"}
+                        title = {text: "AI moves incredibly fast"},
+                        <SlideBody> {text: "- september 2023\n- 2 months later: 6x faster"}
                     }
                     <Slide> {
-                        title = {text: "Let's start over!"},
-                        <SlideBody> {text: "- JavaScript and WebGL for UI\n- Write shaders to style UI"}
+                        title = {text: "Large Language Models"},
+                        <SlideBody> {text: "- text input, text output\n- GPT 3.5, LLama, Mistral"}
                     }
                     <Slide> {
-                        title = {text: "Tried, and tried again."},
-                        <SlideBody> {text: "5 times: 2013-2018"}
+                        title = {text: "Diffuser models"},
+                        <SlideBody> {text: "- text input, image output\n- Midjourney, Stable Diffusion, Dall-E"}
                     }
                     <Slide> {
-                        title = {text: "Final result"},
-                        <SlideBody> {text: "- makepad.github.io/makepad_js.html"}
+                        title = {text: "Multi modal"},
+                        <SlideBody> {text: "- Can use image/audio as inputs"}
                     }
                     <Slide> {
-                        title = {text: "The good part"},
-                        <SlideBody> {text: "- Live Coding"}
+                        title = {text: "Lets build!"},
+                        <SlideBody> {text: "- a generative image explorer\n- conversational input\n- image output"}
                     }
                     <Slide> {
-                        title = {text: "The bad parts"},
-                        <SlideBody> {text: "- Too slow\n- Cannot scale: no types\n- Chrome crashes"}
+                        title = {text: "Lets go local"},
+                        <SlideBody> {text: "- Fun, it's your own computer\n- Can be faster\n- Privacy"}
                     }
                     <Slide> {
-                        title = {text: "Now what"},
-                        <SlideBody> {text: "- 5 years of my life gone"}
+                        title = {text: "Language model"},
+                        <SlideBody> {text: "- Mixtral 8x7b\n- Very close to chatGPT"}
                     }
                     <Slide> {
-                        title = {text: "Rust appears"},
-                        <SlideBody> {text: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
+                        title = {text: "Image model"},
+                        <SlideBody> {text: "- SDXL Turbo\n- Fast and good"}
                     }
                     <Slide> {
-                        title = {text: "Rust"},
-                        <SlideBody> {text: "- Compiled: LLVM\n- Typed\n- Compiles everywhere"}
+                        title = {text: "How much compute"},
+                        <SlideBody> {text: "- GPU 1: NVidia 4090 for SDXL\n- 86 TFLOP\n- GPU 2: Apple M3 max for Mixtral\n- 28 TFLOP: 114\n- 2005 2nd BGW Blue gene\n- 448KW, 41000 cores"}
                     }
                     <Slide> {
-                        title = {text: "Finally we have\nperformance"},
-                    }                                                                                                  
-                    <Slide> {
-                        title = {text: "The slides are a\nMakepad app"},
+                        title = {text: "Lets try it"},
+                        <SlideBody> {text: "- Pure prompt\n- Conversation\n- Camera input"}
                     }
                     <Slide> {
-                        title = {text: "However"},
-                        <SlideBody> {text: "- No more live coding?"}
+                        title = {text: "Demo ComfyUI"},
                     }
                     <Slide> {
-                        title = {text: "Goals"},
-                        <SlideBody> {text: "- Make Rust programming fun:\n- Visual designer\n- Media APIs\n- Live coding"}
+                        title = {text: "Llama CPP"},
                     }
                     <Slide> {
-                        title = {text: "Solution for\nlive coding"},
-                        <SlideBody> {text: "- Makepad UI Language: A DSL"}
-                    }
-                    <Slide> {
-                        title = {text: "Makepad Studio"},
-                        <SlideBody> {text: "- github.com/makepad/makepad\n- cargo run -p makepad-studio --release"}
-                    }
-                    <Slide> {
-                        title = {text: "A Makepad App"},
-                        <SlideBody> {text: "- Platform layer: OS/GPU\n- UI DSL: Structure+Shaders\n- Rust Code: Logic"}
-                    }
-                    <Slide> {
-                        title = {text: "Lets look at a\nMakepad app"},
-                        <SlideBody> {text: "- Simple: UI and events\n- News Feed: Virtual viewport"}
-                    }
-                    <Slide> {
-                        title = {text: "Platforms"},
-                        <SlideBody> {text: "- Windows / Mac / Linux\n- iOS / Android\n- WebAssembly"}
-                    }
-                    <Slide> {
-                        title = {text: "Build examples"}, 
-                        <SlideBody> {text: "- Before: fast or multiplatform\n- Demo builds"}
-                    }
-                    <Slide> {
-                        title = {text: "SDXL UI"},
-                        <SlideBody> {text: "- AI Image gen"}
-                    }
-                    <Slide> {
-                        title = {text: "Audio UI"},
-                        <SlideBody> {text: "- Ironfish"}
-                    }
-                    <Slide> {
-                        title = {text: "Live coding shaders"},
-                        <SlideBody> {text: "- Ironfish piano\n - Designer accessible"}
-                    }       
-                    <Slide> {
-                        title = {text: "Why"},
-                        <SlideBody> {text: "- Fast compute needed\n - Run on web and native\n- Tooling UI"}
-                    }       
-                    <Slide> {
-                        title = {text: "Inception"},
+                        title = {text: "Future"},
+                        <SlideBody> {text: "- Hold on to your hats\n- Integrate LLM in code editor"}
                     }
                     <Slide> {
                         title = {text: "Links"}, 
-                        <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl"}
+                        <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl\n- twitter @rikarends"}
                     }
                 }
             }

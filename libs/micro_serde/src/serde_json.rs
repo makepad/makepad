@@ -668,23 +668,23 @@ pub enum JsonValue{
 }
 
 impl JsonValue{
-    pub fn object(&self)->&HashMap<String, JsonValue>{
+    pub fn object(&self)->Option<&HashMap<String, JsonValue>>{
         if let JsonValue::Object(obj) = self{
-            return obj
+            return Some(obj)
         }
-        panic!()
+        None
     }
-    pub fn string(&self)->&String{
+    pub fn string(&self)->Option<&String>{
         if let JsonValue::String(obj) = self{
-            return obj
+            return Some(obj)
         }
-        panic!()
+        None
     }
-    pub fn key(&self, key:&str)->&JsonValue{
+    pub fn key(&self, key:&str)->Option<&JsonValue>{
         if let JsonValue::Object(obj) = self{
-            return obj.get(key).unwrap()
+            return obj.get(key)
         }
-        panic!()
+        None
     }
 }
 

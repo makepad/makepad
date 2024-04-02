@@ -59,8 +59,8 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
         web_socket::WebSocketMessage,
     },
-    makepad_http::websocket::WebSocket as WebSocketImpl,
-    makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
+    makepad_http::websocket::ServerWebSocket as WebSocketImpl,
+    makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
 
 impl Cx {

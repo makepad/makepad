@@ -89,34 +89,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
-        this.start_live_change_watch();
         var loaders = document.getElementsByClassName('canvas_loader');
         for (var i = 0; i < loaders.length; i ++) {
             loaders[i].parentNode.removeChild(loaders[i])
         }
-    }
-    
-    start_live_change_watch(){
-        var req = new XMLHttpRequest()
-        req.timeout = 60000
-        req.addEventListener("error", ()=>{
-            setTimeout(function() {
-                //location.href = location.href
-            }, 500)
-        })
-        req.responseType = 'text'
-        req.addEventListener("load", ()=>{
-            if (req.status === 201) return this.start_live_change_watch();
-            if (req.status === 200) {
-                if (req.response.length > 0){
-                    this.to_wasm.ToWasmLiveFileChange({body:req.response});
-                    this.do_wasm_pump();
-                }
-                this.start_live_change_watch();
-            }
-        })
-        req.open("GET", "/$live_file_change?" + ('' + Math.random()).slice(2))
-        req.send()
     }
     
     FromWasmLoadDeps(args) {
@@ -246,7 +222,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmHideTextIME() {
         this.update_text_area_pos({x: -3000, y: -3000});
     }
-    
+    /*
     FromWasmWebSocketOpen(args) {
         let id_lo = args.id_lo;
         let id_hi = args.id_hi;
@@ -289,7 +265,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         }
         web_socket._queue = []
-    }
+    }*/
     
     FromWasmWebSocketSend(args) {
         let web_socket = this.web_sockets[args.web_socket_id];
@@ -461,7 +437,7 @@ export class WasmWebBrowser extends WasmBridge {
         
     }
     
-    alloc_thread_stack(context_ptr) {
+    alloc_thread_stack(context_ptr, timer) {
         let tls_size = this.exports.__tls_size.value;
         tls_size += 8 - (tls_size & 7); // align it to 8 bytes
         let stack_size = this.thread_stack_size; // 8mb
@@ -472,6 +448,7 @@ export class WasmWebBrowser extends WasmBridge {
         return {
             tls_ptr,
             stack_ptr,
+            timer,
             module: this.wasm._module,
             memory: this.wasm._memory,
             context_ptr
@@ -499,7 +476,7 @@ export class WasmWebBrowser extends WasmBridge {
             console.error("FromWasmCreateThread not available, wasm file not compiled with -C link-arg=--export=__stack_pointer");
             return
         }
-        worker.postMessage(this.alloc_thread_stack(args.context_ptr));
+        worker.postMessage(this.alloc_thread_stack(args.context_ptr, args.timer));
         
         this.workers.push(worker);
     }

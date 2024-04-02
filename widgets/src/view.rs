@@ -237,7 +237,7 @@ impl LiveHook for View {
         apply: &mut Apply,
         index: usize,
         nodes: &[LiveNode],
-    ) -> usize {
+    ) -> usize { 
         //! TODO
         // NOTE FOR LIVE RELOAD
         // the id is always unique
@@ -938,5 +938,12 @@ impl View {
 
     pub fn child_count(&self) -> usize {
         self.draw_order.len()
+    }
+    
+    pub fn debug_print_children(&self){
+        log!("Debug print view children {:?}", self.children.len());
+        for i in 0..self.draw_order.len(){
+            log!("Child: {}",self.draw_order[i])
+        }
     }
 }
