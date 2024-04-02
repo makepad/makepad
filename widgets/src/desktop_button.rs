@@ -56,7 +56,7 @@ impl Widget for DesktopButton{
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
-        let _ = self.draw_walk_desktop_button(cx, walk);
+        let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }
 }
@@ -83,8 +83,7 @@ pub struct DrawDesktopButton {
 }
 
 impl LiveHook for DesktopButton {
-    
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+    fn after_apply_from_doc(&mut self, _cx: &mut Cx) {
         let (w, h) = match self.draw_bg.button_type {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
@@ -94,16 +93,5 @@ impl LiveHook for DesktopButton {
             DesktopButtonType::Fullscreen => (50., 36.),
         };
         self.walk = Walk::fixed_size(dvec2(w, h))
-    }
-}
-
-impl DesktopButton {
-    pub fn area(&mut self)->Area{
-        self.draw_bg.area()
-    }
-    pub fn get_widwalk(&self)->Walk{self.walk}
-    
-    pub fn draw_walk_desktop_button(&mut self, cx: &mut Cx2d, walk:Walk) {
-        self.draw_bg.draw_walk(cx, walk);
     }
 }
