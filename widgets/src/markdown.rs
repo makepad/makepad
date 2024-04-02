@@ -47,6 +47,7 @@ impl Widget for Markdown {
             match node{
                 MarkdownNode::BeginHead{level}=>{
                     tf.push_size_abs_scale(3.0 / *level as f64);
+                    tf.push_bold();
                 },
                 MarkdownNode::Separator=>{
                     cx.turtle_new_line();
@@ -54,6 +55,7 @@ impl Widget for Markdown {
                 }
                 MarkdownNode::EndHead=>{
                     tf.pop_size();
+                    tf.pop_bold();
                     cx.turtle_new_line();
                 },
                 MarkdownNode::NewLine=>{
