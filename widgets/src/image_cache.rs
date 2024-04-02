@@ -261,7 +261,7 @@ pub trait ImageCacheImpl {
         if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
             self.set_texture(Some(texture.clone()), id);
             Ok(())
-        }
+        } 
         else{
             match cx.take_dependency(image_path) {
                 Ok(data) => {
