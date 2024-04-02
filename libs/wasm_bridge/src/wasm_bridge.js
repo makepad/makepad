@@ -106,7 +106,7 @@ export class WasmBridge {
         this.exports.wasm_init_panic_hook();
         this.update_array_buffer_refs();
     }
-    
+    /*
     chars_to_string(chars_ptr, len) {
         let out = "";
         let array = new Uint32Array(this.memory.buffer, chars_ptr, len);
@@ -114,14 +114,22 @@ export class WasmBridge {
             out += String.fromCharCode(array[i]);
         }
         return out
+    }*/
+    
+    u8_to_string(ptr, len){
+        let u8 = new Uint8Array(this.memory.buffer, ptr, len);
+        let copy = new Uint8Array(len);
+        copy.set(u8);
+        const decoder = new TextDecoder();
+        return decoder.decode(copy);
+    }
+
+    js_console_log(u8_ptr, len) {
+        console.log(this.u8_to_string(u8_ptr, len));
     }
     
-    js_console_log(chars_ptr, len) {
-        console.log(this.chars_to_string(chars_ptr, len));
-    }
-    
-    js_console_error(chars_ptr, len) {
-        console.error(this.chars_to_string(chars_ptr, len), '');
+    js_console_error(u8_ptr, len) {
+        console.error(this.u8_to_string(u8_ptr, len), '');
     }
     
     static create_shared_memory() {
@@ -144,18 +152,12 @@ export class WasmBridge {
     
     static instantiate_wasm(module, memory, env) {
         let _wasm = null;
-        function chars_to_string(chars_ptr, len) {
-            let out = "";
-            let array = new Uint32Array(wasm_for_imports._memory.buffer, chars_ptr, len);
-            for (let i = 0; i < len; i ++) {
-                out += String.fromCharCode(array[i]);
-            }
-            return out
-        }
-        
-        env.js_console_log = (chars_ptr, len) => _wasm._bridge.js_console_log(chars_ptr, len);
-        env.js_console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
-        env.js_post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
+
+        env.js_console_log = (u8_ptr, len) => _wasm._bridge.js_console_log(u8_ptr, len);
+        env.js_console_error = (u8_ptr, len) => _wasm._bridge.js_console_error(u8_ptr, len);
+        env.js_open_web_socket = (id, url_ptr, url_len) => console.error("js_open_web_socket out of context");
+        env.js_web_socket_send_string = (id, str_ptr, url_len)=> console.error("js_web_socket_send_string out of context");
+        env.js_web_socket_send_binary = (id, bin_ptr, bin_len)=> console.error("js_web_socket_send_binary out of context");
         
         if (memory !== undefined) {
             env.memory = memory;
@@ -230,23 +232,9 @@ export class ToWasmMsg {
         
         let u8_len = input_buffer.byteLength;
         let output_ptr = app.wasm_new_data_u8(u8_len);
-        
-        if ((u8_len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
-            var u8_out = new Uint8Array(app.memory.buffer, output_ptr, u8_len)
-            var u8_in = new Uint8Array(input_buffer)
-            for (let i = 0; i < u8_len; i ++) {
-                u8_out[i] = u8_in[i];
-            }
-        }
-        else { // do a u32 copy
-            let u32_len = u8_len >> 2; //4 bytes at a time.
-            var u32_out = new Uint32Array(app.memory.buffer, output_ptr, u32_len)
-            var u32_in = new Uint32Array(input_buffer)
-            for (let i = 0; i < u32_len; i ++) {
-                u32_out[i] = u32_in[i];
-            }
-        }
-        
+        var u8_out = new Uint8Array(app.memory.buffer, output_ptr, u8_len)
+        var u8_in = new Uint8Array(input_buffer)
+        u8_out.set(u8_in);
         app.u32[this.u32_offset ++] = output_ptr;
         app.u32[this.u32_offset ++] = u8_len;
     }

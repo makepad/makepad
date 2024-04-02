@@ -10,6 +10,7 @@ pub struct PlistValues {
     executable: String,
     version: String,
 }
+
 impl PlistValues{
     fn to_plist_file(&self, os: AppleOs)->String{
         match os{
@@ -238,8 +239,10 @@ pub fn run_on_sim(apple_args: AppleArgs, args: &[String], apple_target: AppleTar
 #[derive(Debug)]
 struct ProvisionData {
     team_ident: String,
+    app_identifier: String,
     devices: Vec<String>,
     path: PathBuf,
+    uuid: String,
 }
 
 
@@ -334,10 +337,12 @@ impl<'a> XmlParser<'a> {
     }
 }
 impl ProvisionData {
-    fn parse(path: &PathBuf, app_id: &str) -> Option<ProvisionData> {
+    fn parse(path: &PathBuf) -> Option<ProvisionData> {
         let bytes = std::fs::read(&path).unwrap();
         let mut devices = Vec::new();
         let mut team_ident = None;
+        let mut app_identifier = None;
+        let mut uuid = None;
         fn find_entitlements(bytes: &[u8]) -> Option<&[u8]> {
             let head = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">";
             let start_bytes = head.as_bytes();
@@ -384,9 +389,13 @@ impl ProvisionData {
                                     team_ident = Some(data);
                                 }
                                 "application-identifier" => if stack.last().unwrap() == "string" {
-                                    if !data.contains(app_id) {
-                                        return None
-                                    }
+                                    app_identifier = Some(data);
+                                    //if !data.contains(app_id) {
+                                    //    return None
+                                    //}
+                                }
+                                "UUID" => if stack.last().unwrap() == "string" {
+                                    uuid = Some(data);
                                 }
                                 _ => ()
                             }
@@ -400,6 +409,8 @@ impl ProvisionData {
         }
         Some(ProvisionData {
             devices,
+            uuid: uuid.unwrap(),
+            app_identifier: app_identifier.unwrap(),
             team_ident: team_ident.unwrap(),
             path: path.clone()
         })
@@ -446,96 +457,64 @@ pub struct AppleArgs {
     pub apple_os: AppleOs,
     pub signing_identity: Option<String>,
     pub provisioning_profile: Option<String>,
-    pub device_uuid: Option<String>,
-    pub org: Option<String>,
-    pub org_id: Option<String>,
-    pub app: Option<String>
+    pub device_identifier: Option<String>,
+    pub app: Option<String>,
+    pub org: Option<String>
 }
 
 pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: AppleTarget) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let home_dir = std::env::var("HOME").unwrap();
+    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
     
-    if apple_args.org.is_none() || apple_args.app.is_none() {
-        return Err("Please set --org=org --app=app on the commandline inbetween ios and run-device, these are the product name and organisation name from the xcode app you deployed to create the keys.".to_string());
+    let provision = apple_args.provisioning_profile.as_ref().and_then(|v|
+        ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v))));
+    
+    if provision.is_none() || apple_args.provisioning_profile.is_none() || apple_args.signing_identity.is_none() || apple_args.device_identifier.is_none(){
+        // lets list the provisioning profiles.
+        println!("Error: missing provisioning profile, signing idenity or device identifier");
+        let profiles = std::fs::read_dir(profile_dir).unwrap();
+        println!("--------------  Scanning provisioning profiles: --------------");
+        for profile in profiles {
+            // lets read it
+            let profile_path = profile.unwrap().path();
+            if let Some(prov) = ProvisionData::parse(&profile_path) {
+                println!("Profile: {}", prov.uuid);
+                println!("    team: {}", prov.team_ident);
+                println!("    app-identifier: {}", prov.app_identifier);
+                for device in prov.devices{
+                    println!("    device: {}", device);
+                }
+            }
+        }
+        println!("please set --provisioning-profile=<> to the right profile hex string\n");
+        // parse identities for code signing
+        println!("-------------- Scanning signing identities: --------------");
+        shell_env(&[], &cwd, "security", &[
+            "find-identity",
+            "-v",
+            "-p",
+            "codesigning"
+        ]) ?;
+        println!("please set --signing-identity=<> to the right signing identity hex string\n");
+        
+        println!("--------------  Scanning devices identifiers: --------------");
+        shell_env(&[], &cwd, "xcrun", &[
+            "devicectl",
+            "list",
+            "devices",
+        ]) ?;
+        println!("please set --device-identifier=<> to the right device hex string, multiple comma separated without spaces: a,b,c\n");
+        return Err("please provide missing arguments BEFORE run-device".into());
     }
+    let provision = provision.unwrap();
+    
     let org = apple_args.org.unwrap();
     let app = apple_args.app.unwrap();
     
     let build_crate = get_build_crate_from_args(args) ?;
     let result = build(&org, &app, args, apple_target) ?;
-    let cwd = std::env::current_dir().unwrap();
-    
-    // parse identities for code signing
-    let security_result = shell_env_cap(&[], &cwd, "security", &[
-        "find-identity",
-        "-v",
-        "-p",
-        "codesigning"
-    ]) ?;
-    
-    // select signing identity
-    let found_identities: Vec<&str> = security_result.split("\n").collect();
-    let selected_identity = if let Some(signing_identity) = &apple_args.signing_identity {
-        // find passed in identity in security result
-        &found_identities.iter().find( | i | i.contains(signing_identity)).unwrap()[5..45]
-    } else if let Some(long_hex_id) = security_result.strip_prefix("  1) ") {
-        // if no argument passed, take first identity found
-        &long_hex_id[0..40]
-    } else {
-        return Err(format!("Error reading the signing identity security result #{}#", security_result))
-    };
-    //println!("Selected signing identity {}", selected_identity);
-    
-    let home = std::env::var("HOME").unwrap();
-    let profiles = std::fs::read_dir(format!("{}/Library/MobileDevice/Provisioning Profiles/", home)).unwrap();
-    
-    
-    let mut found_profiles = Vec::new();
-    for profile in profiles {
-        // lets read it
-        let profile_path = profile.unwrap().path();
-        if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{org}.{app}")) {
-            found_profiles.push(prov);
-        }
-        else if let Some(prov) = ProvisionData::parse(&profile_path, &format!("{}.", apple_args.org_id.clone().expect("Please set --org-id=<ID> to assist in finding the profile\nYou can lookt it up in the files in ~/Library/MobileDevice/Provisioning Profiles/"))) {
-            found_profiles.push(prov);
-        }
-    }
-    
-    // select provisioning profile
-    let provision = if let Some(provisioning_profile) = &apple_args.provisioning_profile {
-        // find passed in provisioning profile
-        found_profiles.iter()
-            .find( | i | i.path.to_str().unwrap().contains(provisioning_profile))
-            .unwrap_or_else( ||
-            panic!("Provisioning profile {} not found", provisioning_profile)
-        )
-    } else if found_profiles.len() > 0 {
-        // if no argument passed, take first profile found
-        &found_profiles[0]
-    } else {
-        return Err(format!("Could not find a matching mobile provision profile for name {org}.{app}\nPlease create an empty app in xcode with this identifier (orgname.appname) and deploy to your mobile device once, then run this again."))
-    };
-    //println!("Selected provisioning profile {:?}, for team_ident {}", provision.path, provision.team_ident);
-    
-    // select device
-    let selected_device = if let Some(device_uuid) = &apple_args.device_uuid {
-        // find passed in device in selected profile
-        provision.devices.iter()
-            .find( | i | i.contains(device_uuid))
-            .unwrap_or_else( ||
-            panic!("Device with UUID {} not found in provisioning profile {:?}", device_uuid, provision.path)
-        )
-    } else if provision.devices.len() > 0 {
-        // if no argument passed, take first device found in profile
-        &provision.devices[0]
-    } else {
-        return Err(format!("No devices found in provisioning profile {:?}", provision.path))
-    };
-    //println!("Selected device with UUID: {}", selected_device);
-    
-    // ok lets find the mobile provision for this application
-    // we can also find the team ids from there to build the scent
-    // and the device id as well
+   
     let scent = Scent {
         app_id: format!("{}.{}.{}", provision.team_ident, org, app),
         team_id: provision.team_ident.to_string()
@@ -555,7 +534,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
         "--force",
         "--timestamp=none",
         "--sign",
-        selected_identity,
+        apple_args.signing_identity.as_ref().unwrap(),
         &result.dst_bin.into_os_string().into_string().unwrap()
     ]) ?;
     
@@ -563,7 +542,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
         "--force",
         "--timestamp=none",
         "--sign",
-        selected_identity,
+        apple_args.signing_identity.as_ref().unwrap(),
         "--entitlements",
         &scent_file.into_os_string().into_string().unwrap(),
         "--generate-entitlement-der",
@@ -572,32 +551,33 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     
     
     let cwd = std::env::current_dir().unwrap();
-
-    let answer = shell_env_cap(&[], &cwd, "xcrun", &[
-        "devicectl",
-        "device",
-        "install",
-        "app",
-        "--device",
-        &selected_device,
-        &app_dir
-    ])?;
-    for line in answer.split("\n"){
-        if line.contains("installationURL:"){
-            let path = &line[21..line.len()-1];
-            shell_env(&[], &cwd, "xcrun", &[
-                "devicectl",
-                "device",
-                "process",
-                "launch",                    
-                "--device",
-                &selected_device,
-                path
-            ])?;
-            return Ok(())
+    for device_identifier in apple_args.device_identifier.unwrap().split(","){
+        let answer = shell_env_cap(&[], &cwd, "xcrun", &[
+            "devicectl",
+            "device",
+            "install",
+            "app",
+            "--device",
+            device_identifier,
+            &app_dir
+        ])?;
+        //println!("TODO: We need to fish out LONGID from the answer {}", answer);
+        for line in answer.split("\n"){
+            if line.contains("installationURL:"){
+                let path = &line[21..line.len()-1];
+                shell_env(&[], &cwd, "xcrun", &[
+                    "devicectl",
+                    "device",
+                    "process",
+                    "launch",
+                    "--device",
+                    device_identifier,
+                    path
+                ])?;
+                continue
+            }
         }
     }
-    println!("TODO: We need to fish out LONGID from the answer {}", answer);
 
     Ok(())
 }

@@ -97,19 +97,55 @@ impl Widget for Button {
     }
 }
 
-impl ButtonRef {
+impl Button {
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let ButtonAction::Clicked = actions.find_widget_action(self.widget_uid()).cast() {
-            return true;
+            true
+        } else {
+            false
         }
-        false
     }
 
     pub fn pressed(&self, actions: &Actions) -> bool {
         if let ButtonAction::Pressed = actions.find_widget_action(self.widget_uid()).cast() {
-            return true;
+            true
+        } else {
+            false
         }
-        false
+    }
+
+    pub fn released(&self, actions: &Actions) -> bool {
+        if let ButtonAction::Released = actions.find_widget_action(self.widget_uid()).cast() {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl ButtonRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.clicked(actions)
+        } else {
+            false
+        }
+    }
+
+    pub fn pressed(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.pressed(actions)
+        } else {
+            false
+        }
+    }
+    
+    pub fn released(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.released(actions)
+        } else {
+            false
+        }
     }
 }
 
@@ -119,5 +155,8 @@ impl ButtonSet {
     }
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.pressed(actions))
+    }
+    pub fn released(&self, actions: &Actions) -> bool {
+        self.iter().any(|v| v.released(actions))
     }
 }

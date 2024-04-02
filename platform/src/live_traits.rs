@@ -31,11 +31,14 @@ pub trait LiveHook {
     fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {}
     fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
         match &apply.from{
-            ApplyFrom::NewFromDoc{..}=>self.after_new_from_doc(cx),
+            ApplyFrom::NewFromDoc{..}=>{self.after_new_from_doc(cx);self.after_apply_from_doc(cx);}
+            ApplyFrom::UpdateFromDoc{..}=>{self.after_update_from_doc(cx);self.after_apply_from_doc(cx);}
             _=>()
         }
     }
     fn after_new_from_doc(&mut self, _cx:&mut Cx){}
+    fn after_update_from_doc(&mut self, _cx:&mut Cx){}
+    fn after_apply_from_doc(&mut self, _cx:&mut Cx){}
     fn after_new_before_apply(&mut self, _cx: &mut Cx) {}
 }
 

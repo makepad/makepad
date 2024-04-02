@@ -25,7 +25,7 @@ impl State {
     }
 }
 
-pub struct WebSocket {
+pub struct ServerWebSocket {
     head: [u8; 8],
     head_expected: usize,
     head_written: usize,
@@ -41,7 +41,7 @@ pub struct WebSocket {
     state: State
 }
 
-pub enum WebSocketMessage<'a> {
+pub enum ServerWebSocketMessage<'a> {
     Ping(&'a [u8]),
     Pong(&'a [u8]),
     Text(&'a str),
@@ -50,33 +50,33 @@ pub enum WebSocketMessage<'a> {
 }
 
 #[derive(Debug)]
-pub enum WebSocketError<'a> {
+pub enum ServerWebSocketError<'a> {
     OpcodeNotSupported(u8),
     TextNotUTF8(&'a [u8]),
 }
 
-pub const PING_MESSAGE:[u8;2] = [128 | 9,0];
-pub const PONG_MESSAGE:[u8;2] = [128 | 10,0];
+pub const SERVER_WEB_SOCKET_PING_MESSAGE:[u8;2] = [128 | 9,0];
+pub const SERVER_WEB_SOCKET_PONG_MESSAGE:[u8;2] = [128 | 10,0];
 
-pub enum MessageFormat {
+pub enum ServerWebSocketMessageFormat {
     Binary,
     Text
 }
 
-pub struct MessageHeader {
-    pub format: MessageFormat,
+pub struct ServerWebSocketMessageHeader {
+    pub format: ServerWebSocketMessageFormat,
     len: usize,
     masked: bool,
     data: [u8;14]
 }
 
-impl MessageHeader {
-    pub fn from_len(len: usize, format: MessageFormat, masked: bool)->Self{
+impl ServerWebSocketMessageHeader {
+    pub fn from_len(len: usize, format: ServerWebSocketMessageFormat, masked: bool)->Self{
         let mut data = [0u8;14];
         
         match format {
-            MessageFormat::Binary => data[0] = 128 | 2,
-            MessageFormat::Text => data[0] = 128 | 1,
+            ServerWebSocketMessageFormat::Binary => data[0] = 128 | 2,
+            ServerWebSocketMessageFormat::Text => data[0] = 128 | 1,
         }
 
         if masked {
@@ -111,9 +111,9 @@ impl MessageHeader {
             for i in header_len..header_len + 4 {
                 data[i] = Self::random_byte();
             }
-            return MessageHeader{len: header_len + 4, data, format, masked}
+            return ServerWebSocketMessageHeader{len: header_len + 4, data, format, masked}
         } else {
-            return MessageHeader{len: header_len, data, format, masked}
+            return ServerWebSocketMessageHeader{len: header_len, data, format, masked}
         }
     }
     
@@ -141,7 +141,7 @@ impl MessageHeader {
     }
 }
 
-impl WebSocket {
+impl ServerWebSocket {
     pub fn new() -> Self {
         Self {
             head: [0u8; 8],
@@ -160,16 +160,16 @@ impl WebSocket {
         }
     }
     
-    pub fn message_to_frame(msg:WebSocketMessage) ->Vec<u8>
+    pub fn message_to_frame(msg:ServerWebSocketMessage) ->Vec<u8>
     {
         match &msg{
-            WebSocketMessage::Text(data)=>{
-                let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                WebSocket::build_message(header, &data.to_string().into_bytes())
+            ServerWebSocketMessage::Text(data)=>{
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                ServerWebSocket::build_message(header, &data.to_string().into_bytes())
             }
-            WebSocketMessage::Binary(data)=>{
-                let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                WebSocket::build_message(header, &data)
+            ServerWebSocketMessage::Binary(data)=>{
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                ServerWebSocket::build_message(header, &data)
             }
             _=>panic!()
         }  
@@ -188,7 +188,7 @@ impl WebSocket {
         response_ack
     }
 
-    pub fn build_message(mut header: MessageHeader, data: &[u8])->Vec<u8>{
+    pub fn build_message(mut header: ServerWebSocketMessageHeader, data: &[u8])->Vec<u8>{
         let mut frame = header.as_slice().to_vec();
         if let Some(mask) = header.mask(){
             for (i, &byte) in data.iter().enumerate() {
@@ -233,7 +233,7 @@ impl WebSocket {
         self.state = state;
     }
     
-    pub fn parse<F>(&mut self, input: &[u8], mut result: F) where F: FnMut(Result<WebSocketMessage, WebSocketError>){
+    pub fn parse<F>(&mut self, input: &[u8], mut result: F) where F: FnMut(Result<ServerWebSocketMessage, ServerWebSocketError>){
         self.input_read = 0;
         // parse a header
         loop {
@@ -249,7 +249,7 @@ impl WebSocket {
                         self.to_state(State::Len1);
                     }
                     else if opcode == 8 {
-                        result(Ok(WebSocketMessage::Close));
+                        result(Ok(ServerWebSocketMessage::Close));
                         break;
                     }
                     else if opcode == 9 {
@@ -261,7 +261,7 @@ impl WebSocket {
                         self.to_state(State::Len1);
                     }
                     else {
-                        result(Err(WebSocketError::OpcodeNotSupported(opcode)));
+                        result(Err(ServerWebSocketError::OpcodeNotSupported(opcode)));
                         break;
                     }
                 },
@@ -340,21 +340,21 @@ impl WebSocket {
                     }
                     else {
                         if self.is_ping {
-                            result(Ok(WebSocketMessage::Ping(&self.data)));
+                            result(Ok(ServerWebSocketMessage::Ping(&self.data)));
                         }
                         else if self.is_pong {
-                            result(Ok(WebSocketMessage::Pong(&self.data)));
+                            result(Ok(ServerWebSocketMessage::Pong(&self.data)));
                         }
                         else if self.is_text{
                             if let Ok(text) = std::str::from_utf8(&self.data){
-                                result(Ok(WebSocketMessage::Text(text)));
+                                result(Ok(ServerWebSocketMessage::Text(text)));
                             }
                             else{
-                                result(Err(WebSocketError::TextNotUTF8(&self.data)))
+                                result(Err(ServerWebSocketError::TextNotUTF8(&self.data)))
                             }
                         }
                         else{
-                            result(Ok(WebSocketMessage::Binary(&self.data)));
+                            result(Ok(ServerWebSocketMessage::Binary(&self.data)));
                         }
                         
                         self.to_state(State::Opcode);
@@ -366,7 +366,7 @@ impl WebSocket {
     
 }
 
-impl Default for WebSocket {
+impl Default for ServerWebSocket {
     fn default() -> Self {
         Self::new()
     }

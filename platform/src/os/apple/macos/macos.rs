@@ -518,15 +518,6 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
                 }
-                /*CxOsOp::WebSocketOpen {request_id, request} => {
-                    web_socket_open(request_id, request, self.os.network_response.sender.clone());
-                }
-                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
-                    todo!()
-                }*/
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
@@ -576,7 +567,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
         self.live_expand();
-        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+        if !Self::has_studio_web_socket() {
             self.start_disk_live_file_watcher(100);
         }
         self.live_scan_dependencies();

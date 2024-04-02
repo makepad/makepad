@@ -31,6 +31,15 @@ class AudioWorklet extends AudioWorkletProcessor {
                     value: chars_to_string(chars_ptr, len)
                 });
             },
+            js_web_socket_send_string(id, str_ptr, str_len){
+            },
+    
+            js_web_socket_send_binary(id, bin_ptr, bin_len){
+            },
+    
+            js_open_web_socket:(id, url_ptr, url_len)=>{
+                
+            }
         };
         WebAssembly.instantiate(thread_info.module, {env}).then(wasm => {
             

@@ -257,6 +257,7 @@ impl Cx {
     }
     
     pub (crate) fn handle_repaint(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &mut D3d11Cx) {
+        
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -265,9 +266,9 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        //let dpi_factor = window.window_geom.dpi_factor;
+                        //let dpi_factor = window.window_geom.dpi_factor;                        
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*pass_id, true, window, d3d11_cx);
+                        self.draw_pass_to_window(*pass_id, false, window, d3d11_cx);
                     }
                 }
                 CxPassParent::Pass(_) => {
