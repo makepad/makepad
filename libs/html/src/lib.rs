@@ -19,7 +19,7 @@ pub enum HtmlNode{
     Attribute{lc:LiveId, nc:LiveId, start:usize, end:usize},
     Text{start: usize, end:usize}
 }
-
+/*
 /// A standalone owned copy of an HTML attribute.
 #[derive(Debug, Clone)]
 pub struct HtmlAttribute {
@@ -29,7 +29,7 @@ pub struct HtmlAttribute {
     pub nc: LiveId,
     /// The value of this attribute.
     pub value: String,
-}
+}*/
  
 pub struct HtmlWalker<'a>{
     decoded: &'a str,
@@ -83,7 +83,7 @@ impl<'a> HtmlWalker<'a>{
     pub fn done(&self)->bool{
         self.index >= self.nodes.len()
     }
-
+/*
     /// Iterates over and returns a list of all attributes for the current open HTML tag.
     pub fn collect_attributes(&self) -> Vec<HtmlAttribute> {
         let mut attrs = Vec::new();
@@ -102,7 +102,7 @@ impl<'a> HtmlWalker<'a>{
         }
         attrs
     }
-    
+    */
     /// Returns the first attribute of the currently-opened Html tag
     /// whose key matches the given `flc` LiveId, which should be all lowercase.
     ///
@@ -122,6 +122,20 @@ impl<'a> HtmlWalker<'a>{
         None
     }
     
+    
+    pub fn while_attr_lc(&mut self)->Option<(LiveId, &'a str)>{
+        if self.index<self.nodes.len(){
+            match &self.nodes[self.index]{
+                HtmlNode::Attribute{lc, nc:_, start, end}=>{
+                    self.index += 1;
+                    return Some((*lc, &self.decoded[*start..*end]))
+                }
+                _=>()
+            }
+        }
+        None
+    }
+     
     /// Returns the first attribute of the currently-opened Html tag 
     /// whose key matches the given `fnc` LiveId, which is case-sensitive.
     ///

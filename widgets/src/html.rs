@@ -291,7 +291,7 @@ impl Widget for Html {
             match Self::handle_open_tag(cx, tf, &mut node, &mut self.list_stack, &self.ul_markers, &self.ol_markers, &self.ol_separator) {
                 Some(_)=>{
                     
-                    handle_custom_widget(cx, scope, tf, &mut node, &mut auto_id); 
+                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id); 
                 }
                 _=>()
             }
@@ -324,6 +324,7 @@ fn handle_custom_widget(
     cx: &mut Cx2d,
     scope: &mut Scope,
     tf: &mut TextFlow,
+    doc: &HtmlDoc,
     node: &mut HtmlWalker,
     auto_id: &mut u64,
 ) {
@@ -335,11 +336,8 @@ fn handle_custom_widget(
     };
 
     let template = node.open_tag_nc().unwrap();
-    // Obtain all attributes for the current open tag so we can pass them
-    // to the new widget item via the Scope `props` field.
-    // The custom widget can access these attributes in `LiveHook::after_apply()`.
-    let attrs = node.collect_attributes();
-    let mut scope_with_attrs = Scope::with_props(&attrs);
+    // lets grab the nodes+index from the walker
+    let mut scope_with_attrs = Scope::with_props_index(doc, node.index + 1);
     // log!("FOUND CUSTOM WIDGET! template: {template:?}, id: {id:?}, attrs: {attrs:?}");
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
@@ -365,13 +363,16 @@ impl LiveHook for HtmlLink {
         //log!("HtmlLink::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
         match apply.from {
             ApplyFrom::NewFromDoc {..}=> {
-                let scope_attrs: Option<&Vec<HtmlAttribute>> = apply.scope.as_ref()
-                    .and_then(|scope| scope.props.get());
-                //log!("HtmlLink::after_apply(): SCOPE ATTRS: {:?}", scope_attrs);
-                if let Some(attrs) = scope_attrs {
-                    if let Some(html_attr) = attrs.iter().find(|attr| attr.lc == live_id!(href)) {
-                        //log!("HtmlLink::after_apply(): found href attr: {:?}", html_attr);
-                        self.href = String::from(&html_attr.value)
+                let scope = apply.scope.as_ref().unwrap();
+                let doc =  scope.props.get::<HtmlDoc>().unwrap();
+                let mut walker = doc.new_walker_with_index(scope.index);
+                
+                if let Some((lc, attr)) = walker.while_attr_lc(){
+                    match lc {
+                        live_id!(href)=>{
+                            self.href = attr.into()
+                        }
+                        _=>()
                     }
                 }
             }
