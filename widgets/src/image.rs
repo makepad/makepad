@@ -66,6 +66,10 @@ impl Image {
         
         let aspect = width / height;
         match self.fit {
+            ImageFit::Size => {
+                walk.width = Size::Fixed(width);
+                walk.height = Size::Fixed(height);
+            }
             ImageFit::Stretch => {
             }
             ImageFit::Horizontal => {
@@ -101,7 +105,7 @@ impl Image {
 }
 
 impl ImageRef {
-    /// Loads the image at the given `image_path` into this `ImageRef`.
+    /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_image_dep_by_path(cx, image_path, 0)
@@ -109,6 +113,15 @@ impl ImageRef {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
+    
+    /// Loads the image at the given `image_path` on disk into this `ImageRef`.
+    pub fn load_image_file_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.load_image_file_by_path(cx, image_path, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }    
     
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {

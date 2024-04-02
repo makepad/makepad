@@ -27,6 +27,7 @@ live_design!{
                 },
                 button1 = <Button> {
                     text: "Hello world 1"
+                    draw_text:{color:#f00}
                 }
                 input1 = <TextInput> {
                     width: 100, height: 30
