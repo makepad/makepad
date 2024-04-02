@@ -15,7 +15,7 @@ pub fn handle_wasm(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "run" =>{
-            compile::run(&args[1..])
+            compile::run(8010, &args[1..])
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }
