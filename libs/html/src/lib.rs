@@ -122,7 +122,6 @@ impl<'a> HtmlWalker<'a>{
         None
     }
     
-    
     pub fn while_attr_lc(&mut self)->Option<(LiveId, &'a str)>{
         if self.index<self.nodes.len(){
             match &self.nodes[self.index]{
