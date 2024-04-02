@@ -69,6 +69,13 @@ impl LiveHook for Window {
             self.view(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
+       
+    }
+    
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if self.demo{
+            self.demo_next_frame = cx.new_next_frame();
+        }
         match cx.os_type() {
             OsType::Windows => {
                 if !cx.in_makepad_studio(){
@@ -84,7 +91,7 @@ impl LiveHook for Window {
                         caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
                     }); 
                 }*/
-                
+                                
                 //draw_bg: {color: (THEME_COLOR_BG_APP)}  
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
@@ -97,12 +104,6 @@ impl LiveHook for Window {
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             _ => ()
-        }
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        if self.demo{
-            self.demo_next_frame = cx.new_next_frame();
         }
     }
 }
