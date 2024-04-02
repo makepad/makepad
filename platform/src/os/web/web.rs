@@ -181,6 +181,10 @@ impl Cx {
                 
                 live_id!(ToWasmSignal) =>{
                     self.handle_media_signals();
+                    if self.handle_live_edit(){
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
                     self.call_event_handler(&Event::Signal);
                 }
                 
@@ -334,10 +338,6 @@ impl Cx {
             to_wasm.block_skip(skip);
         };
         
-        if self.handle_live_edit(){
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
 
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
