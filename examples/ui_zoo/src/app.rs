@@ -523,6 +523,7 @@ live_design!{
                         <View> {
                             height: Fit
                             flow: Right
+                            spacing: (THEME_SPACE_1)
                             align: { x: 0.0, y: 0.5}
                             <CheckBox> {text:"Check me out!"}
                             <CheckBox> {text:"Check me out!"}
@@ -532,6 +533,7 @@ live_design!{
                         <View> {
                             height: Fit
                             flow: Right
+                            spacing: (THEME_SPACE_1)
                             align: { x: 0.0, y: 0.5}
                             <CheckBoxToggle> {text:"Check me out!" }
                             <CheckBoxToggle> {text:"Check me out!" }
@@ -541,6 +543,7 @@ live_design!{
                         <View> {
                             height: Fit
                             flow: Right
+                            spacing: (THEME_SPACE_1)
                             align: { x: 0.0, y: 0.5}
                             <CheckBoxCustom> {
                                 text:"Check me out!"
