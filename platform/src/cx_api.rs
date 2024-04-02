@@ -104,7 +104,7 @@ impl Cx {
         if let Some(data) = self.dependencies.get_mut(path) {
             if let Some(data) = data.data.take() {
                 return match data {
-                    Ok(data) => Ok(data.clone()),
+                    Ok(data) => Ok(data),
                     Err(s) => Err(s.clone()),
                 };
             }
