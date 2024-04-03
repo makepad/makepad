@@ -216,7 +216,7 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                     let path = path.strip_prefix("/").unwrap();
                                          
                     let path = root.join(&path);
-                    println!("OPENING {:?}", path);
+                    //println!("OPENING {:?}", path);
                     if let Ok(mut file_handle) = File::open(path) {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {
