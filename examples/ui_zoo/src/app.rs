@@ -113,7 +113,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text: "View 1" }
+                    title = {text: "<View>" }
                     <ZooDesc> {text:"This is a gray view with flow set to Right\nTo show the extend, the background has been enabled using show_bg and a gray pixelshader has been provided to draw_bg."}
                     <View> {
                         height: Fit
@@ -248,44 +248,58 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"Button"}
+                    title = {text:"<Button>"}
                     <ZooDesc> {text:"A small clickable region"}
-                    <View> {
-                        flow: Right,
+                    <ZooGroup> {
+                        flow: Down,
                         width: Fill, height: Fit,
                         align: { x: 0.0, y: 0.5 }
                         spacing: 10.,
+
+                        <H4> { text: "Default"}
+                        <Label> { text: "<Button>"}
                         basicbutton = <Button> { text: "I can be clicked" }
 
+                        <H4> { text: "Button with an icon"}
+                        <Label> { text: "<ButtonIcon>"}
                         iconbutton = <ButtonIcon> {
                             draw_icon: {
                                 svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                             }
-                            text: "I can have a lovely icon!"
+                            text: "I can have a icon!"
                         }
 
-                        <ButtonFlat> {
-                            draw_icon: {
-                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                        <H4> { text: "Flat Mode"}
+                        <Label> { text: "<ButtonFlat>"}
+                        <View> {
+                            flow: Right,
+                            align: { x: 0., y: 0.5 } 
+                            width: Fill, height: Fit,
+                            <ButtonFlat> {
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                                text: "I can have a lovely icon!"
                             }
-                            text: "I can have a lovely icon!"
-                        }
 
-                        <ButtonFlat> {
-                            draw_icon: {
-                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                            <ButtonFlat> {
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                            }
+
+                            <ButtonFlat> {
+                                flow: Down,
+                                icon_walk: { width: 15. }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                                text: "Vertical Layout"
                             }
                         }
 
-                        <ButtonFlat> {
-                            flow: Down,
-                            icon_walk: { width: 15. }
-                            draw_icon: {
-                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                            }
-                            text: "Vertical Layout"
-                        }
-
+                        <H4> { text: "Freely styled button"}
+                        <Label> { text: "<Button>"}
                         styledbutton = <Button> {
                             draw_bg: {
                                 fn pixel(self) -> vec4 {
@@ -303,11 +317,11 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"TextInput"}
+                    title = {text:"<TextInput>"}
                     <ZooDesc> { text:"Simple 1 line textbox" }
                     <ZooGroup> {
                         simpletextinput= <TextInput> {
-                            text: "This is inside a text input!"
+                            empty_message: "Inline Label",
                         }
 
                         simpletextinput_outputbox = <P> {
@@ -317,7 +331,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"Label"}
+                    title = {text:"<Label>"}
                     <ZooDesc> { text:"Simple 1 line textbox" }
                     <ZooGroup> { <Label> { text: "This is a small line of text" } }
                     <ZooGroup> {
@@ -348,7 +362,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = { text:"Slider" }
+                    title = { text:"<Slider>" }
                     <ZooDesc> { text:"A parameter dragger" }
                     <ZooGroup> {
                         width: Fill, height: Fit,
@@ -375,7 +389,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"DropDown"}
+                    title = {text:"<DropDown>"}
                     <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
                     <ZooGroup> {
                         dropdown = <DropDown> {
@@ -386,7 +400,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"File Tree"}
+                    title = {text:"<FileTree>"}
                     <ZooDesc> {text:"File Tree"}
                     <ZooGroup> {
                         padding: 0.
@@ -396,7 +410,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = { text:"FoldHeader" }
+                    title = { text:"<FoldHeader>" }
                     <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
                     <ZooGroup> {
                         thefoldheader= <FoldHeader> {
@@ -416,7 +430,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"Html"}
+                    title = {text:"<Html>"}
                     <ZooDesc> {text:"HTML Widget"}
                     <ZooGroup> {
                         <Html> {
@@ -430,7 +444,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"Markdown"}
+                    title = {text:"<Markdown>"}
                     <ZooDesc> {text:"Markdown"}
                     <ZooGroup> {
                         <Markdown> {
@@ -444,13 +458,13 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"Image"}
+                    title = {text:"<Image>"}
                     <ZooDesc> {text:"A static inline image from a resource."}
                     <ZooGroup> { <Image> { source: dep("crate://self/resources/ducky.png" ) } }
                 }
 
                 <ZooHeader> {
-                    title = {text:"Link Label"}
+                    title = {text:"<LinkLabel>"}
                     <ZooDesc> {text:"Link Label"}
                     <ZooGroup> {
                         width: Fill, height: Fit,
@@ -505,8 +519,8 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"CheckBox"}
-                    <ZooDesc> {text:"Checkbox?"}
+                    title = {text:"<CheckBox>"}
+                    <ZooDesc> {text:"Checkbox"}
                     <ZooGroup> {
                         height: Fit
                         spacing: (THEME_SPACE_2)
@@ -564,7 +578,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"RadioButtons"}
+                    title = {text:"<RadioButton>"}
                     <ZooDesc> {text:"Todo: List the different radio button templates."}
                     <ZooGroup> {
                         flow: Down,
@@ -668,7 +682,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"Slides View"}
+                    title = {text:"<SlidesView>"}
                     width: Fill, height: Fit,
                     <ZooDesc> {text:"Slides View"}
                     <ZooGroup> {
@@ -689,7 +703,7 @@ live_design!{
 
                 // TODO: SHOW
                 <ZooHeader> {
-                    title = {text:"Dock"}
+                    title = {text:"<Dock>"}
                     <ZooDesc> {text:"Dock"}
                     <ZooGroup> {
                         <Dock> {
