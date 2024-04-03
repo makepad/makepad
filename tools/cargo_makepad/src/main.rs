@@ -8,6 +8,8 @@ use wasm::*;
 use apple::*;
 use check::*;
 pub use makepad_shell;
+pub use makepad_http;
+pub use makepad_wasm_strip;
 
 fn show_help(err: &str){
     if !err.is_empty(){

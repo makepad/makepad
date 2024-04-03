@@ -150,6 +150,7 @@ impl Scent{
 
 pub struct IosBuildResult {
     app_dir: PathBuf,
+    build_dir: PathBuf,
     plist: PlistValues,
     dst_bin: PathBuf
 }
@@ -198,12 +199,14 @@ pub fn build(org: &str, product: &str, args: &[String], apple_target: AppleTarge
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file(apple_target.os())) ?;
     
+    let build_dir = cwd.join(format!("target/{}/{profile}/", apple_target.toolchain()));
     let src_bin = cwd.join(format!("target/{}/{profile}/{build_crate}", apple_target.toolchain()));
     let dst_bin = app_dir.join(build_crate.to_string());
     
     cp(&src_bin, &dst_bin, false) ?;
     
     Ok(IosBuildResult {
+        build_dir,
         app_dir,
         plist,
         dst_bin
@@ -417,8 +420,8 @@ impl ProvisionData {
     }
 }
 
-fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
-    let mut assets_to_add: Vec<String> = Vec::new();
+fn copy_resources(app_dir: &Path, build_crate: &str, build_dir:&Path, apple_target: AppleTarget) -> Result<(), String> {
+    /*let mut assets_to_add: Vec<String> = Vec::new();*/
     
     let build_crate_dir = get_crate_dir(build_crate) ?;
     
@@ -429,24 +432,16 @@ fn copy_resources(app_dir: &Path, build_crate: &str) -> Result<(), String> {
         let dst_dir = app_dir.join(format!("makepad/{underscore_build_crate}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(&local_resources_path, &dst_dir, false) ?;
-        
-        let assets = ls(&dst_dir) ?;
-        for path in &assets {
-            let path = path.display();
-            assets_to_add.push(format!("makepad/{underscore_build_crate}/resources/{path}"));
-        }
     }
 
-    let resources = get_crate_resources(build_crate);
-    for (name, resources_path) in resources.iter() {
-        let dst_dir = app_dir.join(format!("makepad/{name}/resources"));
-        mkdir(&dst_dir) ?;
-        cp_all(resources_path, &dst_dir, false) ?;
-        
-        let assets = ls(&dst_dir) ?;
-        for path in &assets {
-            let path = path.display();
-            assets_to_add.push(format!("makepad/{name}/resources/{path}"));
+    let deps = get_crate_dep_dirs(build_crate, &build_dir, apple_target.toolchain());
+    for (name, dep_dir) in deps.iter() {
+        let resources_path = dep_dir.join("resources");
+        if resources_path.is_dir(){
+            let name = name.replace("-","_");
+            let dst_dir = app_dir.join(format!("makepad/{name}/resources"));
+            mkdir(&dst_dir) ?;
+            cp_all(&resources_path, &dst_dir, false) ?;
         }
     }
     
@@ -528,7 +523,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     
     cp(&provision.path, &dst_provision, false) ?;
     
-    copy_resources(Path::new(&app_dir), build_crate) ?;
+    copy_resources(Path::new(&app_dir), build_crate, &result.build_dir, apple_target) ?;
     
     shell_env_cap(&[], &cwd, "codesign", &[
         "--force",

@@ -66,6 +66,7 @@ impl Cx {
                     
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
+                        crate::log!("AM HERE {}", path);
                         deps.push(path.to_string());
                     }
                     
@@ -515,6 +516,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        self.live_registry.borrow_mut().package_root = Some("".to_string());
         self.live_expand();
         self.live_scan_dependencies();
         
