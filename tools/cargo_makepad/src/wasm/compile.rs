@@ -71,13 +71,9 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
     args_out.extend_from_slice(base_args);
     
     // dont allow wasm builds to be debug builds
-    let mut found_release = false;
+    let profile = get_profile_from_args(&args);
     for arg in args {
-        if arg == "--release"{found_release = true};
         args_out.push(arg);
-    }
-    if !found_release{
-        args_out.insert(4, "--release");
     }
     
     shell_env(&[
@@ -85,8 +81,8 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
         ("MAKEPAD", "lines"),
     ], &cwd, "rustup", &args_out) ?;
     
-    let app_dir = cwd.join(format!("target/makepad-wasm-app/{}", build_crate));
-    let build_dir = cwd.join(format!("target/wasm32-unknown-unknown/release"));
+    let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
+    let build_dir = cwd.join(format!("target/wasm32-unknown-unknown/{profile}"));
     
     let build_crate_dir = get_crate_dir(build_crate) ?;
     let local_resources_path = build_crate_dir.join("resources");
@@ -149,6 +145,7 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
     let index_path = app_dir.join("index.html");
     let html = generate_html(build_crate);
     fs::write(&index_path, &html.as_bytes()).map_err( | e | format!("Can't write {:?} {:?} ", index_path, e)) ?;
+    println!("Created wasm package: {:?}", app_dir);
     
     Ok(WasmBuildResult{
         app_dir
