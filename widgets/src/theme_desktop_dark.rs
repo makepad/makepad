@@ -1939,7 +1939,7 @@ live_design! {
             }
 
             fn get_border_color(self) -> vec4 {
-                return mix(THEME_COLOR_U_3, THEME_COLOR_D_2, self.pos.y)
+                return mix(THEME_COLOR_U_3, THEME_COLOR_D_2, pow(self.pos.y, 0.35))
             }
 
             fn pixel(self) -> vec4 {
