@@ -3153,6 +3153,7 @@ live_design! {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.2}}
+                    ease: OutQuad
                     apply: {
                         draw_slider: {hover: 0.0}
                         // text_input: { draw_bg: { hover: 0.0}}
