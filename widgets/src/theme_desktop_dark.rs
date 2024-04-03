@@ -5,21 +5,19 @@ live_design! {
     import crate::base::*;
 
     THEME_SPACE_FACTOR = 10.0 // Increase for a less dense layout
-    THEME_SPACE_0 = 0.0
     THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
     THEME_SPACE_2 = (1 * (THEME_SPACE_FACTOR))
     THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
 
-    THEME_MSPACE_0 = {top: (THEME_SPACE_0), right: (THEME_SPACE_0), bottom: (THEME_SPACE_0), left: (THEME_SPACE_0)}
     THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)}
-    THEME_MSPACE_H_1 = {top: (THEME_SPACE_0), right: (THEME_SPACE_1), bottom: (THEME_SPACE_0), left: (THEME_SPACE_1)}
-    THEME_MSPACE_V_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_0), bottom: (THEME_SPACE_1), left: (THEME_SPACE_0)}
+    THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
+    THEME_MSPACE_V_1 = {top: (THEME_SPACE_1), right: 0., bottom: (THEME_SPACE_1), left: 0.}
     THEME_MSPACE_2 = {top: (THEME_SPACE_2), right: (THEME_SPACE_2), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
-    THEME_MSPACE_H_2 = {top: (THEME_SPACE_0), right: (THEME_SPACE_2), bottom: (THEME_SPACE_0), left: (THEME_SPACE_2)}
-    THEME_MSPACE_V_2 = {top: (THEME_SPACE_2), right: (THEME_SPACE_0), bottom: (THEME_SPACE_2), left: (THEME_SPACE_0)}
+    THEME_MSPACE_H_2 = {top: 0., right: (THEME_SPACE_2), bottom: 0., left: (THEME_SPACE_2)}
+    THEME_MSPACE_V_2 = {top: (THEME_SPACE_2), right: 0., bottom: (THEME_SPACE_2), left: 0.}
     THEME_MSPACE_3 = {top: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom: (THEME_SPACE_3), left: (THEME_SPACE_3)}
-    THEME_MSPACE_H_3 = {top: (THEME_SPACE_0), right: (THEME_SPACE_3), bottom: (THEME_SPACE_0), left: (THEME_SPACE_3)}
-    THEME_MSPACE_V_3 = {top: (THEME_SPACE_3), right: (THEME_SPACE_0), bottom: (THEME_SPACE_3), left: (THEME_SPACE_0)}
+    THEME_MSPACE_H_3 = {top: 0., right: (THEME_SPACE_3), bottom: 0., left: (THEME_SPACE_3)}
+    THEME_MSPACE_V_3 = {top: (THEME_SPACE_3), right: 0., bottom: (THEME_SPACE_3), left: 0.}
 
     THEME_DATA_ITEM_HEIGHT = 23.0
     THEME_DATA_ICON_WIDTH = 16.0
@@ -185,7 +183,7 @@ live_design! {
 
     H1 = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_1), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_1)}
         draw_text: {
             wrap: Word
             text_style: <THEME_FONT_BOLD> {
@@ -199,7 +197,7 @@ live_design! {
 
     H1italic = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_1), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_1)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -212,7 +210,7 @@ live_design! {
 
     H2 = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_2), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_2)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -225,7 +223,7 @@ live_design! {
 
     H2italic = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_2), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_2)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -238,7 +236,7 @@ live_design! {
 
     H3 = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_3), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_3)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -251,7 +249,7 @@ live_design! {
 
     H3italic = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_3), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_3)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -264,7 +262,7 @@ live_design! {
 
     H4 = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_4), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_4)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -277,7 +275,7 @@ live_design! {
 
     H4italic = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_4), bottom: (THEME_SPACE_0)}
+        margin: {top: (THEME_FONT_SIZE_4)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -290,7 +288,7 @@ live_design! {
 
     P = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -303,7 +301,7 @@ live_design! {
 
     Pbold = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -316,7 +314,7 @@ live_design! {
 
     Pitalic = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -329,7 +327,7 @@ live_design! {
 
     Pbolditalic = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -342,7 +340,7 @@ live_design! {
 
     Meta = <Label> {
         width: Fill,
-        margin: <THEME_MSPACE_0> {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -365,7 +363,6 @@ live_design! {
         }
         <View> {
             width: Fill, height: 0.5,
-            margin: <THEME_MSPACE_0> {}
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_U_3) }
         }
@@ -378,7 +375,6 @@ live_design! {
     HtmlLink = <HtmlLinkBase> {
         width: Fit,
         height: Fit,
-        margin: <THEME_MSPACE_0> {}, padding: <THEME_MSPACE_0> {}
         align: {x: 0., y: 0.}
                         
         label_walk: {
@@ -532,7 +528,7 @@ live_design! {
 
         list_item_layout: {
             flow: RightWrap,
-            padding: <THEME_MSPACE_0> { right: 10. }
+            padding: { right: 10. }
         }
         list_item_walk: { width: Fill, height: Fit }
 
@@ -540,7 +536,7 @@ live_design! {
             flow: RightWrap,
             padding: <THEME_MSPACE_1> {}
         }
-        inline_code_walk:{ height:Fit, width:Fit, margin: <THEME_MSPACE_0> { top: -2 } }
+        inline_code_walk:{ height:Fit, width:Fit, margin: { top: -2 } }
 
         sep_walk: {
             width: Fill, height: 4.
@@ -690,7 +686,7 @@ live_design! {
 
         inline_code_layout: {
             flow: RightWrap,
-            padding: <THEME_MSPACE_0> { left: (THEME_SPACE_1), right: (THEME_SPACE_1) }
+            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1) }
         }
         inline_code_walk: {
             width: Fit, height: Fit,
@@ -891,11 +887,10 @@ live_design! {
 
     Button = <ButtonBase> {
         width: Fit, height: Fit,
-        margin: <THEME_MSPACE_0> {}
         spacing: 7.5,
         align: {x: 0.5, y: 0.5},
         padding: <THEME_MSPACE_2> {}
-        label_walk: { width: Fit, height: Fit, margin: <THEME_MSPACE_0> {} },
+        label_walk: { width: Fit, height: Fit },
 
         draw_text: {
             instance hover: 0.0,
@@ -918,7 +913,6 @@ live_design! {
 
         icon_walk: {
             width: (THEME_DATA_ICON_WIDTH), height: Fit,
-            margin: <THEME_MSPACE_0> {}
         }
 
         draw_icon: {
@@ -1025,13 +1019,13 @@ live_design! {
     ButtonIcon = <Button> {
         icon_walk: {
             width: 12.
-            margin: <THEME_MSPACE_0> { left: 0. }
+            margin: { left: 0. }
         }
     }
 
     ButtonFlat = <ButtonIcon> {
-        height: Fill, width: Fit,
-        margin: <THEME_MSPACE_H_1> { }, padding: <THEME_MSPACE_0> {},
+        height: Fit, width: Fit,
+        margin: <THEME_MSPACE_H_1> {}
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
         draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_0) } }
@@ -1074,11 +1068,11 @@ live_design! {
 
     CheckBox = <CheckBoxBase> {
         width: Fit, height: 20,
-        margin: <THEME_MSPACE_0> { top: (THEME_SPACE_1), bottom: (THEME_SPACE_1) }
+        margin: { top: (THEME_SPACE_1), bottom: (THEME_SPACE_1) }
         align: { x: 0.0, y: 0.5 }
         label_walk: {
             width: Fit, height: Fit,
-            margin: <THEME_MSPACE_0> { left: 20., right: (THEME_SPACE_2) }
+            margin: { left: 20., right: (THEME_SPACE_2) }
         }
 
         draw_check: {
@@ -1269,7 +1263,7 @@ live_design! {
     }
 
     CheckBoxToggle = <CheckBox> {
-        margin: <THEME_MSPACE_0> { left: -8. }
+        margin: { left: -8. }
         draw_check: { check_type: Toggle }
         label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
 
@@ -1640,7 +1634,7 @@ live_design! {
 
     TabCloseButton = <TabCloseButtonBase> {
         height: 10.0, width: 10.0,
-        margin: <THEME_MSPACE_0> { right: 5 },
+        margin: { right: 5 },
         draw_button: {
 
             instance hover: float;
@@ -1968,7 +1962,6 @@ live_design! {
 
     DropDown = <DropDownBase> {
         width: Fit, height: Fit,
-        margin: <THEME_MSPACE_0> {}
         padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: 20. }
         align: {x: 0., y: 0.}
 
@@ -2188,7 +2181,7 @@ live_design! {
 
         icon_walk: {
             width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
-            margin: <THEME_MSPACE_0> {  right: 3.0 }
+            margin: { right: 3.0 }
         }
 
         animator: {
@@ -2430,13 +2423,12 @@ live_design! {
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        margin: <THEME_MSPACE_0> {}, padding: { bottom: 2. }
+        padding: { bottom: 2. }
         spacing: 7.5,
         align: {x: 0., y: 0.}
 
         label_walk: {
             width: Fit, height: Fit,
-            margin: <THEME_MSPACE_0> {}
         },
 
         draw_bg: {
@@ -2513,8 +2505,8 @@ live_design! {
     }
 
     LinkLabelIcon = <LinkLabel> {
-        margin: <THEME_MSPACE_0> {}, padding: { bottom: 2. }
-        label_walk: { margin: <THEME_MSPACE_0> { left: -5. }},
+        padding: { bottom: 2. }
+        label_walk: { margin: { left: -5. }},
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
@@ -2535,13 +2527,13 @@ live_design! {
 
     RadioButton = <RadioButtonBase> {
         width: Fit, height: Fit,
-        align: {x: 0.0, y: 0.5}
+        align: { x: 0.0, y: 0.5 }
 
-        icon_walk: { margin: <THEME_MSPACE_0> { left: 20. } }
+        icon_walk: { margin: { left: 20. } }
 
         label_walk: {
             width: Fit, height: Fit,
-            margin: <THEME_MSPACE_1> { left: 20.}
+            margin: { left: 20. }
         }
         label_align: { y: 0.0 }
 
@@ -2732,10 +2724,10 @@ live_design! {
                 return sdf.result
             }
         }
-        margin: <THEME_MSPACE_0> { left: -17.5 }
+        margin: { left: -17.5 }
         label_walk: {
             width: Fit, height: Fit,
-            margin: <THEME_MSPACE_0> { left: (THEME_SPACE_1) }
+            margin: { left: (THEME_SPACE_1) }
         }
     }
 
@@ -2746,10 +2738,9 @@ live_design! {
                 return sdf.result
             }
         }
-        margin: <THEME_MSPACE_0> {}
         label_walk: {
+            margin: 0.,
             width: Fit, height: Fit,
-            margin: <THEME_MSPACE_0> {}
         }
         draw_text: {
             instance hover: 0.0
@@ -2778,10 +2769,8 @@ live_design! {
     }
 
     RadioButtonTab = <RadioButton> {
-        margin: <THEME_MSPACE_0> {}
         draw_radio: { radio_type: Tab }
-        padding: <THEME_MSPACE_2> {}
-        label_walk: { margin: <THEME_MSPACE_0> {} }
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1)}
 
         draw_text: {
             instance hover: 0.0
@@ -3021,8 +3010,7 @@ live_design! {
     }
 
     Slider = <SliderBase> {
-        min: 0.0,
-        max: 1.0,
+        min: 0.0, max: 1.0,
         step: 0.0,
         label_align: { y: 0.0 }
         margin: <THEME_MSPACE_1> {}
@@ -3086,10 +3074,10 @@ live_design! {
             }
         }
 
-        label_walk: { width: Fill, height: Fill, }
+        label_walk: { width: Fill, height: Fill }
 
         text_input: <TextInput> {
-            width: Fit,
+            width: Fit, padding: 0.,
             cursor_margin_bottom: (THEME_SPACE_1),
             cursor_margin_top: (THEME_SPACE_1),
             select_pad_edges: 3.0
@@ -3101,9 +3089,8 @@ live_design! {
                 radius: 2.0
             },
 
-            padding: <THEME_MSPACE_0> {},
             label_align: {y: 0.},
-            margin: {top: (THEME_SPACE_0), right: (THEME_SPACE_0), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
+            margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
             draw_bg: {
                 instance radius: 2.0
                 instance border_width: 0.0
