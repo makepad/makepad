@@ -65,7 +65,7 @@ onmessage = async function(e) {
             }
             web_socket.onmessage = e => {
                 if(typeof e.data == "string"){
-                    let data = string_to_u8("" + e);
+                    let data = string_to_u8("" + e.data);
                     wasm.exports.wasm_web_socket_string(id, data.ptr, data.len);
                 }
                 else{
