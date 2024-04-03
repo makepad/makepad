@@ -375,6 +375,108 @@ live_design! {
         width: Fill, height: Fill
     }
 
+    HtmlLink = <HtmlLinkBase> {
+        width: Fit,
+        height: Fit,
+        margin: 0
+        padding: 0
+        align: {x: 0., y: 0.}
+                        
+        label_walk: {
+            width: Fit,
+            height: Fit
+        }
+                        
+        draw_icon: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+
+        animator: {
+                hover = {
+                    default: off,
+                    off = {
+                        from: {all: Forward {duration: 0.1}}
+                        apply: {
+                            draw_bg: {pressed: 0.0, hover: 0.0}
+                            draw_icon: {pressed: 0.0, hover: 0.0}
+                            draw_text: {pressed: 0.0, hover: 0.0}
+                        }
+                    }
+                                                    
+                    on = {
+                        from: {
+                            all: Forward {duration: 0.1}
+                            pressed: Forward {duration: 0.01}
+                        }
+                        apply: {
+                            draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                            draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                            draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        }
+                    }
+                                                    
+                    pressed = {
+                        from: {all: Forward {duration: 0.2}}
+                        apply: {
+                            draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                            draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                            draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        }
+                    }
+                }
+            }
+                        
+                        
+            draw_bg: {
+                instance pressed: 0.0
+                instance hover: 0.0
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let offset_y = 1.0
+                    sdf.move_to(0., self.rect_size.y - offset_y);
+                    sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                    return sdf.stroke(mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_META,
+                        self.pressed
+                    ), mix(0.0, 0.8, self.hover));
+                }
+            }
+                        
+        draw_text: {
+            wrap: Word
+            color: (LINK_COLOR),
+            instance color_hover: (LINK_COLOR_HOVER),
+            instance color_pressed: (LINK_COLOR_PRESSED),
+            instance pressed: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_LABEL>{}
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_pressed,
+                    self.pressed
+                )
+            }
+        }
+    }
+
     Html = <HtmlBase> {
         width: Fill, height: Fit,
         flow: RightWrap,
@@ -421,26 +523,37 @@ live_design! {
             flow: RightWrap,
             padding: <THEME_MSPACE_2> {}
         }
-
         code_walk: { width: Fill, height: Fit }
 
         quote_layout: {
             flow: RightWrap,
             padding: <THEME_MSPACE_3> {}
         }
-
         quote_walk: { width: Fill, height: Fit }
 
         list_item_layout: {
             flow: RightWrap,
             padding: <THEME_MSPACE_0> { right: 10 }
         }
-
         list_item_walk: { width: Fill, height: Fit }
+
+        inline_code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        inline_code_walk:{ height:Fit, width:Fit, margin:{top:-2} }
 
         sep_walk: {
             width: Fill, height: 4.
             margin: <THEME_MSPACE_V_3> {}
+        }
+
+        a = <HtmlLink> {
+            draw_text: {
+                text_style: {
+                    font_size: 12,
+                }
+            }
         }
 
         draw_block: {
@@ -466,6 +579,17 @@ live_design! {
                         sdf.fill(THEME_COLOR_U_3);
                         return sdf.result;
                     }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(THEME_COLOR_D_2);
+                        return sdf.result;
+                    }
                     FlowBlockType::Code => {
                         sdf.box(
                             0.,
@@ -486,17 +610,6 @@ live_design! {
                             2.
                         );
                         sdf.fill(THEME_COLOR_U_2);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(THEME_COLOR_D_2);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -725,11 +838,11 @@ live_design! {
                         self.border_radius
                     );
                 }
-                return sdf.fill(mix(
+                return sdf.fill( mix(
                     THEME_COLOR_SCROLL_BAR_DEFAULT,
                     mix(
-                        THEME_COLOR_CONTROL_HOVER,
-                        THEME_COLOR_CONTROL_PRESSED,
+                        THEME_COLOR_U_3,
+                        THEME_COLOR_U_4,
                         self.pressed
                     ),
                     self.hover
