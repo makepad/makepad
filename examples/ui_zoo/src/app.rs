@@ -386,8 +386,8 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text:"DemoFileTree"}
-                    <ZooDesc> {text:"DemoFileTree?"}
+                    title = {text:"File Tree"}
+                    <ZooDesc> {text:"File Tree"}
                     <ZooGroup> {
                         padding: 0.
                         show_bg: false,
