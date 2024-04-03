@@ -1849,8 +1849,10 @@ live_design! {
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
-            instance color: (THEME_COLOR_U_3)
-            instance color_selected: (THEME_COLOR_U_5)
+            instance color: #505050FF
+            instance color_selected: #6F
+            // instance color: (THEME_COLOR_U_3)
+            // instance color_selected: (THEME_COLOR_U_5)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1926,19 +1928,18 @@ live_design! {
         menu_item: <PopupMenuItem> {}
 
         draw_bg: {
-            instance color: #00f // shadow behind popup
-            instance border_color: #f00, // outline shadow
-            instance border_width: 5.0,
+            instance color: #505050FF // shadow behind popup
+            instance border_width: 1.0,
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
-            instance radius: 5.0
-            instance blur: 40.0
+            instance radius: 2.0
+            instance blur: 0.0
 
             fn get_color(self) -> vec4 {
                 return self.color
             }
 
             fn get_border_color(self) -> vec4 {
-                return self.border_color
+                return mix(THEME_COLOR_U_3, THEME_COLOR_D_2, self.pos.y)
             }
 
             fn pixel(self) -> vec4 {
