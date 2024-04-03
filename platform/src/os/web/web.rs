@@ -66,7 +66,6 @@ impl Cx {
                     
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
-                        crate::log!("AM HERE {}", path);
                         deps.push(path.to_string());
                     }
                     
