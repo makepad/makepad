@@ -9,8 +9,7 @@ live_design! {
     THEME_SPACE_2 = (1 * (THEME_SPACE_FACTOR))
     THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
 
-    THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)}
-    THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
+    THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)} THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
     THEME_MSPACE_V_1 = {top: (THEME_SPACE_1), right: 0., bottom: (THEME_SPACE_1), left: 0.}
     THEME_MSPACE_2 = {top: (THEME_SPACE_2), right: (THEME_SPACE_2), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
     THEME_MSPACE_H_2 = {top: 0., right: (THEME_SPACE_2), bottom: 0., left: (THEME_SPACE_2)}
@@ -26,17 +25,11 @@ live_design! {
 
     THEME_DOCK_BORDER_SIZE: 0.0
 
-    THEME_BRIGHTNESS = #x40
+    // COLORS
     THEME_COLOR_MAKEPAD = #FF5C39FF
-    // THEME_COLOR_MAKEPAD = #x1A
-    THEME_COLOR_HIGHLIGHT = #FFFFFF88
-    THEME_COLOR_HIGH = #C00
-    THEME_COLOR_MID = #FA0
-    THEME_COLOR_LOW = #8A0
-    THEME_COLOR_BG = #4
+    THEME_COLOR_BG_APP = #x40
 
-    // RELATIVE =DEFS
-    //    42, =78, 117
+    // COLOR PALETTE
     THEME_COLOR_WHITE = #FFFFFFFF
     THEME_COLOR_U_8 = #FFFFFFCC
     THEME_COLOR_U_6 = #FFFFFFAA
@@ -46,9 +39,6 @@ live_design! {
     THEME_COLOR_U_2 = #FFFFFF26
     THEME_COLOR_U_1 = #FFFFFF1A
     THEME_COLOR_U_04 = #FFFFFF0D
-    THEME_COLOR_U_0 = #FFFFFF00
-    THEME_COLOR_D_0 = #00000000
-    THEME_COLOR_D_05 = #00000013
     THEME_COLOR_D_075 = #00000022
     THEME_COLOR_D_1 = #00000033
     THEME_COLOR_D_2 = #00000044
@@ -57,77 +47,79 @@ live_design! {
     THEME_COLOR_D_5 = #000000AA
     THEME_COLOR_BLACK = #000000FF
 
-    // CORE BACKGROUND COLORS
-
-    THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
-    THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
-
-    THEME_COLOR_BG_HEADER = (blend(
-        THEME_COLOR_BG_APP,
-        THEME_COLOR_D_1
-    ))
-
-    THEME_COLOR_BG_EDITOR = (THEME_COLOR_D_075)
-
-    // THEME_COLOR_BG_EDITOR = (blend(
-    //     THEME_COLOR_BG_HEADER,
-    //     THEME_COLOR_D_1
-    // ))
-
-    THEME_COLOR_BG_ODD = (THEME_COLOR_D_1)
-    // THEME_COLOR_BG_ODD = (blend(
-    //     THEME_COLOR_BG_EDITOR,
-    //     THEME_COLOR_D_05
-    // ))
-
-    THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
-
-    THEME_COLOR_BG_UNFOCUSSED = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_U_1
-    ))
-
-    THEME_COLOR_EDITOR_SELECTED = (THEME_COLOR_BG_SELECTED)
-    THEME_COLOR_EDITOR_SELECTED_UNFOCUSSED = (THEME_COLOR_BG_SELECTED_UNFOCUSSED)
-
-    THEME_COLOR_BG_CURSOR = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_U_04
-    ))
-
-    THEME_COLOR_FG_CURSOR = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_U_5
-    ))
-
-    // TEXT / ICON COLORS
+    // BASICS
+    THEME_COLOR_U_HIDDEN = #FFFFFF00
+    THEME_COLOR_D_HIDDEN = #00000000
 
     THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_6)
+    THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT_DEFAULT)
+    THEME_COLOR_TEXT_META = (THEME_COLOR_U_4)
+
+    THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_3)
     THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
-    THEME_COLOR_TEXT_META = (THEME_COLOR_U_3)
-    THEME_COLOR_SELECTED = (THEME_COLOR_U_8)
+    THEME_COLOR_TEXT_ACTIVE = (THEME_COLOR_U_8)
+    THEME_COLOR_TEXT_INACTIVE = (THEME_COLOR_U_4)
+    THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_U_8)
+    THEME_COLOR_TEXT_FOCUSED = (THEME_COLOR_U_6)
+    THEME_COLOR_TEXT_PLACEHOLDER = (THEME_COLOR_U_4)
 
-    // SPLITTER AND SCROLLBAR
+    THEME_COLOR_TEXT_CURSOR = (THEME_COLOR_WHITE)
 
-    THEME_COLOR_SCROLL_BAR_DEFAULT = (THEME_COLOR_U_1)
+    THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_075)
+    THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.75)
+    THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.25)
+    THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_04) // Code-blocks and quotes.
+    THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_1) // i.e. inline code
 
-    THEME_COLOR_CONTROL_HOVER = (blend(
-        THEME_COLOR_BG_HEADER,
-        THEME_COLOR_U_5
-    ))
+    THEME_COLOR_BEVEL_RIMLIGHT = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_HIDDEN)
+ 
+    // WIDGET COLORS
+    THEME_COLOR_CTRL_DEFAULT = (THEME_COLOR_U_04)
+    THEME_COLOR_CTRL_PRESSED = (THEME_COLOR_U_1)
+    THEME_COLOR_CTRL_HOVER = (THEME_COLOR_U_3)
+    THEME_COLOR_CTRL_ACTIVE = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_CTRL_SELECTED = (THEME_COLOR_U_8)
+    THEME_COLOR_CTRL_INACTIVE = (THEME_COLOR_D_HIDDEN)
 
-    THEME_COLOR_CONTROL_PRESSED = (blend(
-        THEME_COLOR_BG_HEADER,
-        THEME_COLOR_U_3
-    ))
+    THEME_COLOR_FLOATING_BG = (THEME_COLOR_D_HIDDEN) // Elements that live on top of the UI like dialogs, popovers, and context menus.
 
-    // ICON COLORS
+    // Background of textinputs, radios, checkboxes etc.
+    THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_INSET_HOVER = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_INSET_ACTIVE = (THEME_COLOR_D_HIDDEN)
+
+    // Progress bars, slider amounts etc.
+    THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_D_HIDDEN)
+
+    THEME_COLOR_MENU_BG_DEFAULT = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_MENU_BG_HOVER = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_MENU_TEXT_DEFAULT = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_MENU_TEXT_HOVER = (THEME_COLOR_D_HIDDEN)
+
+    // WIDGET SPECIFIC COLORS
+    THEME_COLOR_SLIDER_NUB_DEFAULT = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_SLIDER_NUB_HOVER = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_SLIDER_NUB_ACTIVE = (THEME_COLOR_D_HIDDEN)
+
+    THEME_COLOR_SLIDES_CHAPTER = (THEME_COLOR_MAKEPAD)
+    THEME_COLOR_SLIDES_BG = (THEME_COLOR_D_4)
+
+
+    // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
+    THEME_COLOR_HIGH = #C00
+    THEME_COLOR_MID = #FA0
+    THEME_COLOR_LOW = #8A0
     THEME_COLOR_PANIC = #f0f
     THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
     THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
     THEME_COLOR_WARNING = (THEME_COLOR_MID),
     THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
+
+    // CORE BACKGROUND COLORS
 
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
@@ -136,9 +128,6 @@ live_design! {
     THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
     THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
     THEME_SPLITTER_SIZE = 5.0
-
-    THEME_COLOR_SLIDES_CHAPTER = (THEME_COLOR_MAKEPAD)
-    THEME_COLOR_SLIDES_BG = (THEME_COLOR_D_4)
 
     THEME_FONT_SIZE_BASE = 7.5
     THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
@@ -159,10 +148,6 @@ live_design! {
     THEME_FONT_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-Italic.ttf") } }
     THEME_FONT_BOLD_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-BoldItalic.ttf") } }
     THEME_FONT_DATA = { font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") } }
-    THEME_FONT_META = {
-        top_drop: 1.2,
-        font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") }
-    }
     THEME_FONT_CODE = {
         font: {
             path: dep("crate://self/resources/LiberationMono-Regular.ttf")
@@ -376,12 +361,12 @@ live_design! {
         width: Fit,
         height: Fit,
         align: {x: 0., y: 0.}
-                        
+
         label_walk: {
             width: Fit,
             height: Fit
         }
-                        
+
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -409,7 +394,7 @@ live_design! {
                             draw_text: {pressed: 0.0, hover: 0.0}
                         }
                     }
-                                                    
+
                     on = {
                         from: {
                             all: Forward {duration: 0.1}
@@ -421,7 +406,7 @@ live_design! {
                             draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                         }
                     }
-                                                    
+
                     pressed = {
                         from: {all: Forward {duration: 0.2}}
                         apply: {
@@ -432,8 +417,8 @@ live_design! {
                     }
                 }
             }
-                        
-                        
+
+
             draw_bg: {
                 instance pressed: 0.0
                 instance hover: 0.0
@@ -449,12 +434,12 @@ live_design! {
                     ), mix(0.0, 0.8, self.hover));
                 }
             }
-                        
+
         draw_text: {
             wrap: Word
-            color: (LINK_COLOR),
-            instance color_hover: (LINK_COLOR_HOVER),
-            instance color_pressed: (LINK_COLOR_PRESSED),
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            instance color_hover: (THEME_COLOR_TEXT_HOVER),
+            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
             text_style: <THEME_FONT_LABEL>{}
@@ -796,7 +781,7 @@ live_design! {
         }
     }
 
-    Spacer = <View> { width: Fill, height: Fill } 
+    Spacer = <View> { width: Fill, height: Fill }
 
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
@@ -830,7 +815,7 @@ live_design! {
                     );
                 }
                 return sdf.fill( mix(
-                    THEME_COLOR_SCROLL_BAR_DEFAULT,
+                    THEME_COLOR_CTRL_DEFAULT,
                     mix(
                         THEME_COLOR_U_3,
                         THEME_COLOR_U_4,
@@ -899,15 +884,7 @@ live_design! {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_DEFAULT,
-                        self.hover
-                    ),
-                    THEME_COLOR_U_4,
-                    self.pressed
-                )
+                return THEME_COLOR_TEXT_DEFAULT
             }
         }
 
@@ -921,11 +898,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_U_5,
-                        THEME_COLOR_U_5,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_U_3,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -1028,7 +1005,7 @@ live_design! {
         margin: <THEME_MSPACE_H_1> {}
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_0) } }
+        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_HIDDEN) } }
 
         draw_text: {
             instance hover: 0.0,
@@ -1043,7 +1020,7 @@ live_design! {
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -1059,7 +1036,7 @@ live_design! {
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -1093,8 +1070,8 @@ live_design! {
                             )
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
+                                mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_2, self.pos.y),
+                                mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             ), 1.0)
                         let szs = sz * 0.5;
@@ -1103,7 +1080,7 @@ live_design! {
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
                         sdf.stroke(mix(
-                            mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.hover),
+                            mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_2, self.hover),
                             THEME_COLOR_U_6,
                             self.selected), 1.25
                         );
@@ -1116,14 +1093,14 @@ live_design! {
                         sdf.fill_keep(THEME_COLOR_D_3);
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_1, self.pos.y),
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
+                                mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_1, self.pos.y),
+                                mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             )
                             , 1.0)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
-                        sdf.fill(mix(THEME_COLOR_U_0, THEME_COLOR_U_5, self.selected));
+                        sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_5, self.selected));
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
@@ -1155,7 +1132,7 @@ live_design! {
                         sdf.fill(mix(THEME_COLOR_U_4, THEME_COLOR_U_5, self.hover));
                     }
                     CheckType::None => {
-                        return THEME_COLOR_D_0
+                        return THEME_COLOR_D_HIDDEN
                     }
                 }
                 return sdf.result
@@ -1176,7 +1153,7 @@ live_design! {
                         THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
-                    THEME_COLOR_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 )
             }
@@ -1193,7 +1170,7 @@ live_design! {
                         THEME_COLOR_U_3,
                         self.hover
                     ),
-                    THEME_COLOR_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 )
             }
@@ -1459,14 +1436,14 @@ live_design! {
             text_style: {
                 font_size: 6
             },
-            color: (THEME_COLOR_U_5)
+            color: (THEME_COLOR_TEXT_DEFAULT)
         }
     }
 
     WindowMenu = <WindowMenuBase> { height: 0, width: 0, }
 
     Window = <WindowBase> {
-        pass: {clear_color: (THEME_COLOR_CLEAR)}
+        pass: {clear_color: (THEME_COLOR_BG_APP)}
         flow: Down
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
@@ -1582,8 +1559,8 @@ live_design! {
                 return sdf.fill_keep(mix(
                     THEME_COLOR_BG_APP,
                     mix(
-                        THEME_COLOR_CONTROL_HOVER,
-                        THEME_COLOR_CONTROL_PRESSED,
+                        THEME_COLOR_CTRL_HOVER,
+                        THEME_COLOR_CTRL_PRESSED,
                         self.pressed
                     ),
                     self.hover
@@ -1694,7 +1671,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_SELECTED,
+                        THEME_COLOR_CTRL_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -1837,7 +1814,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_SELECTED,
+                        THEME_COLOR_CTRL_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -1860,8 +1837,6 @@ live_design! {
                 sdf.clear(mix(
                     self.color,
                     self.color_selected,
-                    // THEME_COLOR_BG_EDITOR,
-                    // THEME_COLOR_BG_SELECTED,
                     self.hover
                 ))
 
@@ -1973,16 +1948,8 @@ live_design! {
 
             fn get_color(self) -> vec4 {
                 return mix(
-                    mix(
-                        mix(
-                            THEME_COLOR_TEXT_DEFAULT,
-                            THEME_COLOR_TEXT_DEFAULT,
-                            self.focus
-                        ),
-                        THEME_COLOR_TEXT_DEFAULT,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -1993,7 +1960,7 @@ live_design! {
             instance focus: 0.0
             instance pressed: 0.0
             uniform border_radius: 3.0
-            instance bodytop: (THEME_COLOR_U_0)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
             instance bodybottom: (THEME_COLOR_U_1)
 
             fn pixel(self) -> vec4 {
@@ -2008,7 +1975,7 @@ live_design! {
                     mix(
                         mix(
                             mix(
-                                THEME_COLOR_U_0,
+                                THEME_COLOR_U_HIDDEN,
                                 THEME_COLOR_U_3,
                                 self.hover
                             ),
@@ -2034,7 +2001,7 @@ live_design! {
                     mix(
                         mix(
                             mix(
-                                THEME_COLOR_D_0,
+                                THEME_COLOR_D_HIDDEN,
                                 THEME_COLOR_D_3,
                                 self.hover
                             ),
@@ -2140,8 +2107,8 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                    THEME_COLOR_BG_EDITOR * 0.75,
-                    THEME_COLOR_BG_EDITOR * 1.25,
+                    THEME_COLOR_BG_EVEN,
+                    THEME_COLOR_BG_ODD,
                     self.is_even
                 ),
                 THEME_COLOR_D_3,
@@ -2159,7 +2126,7 @@ live_design! {
                 sdf.union();
                 return sdf.fill(mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 ));
             }
@@ -2169,7 +2136,7 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 )
             }
@@ -2309,13 +2276,13 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
-                        THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
+                        THEME_COLOR_CTRL_INACTIVE,
+                        THEME_COLOR_CTRL_SELECTED,
                         self.focussed
                     ),
                     self.selected
@@ -2462,7 +2429,7 @@ live_design! {
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -2527,7 +2494,7 @@ live_design! {
     }
 
     RadioButton = <RadioButtonBase> {
-        width: Fit, height: Fit,
+        width: Fit, height: 16.,
         align: { x: 0.0, y: 0.5 }
 
         icon_walk: { margin: { left: 20. } }
@@ -2564,8 +2531,8 @@ live_design! {
                             )
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
-                                mix(THEME_COLOR_U_0, THEME_COLOR_U_2, self.pos.y),
+                                mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_2, self.pos.y),
+                                mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_2, self.pos.y),
                                 self.hover
                             )
                             , 1.0)
@@ -2574,7 +2541,7 @@ live_design! {
                         sdf.fill(
                             mix(
                                 mix(
-                                    THEME_COLOR_D_0,
+                                    THEME_COLOR_D_HIDDEN,
                                     THEME_COLOR_U_3,
                                     self.hover
                                 ),
@@ -2636,7 +2603,7 @@ live_design! {
 
             uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
 
             color: (THEME_COLOR_U_5)
             text_style: <THEME_FONT_REGULAR> {
@@ -2719,6 +2686,7 @@ live_design! {
     }
 
     RadioButtonCustom = <RadioButton> {
+        height: Fit,
         draw_radio: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -2733,6 +2701,7 @@ live_design! {
     }
 
     RadioButtonTextual = <RadioButton> {
+        height: Fit,
         draw_radio: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -2747,11 +2716,10 @@ live_design! {
             instance hover: 0.0
             instance selected: 0.0
 
-            uniform color_unselected: (THEME_COLOR_U_3)
-            uniform color_unselected_hover: (THEME_COLOR_U_5)
-            uniform color_selected: (THEME_COLOR_WHITE)
+            uniform color_unselected: (THEME_COLOR_TEXT_INACTIVE)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
 
-            color: (THEME_COLOR_U_5)
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -2770,6 +2738,7 @@ live_design! {
     }
 
     RadioButtonTab = <RadioButton> {
+        height: Fit,
         draw_radio: { radio_type: Tab }
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1)}
 
@@ -2862,11 +2831,11 @@ live_design! {
                 return
                 mix(
                     mix(
-                        THEME_COLOR_TEXT_META,
+                        THEME_COLOR_TEXT_FOCUSED,
                         THEME_COLOR_TEXT_DEFAULT,
                         self.focus
                     ),
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_PLACEHOLDER,
                     self.is_empty
                 )
             }
@@ -2884,7 +2853,7 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix(THEME_COLOR_U_0, THEME_COLOR_WHITE, self.focus));
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
                 return sdf.result
             }
         }
@@ -2904,7 +2873,7 @@ live_design! {
                     self.border_radius
                 )
                 sdf.fill(
-                    mix(THEME_COLOR_U_0,
+                    mix(THEME_COLOR_U_HIDDEN,
                     THEME_COLOR_U_2,
                     self.focus)
                 ); // Pad color
@@ -2930,7 +2899,7 @@ live_design! {
                     self.focus
                 );
 
-                let body_transp = (THEME_COLOR_D_0)
+                let body_transp = (THEME_COLOR_D_HIDDEN)
 
                 let top_gradient = mix(
                     body_transp,
@@ -3098,8 +3067,8 @@ live_design! {
                 instance border_color: (THEME_COLOR_U_2)
                 instance inset: vec4(0.0, 0.0, 0.0, 0.0)
                 instance focus: 0.0,
-                color: (THEME_COLOR_D_0)
-                instance color_selected: (THEME_COLOR_D_0)
+                color: (THEME_COLOR_D_HIDDEN)
+                instance color_selected: (THEME_COLOR_D_HIDDEN)
 
                 fn get_color(self) -> vec4 {
                     return mix(self.color, self.color_selected, self.focus)
@@ -3190,7 +3159,7 @@ live_design! {
         draw_bg: { color: (THEME_COLOR_SLIDES_BG), radius: 5.0 }
         title = <H1> {
             text: "SlideTitle",
-            draw_text: {color: (THEME_COLOR_U_8) }
+            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
         }
     }
 
@@ -3203,13 +3172,13 @@ live_design! {
         draw_bg: {color: (THEME_COLOR_SLIDES_CHAPTER), radius: 5.0}
         title = <H1> {
             text: "SlideTitle",
-            draw_text: {color: (THEME_COLOR_U_8) }
+            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
         }
     }
 
     SlideBody = <H2> {
         text: "Body of the slide"
-        draw_text: {color: (THEME_COLOR_U_8) }
+            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
     }
 
     DrawScrollShadow = <DrawScrollShadowBase> {
@@ -3219,7 +3188,7 @@ live_design! {
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
             let is_viz = clamp(self.scroll * 0.1, 0., 1.);
             let pos = self.pos;
-            let base = THEME_COLOR_BG_EDITOR.xyz;
+            let base = THEME_COLOR_BG_CONTAINER.xyz;
             let alpha = 0.0;
             if self.shadow_is_top > 0.5 {
                 alpha = pow(pos.y, 0.5);

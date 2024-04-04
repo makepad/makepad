@@ -66,7 +66,7 @@ live_design!{
             show_bg: true,
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return (THEME_COLOR_BG);
+                    return (THEME_COLOR_BG_APP);
                 }
             }
 
@@ -84,6 +84,26 @@ live_design!{
                 scroll_bars: <ScrollBars> {}
 
                 <ZooTitle> {}
+
+                <ZooHeader> {
+                    title = {text: "Intro"}
+                    <ZooDesc> {
+                        text: "Intro."
+                    }
+                    <View> {
+                        width: Fill, height: Fit,
+                        flow: Down,
+                        show_bg: true,
+                        draw_bg: { color: (COLOR_CONTAINER) }
+                        padding: 20.,
+                        <P> { text: "- Shader-based: what does that mean for how things work." }
+                        <P> { text: "- Inheritance mechanisms in the DSL." }
+                        <P> { text: "- Introduction to the layout system." }
+                        <P> { text: "- Typographic system. Base font-size and contrast." }
+                        <P> { text: "- Space constants to control denseness of the design." }
+                        <P> { text: "- Transparency mechanism of the widgets." }
+                    }
+                }
 
                 <ZooHeader> {
                     title = {text:"Typographic System"}
@@ -349,7 +369,7 @@ live_design!{
                         <Label> {
                             draw_text: {
                                 fn get_color(self) ->vec4{
-                                    return mix((COLOR_ACCENT), (THEME_COLOR_U_0), self.pos.x)
+                                    return mix((COLOR_ACCENT), (THEME_COLOR_U_HIDDEN), self.pos.x)
                                 }
                                 color: (THEME_COLOR_MAKEPAD)
                                 text_style: {
