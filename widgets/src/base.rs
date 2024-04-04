@@ -119,7 +119,6 @@ live_design!{
             }
             
             fn pixel(self) -> vec4 {
-                
                 let color = self.get_color();
                 return Pal::premul(vec4(color.xyz, color.w * self.opacity))
             }
@@ -139,7 +138,7 @@ live_design!{
             instance image_pan: vec2(0.0, 0.0)
             instance breathe: 0.0            
             fn get_color_scale_pan(self, scale: vec2, pan: vec2) -> vec4 {
-                let b = 1.0-0.1*self.breathe;
+                let b = 1.0 - 0.1*self.breathe;
                 let s = vec2(0.05*self.breathe);
                 return mix(
                     sample2d(self.image0, self.pos * scale*b + pan+s).xyzw,
@@ -147,7 +146,7 @@ live_design!{
                     self.blend
                 )
             }
-                        
+            
             fn get_color(self) -> vec4 {
                 return self.get_color_scale_pan(self.image_scale, self.image_pan)
             }
