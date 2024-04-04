@@ -59,7 +59,7 @@ live_design!{
                 }
             }
         }
-        image_view:  <View>{ 
+        image_view:  <View>{
             width: Fill,
             height: Fill,
             image = <Image> {
@@ -101,6 +101,7 @@ live_design!{
                     x: 0.5,
                     y: 0.5
                 },
+
                 simple_img = <Image> {
                     width: 272,
                     height: 92,
