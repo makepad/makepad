@@ -117,11 +117,11 @@ impl Widget for FishPatchEditor {
                     }
                     BlockHeaderButtonAction::Move { id, dx, dy } => {
                         self.scroll_bars.redraw(cx);
-                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
                         patch.move_selection(&self.selection, dx,dy);
                     }
                     BlockHeaderButtonAction::RecordDragStart { id } => {
-                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
                         let block = patch.blocks.find(id);
                         
                         if block.is_some() {
@@ -144,7 +144,7 @@ impl Widget for FishPatchEditor {
                         }
                     }
                     BlockHeaderButtonAction::RecordDragEnd { id: _ } => {
-                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
 
 
                         patch.undo_checkpoint_end_if_match(self.active_undo_level);
@@ -154,7 +154,7 @@ impl Widget for FishPatchEditor {
                 }
                 match action.as_widget_action().cast() {
                     BlockDeleteButtonAction::KillBlock { id } => {
-                        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                        let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
                         patch.remove_block(id);
                         self.scroll_bars.redraw(cx);
                     }
@@ -201,7 +201,7 @@ impl Widget for FishPatchEditor {
             Hit::FingerDown(fe) => {
 //                if  fe.digit_id == live_id!(0).into() {
                     self.selecting = true;              
-                    let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+                    let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
                             
                     // start selecting
                     self.selectstart = fe.abs.clone();
@@ -218,7 +218,7 @@ impl Widget for FishPatchEditor {
                  self.selecting
                  {
                     self.selectend = fe.abs.clone();
-                    let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];                   
+                    let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];                   
                     self.selection = patch.select_rectangle(self.selectstart, self.selectend);                    
                     self.scroll_bars.redraw(cx);
                 }
@@ -264,7 +264,7 @@ impl Widget for FishPatchEditor {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let patch = &mut scope.data.get_mut::<FishDoc>().patches[0];
+        let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
         //let mut _fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
 
         self.scroll_bars.begin(cx, walk, Layout::flow_overlay());
