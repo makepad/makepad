@@ -146,7 +146,18 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
     let html = generate_html(build_crate);
     fs::write(&index_path, &html.as_bytes()).map_err( | e | format!("Can't write {:?} {:?} ", index_path, e)) ?;
     println!("Created wasm package: {:?}", app_dir);
-    
+    println!("Copy this directory to any webserver, and serve with atleast these headers:");
+    println!("Cross-Origin-Embedder-Policy: require-corp");
+    println!("Cross-Origin-Opener-Policy: same-origin");
+    println!("Files need to be served with these mime types: ");
+    println!("*.html => text/html");
+    println!("*.wasm => application/wasm");
+    println!("*.css => text/css");
+    println!("*.js => text/javascript");
+    println!("*.ttf => application/ttf");
+    println!("*.png => image/png");
+    println!("*.jpg => image/jpg");
+    println!("*.svg => image/svg+xml");
     Ok(WasmBuildResult{
         app_dir
     })
