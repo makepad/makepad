@@ -45,6 +45,7 @@ live_design!{
     // }
 
     TextOrImage = {{TextOrImage}}{
+        margin:{left:10, right:10}
         text_view: <View>{ 
             width: Fill,
             height: Fill,
@@ -58,7 +59,7 @@ live_design!{
                 }
             }
         }
-        image_view:  <View>{ 
+        image_view:  <View>{
             width: Fill,
             height: Fill,
             image = <Image> {
@@ -100,6 +101,7 @@ live_design!{
                     x: 0.5,
                     y: 0.5
                 },
+
                 simple_img = <Image> {
                     width: 272,
                     height: 92,
@@ -322,8 +324,8 @@ impl Widget for TextOrImage {
         walk.height = Size::Fixed(self.pixel_height / cx.current_dpi_factor());
         cx.begin_turtle(walk, self.layout);
         match self.status{
-            TextOrImageStatus::Image=>self.image_view.draw_walk_all(cx, scope, walk),
-            TextOrImageStatus::Text=>self.text_view.draw_walk_all(cx, scope, walk)
+            TextOrImageStatus::Image=>self.image_view.draw_all(cx, scope),
+            TextOrImageStatus::Text=>self.text_view.draw_all(cx, scope)
         }
         cx.end_turtle();
         DrawStep::done()

@@ -116,18 +116,22 @@ impl Area {
                 if inst.instance_count == 0 {
                     return false
                 }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    return false
+                if let Some(draw_list) = cx.draw_lists.checked_index(inst.draw_list_id){
+                    if draw_list.redraw_id != inst.redraw_id {
+                        return false
+                    }
+                    return true
                 }
-                return true
+                return false
             },
             Area::Rect(list) => {
-                let draw_list = &cx.draw_lists[list.draw_list_id];
-                if draw_list.redraw_id != list.redraw_id {
-                    return false
+                if let Some(draw_list) = cx.draw_lists.checked_index(list.draw_list_id){
+                    if draw_list.redraw_id != list.redraw_id {
+                        return false
+                    }
+                    return true
                 }
-                return true
+                return false
             },
             _ => false,
         }

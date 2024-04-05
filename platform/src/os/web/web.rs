@@ -334,10 +334,6 @@ impl Cx {
             to_wasm.block_skip(skip);
         };
         
-        if self.handle_live_edit(){
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
 
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
@@ -350,7 +346,12 @@ impl Cx {
         if network_responses.len() != 0 {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
-
+        
+        if self.handle_live_edit(){ 
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+        
         self.handle_platform_ops();
         self.handle_media_signals();
         
@@ -514,6 +515,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        self.live_registry.borrow_mut().package_root = Some("".to_string());
         self.live_expand();
         self.live_scan_dependencies();
         
