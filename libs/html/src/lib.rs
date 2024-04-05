@@ -170,8 +170,8 @@ impl<'a> HtmlWalker<'a>{
     }
         
     pub fn text(&self)->Option<&'a str>{
-        match &self.nodes[self.index]{
-            HtmlNode::Text{start,end}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::Text{start,end})=>{
                 Some(&self.decoded[*start..*end])
             }
             _=> None
@@ -179,24 +179,24 @@ impl<'a> HtmlWalker<'a>{
     }
     
     pub fn open_tag_lc(&self)->Option<LiveId>{
-        match &self.nodes[self.index]{
-            HtmlNode::OpenTag{lc,nc:_}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::OpenTag{lc,nc:_})=>{
                 Some(*lc)
             }
             _=> None
         }
     }
     pub fn open_tag_nc(&self)->Option<LiveId>{
-        match &self.nodes[self.index]{
-            HtmlNode::OpenTag{lc:_,nc}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::OpenTag{lc:_,nc})=>{
                 Some(*nc)
             }
             _=> None
         }
     }
     pub fn open_tag(&self)->Option<(LiveId,LiveId)>{
-        match &self.nodes[self.index]{
-            HtmlNode::OpenTag{lc,nc}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::OpenTag{lc,nc})=>{
                 Some((*lc, *nc))
             }
             _=> None
@@ -204,24 +204,24 @@ impl<'a> HtmlWalker<'a>{
     }
     
     pub fn close_tag_lc(&self)->Option<LiveId>{
-        match &self.nodes[self.index]{
-            HtmlNode::CloseTag{lc,nc:_}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::CloseTag{lc,nc:_})=>{
                 Some(*lc)
             }
             _=> None
         }
     }
     pub fn close_tag_nc(&self)->Option<LiveId>{
-        match &self.nodes[self.index]{
-            HtmlNode::CloseTag{lc:_,nc}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::CloseTag{lc:_,nc})=>{
                 Some(*nc)
             }
             _=> None
         }
     }
     pub fn close_tag(&self)->Option<(LiveId,LiveId)>{
-        match &self.nodes[self.index]{
-            HtmlNode::CloseTag{lc,nc}=>{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::CloseTag{lc,nc})=>{
                 Some((*lc, *nc))
             }
             _=> None

@@ -334,10 +334,10 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String]) -> Result<(), String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String]) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     let profile = get_profile_from_args(args);
-    
+    let mut build_dir = None;
     for android_target in android_targets {
         let abi = android_target.abi_identifier();
         mkdir(&build_paths.out_dir.join(format!("lib/{abi}"))) ?;
@@ -348,6 +348,7 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
             println!("WARNING - compiling a DEBUG build of the application, this creates a very slow and big app. Try adding --release for a fast, or --profile=small for a small build.");
         }
         let src_lib = cwd.join(format!("target/{android_target_dir}/{profile}/lib{underscore_target}.so"));
+        build_dir = Some(cwd.join(format!("target/{android_target_dir}/{profile}")));
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false) ?;
 
@@ -358,10 +359,10 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
         ]) ?;
     }
 
-    Ok(())
+    Ok(build_dir.unwrap())
 }
 
-fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) -> Result<(), String> {
+fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, build_dir:&Path, android_targets:&[AndroidTarget]) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
     
     let build_crate_dir = get_crate_dir(build_crate) ?;
@@ -380,16 +381,21 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths) ->
         }
     }
 
-    let resources = get_crate_resources(build_crate);
-    for (name, resources_path) in resources.iter() {
-        let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{name}/resources"));
-        mkdir(&dst_dir) ?;
-        cp_all(resources_path, &dst_dir, false) ?;
-
-        let assets = ls(&dst_dir) ?;
-        for path in &assets {
-            let path = path.display().to_string();
-            assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
+    let deps = get_crate_dep_dirs(build_crate, &build_dir, &android_targets[0].toolchain());
+    for (name, dep_dir) in deps.iter() {
+        let resources_path = dep_dir.join("resources");
+        if resources_path.is_dir(){
+            let name = name.replace('-', "_");
+            
+            let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{name}/resources"));
+            mkdir(&dst_dir) ?;
+            cp_all(&resources_path, &dst_dir, false) ?;
+    
+            let assets = ls(&dst_dir) ?;
+            for path in &assets {
+                let path = path.display().to_string();
+                assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
+            }
         }
     }
 
@@ -462,8 +468,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     println!("Building APK");
     build_dex(sdk_dir, &build_paths)?;
     build_unaligned_apk(sdk_dir, &build_paths)?;
-    add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args)?;
-    add_resources(sdk_dir, build_crate, &build_paths)?;
+    let build_dir = add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args)?;
+    add_resources(sdk_dir, build_crate, &build_paths, &build_dir, android_targets)?;
     build_zipaligned_apk(sdk_dir, &build_paths)?;
     sign_apk(sdk_dir, &build_paths)?;
 
