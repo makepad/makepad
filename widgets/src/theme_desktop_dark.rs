@@ -98,9 +98,9 @@ live_design! {
     THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)
 
     // Progress bars, slider amounts etc.
-    THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_U_2)
-    THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_U_3)
-    THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_U_4)
+    THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_U_3)
+    THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_U_4)
+    THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_U_5)
     THEME_COLOR_AMOUNT_TRACK_DEFAULT = (THEME_COLOR_D_3)
     THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_4)
     THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_5)
@@ -131,7 +131,7 @@ live_design! {
     THEME_COLOR_WARNING = (THEME_COLOR_MID),
     THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
 
-    THEME_BEVEL_BORDER = 0.75
+    THEME_BEVEL_BORDER = 1.
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
     THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
@@ -961,7 +961,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    1.0
+                    THEME_BEVEL_BORDER * 1.5
                 )
 
                 return sdf.result
@@ -1074,7 +1074,7 @@ live_design! {
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_RIMLIGHT, self.pos.y), 1.0)
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_RIMLIGHT, self.pos.y), THEME_BEVEL_BORDER)
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
@@ -1092,7 +1092,7 @@ live_design! {
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_RIMLIGHT, self.pos.y), (THEME_BEVEL_BORDER))
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_RIMLIGHT, self.pos.y), THEME_BEVEL_BORDER)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
@@ -1118,7 +1118,7 @@ live_design! {
                                 THEME_COLOR_BEVEL_SHADOW,
                                 THEME_COLOR_BEVEL_RIMLIGHT,
                                 clamp(self.pos.y - 0.2, 0, 1)),
-                            1.
+                            THEME_BEVEL_BORDER
                         )
 
                         sdf.fill(
@@ -1855,7 +1855,7 @@ live_design! {
                 sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
                 sdf.line_to(c.x, c.y + sz);
                 sdf.line_to(c.x + sz, c.y - sz);
-                sdf.stroke(mix(#fff0, #f, self.selected), 1.0);
+                sdf.stroke(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_DEFAULT, self.selected), 1.0);
 
                 return sdf.result;
             }
@@ -1936,7 +1936,7 @@ live_design! {
                 )
                 sdf.fill_keep(self.get_color())
                 if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                    sdf.stroke(self.get_border_color(), THEME_BEVEL_BORDER)
                 }
                 return sdf.result;
             }
@@ -2008,7 +2008,7 @@ live_design! {
                     ),
                     THEME_COLOR_BEVEL_SHADOW,
                     self.focus
-                    ), 1.
+                    ), THEME_BEVEL_BORDER
                 )
 
                 sdf.box(
@@ -2022,7 +2022,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    1.0
+                    THEME_BEVEL_BORDER * 1.5
                 )
 
                 // lets draw a little triangle in the corner
@@ -2573,7 +2573,7 @@ live_design! {
                         )
                         sdf.fill_keep(body)
 
-                        sdf.stroke(bot_gradient, THEME_BEVEL_BORDER)
+                        sdf.stroke(bot_gradient, THEME_BEVEL_BORDER * 1.5)
                     }
                 }
                 return sdf.result
@@ -2912,7 +2912,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    0.6
+                    THEME_BEVEL_BORDER * 0.9
                 )
 
                 return sdf.result
