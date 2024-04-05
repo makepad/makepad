@@ -101,7 +101,7 @@ live_design!{
                         <P> { text: "- Introduction to the layout system." }
                         <P> { text: "- Typographic system. Base font-size and contrast." }
                         <P> { text: "- Space constants to control denseness of the design." }
-                        <P> { text: "- Transparency mechanism of the widgets." }
+                        <P> { text: "- Transparency mechanism of the widgets. Nesting for structure." }
                     }
                 }
 
@@ -705,7 +705,8 @@ live_design!{
                     title = {text:"<SlidesView>"}
                     width: Fill, height: Fit,
                     <ZooDesc> {text:"Slides View"}
-                    <ZooGroup> {
+                    <View> {
+                        width: Fill, height: Fit,
                         <SlidesView> {
                             width: Fill, height: 400,
 
@@ -713,10 +714,12 @@ live_design!{
                                 title = {text: "Hey!"},
                                 <SlideBody> {text: "This is the 1st slide. Use your right\ncursor key to show the next slide."}
                             }
+
                             <Slide> {
                                 title = {text: "Second slide"},
                                 <SlideBody> {text: "This is the 2nd slide. Use your left\ncursor key to show the previous slide."}
                             }
+
                         }
                     }
                 }
@@ -725,7 +728,8 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"<Dock>"}
                     <ZooDesc> {text:"Dock"}
-                    <ZooGroup> {
+                    <View> {
+                        height: Fit, width: Fill
                         <Dock> {
                             height: 500., width: Fill
 
