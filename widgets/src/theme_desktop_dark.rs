@@ -131,7 +131,7 @@ live_design! {
     THEME_COLOR_WARNING = (THEME_COLOR_MID),
     THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
 
-    THEME_BEVEL_BORDER = 1.
+    THEME_BEVEL_BORDER = .75
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
     THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
@@ -353,12 +353,14 @@ live_design! {
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
         <View> {
-            width: Fill, height: 2.,
+            width: Fill, height: (THEME_BEVEL_BORDER * 2.0),
+            // width: Fill, height: 2.,
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
         }
         <View> {
-            width: Fill, height: 0.5,
+            width: Fill, height: (THEME_BEVEL_BORDER * 0.5),
+            // width: Fill, height: 0.5,
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_RIMLIGHT) }
         }
