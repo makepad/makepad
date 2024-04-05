@@ -26,7 +26,7 @@ live_design!{
                     y: 0.5
                 },
                 button1 = <Button> {
-                    text: "Hello world 3123414234312"
+                    text: "Hello world 13241234312434214321234112343412412312343421"
                     draw_text:{color:#f00}
                 }
                 input1 = <TextInput> {
@@ -148,6 +148,8 @@ impl MatchEvent for App{
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            log!("TOTAL : {}",TrackingHeap.total());
+            
         }
     }
 }
@@ -161,7 +163,6 @@ impl AppMain for App {
 
 
 
-/*
 // This is our custom allocator!
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -209,4 +210,4 @@ unsafe impl GlobalAlloc for TrackingHeapWrap {
 
 // Register our custom allocator.
 #[global_allocator]
-static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();*/
+static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();

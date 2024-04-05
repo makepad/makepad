@@ -8,6 +8,8 @@ use wasm::*;
 use apple::*;
 use check::*;
 pub use makepad_shell;
+pub use makepad_http;
+pub use makepad_wasm_strip;
 
 fn show_help(err: &str){
     if !err.is_empty(){
@@ -22,11 +24,13 @@ fn show_help(err: &str){
     println!();
     println!("    wasm install-toolchain                       Install the toolchain needed for wasm32 with rustup");
     println!("    wasm build <cargo args>                      Build a wasm project");
-    println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8080 by default");
+println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8010");
     println!();
     println!("    [options] with its default value:");
     println!();
-    println!("       --port=8080                               The port to run the wasm webserver");
+    println!("       --port=8010                               The port to run the wasm webserver");
+    println!("       --lan                                     Bind the webserver to your lan ip");
+    println!("       --strip                                   Strip the wasm file of debug symbols");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();

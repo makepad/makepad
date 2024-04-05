@@ -48,6 +48,14 @@ impl CxDrawListPool {
     pub fn alloc(&mut self) -> DrawList {
         DrawList(self.0.alloc())
     }
+    
+    pub fn checked_index(&self, index: DrawListId)->Option<&CxDrawList>{
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1 {
+            return None
+        }
+        return Some(&d.item)
+    }
 }
 
 impl std::ops::Index<DrawListId> for CxDrawListPool {
