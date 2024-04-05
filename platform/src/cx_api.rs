@@ -98,7 +98,20 @@ impl Cx {
     pub fn get_ref(&self) -> CxRef {
         CxRef(self.self_ref.clone().unwrap())
     }
-
+    
+        
+    pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
+        if let Some(data) = self.dependencies.get_mut(path) {
+            if let Some(data) = data.data.take() {
+                return match data {
+                    Ok(data) => Ok(data),
+                    Err(s) => Err(s.clone()),
+                };
+            }
+        }
+        Err(format!("Dependency not loaded {}", path))
+    }
+    
     pub fn get_dependency(&self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get(path) {
             if let Some(data) = &data.data {

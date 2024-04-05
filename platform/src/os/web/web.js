@@ -1,4 +1,4 @@
-import {WasmBridge} from "/makepad/libs/wasm_bridge/src/wasm_bridge.js"
+import {WasmBridge} from "../makepad_wasm_bridge/wasm_bridge.js"
 
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
@@ -98,7 +98,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmLoadDeps(args) {
         let promises = [];
         for (let path of args.deps) {
-            promises.push(fetch_path("/makepad/", path))
+            promises.push(fetch_path(".", path))
         }
         this.load_deps_promise = Promise.all(promises);
     }
@@ -292,7 +292,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         const start_worklet = async () => {
 
-            await this.audio_context.audioWorklet.addModule("/makepad/platform/src/os/web/audio_worklet.js", {credentials: 'omit'});
+            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", {credentials: 'omit'});
             
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
@@ -464,7 +464,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmCreateThread(args) {
         
         let worker = new Worker(
-            '/makepad/platform/src/os/web/web_worker.js',
+            './makepad_platform/web_worker.js',
             {type: 'module'}
         );
         
@@ -1238,10 +1238,6 @@ function fetch_path(base, path) {
             })
         })
         let url = base + path;
-        if (location.hostname.startsWith("192.168") || location.hostname == "localhost") {
-            // fix this on the server next time
-            url = url.replace("/Users/admin/makepad/edit_repo", "");
-        }
         req.open("GET", url)
         req.send()
     })

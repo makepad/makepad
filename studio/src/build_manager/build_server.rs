@@ -229,7 +229,7 @@ impl BuildConnection {
                 "cargo".into(),
                 "makepad".into(),
                 "wasm".into(),
-                "build".into(),
+                "run".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--release".into(),
