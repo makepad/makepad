@@ -114,12 +114,12 @@ impl MatchEvent for App{
     
     fn handle_startup(&mut self,  cx: &mut Cx){
         self.start_network_stack(cx);
-        self.start_artnet_client(cx);
         self.store_to_widgets(cx);
-        self.fetch_hue_lights(cx);
-        self.start_imu_forward(cx);
-        self.start_forza_forward(cx);
-        self.hue_poll = cx.start_interval(0.1);
+        //self.start_artnet_client(cx);
+        //self.fetch_hue_lights(cx);
+        //self.start_imu_forward(cx);
+        //self.start_forza_forward(cx);
+        //self.hue_poll = cx.start_interval(0.1);
     }
     
     fn handle_timer(&mut self, cx:&mut Cx, e:&TimerEvent){
