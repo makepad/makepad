@@ -101,9 +101,9 @@ live_design! {
     THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_U_2)
     THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_U_3)
     THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_U_4)
-    THEME_COLOR_AMOUNT_TRACK_DEFAULT = (THEME_COLOR_D_2)
-    THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_3)
-    THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_4)
+    THEME_COLOR_AMOUNT_TRACK_DEFAULT = (THEME_COLOR_D_3)
+    THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_4)
+    THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_5)
 
     THEME_COLOR_MENU_BG_DEFAULT = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_MENU_BG_HOVER = (THEME_COLOR_D_HIDDEN)
@@ -2996,8 +2996,8 @@ live_design! {
                         sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
 
-                        sdf.rect(0, self.rect_size.y - slider_height * 0.25, self.rect_size.x, slider_height)
-                        sdf.fill(THEME_COLOR_CTRL_DEFAULT);
+                        sdf.rect(0, self.rect_size.y - slider_height * 0.3, self.rect_size.x, slider_height)
+                        sdf.fill(THEME_COLOR_BEVEL_RIMLIGHT);
 
                         sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
                         sdf.fill(slider_color);
