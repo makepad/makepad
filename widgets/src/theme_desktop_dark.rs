@@ -4,6 +4,7 @@ live_design! {
     import makepad_draw::shader::std::*;
     import crate::base::*;
 
+    // DIMENSIONS
     THEME_SPACE_FACTOR = 10.0 // Increase for a less dense layout
     THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
     THEME_SPACE_2 = (1 * (THEME_SPACE_FACTOR))
@@ -21,9 +22,20 @@ live_design! {
     THEME_DATA_ITEM_HEIGHT = 23.0
     THEME_DATA_ICON_WIDTH = 16.0
     THEME_DATA_ICON_HEIGHT = 24.0
-    // ABSOLUTE DEFS
 
+    THEME_CTRL_CORNER_RADIUS = 3.0
+    THEME_CONTAINER_CORNER_RADIUS = 7.5
+    THEME_TEXTSELECTION_CORNER_RADIUS = 1.5
+    THEME_BEVEL_BORDER = .75
+    THEME_TAB_HEIGHT = 32.0,
+    THEME_SPLITTER_HORIZONTAL = 16.0,
+    THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
+    THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
+    THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
+    THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
+    THEME_SPLITTER_SIZE = 5.0
     THEME_DOCK_BORDER_SIZE: 0.0
+
 
     // COLOR PALETTE
     THEME_COLOR_WHITE = #FFFFFFFF
@@ -131,15 +143,8 @@ live_design! {
     THEME_COLOR_WARNING = (THEME_COLOR_MID),
     THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
 
-    THEME_BEVEL_BORDER = .75
-    THEME_TAB_HEIGHT = 32.0,
-    THEME_SPLITTER_HORIZONTAL = 16.0,
-    THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
-    THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
-    THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
-    THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
-    THEME_SPLITTER_SIZE = 5.0
 
+    // TYPOGRAPHY
     THEME_FONT_SIZE_BASE = 7.5
     THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
 
@@ -354,17 +359,34 @@ live_design! {
         margin: <THEME_MSPACE_V_2> {}
         <View> {
             width: Fill, height: (THEME_BEVEL_BORDER * 2.0),
-            // width: Fill, height: 2.,
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
         }
         <View> {
             width: Fill, height: (THEME_BEVEL_BORDER * 0.5),
-            // width: Fill, height: 0.5,
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_RIMLIGHT) }
         }
     }
+
+//    TODO: enable once Makepad's layout supports Fill that knows how high adjacent elements are. For now this is not possible.
+//    Vr = <View> {
+//         width: Fit., height: Fill,
+//         flow: Right,
+//         spacing: 0.,
+//         margin: <THEME_MSPACE_V_2> {}
+//         <View> {
+//             width: (THEME_BEVEL_BORDER * 2.0), height: Fill
+//             show_bg: true,
+//             draw_bg: { color: #f00 }
+//         }
+//         <View> {
+//             width: (THEME_BEVEL_BORDER * 0.5), height: Fill,
+//             show_bg: true,
+//             draw_bg: { color: #f0f }
+//         }
+//     }
+
 
     Filler = <View> {
         width: Fill, height: Fill
@@ -924,7 +946,7 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            uniform border_radius: 3.0
+            uniform border_radius: (THEME_CTRL_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
             instance bodybottom: (THEME_COLOR_CTRL_HOVER)
             fn pixel(self) -> vec4 {
@@ -1775,7 +1797,7 @@ live_design! {
     Dock = <DockBase> {
         round_corner: {
             draw_depth: 6.0
-            border_radius: 10.0
+            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
             fn pixel(self) -> vec4 {
 
                 let pos = vec2(
@@ -1968,7 +1990,7 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
             instance pressed: 0.0
-            uniform border_radius: 3.0
+            uniform border_radius: (THEME_CTRL_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_U_HIDDEN)
             instance bodybottom: (THEME_COLOR_CTRL_HOVER)
 
@@ -2511,7 +2533,7 @@ live_design! {
             // uniform color_inactive: (THEME_COLOR_D_1)
 
             // instance pressed: 0.0
-            uniform border_radius: 3.0
+            uniform border_radius: (THEME_CTRL_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
             instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
 
@@ -2845,7 +2867,7 @@ live_design! {
         draw_select: {
             instance hover: 0.0
             instance focus: 0.0
-            uniform border_radius: 2.0
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
             fn pixel(self) -> vec4 {
                 //return mix(#f00,#0f0,self.pos.y)
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -3172,7 +3194,7 @@ live_design! {
 
         shadow_size: 4.0,
 
-        fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+        fn pixel(self) -> vec4 { // TODO: make the corner overlap properly with a distance field eq.
             let is_viz = clamp(self.scroll * 0.1, 0., 1.);
             let pos = self.pos;
             let base = THEME_COLOR_BG_CONTAINER.xyz;
