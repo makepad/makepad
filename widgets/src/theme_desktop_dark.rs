@@ -2964,7 +2964,7 @@ live_design! {
             focus = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.1}}
+                    from: {all: Forward {duration: .25}}
                     apply: {
                         draw_cursor: {focus: 0.0},
                         draw_bg: {focus: 0.0},
