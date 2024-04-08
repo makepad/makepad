@@ -39,8 +39,8 @@ live_design!{
         height: Fit, width: Fill,
         flow: Right,
         align: { x: 0.0, y: 0.5},
-        margin: 0., padding: <THEME_MSPACE_2> {},
-        show_bg: true;
+        margin: 0., padding: 0.,
+        show_bg: false;
         draw_bg: { color: (COLOR_CONTAINER) }
     }
 
@@ -56,7 +56,7 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(self.color, self.color*0.5, self.pos.y);
             }
-            radius: 5.
+            radius: (THEME_CONTAINER_CORNER_RADIUS)
         }
     }
 
@@ -93,8 +93,6 @@ live_design!{
                     <View> {
                         width: Fill, height: Fit,
                         flow: Down,
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
                         padding: 20.,
                         <P> { text: "- Shader-based: what does that mean for how things work." }
                         <P> { text: "- Inheritance mechanisms in the DSL." }
@@ -113,8 +111,6 @@ live_design!{
                     <View> {
                         width: Fill, height: Fit,
                         flow: Down,
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
                         padding: 20.,
                         <H1> { text: "H1 headline" }
                         <H1italic> { text: "H1 italic headline" }
