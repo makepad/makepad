@@ -952,8 +952,9 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
-                let grad_bot = 1.0;
+                let grad_bot = 2.0;
                 let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_RIMLIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
@@ -971,7 +972,7 @@ live_design! {
                         THEME_COLOR_BEVEL_SHADOW,
                         THEME_COLOR_BEVEL_RIMLIGHT,
                         self.pressed
-                    ), THEME_DOCK_BORDER_SIZE
+                    ), THEME_BEVEL_BORDER
                 )
 
                 sdf.box(
