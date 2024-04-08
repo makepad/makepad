@@ -510,13 +510,9 @@ impl PortalList {
             });
             Some((entry.clone(), already_existed))
         } else {
+            warning!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
             None
         }
-    }
-
-    /// Returns `true` if a widget already exists for the given `entry_id` and `template`.
-    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
-        self.items.contains_key(&(entry_id, template))
     }
     
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
