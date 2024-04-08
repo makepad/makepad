@@ -514,6 +514,11 @@ impl PortalList {
             None
         }
     }
+
+    /// Returns `true` if a widget already exists for the given `entry_id` and `template`.
+    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
+        self.items.contains_key(&(entry_id, template))
+    }
     
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
         self.range_start = range_start;
