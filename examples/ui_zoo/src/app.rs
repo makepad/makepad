@@ -847,14 +847,6 @@ live_design!{
                 // }
 
                 // TODO: SHOW
-                // SEEMS NOT TO WORK WITHOUT DUMMY DATA
-                // <ZooHeader> {
-                //     title = {text:"Portal List"}
-                //     <ZooDesc> {text:"Portal List"}
-                //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
-                // }
-
-                // TODO: SHOW
                 // <ZooHeader> {
                 //     title = {text:"Flat list"}
                 //     <ZooDesc> {text:"Flat list"}
@@ -886,30 +878,6 @@ live_design!{
                 //                 }
 
                 //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #ff0} }
-                //             }
-                //         }
-                //     }
-                // }
-
-                //  TODO: Slidepanel appears to be buggy
-                // <ZooHeader> {
-                //     title = {text:"SlidePanel"}
-                //     <ZooDesc> {text:"Slide panel?"}
-                //     <ZooGroup> {
-                //         <SlidePanel> {
-                //             width: (1000 * 0.175), height: (1000 * 0.175),
-                //             margin: 0.
-                //             side: Right,
-                //             <ZooHeader> {
-                //                 title = {text:"Image"}
-                //                 <ZooDesc> {text:"A static inline image from a resource."}
-                //                 <ZooGroup> {
-                //                     <Image> {
-                //                         width: (1000 * 0.175), height: (1000 * 0.175),
-                //                         margin: 0
-                //                         source: dep("crate://self/resources/ducky.png" ),
-                //                     }
-                //                 }
                 //             }
                 //         }
                 //     }
