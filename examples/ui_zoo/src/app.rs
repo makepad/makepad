@@ -20,7 +20,7 @@ live_design!{
         width: Fill, height: Fit,
         flow: Down,
         align: { x: 0.0, y: 0.5},
-        margin: <THEME_MSPACE_3> {}, padding: 0.,
+        margin: <THEME_MSPACE_3> {}, 
         spacing: 10.,
         show_bg: false,
         title = <H2> { text: "Makepad UI Zoo" }
@@ -30,7 +30,7 @@ live_design!{
         width: Fill, height: Fit,
         flow: Down,
         spacing: (THEME_SPACE_1),
-        padding: 0., margin: <THEME_MSPACE_H_3> {}
+         margin: <THEME_MSPACE_H_3> {}
         divider = <Hr> { }
         title = <H3> { text: "Header" }
     }
@@ -39,7 +39,7 @@ live_design!{
         height: Fit, width: Fill,
         flow: Right,
         align: { x: 0.0, y: 0.5},
-        margin: 0., padding: 0.,
+        margin: 0., 
         show_bg: false;
         draw_bg: { color: (COLOR_CONTAINER) }
     }
@@ -48,7 +48,7 @@ live_design!{
 
     ZooBlock = <RoundedView> {
         width: 50., height: 50.
-        margin: 0., padding: 0.,
+        margin: 0., 
         spacing: 0.,
 
         show_bg: true;
@@ -80,7 +80,7 @@ live_design!{
                 width: Fill, height: Fill,
                 flow: Down,
                 spacing: 10.,
-                margin: 0., padding: 0.
+                margin: 0., 
                 scroll_bars: <ScrollBars> {}
 
                 <ZooTitle> {}
@@ -93,25 +93,7 @@ live_design!{
                     <View> {
                         width: Fill, height: Fit,
                         flow: Down,
-                        padding: 20.,
-                        <P> { text: "- Shader-based: what does that mean for how things work." }
-                        <P> { text: "- Inheritance mechanisms in the DSL." }
-                        <P> { text: "- Introduction to the layout system." }
-                        <P> { text: "- Typographic system. Base font-size and contrast." }
-                        <P> { text: "- Space constants to control denseness of the design." }
-                        <P> { text: "- Transparency mechanism of the widgets. Nesting for structure." }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"Typographic System"}
-                    <ZooDesc> {
-                        text:"Explain: typographic sizes, base size and contrast."
-                    }
-                    <View> {
-                        width: Fill, height: Fit,
-                        flow: Down,
-                        padding: 20.,
+                        
                         <H1> { text: "H1 headline" }
                         <H1italic> { text: "H1 italic headline" }
                         <H2> { text: "H2 headline" }
@@ -185,7 +167,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            padding: 0
                             spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
@@ -197,7 +178,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            padding: 0
                             spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
@@ -209,7 +189,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            padding: 0
                             spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
@@ -221,7 +200,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            padding: 0
                             spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
@@ -233,7 +211,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            padding: 0
                             spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
@@ -336,13 +313,53 @@ live_design!{
                     title = {text:"<TextInput>"}
                     <ZooDesc> { text:"Simple 1 line textbox" }
                     <ZooGroup> {
-                        simpletextinput= <TextInput> {
-                            empty_message: "Inline Label",
+                        flow: Down,
+                        spacing: (THEME_SPACE_1)
+                        <View> {
+                            height: Fit, width: Fill,
+                            spacing: (THEME_SPACE_2),
+                            <H4> { text: "Default", width: 175.}
+                            simpletextinput = <TextInput> { }
+                            simpletextinput_outputbox = <P> {
+                                text: "Output"
+                            }
                         }
-
-                        simpletextinput_outputbox = <P> {
-                            text: "Output"
+                        <View> {
+                            height: Fit, width: Fill,
+                            spacing: (THEME_SPACE_2),
+                            <H4> { text: "Inline Label", width: 175.}
+                            <TextInput> { empty_message: "Inline Label" }
                         }
+                        <View> {
+                            height: Fit, width: Fill,
+                            spacing: (THEME_SPACE_2),
+                            <H4> { text: "Secret", width: 175.}
+                            <TextInput> { text: "1234567", empty_message: "Password", secret: true }
+                        }
+                        <View> {
+                            height: Fit, width: Fill,
+                            spacing: (THEME_SPACE_2),
+                            <H4> { text: "On focus select all", width: 175.}
+                            <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
+                        }
+                        <View> {
+                            height: Fit, width: Fill,
+                            spacing: (THEME_SPACE_2),
+                            <H4> { text: "Read only", width: 175.}
+                            <TextInput> { text: "You can't change me", read_only: true }
+                        }
+                        <View> {
+                            height: Fit, width: Fill,
+                            spacing: (THEME_SPACE_2),
+                            <H4> { text: "ASCII only", width: 175.}
+                            <TextInput> { empty_message: "No fancy characters", ascii_only: true }
+                        }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "Double Tap start", width: 175.}
+                        //     <TextInput> { empty_message: "Click twice", double_tap_start: TODO: UNCLEAR WHAT VALUE THIS NEEDS }
+                        // }
                     }
                 }
 
@@ -419,7 +436,7 @@ live_design!{
                     title = {text:"<FileTree>"}
                     <ZooDesc> {text:"File Tree"}
                     <ZooGroup> {
-                        padding: 0.
+                        
                         show_bg: false,
                         <DemoFileTree> { file_tree:{ height: 400. } }
                     }
