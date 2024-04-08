@@ -24,7 +24,7 @@ live_design! {
     THEME_DATA_ICON_HEIGHT = 24.0
 
     THEME_CTRL_CORNER_RADIUS = 3.0
-    THEME_CONTAINER_CORNER_RADIUS = 7.5
+    THEME_CONTAINER_CORNER_RADIUS = 6.0
     THEME_TEXTSELECTION_CORNER_RADIUS = 1.5
     THEME_BEVEL_BORDER = .75
     THEME_TAB_HEIGHT = 32.0,
@@ -2888,7 +2888,7 @@ live_design! {
         }
 
         draw_bg: {
-            instance radius: 2.0
+            instance radius: (THEME_CTRL_CORNER_RADIUS)
             instance hover: 0.0
             instance focus: 0.0
             instance bodytop: (THEME_COLOR_INSET_DEFAULT)
@@ -3063,15 +3063,11 @@ live_design! {
             cursor_size: 2.0,
             empty_message: "0",
             numeric_only: true,
-            draw_bg: {
-                shape: None
-                radius: 2.0
-            },
 
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
             draw_bg: {
-                instance radius: 2.0
+                instance radius: 1.0
                 instance border_width: 0.0
                 instance border_color: (#f00) // TODO: This appears not to do anything.
                 instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -3164,8 +3160,7 @@ live_design! {
         flow: Down, spacing: 10,
         align: { x: 0.0, y: 0.5 }
         padding: 50.
-
-        draw_bg: { color: (THEME_COLOR_SLIDES_BG), radius: 5.0 }
+        draw_bg: { color: (THEME_COLOR_SLIDES_BG), radius: (THEME_CONTAINER_CORNER_RADIUS) }
         title = <H1> {
             text: "SlideTitle",
             draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
@@ -3178,7 +3173,7 @@ live_design! {
         align: {x: 0.0, y: 0.5}
         spacing: 10,
         padding: 50,
-        draw_bg: {color: (THEME_COLOR_SLIDES_CHAPTER), radius: 5.0}
+        draw_bg: {color: (THEME_COLOR_SLIDES_CHAPTER), radius: (THEME_CONTAINER_CORNER_RADIUS)}
         title = <H1> {
             text: "SlideTitle",
             draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
@@ -3187,7 +3182,7 @@ live_design! {
 
     SlideBody = <H2> {
         text: "Body of the slide"
-            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
+        draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
     }
 
     DrawScrollShadow = <DrawScrollShadowBase> {
