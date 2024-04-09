@@ -1,9 +1,7 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*
-    },
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::{shader::draw_text::TextStyle, *},
+    widget::*,
 }; 
     
 live_design!{
@@ -56,6 +54,7 @@ pub struct TextFlow {
     #[rust] underline_counter: usize,
     #[rust] strikethrough_counter: usize,
     
+    #[rust] text_style_stack: Vec<TextStyleOptions>,
     #[rust] font_size_stack: FontSizeStack,
     #[rust] area_stack: AreaStack,
     #[layout] layout: Layout,
@@ -138,6 +137,41 @@ impl AreaStack{
     }
 }
 
+#[derive(Default)]
+pub struct TextStyleOptions {
+    pub font: Option<Font>,
+    pub font_size: Option<f64>,
+    pub brightness: Option<f32>,
+    pub curve: Option<f32>,
+    pub line_spacing: Option<f64>,
+    pub top_drop: Option<f64>,
+    pub height_factor: Option<f64>,
+}
+impl TextStyleOptions {
+    pub fn apply_to(&self, style: &mut TextStyle) {
+        if let Some(font) = self.font.as_ref() {
+            style.font = font.clone();
+        }
+        if let Some(font_size) = self.font_size {
+            style.font_size = font_size;
+        }
+        if let Some(brightness) = self.brightness {
+            style.brightness = brightness;
+        }
+        if let Some(curve) = self.curve {
+            style.curve = curve;
+        }
+        if let Some(line_spacing) = self.line_spacing {
+            style.line_spacing = line_spacing;
+        }
+        if let Some(top_drop) = self.top_drop {
+            style.top_drop = top_drop;
+        }
+        if let Some(height_factor) = self.height_factor {
+            style.height_factor = height_factor;
+        }
+    }
+}
 
 #[derive(Default)]
 struct FontSizeStack{
@@ -229,6 +263,7 @@ impl TextFlow{
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
+        self.text_style_stack.clear();
         self.font_size_stack.clear();
         self.area_stack.clear();
         self.bold_counter = 0;
@@ -313,7 +348,18 @@ impl TextFlow{
             self.font_size * scale
         );
     }
-    
+
+    pub fn push_text_style_options(&mut self, style: TextStyleOptions) {
+        self.text_style_stack.push(style);
+    }
+
+    pub fn pop_text_style_options(&mut self) {
+        self.text_style_stack.pop();
+    }
+
+    pub fn latest_text_style_options(&self) -> Option<&TextStyleOptions> {
+        self.text_style_stack.last()
+    }
 
     
     pub fn begin_code(&mut self, cx:&mut Cx2d){
@@ -432,8 +478,17 @@ impl TextFlow{
                     }
                 }
             };
-            let fs = self.font_size_stack.value(self.font_size);
-            dt.text_style.font_size = fs;
+
+            // Apply the text style options before the font size options,
+            // such that the font size stack can override the text style stack.
+            //
+            // In the future, we can combine font_size_stack into text_style_stack.
+            if let Some(style) = self.text_style_stack.last() {
+                style.apply_to(&mut dt.text_style);
+            }
+            let font_size = self.font_size_stack.value(self.font_size);
+            dt.text_style.font_size = font_size;
+
             // the turtle is at pos X so we walk it.
             if self.strikethrough_counter > 0{
                 let db = &mut self.draw_block;
