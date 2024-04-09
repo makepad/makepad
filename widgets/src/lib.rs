@@ -51,6 +51,7 @@ pub mod flat_list;
 pub mod file_tree;
 pub mod slides_view;
 pub mod color_picker;
+pub mod root;
 
 pub mod debug_view;
 pub mod performance_view;
@@ -78,6 +79,7 @@ pub use crate::{
     icon::*,
     label::*,
     slider::*,
+    root::*,
     text_flow::*,
     html::*,
     check_box::*,
@@ -176,4 +178,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::text_flow::live_design(cx);
     crate::markdown::live_design(cx);
     crate::html::live_design(cx);
+    crate::root::live_design(cx);
 }
