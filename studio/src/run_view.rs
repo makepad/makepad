@@ -95,7 +95,6 @@ impl RunView {
     
     pub fn run_tick(&mut self, cx: &mut Cx, run_view_id: LiveId, manager: &mut BuildManager) {
         self.frame += 1;
-        
         manager.send_host_to_stdin(run_view_id, HostToStdin::PollSwapChain{window_id: self.window_id});
         
         if self.window_id == 0{
@@ -134,43 +133,45 @@ impl RunView {
                 self.redraw(cx);
             }
             StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
-                if let Some(v) = manager.active.builds.get_mut(&run_view_id){
-                    // Only allow presenting images in the current host swapchain
-                    // (or the previous one, before any draws on the current one),
-                    // and look them up by their unique IDs, to avoid rendering
-                    // different textures than the ones the client just drew to.
-                    let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
-                        let swapchain = swapchain.as_ref()?;
-                        let drawn = swapchain.get_image(presentable_draw.target_id)?;
-
-                        self.draw_app.set_texture(0, &drawn.image);
-                        self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
-                            (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
-                            (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
-                        ]);
-                        self.draw_app.draw_vars.set_var_instance(cx, id!(tex_size), &[
-                            (swapchain.alloc_width as f32),
-                            (swapchain.alloc_height as f32),
-                        ]);
-
-                        if !self.started {
-                            self.started = true;
-                            self.animator_play(cx, id!(started.on));
+                if self.window_id == presentable_draw.window_id{
+                    if let Some(v) = manager.active.builds.get_mut(&run_view_id){
+                        // Only allow presenting images in the current host swapchain
+                        // (or the previous one, before any draws on the current one),
+                        // and look them up by their unique IDs, to avoid rendering
+                        // different textures than the ones the client just drew to.
+                        let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
+                            let swapchain = swapchain.as_ref()?;
+                            let drawn = swapchain.get_image(presentable_draw.target_id)?;
+    
+                            self.draw_app.set_texture(0, &drawn.image);
+                            self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
+                                (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
+                                (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
+                            ]);
+                            self.draw_app.draw_vars.set_var_instance(cx, id!(tex_size), &[
+                                (swapchain.alloc_width as f32),
+                                (swapchain.alloc_height as f32),
+                            ]);
+    
+                            if !self.started {
+                                self.started = true;
+                                self.animator_play(cx, id!(started.on));
+                            }
+                            self.redraw_countdown = 20;
+                            
+                            Some(())
+                        };
+    
+                        if try_present_through(&v.swapchain).is_some() {
+                            // The client is now drawing to the current swapchain,
+                            // we can discard any previous one we were stashing.
+                            v.last_swapchain_with_completed_draws = None;
+                        } else {
+                            // New draws to a previous swapchain are fine, just means
+                            // the client hasn't yet drawn on the current swapchain,
+                            // what lets us accept draws is their target `Texture`s.
+                            try_present_through(&v.last_swapchain_with_completed_draws);
                         }
-                        self.redraw_countdown = 20;
-                        
-                        Some(())
-                    };
-
-                    if try_present_through(&v.swapchain).is_some() {
-                        // The client is now drawing to the current swapchain,
-                        // we can discard any previous one we were stashing.
-                        v.last_swapchain_with_completed_draws = None;
-                    } else {
-                        // New draws to a previous swapchain are fine, just means
-                        // the client hasn't yet drawn on the current swapchain,
-                        // what lets us accept draws is their target `Texture`s.
-                        try_present_through(&v.last_swapchain_with_completed_draws);
                     }
                 }
             }
