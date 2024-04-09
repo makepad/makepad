@@ -71,6 +71,7 @@ pub struct RunView {
     #[rust] time: f64,
     #[rust] frame: u64,
     #[rust] started: bool,
+    #[live] window_id: usize,
 }
 
 impl LiveHook for RunView {
@@ -92,13 +93,15 @@ impl LiveHook for RunView {
 
 impl RunView {
     
-    pub fn run_tick(&mut self, cx: &mut Cx, time: f64, run_view_id: LiveId, manager: &mut BuildManager) {
+    pub fn run_tick(&mut self, cx: &mut Cx, run_view_id: LiveId, manager: &mut BuildManager) {
         self.frame += 1;
-        manager.send_host_to_stdin(run_view_id, HostToStdin::Tick {
-            buffer_id: run_view_id.0,
-            frame: 0,
-            time: time
-        });
+        
+        manager.send_host_to_stdin(run_view_id, HostToStdin::PollSwapChain{window_id: self.window_id});
+        
+        if self.window_id == 0{
+            manager.send_host_to_stdin(run_view_id, HostToStdin::Tick);
+        }
+            
         if self.redraw_countdown>0 {
             self.redraw_countdown -= 1;
             self.redraw(cx);
@@ -110,11 +113,11 @@ impl RunView {
     }
     
     pub fn pump_event_loop(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
-        if let Some(te) = self.timer.is_event(event) {
-            self.run_tick(cx, te.time.unwrap_or(0.0), run_view_id, manager)
+        if let Some(_) = self.timer.is_event(event) {
+            self.run_tick(cx, run_view_id, manager)
         }
-        if let Some(te) = self.tick.is_event(event) {
-            self.run_tick(cx, te.time, run_view_id, manager)
+        if let Some(_) = self.tick.is_event(event) {
+            self.run_tick(cx, run_view_id, manager)
         }
     }
     
@@ -202,6 +205,7 @@ impl RunView {
             // most of the time, letting it draw on its existing swapchain,
             // and only replace the swapchain when a larger one is needed.
             manager.send_host_to_stdin(run_view_id, HostToStdin::WindowGeomChange {
+                window_id: self.window_id,
                 dpi_factor,
                 inner_width,
                 inner_height,
@@ -241,7 +245,7 @@ impl RunView {
                 let alloc_height = min_height.max(64).next_power_of_two();
                 
                 let swapchain = v.swapchain.get_or_insert_with(|| {
-                    Swapchain::new(alloc_width, alloc_height).images_map(|pi| {
+                    Swapchain::new(self.window_id, alloc_width, alloc_height).images_map(|pi| {
                         // Prepare a version of the swapchain for cross-process sharing.
                         Texture::new_with_format(cx, TextureFormat::SharedBGRAu8 {
                             id: pi.id,
@@ -329,6 +333,7 @@ impl Widget for RunView {
             Event::MouseDown(e) => {
                 let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
+                    window_id: self.window_id,
                     time: e.time,
                     x: rel.x,
                     y: rel.y,
@@ -338,6 +343,7 @@ impl Widget for RunView {
             Event::MouseMove(e) => {
                 let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
+                    window_id: self.window_id,
                     time: e.time,
                     x: rel.x,
                     y: rel.y,
@@ -346,6 +352,7 @@ impl Widget for RunView {
             Event::MouseUp(e) => {
                 let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
+                    window_id: self.window_id,
                     time: e.time,
                     button: e.button,
                     x: rel.x,
@@ -355,6 +362,7 @@ impl Widget for RunView {
             Event::Scroll(e) => {
                 let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
+                    window_id: self.window_id,
                     is_mouse: e.is_mouse,
                     time: e.time,
                     x: rel.x,

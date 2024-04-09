@@ -191,7 +191,11 @@ impl MatchEvent for App{
         match action.cast(){
             RunListAction::Create(run_view_id, name) => {
                 let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
-                dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
+                dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name.clone(), TabClosable::Yes);
+                let design_view_id = run_view_id.hash();
+                let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap();
+                dock.create_and_select_tab(cx, tab_bar_id, design_view_id, live_id!(RunView), name, TabClosable::Yes);
+                                
                 dock.redraw(cx);
                 log_list.redraw(cx);
             }
