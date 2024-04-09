@@ -34,6 +34,15 @@ impl CxWindowPool {
         WindowHandle(self.0.alloc())
     }
     
+    pub fn is_valid(&self, v: WindowId)->bool{
+        if v.0 < self.0.pool.len(){
+            if self.0.pool[v.0].generation == v.1{
+                return true
+            }
+        }
+        false
+    }
+    
     pub fn id_zero()->WindowId{
         WindowId(0, 0)
     }
