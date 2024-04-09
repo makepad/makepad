@@ -168,7 +168,7 @@ impl MatchEvent for App{
                 if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut() {
                     run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.data.build_manager);
                 }
-                if let Some(mut run_view) = dock.item(run_view_id.hash()).as_run_view().borrow_mut() {
+                if let Some(mut run_view) = dock.item(run_view_id.add(1)).as_run_view().borrow_mut() {
                     run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.data.build_manager);
                 }
             }
@@ -195,7 +195,7 @@ impl MatchEvent for App{
             RunListAction::Create(run_view_id, name) => {
                 let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
                 dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name.clone(), TabClosable::Yes);
-                let design_view_id = run_view_id.hash();
+                let design_view_id = run_view_id.add(1);
                 let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap();
                 dock.create_and_select_tab(cx, tab_bar_id, design_view_id, live_id!(DesignView), name, TabClosable::Yes);
                                 
@@ -204,6 +204,7 @@ impl MatchEvent for App{
             }
             RunListAction::Destroy(run_view_id) => {
                 dock.close_tab(cx, run_view_id);
+                dock.close_tab(cx, run_view_id.add(1));
                 dock.redraw(cx);
                 log_list.redraw(cx);
             }

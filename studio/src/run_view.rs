@@ -95,6 +95,7 @@ impl RunView {
     
     pub fn run_tick(&mut self, cx: &mut Cx, run_view_id: LiveId, manager: &mut BuildManager) {
         self.frame += 1;
+        
         manager.send_host_to_stdin(run_view_id, HostToStdin::PollSwapChain{window_id: self.window_id});
         
         if self.window_id == 0{
@@ -112,6 +113,7 @@ impl RunView {
     }
     
     pub fn pump_event_loop(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
+        let run_view_id = run_view_id.sub(self.window_id as u64);
         if let Some(_) = self.timer.is_event(event) {
             self.run_tick(cx, run_view_id, manager)
         }
@@ -256,6 +258,7 @@ impl RunView {
                         })
                     })
                 });
+                
 
                 let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
                     cx.share_texture_for_presentable_image(&pi.image)
@@ -302,15 +305,14 @@ impl RunView {
 impl Widget for RunView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let run_view_id = scope.path.get(0);
+        let run_view_id = scope.path.get(0).sub(self.window_id as u64);
         let manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         DrawStep::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        
-        let run_view_id = scope.path.get(0);
+        let run_view_id = scope.path.get(0).sub(self.window_id as u64);
         let manager = &scope.data.get::<AppData>().unwrap().build_manager;
         
         self.animator_handle_event(cx, event);
