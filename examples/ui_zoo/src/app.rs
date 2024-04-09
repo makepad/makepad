@@ -9,7 +9,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_example_ui_zoo::demofiletree::*;
 
-    COLOR_CONTAINER = (THEME_COLOR_D_075)
+    COLOR_CONTAINER = (THEME_COLOR_D_2)
     COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
 
     DEMO_COLOR_1 = #8f0
