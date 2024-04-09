@@ -60,6 +60,8 @@ live_design!{
         }
     }
 
+    COLOR_CONTRAST = 3.0 
+
     App = {{App}} {
         ui: <Window> {
             width: Fill, height: Fill,
@@ -94,6 +96,40 @@ live_design!{
                         width: Fill, height: Fit,
                         flow: Down,
                         
+                        <View> {
+                            width: Fill, height: 100.,
+                            spacing: (THEME_SPACE_2),
+                            show_bg: true,
+                            draw_bg: { color: #f00}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (blend(#FFFFFFFF, #00FF00FF)) }}
+                                //  draw_bg: { color: (#FFFFFFFF * (#00000000)) }}
+                                //  draw_bg: { color: (#FFFFFFFF * pow(0.8, COLOR_CONTRAST)) }}
+                                //  draw_bg: {
+                                //         fn pixel(self) -> vec4 {
+                                //             return mix( #x00000000, #x000000FF, pow(0.25, 1) )
+                                //         }
+                                //     }
+                                // }
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#FFFFFFFF * pow(0.8, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#FFFFFFFF * pow(0.6, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#FFFFFFFF * pow(0.4, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#FFFFFFFF * pow(0.2, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#000000FF * pow(0.2, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#000000FF * pow(0.4, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#000000FF * pow(0.6, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#000000FF * pow(0.8, COLOR_CONTRAST)) }}
+                            <View> { show_bg: true, width: Fill, height: Fill,
+                                 draw_bg: { color: (#000000FF * pow(1.0, COLOR_CONTRAST)) }}
+                        }
                         <H1> { text: "H1 headline" }
                         <H1italic> { text: "H1 italic headline" }
                         <H2> { text: "H2 headline" }
