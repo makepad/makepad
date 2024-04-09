@@ -19,6 +19,10 @@ pub struct WindowHandle(PoolId);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct WindowId(usize, u64);
 
+impl WindowId{
+    pub fn id(&self)->usize{self.0}
+}
+
 impl WindowHandle {
     pub fn window_id(&self) -> WindowId {WindowId(self.0.id, self.0.generation)}
 }
@@ -32,6 +36,10 @@ impl CxWindowPool {
     
     pub fn id_zero()->WindowId{
         WindowId(0, 0)
+    }
+    
+    pub fn from_usize(v:usize)->WindowId{
+        WindowId(v, 0)
     }
 }
 
