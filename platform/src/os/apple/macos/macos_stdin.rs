@@ -6,6 +6,7 @@ use {
         path::Path,
         fs,
         process::Command,
+        sync::mpsc,
     },
     crate::{
         makepad_live_id::*,
@@ -34,6 +35,23 @@ use {
     }
 };
 
+struct StdinWindow{
+    swapchain: Option<Swapchain<Option<Texture>>>,
+    tx_fb: mpsc::Sender<RcObjcId>,
+    rx_fb: mpsc::Receiver<RcObjcId>
+}
+
+impl StdinWindow{
+    fn new()->Self{
+        let (tx_fb, rx_fb) = mpsc::channel::<RcObjcId> ();
+        Self{
+            swapchain: None,
+            tx_fb,
+            rx_fb
+        }
+    }
+}
+
 impl Cx {
     
     pub (crate) fn stdin_send_draw_complete(presentable_draw: PresentableDraw) {
@@ -43,7 +61,7 @@ impl Cx {
     pub (crate) fn stdin_handle_repaint(
         &mut self,
         metal_cx: &mut MetalCx,
-        swapchain: &Swapchain<Option<Texture>>,
+        windows: &mut [StdinWindow],
         time: f32,
     ) {
         let mut passes_todo = Vec::new();
@@ -52,28 +70,30 @@ impl Cx {
         for &pass_id in &passes_todo {
             self.passes[pass_id].set_time(time as f32);
             match self.passes[pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
-                    let [current_image] = &swapchain.presentable_images;
-                    if let Some(texture) = &current_image.image {
-                        let window = &mut self.windows[CxWindowPool::id_zero()];
-                        let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture: texture.clone(),
-                        }];
-
-                        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-                        let future_presentable_draw = PresentableDraw {
-                            target_id: current_image.id,
-                            width: (pass_rect.size.x * dpi_factor) as u32,
-                            height: (pass_rect.size.y * dpi_factor) as u32,
-                        };
-
-                        // render to swapchain
-                        self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw));
-
-                        // and then wait for GPU, which calls stdin_send_draw_complete when its done
+                CxPassParent::Window(window_id) => {
+                    if let Some(swapchain) = &mut windows[window_id.id()].swapchain{
+                        let [current_image] = &swapchain.presentable_images;
+                        if let Some(texture) = &current_image.image {
+                            let window = &mut self.windows[window_id];
+                            let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                            pass.color_textures = vec![CxPassColorTexture {
+                                clear_color: PassClearColor::ClearWith(pass.clear_color),
+                                texture: texture.clone(),
+                            }];
+    
+                            let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+                            let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            let future_presentable_draw = PresentableDraw {
+                                target_id: current_image.id,
+                                window_id: window_id.id(),
+                                width: (pass_rect.size.x * dpi_factor) as u32,
+                                height: (pass_rect.size.y * dpi_factor) as u32,
+                            };
+    
+                            // render to swapchain
+                            self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw));
+                            // and then wait for GPU, which calls stdin_send_draw_complete when its done
+                        }
                     }
                 }
                 CxPassParent::Pass(_) => {
@@ -117,11 +137,15 @@ impl Cx {
         }
 
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-
-        let mut swapchain = None;
-
+        
+        let mut windows:Vec<StdinWindow> = Vec::new();
+        windows.push(StdinWindow::new());
+        windows.push(StdinWindow::new());
+                
         self.call_event_handler(&Event::Startup);
-        let (tx_fb, rx_fb) = std::sync::mpsc::channel::<RcObjcId> ();
+        
+        // lets create 2 windows
+
 
         while let Ok(msg) =  json_msg_rx.recv(){
             match msg {
@@ -164,8 +188,8 @@ impl Cx {
                 HostToStdin::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
-                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
-                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height, window_id } => {
+                    self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
                         dpi_factor,
                         inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
@@ -173,16 +197,18 @@ impl Cx {
                     self.redraw_all();
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
-                    swapchain = Some(new_swapchain.images_map(|_| None));
+                    windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
 
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
                 }
-                HostToStdin::Tick {frame: _, buffer_id: _, time:_} => if let Some(swapchain) = &mut swapchain {
+                HostToStdin::PollSwapChain{window_id}  => if windows[window_id].swapchain.is_some() {
+                    let window = &mut windows[window_id];
+                    let swapchain = window.swapchain.as_mut().unwrap();
                     let [presentable_image] = &swapchain.presentable_images;
                     // lets fetch the framebuffers
                     if presentable_image.image.is_none() {
-                        let tx_fb = tx_fb.clone();
+                        let tx_fb = window.tx_fb.clone();
                         fetch_xpc_service_texture(
                             service_proxy.as_id(),
                             presentable_image.id,
@@ -190,7 +216,7 @@ impl Cx {
                         ); 
                         // this is still pretty bad at 100ms if the service is still starting up
                         // we should 
-                        if let Ok(fb) = rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
+                        if let Ok(fb) = window.rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: presentable_image.id,
                                 width: swapchain.alloc_width as usize,
@@ -206,8 +232,9 @@ impl Cx {
                             }
                         }
                     }
-
-                    // check signals
+                }
+                HostToStdin::Tick=>{
+// check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
@@ -231,12 +258,7 @@ impl Cx {
                         self.call_draw_event();
                         self.mtl_compile_shaders(metal_cx);
                     }
-
-                    let [presentable_image] = &swapchain.presentable_images;
-                   // log!("TICKIN");
-                    if presentable_image.image.is_some() {
-                        self.stdin_handle_repaint(metal_cx, swapchain, self.os.stdin_timers.time_now() as f32);
-                    }
+                    self.stdin_handle_repaint(metal_cx, &mut windows, self.os.stdin_timers.time_now() as f32);
                 }
             }
         }
