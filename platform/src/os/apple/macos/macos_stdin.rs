@@ -191,24 +191,26 @@ impl Cx {
                 }
                 HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height, window_id } => {
                     let window_id = CxWindowPool::from_usize(window_id);
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        dpi_factor,
-                        inner_size: dvec2(inner_width, inner_height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent{
-                        window_id,
-                        new_geom,
-                        old_geom
-                    };
-                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor || re.old_geom.inner_size != re.new_geom.inner_size {
-                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                            self.redraw_pass_and_child_passes(main_pass_id);
+                    if self.windows.is_valid(window_id){
+                        let old_geom = self.windows[window_id].window_geom.clone();
+                        let new_geom = WindowGeom {
+                            dpi_factor,
+                            inner_size: dvec2(inner_width, inner_height),
+                            ..Default::default()
+                        };
+                        self.windows[window_id].window_geom = new_geom.clone();
+                        let re = WindowGeomChangeEvent{
+                            window_id,
+                            new_geom,
+                            old_geom
+                        };
+                        if re.old_geom.dpi_factor != re.new_geom.dpi_factor || re.old_geom.inner_size != re.new_geom.inner_size {
+                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                self.redraw_pass_and_child_passes(main_pass_id);
+                            }
                         }
-                    }
-                    self.call_event_handler(&Event::WindowGeomChange(re));
+                        self.call_event_handler(&Event::WindowGeomChange(re));
+                    }        
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
