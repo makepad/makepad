@@ -35,7 +35,7 @@ use {
     }
 };
 
-struct StdinWindow{
+pub(crate) struct StdinWindow{
     swapchain: Option<Swapchain<Option<Texture>>>,
     tx_fb: mpsc::Sender<RcObjcId>,
     rx_fb: mpsc::Receiver<RcObjcId>
