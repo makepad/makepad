@@ -772,7 +772,7 @@ impl DrawText {
         }
     }
     
-    pub fn closest_offset(&self, cx: &Cx, pos: DVec2) -> Option<usize> {
+    pub fn closest_offset(&self, cx: &Cx, newline_indexes: Vec<usize>, pos: DVec2) -> Option<usize> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
@@ -785,30 +785,42 @@ impl DrawText {
         let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
 
         let mut last_y = None;
+        let mut newlines = 0;
         for i in 0..rect_pos.repeat {
+            if newline_indexes.contains(&(i + newlines)) {
+                newlines += 1;
+            }
+
             let index = rect_pos.stride * i;
             let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
+
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             if last_y.is_none() {last_y = Some(y)}
             let advance = advance.buffer[index + 0] as f64;
             if i > 0 && (y - last_y.unwrap()) > 0.001 && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
-                return Some(i - 1)
+                return Some(i - 1 + newlines)
             }
             if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {
-                return Some(i)
+                return Some(i + newlines)
             }
             last_y = Some(y)
         }
-        return Some(rect_pos.repeat);
+        return Some(rect_pos.repeat + newlines);
         
     }
     
-    pub fn get_selection_rects(&self, cx: &Cx, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
+    pub fn get_selection_rects(&self, cx: &Cx, newline_indexes: Vec<usize>, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return Vec::new();
         }
+
+        // Adjustments because of newlines characters (they are not in the buffers)
+        let start_offset = newline_indexes.iter().filter(|&&i| i < start).count();
+        let start = start - start_offset;
+        let end_offset = newline_indexes.iter().filter(|&&i| i < end).count();
+        let end = end - end_offset;
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
@@ -853,7 +865,6 @@ impl DrawText {
         out
     }
     
-    
     pub fn get_char_count(&self, cx: &Cx) -> usize {
         let area = &self.draw_vars.area;
         if !area.is_valid(cx) {
@@ -863,12 +874,19 @@ impl DrawText {
         rect_pos.repeat
     }
     
-    pub fn get_cursor_pos(&self, cx: &Cx, pos: f32, index: usize) -> Option<DVec2> {
+    pub fn get_cursor_pos(&self, cx: &Cx, newline_indexes: Vec<usize>, pos: f32, index: usize) -> Option<DVec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return None
         }
+        // Adjustment because of newlines characters (they are not in the buffers)
+        let index_offset = newline_indexes.iter().filter(|&&i| i < index).count();
+        let (index, pos) = if newline_indexes.contains(&(index)){
+            (index - index_offset - 1, pos + 1.0)
+        } else {
+            (index - index_offset, pos)
+        };
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
