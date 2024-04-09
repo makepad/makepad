@@ -138,7 +138,7 @@ live_design!{
 const _: () = assert!(crate::font_atlas::ATLAS_WIDTH == 4096);
 const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 
-#[derive(Clone, Live, LiveHook, LiveRegister)]
+#[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
