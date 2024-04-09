@@ -196,6 +196,16 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
         LiveValue::ExprCall {ident, args} => {
             *index += 1;
             match ident {
+                live_id!(pow) if *args == 2 => {
+                    let a = live_eval(live_registry, start, index, nodes)?;
+                    let b = live_eval(live_registry, start, index, nodes)?;
+                    if let LiveEval::Float64(va) = a {
+                        if let LiveEval::Float64(vb) = b {
+                            // ok so how do we blend this eh.
+                            return Ok(LiveEval::Float64(va.powf(vb)))
+                        }
+                    }
+                }
                 live_id!(blend) if *args == 2 => {
                     let a = live_eval(live_registry, start, index, nodes)?;
                     let b = live_eval(live_registry, start, index, nodes)?;
