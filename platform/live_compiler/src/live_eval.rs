@@ -221,6 +221,26 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                         }
                     }
                 }
+                live_id!(mix) if *args == 3 => {
+                    let a = live_eval(live_registry, start, index, nodes)?;
+                    let b = live_eval(live_registry, start, index, nodes)?;
+                    let c = live_eval(live_registry, start, index, nodes)?;
+                    if let LiveEval::Vec4(va) = a {
+                        if let LiveEval::Vec4(vb) = b {
+                            if let LiveEval::Float64(vc) = c {
+                                let vc = vc as f32;
+                                // ok so how do we blend this eh.
+                                return Ok(LiveEval::Vec4(vec4(
+                                    va.x + (vb.x - va.x) * vc,
+                                    va.y + (vb.y - va.y) * vc,
+                                    va.z + (vb.z - va.z) * vc,
+                                    va.w + (vb.w - va.w) * vc
+                                )))
+                            }
+                            
+                        }
+                    }
+                }
                 live_id!(hsvmod) if *args == 4 => {
                     let orig = live_eval(live_registry, start, index, nodes)?;
                     let hmod = live_eval(live_registry, start, index, nodes)?;
