@@ -168,6 +168,9 @@ impl MatchEvent for App{
                 if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut() {
                     run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.data.build_manager);
                 }
+                if let Some(mut run_view) = dock.item(run_view_id.hash()).as_run_view().borrow_mut() {
+                    run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.data.build_manager);
+                }
             }
             BuildManagerAction::None=>()
         }
@@ -194,7 +197,7 @@ impl MatchEvent for App{
                 dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name.clone(), TabClosable::Yes);
                 let design_view_id = run_view_id.hash();
                 let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap();
-                dock.create_and_select_tab(cx, tab_bar_id, design_view_id, live_id!(RunView), name, TabClosable::Yes);
+                dock.create_and_select_tab(cx, tab_bar_id, design_view_id, live_id!(DesignView), name, TabClosable::Yes);
                                 
                 dock.redraw(cx);
                 log_list.redraw(cx);
