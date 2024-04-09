@@ -468,9 +468,6 @@ live_design!{
                     <ZooGroup> {
                         <Html> {
                             width:Fill, height:Fit,
-                            // font_size: (THEME_FONT_SIZE_BASE),
-                            // flow: RightWrap,
-                            // padding: 5,
                             body:"This is <b>bold text</b>&nbsp;and&nbsp;<i>italic text</i>. <br/> <sep> <b><i>Bold italic</i></b>, <u>underlined</u>, and <s>strike through</s> text.<br/> <Button>Button</Button><br/> <block_quote>Blockquote<br/> <block_quote>Nested blockquote</block_quote> </block_quote><br/><code>This is a code block</code>"
                         }
                     }
@@ -482,9 +479,6 @@ live_design!{
                     <ZooGroup> {
                         <Markdown> {
                             width:Fill, height: Fit,
-                            // font_size: (THEME_FONT_SIZE_BASE),
-                            // flow: RightWrap,
-                            // padding: 5,
                             body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote.\n\nThis is `inline code`.\n\n ```code block```"
                         }
                     }
@@ -493,7 +487,28 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"<Image>"}
                     <ZooDesc> {text:"A static inline image from a resource."}
-                    <ZooGroup> { <Image> { source: dep("crate://self/resources/ducky.png" ) } }
+                    <ZooGroup> {
+                        height: 150, width: Fill,
+                        spacing: (THEME_SPACE_2)
+                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
+                            <Image> { source: dep("crate://self/resources/ducky.png" ), min_width: 140, min_height: 160 }
+                        }
+                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
+                            <Image> { source: dep("crate://self/resources/ducky.png"), fit: Stretch }
+                        }
+                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
+                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
+                        }
+                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
+                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
+                        }
+                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
+                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
+                        }
+                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
+                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
+                        }
+                    }
                 }
 
                 <ZooHeader> {
