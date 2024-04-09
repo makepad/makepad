@@ -524,12 +524,12 @@ impl Dock {
             let entry = self.items.get_or_insert(cx, entry_id, | cx | {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
-            return Some(entry.1.clone())
+            Some(entry.1.clone())
         }
         else {
-            log!("PortalList template not found {}", template);
+            warning!("Template not found: {template}. Did you add it to the <Dock> instance in `live_design!{{}}`?");
+            None
         }
-        None
     }
     
     pub fn items(&mut self) -> &ComponentMap<LiveId, (LiveId, WidgetRef)> {

@@ -189,8 +189,8 @@ impl Widget for TextInput {
                 KeyCode::ArrowDown => if !ke.modifiers.logo {
                     self.undo_id += 1;
                     // we need to figure out what is below our current cursor
-                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head) {
-                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_text.get_line_spacing() * 1.5)) {
+                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, self.newline_indexes(), 0.0, self.cursor_head) {
+                        if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), dvec2(pos.x, pos.y + self.draw_text.get_line_spacing() * 1.5)) {
                             self.cursor_head = pos;
                             if !ke.modifiers.shift {
                                 self.cursor_tail = self.cursor_head;
@@ -202,8 +202,8 @@ impl Widget for TextInput {
                 KeyCode::ArrowUp => if !ke.modifiers.logo {
                     self.undo_id += 1;
                     // we need to figure out what is below our current cursor
-                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head) {
-                        if let Some(pos) = self.draw_text.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_text.get_line_spacing() * 0.5)) {
+                    if let Some(pos) = self.draw_text.get_cursor_pos(cx, self.newline_indexes(), 0.0, self.cursor_head) {
+                        if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), dvec2(pos.x, pos.y - self.draw_text.get_line_spacing() * 0.5)) {
                             self.cursor_head = pos;
                             if !ke.modifiers.shift {
                                 self.cursor_tail = self.cursor_head;
@@ -261,7 +261,7 @@ impl Widget for TextInput {
                 self.set_key_focus(cx);
                 // ok so we need to calculate where we put the cursor down.
                 //elf.
-                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 1 {
@@ -286,7 +286,7 @@ impl Widget for TextInput {
             },
             Hit::FingerUp(fe) => {
                 self.double_tap_start = None;
-                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), fe.abs) {
                     let pos = pos.min(self.text.chars().count());
                     if !fe.modifiers.shift && fe.tap_count == 1 && fe.was_tap() {
                         self.cursor_head = pos;
@@ -305,7 +305,7 @@ impl Widget for TextInput {
                 }
             }
             Hit::FingerMove(fe) => {
-                if let Some(pos) = self.draw_text.closest_offset(cx, fe.abs) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), fe.abs) {
                     let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 2 {
                         let (head, tail) = self.double_tap_start.unwrap();
@@ -320,7 +320,7 @@ impl Widget for TextInput {
                         self.draw_bg.redraw(cx);
                     }
                     else if fe.tap_count == 1 {
-                        if let Some(pos_start) = self.draw_text.closest_offset(cx, fe.abs_start) {
+                        if let Some(pos_start) = self.draw_text.closest_offset(cx, self.newline_indexes(), fe.abs_start) {
                             let pos_start = pos_start.min(self.text.chars().count());
                                                         
                             self.cursor_head = pos_start;
@@ -556,6 +556,16 @@ impl TextInput {
             output.push_str(input);
         }
     }
+
+    fn newline_indexes(&self) -> Vec<usize> {
+        let mut ret = Vec::new();
+        for (i, c) in self.text.chars().enumerate() {
+            if c == '\n' {
+                ret.push(i);
+            }
+        }
+        ret
+    }
     
     pub fn draw_walk_text_input(&mut self, cx: &mut Cx2d, walk: Walk) {
         
@@ -591,7 +601,7 @@ impl TextInput {
         // move the IME
         let line_spacing = self.draw_text.get_line_spacing();
         let top_drop = self.draw_text.get_font_size() * 0.2;
-        let head = self.draw_text.get_cursor_pos(cx, 0.0, self.cursor_head)
+        let head = self.draw_text.get_cursor_pos(cx, self.newline_indexes(), 0.0, self.cursor_head)
             .unwrap_or(dvec2(turtle.pos.x, 0.0));
         
         if !self.read_only && self.cursor_head == self.cursor_tail {
@@ -608,7 +618,7 @@ impl TextInput {
             let bottom_drop = self.draw_text.get_font_size() * 0.1;
             
             let (start, end) = self.sorted_cursor();
-            let rects = self.draw_text.get_selection_rects(cx, start, end, dvec2(0.0, -top_drop), dvec2(0.0, bottom_drop));
+            let rects = self.draw_text.get_selection_rects(cx, self.newline_indexes(), start, end, dvec2(0.0, -top_drop), dvec2(0.0, bottom_drop));
             for rect in rects {
                 self.draw_select.draw_abs(cx, rect);
             }
@@ -617,7 +627,7 @@ impl TextInput {
         
         if  cx.has_key_focus(self.draw_bg.area()) {
             // ok so. if we have the IME we should inject a tracking point
-            let ime_x = self.draw_text.get_cursor_pos(cx, 0.5, self.cursor_head)
+            let ime_x = self.draw_text.get_cursor_pos(cx, self.newline_indexes(), 0.5, self.cursor_head)
                 .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
             
             if self.numeric_only {
