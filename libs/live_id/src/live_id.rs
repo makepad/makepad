@@ -158,11 +158,14 @@ impl LiveId {
         Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
-    pub fn hash(&self)->Self{
-        let bytes = self.0.to_be_bytes();
-        Self::from_bytes(LIVE_ID_SEED, &bytes, 0, bytes.len())
+    pub fn add(&self, what:u64)->Self{
+        Self(self.0 + what)
     }
     
+    pub fn sub(&self, what:u64)->Self{
+        Self(self.0 - what)
+    }
+        
     pub const fn from_str(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
