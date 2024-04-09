@@ -510,6 +510,7 @@ impl PortalList {
             });
             Some((entry.clone(), already_existed))
         } else {
+            warning!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
             None
         }
     }
