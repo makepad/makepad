@@ -44,7 +44,6 @@ live_design!{
                     text_style: <GO_NOTO_CURRENT_REGULAR>{
                         font_size: 12, 
                     }
-                    draw_text:{color: #00f}
                 }
             }
         }
@@ -121,7 +120,13 @@ live_design!{
                     draw_bold:        { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
                     draw_bold_italic: { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
                     draw_fixed:       {                              text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
-            
+                    draw_block:{ 
+                        line_color: (MESSAGE_TEXT_COLOR)
+                        sep_color: (MESSAGE_TEXT_COLOR)
+                        quote_bg_color: (#4)
+                        quote_fg_color: (#7)
+                        block_color: (#3)
+                    }
                     list_item_layout: { line_spacing: 5.0, padding: {top: 1.0, bottom: 1.0}, }
 
                     Button = <Button> {
