@@ -106,7 +106,6 @@ live_design!{
                         <Pitalic> { text: "P italic copy text" }
                         <Pbold> { text: "P bold copy text" }
                         <Pbolditalic> { text: "P bold italic copy text" }
-                        <Meta> { text: "Meta information" }
                     }
                 }
 
