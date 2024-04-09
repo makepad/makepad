@@ -30,6 +30,11 @@ pub enum FlowBlockType {
 #[repr(C)]
 pub struct DrawFlowBlock {
     #[deref] draw_super: DrawQuad,
+    #[live] line_color: Vec4,
+    #[live] sep_color: Vec4,
+    #[live] code_color: Vec4,
+    #[live] quote_bg_color: Vec4,
+    #[live] quote_fg_color: Vec4,
     #[live] block_type: FlowBlockType
 } 
 
