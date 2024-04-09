@@ -5,7 +5,7 @@ live_design! {
     import crate::base::*;
 
     // DIMENSIONS
-    THEME_SPACE_FACTOR = 10.0 // Increase for a less dense layout
+    THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
     THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
     THEME_SPACE_2 = (1 * (THEME_SPACE_FACTOR))
     THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
@@ -46,7 +46,9 @@ live_design! {
     THEME_COLOR_U_4 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.75, THEME_COLOR_CONTRAST)))
     THEME_COLOR_U_3 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.9, THEME_COLOR_CONTRAST)))
     THEME_COLOR_U_1 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.95, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_HIDDEN = #FFFFFF00
 
+    THEME_COLOR_D_HIDDEN = #00000000
     THEME_COLOR_D_1 = (mix(#000000FF, #00000000, pow(0.85, THEME_COLOR_CONTRAST)))
     THEME_COLOR_D_2 = (mix(#000000FF, #00000000, pow(0.6, THEME_COLOR_CONTRAST)))
     THEME_COLOR_D_3 = (mix(#000000FF, #00000000, pow(0.4, THEME_COLOR_CONTRAST)))
@@ -62,12 +64,8 @@ live_design! {
     THEME_COLOR_CURSOR_BG = (THEME_COLOR_BLACK)
     THEME_COLOR_CURSOR_BORDER = (THEME_COLOR_WHITE)
 
-    THEME_COLOR_U_HIDDEN = #FFFFFF00
-    THEME_COLOR_D_HIDDEN = #00000000
-
     THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_6)
     THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT_DEFAULT)
-    THEME_COLOR_TEXT_META = (THEME_COLOR_U_5)
 
     THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_4)
     THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
@@ -100,7 +98,6 @@ live_design! {
 
     // Background of textinputs, radios, checkboxes etc.
     THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_U_1)
-    THEME_COLOR_INSET_HOVER = (THEME_COLOR_U_3)
     THEME_COLOR_INSET_PIT_TOP = (THEME_COLOR_D_3)
     THEME_COLOR_INSET_PIT_TOP_HOVER = (THEME_COLOR_D_3)
     THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)
@@ -110,13 +107,8 @@ live_design! {
     THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_U_5)
     THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_U_6)
     THEME_COLOR_AMOUNT_TRACK_DEFAULT = (THEME_COLOR_D_2)
-    THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_3)
+    THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_2)
     THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_3)
-
-    THEME_COLOR_MENU_BG_DEFAULT = (THEME_COLOR_D_HIDDEN)
-    THEME_COLOR_MENU_BG_HOVER = (THEME_COLOR_D_HIDDEN)
-    THEME_COLOR_MENU_TEXT_DEFAULT = (THEME_COLOR_D_HIDDEN)
-    THEME_COLOR_MENU_TEXT_HOVER = (THEME_COLOR_D_HIDDEN)
 
     // WIDGET SPECIFIC COLORS
     THEME_COLOR_DIVIDER = (THEME_COLOR_D_2)
@@ -152,14 +144,12 @@ live_design! {
     THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
     THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
-    THEME_FONT_SIZE_META = (THEME_FONT_SIZE_BASE + 0.5 * THEME_FONT_SIZE_CONTRAST)
 
     THEME_FONT_LABEL = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     THEME_FONT_REGULAR = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } }
     THEME_FONT_BOLD = { font: { path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf") } }
     THEME_FONT_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-Italic.ttf") } }
     THEME_FONT_BOLD_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-BoldItalic.ttf") } }
-    THEME_FONT_DATA = { font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") } }
     THEME_FONT_CODE = {
         font: {
             path: dep("crate://self/resources/LiberationMono-Regular.ttf")
@@ -187,7 +177,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_1)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H1"
     }
@@ -200,7 +190,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_1)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H1"
     }
@@ -213,7 +203,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_2)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H2"
     }
@@ -226,7 +216,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_2)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H2"
     }
@@ -239,7 +229,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_3)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H3"
     }
@@ -252,7 +242,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_3)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H3"
     }
@@ -265,7 +255,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_4)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H4"
     }
@@ -278,7 +268,7 @@ live_design! {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_4)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT_HL)
         }
         text: "Headline H4"
     }
@@ -333,19 +323,6 @@ live_design! {
             color: (THEME_COLOR_TEXT_DEFAULT)
         }
         text: "Paragraph"
-    }
-
-    Meta = <Label> {
-        width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
-        draw_text: {
-            text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_LINE_SPACING),
-                font_size: (THEME_FONT_SIZE_META)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-        text: "Meta data"
     }
 
     Hr = <View> {
@@ -460,7 +437,7 @@ live_design! {
                     sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                     return sdf.stroke(mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_META,
+                        THEME_COLOR_TEXT_PRESSED,
                         self.pressed
                     ), mix(0.0, 0.8, self.hover));
                 }
@@ -473,7 +450,7 @@ live_design! {
             instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_REGULAR>{}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -1838,7 +1815,7 @@ live_design! {
             instance selected: 0.0
             instance hover: 0.0
             text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
+                font_size: (THEME_FONT_SIZE_P),
             }
             fn get_color(self) -> vec4 {
                 return mix(
@@ -1966,7 +1943,7 @@ live_design! {
 
     DropDown = <DropDownBase> {
         width: Fit, height: Fit,
-        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: 20. }
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2), right: 22.5 }
         align: {x: 0., y: 0.}
 
         draw_text: {
@@ -2505,7 +2482,7 @@ live_design! {
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -2743,7 +2720,7 @@ live_design! {
     RadioButtonTab = <RadioButton> {
         height: Fit,
         draw_radio: { radio_type: Tab }
-        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1)}
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
 
         draw_text: {
             instance hover: 0.0
@@ -3002,7 +2979,7 @@ live_design! {
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let slider_bg_color = mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.focus);
+                let slider_bg_color = mix(mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_HOVER, self.hover), THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.focus);
                 let slider_color = mix(
                     mix(THEME_COLOR_AMOUNT_DEFAULT, THEME_COLOR_AMOUNT_HOVER, self.hover),
                     THEME_COLOR_AMOUNT_ACTIVE,
