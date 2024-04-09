@@ -24,7 +24,7 @@ live_design!{
     // }
     GO_NOTO_CURRENT_REGULAR = {
         font_size: 12,
-        top_drop: 1.2,
+        top_drop: 1.1,
         font: {
             path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")
         }
@@ -135,7 +135,12 @@ live_design!{
                     img = <HtmlImage> {
                     }
 
+                    // testing nested superscript one<sup>two<sup>three<sup>four</sup></sup></sup> <br />
                     body: "
+                        testing nested subscript zero a<sub>one a<sub>two a<sub>three a</sub>two b</sub>one b</sub> zero b<br />
+                        <br />
+                        another test nested subscript 0<sub>1<sub>2<sub>3</sub>2</sub>1</sub>0<br />
+                        <sep>
                         text up top with inline image
                         <img src=\"experiments/html_experiment/resources/img/google_logo.png\" width=272 height=92 alt=\"Google Logo\" title=\"Google Logo\" />
                         text after image <br />

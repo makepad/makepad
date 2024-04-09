@@ -4,7 +4,7 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        text_flow::TextFlow,
+        text_flow::{TextFlow, TextStyleOptions},
         link_label::LinkLabel,
     },
     std::rc::Rc,
@@ -128,11 +128,26 @@ impl Html {
             | some_id!(em) => tf.push_italic(),
 
             some_id!(sub) => {
-                // TODO: adjust baseline downwards
-                tf.push_size_abs_scale(0.6);
+                // Adjust the top drop to move the text slightly downwards.
+                let curr_top_drop = tf.latest_text_style_options()
+                    .and_then(|ts| ts.top_drop)
+                    .unwrap_or(1.1);
+                // A 55% increase in top_drop seems to look good for subscripts,
+                // which should be slightly below the halfway point in the line
+                let new_top_drop = curr_top_drop * 1.55;
+                tf.push_text_style_options(TextStyleOptions {
+                    top_drop: Some(new_top_drop),
+                    ..Default::default()
+                });
+                tf.push_size_rel_scale(0.7);
             }
             some_id!(sup) => {
-                tf.push_size_abs_scale(0.6);
+                // TODO: should superscript set top_drop as well?
+                //       It currently workw without it, but may be better with it.
+                tf.push_text_style_options(TextStyleOptions {
+                    ..Default::default()
+                });
+                tf.push_size_rel_scale(0.7);
             }
             some_id!(ul) => {
                 list_stack.push(ListLevel {
@@ -248,6 +263,7 @@ impl Html {
             }
             some_id!(sub)
             | some_id!(sup) => {
+                tf.pop_text_style_options();
                 tf.pop_size();
             }
             some_id!(ul)
