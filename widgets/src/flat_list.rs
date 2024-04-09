@@ -119,9 +119,12 @@ impl FlatList {
             let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
-            return Some(entry.clone())
+            Some(entry.clone())
         }
-        None
+        else {
+            warning!("Template not found: {template}. Did you add it to the <FlatList> instance in `live_design!{{}}`?");
+            None
+        }
     }
 
     /*
