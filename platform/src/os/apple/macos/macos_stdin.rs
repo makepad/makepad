@@ -15,7 +15,7 @@ use {
         //makepad_live_compiler::LiveFileChange,
         event::Event,
         window::CxWindowPool,
-        event::WindowGeom,
+        event::{WindowGeom,WindowGeomChangeEvent},
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         os::{
@@ -72,6 +72,7 @@ impl Cx {
             match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(swapchain) = &mut windows[window_id.id()].swapchain{
+                        
                         let [current_image] = &swapchain.presentable_images;
                         if let Some(texture) = &current_image.image {
                             let window = &mut self.windows[window_id];
@@ -83,13 +84,13 @@ impl Cx {
     
                             let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            
                             let future_presentable_draw = PresentableDraw {
                                 target_id: current_image.id,
                                 window_id: window_id.id(),
                                 width: (pass_rect.size.x * dpi_factor) as u32,
                                 height: (pass_rect.size.y * dpi_factor) as u32,
-                            };
-    
+                            }; 
                             // render to swapchain
                             self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw));
                             // and then wait for GPU, which calls stdin_send_draw_complete when its done
@@ -189,25 +190,40 @@ impl Cx {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
                 HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height, window_id } => {
-                    self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
+                    let window_id = CxWindowPool::from_usize(window_id);
+                    let old_geom = self.windows[window_id].window_geom.clone();
+                    let new_geom = WindowGeom {
                         dpi_factor,
                         inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
                     };
-                    self.redraw_all();
+                    self.windows[window_id].window_geom = new_geom.clone();
+                    let re = WindowGeomChangeEvent{
+                        window_id,
+                        new_geom,
+                        old_geom
+                    };
+                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor || re.old_geom.inner_size != re.new_geom.inner_size {
+                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
+                        }
+                    }
+                    self.call_event_handler(&Event::WindowGeomChange(re));
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
-
+                    //println!("STORING SWAPCHAIN {}", new_swapchain.window_id);
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
                 }
                 HostToStdin::PollSwapChain{window_id}  => if windows[window_id].swapchain.is_some() {
+                    
                     let window = &mut windows[window_id];
                     let swapchain = window.swapchain.as_mut().unwrap();
                     let [presentable_image] = &swapchain.presentable_images;
                     // lets fetch the framebuffers
                     if presentable_image.image.is_none() {
+                        
                         let tx_fb = window.tx_fb.clone();
                         fetch_xpc_service_texture(
                             service_proxy.as_id(),
@@ -217,6 +233,7 @@ impl Cx {
                         // this is still pretty bad at 100ms if the service is still starting up
                         // we should 
                         if let Ok(fb) = window.rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
+                            
                             let format = TextureFormat::SharedBGRAu8 {
                                 id: presentable_image.id,
                                 width: swapchain.alloc_width as usize,
@@ -361,11 +378,9 @@ impl Cx {
     fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::CreateWindow(_window_id) => {
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
+                CxOsOp::CreateWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    // lets set up our render pass target
-                    
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
