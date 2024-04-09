@@ -102,7 +102,8 @@ live_design!{
                             show_bg: true,
                             draw_bg: { color: #f00}
                             <View> { show_bg: true, width: Fill, height: Fill,
-                                 draw_bg: { color: (blend(#FFFFFFFF, #00FF00FF)) }}
+                                 draw_bg: { color: (blend(#FFFFFFFF, #00FF00FF)) }
+                                 draw_bg: { color: (mix(#FFFFFFFF, #00FF00FF, 0.5)) }
                                 //  draw_bg: { color: (#FFFFFFFF * (#00000000)) }}
                                 //  draw_bg: { color: (#FFFFFFFF * pow(0.8, COLOR_CONTRAST)) }}
                                 //  draw_bg: {
