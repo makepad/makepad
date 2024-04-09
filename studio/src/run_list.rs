@@ -283,8 +283,8 @@ impl BuildManager {
             active.builds.insert(item_id, ActiveBuild {
                 log_index: format!("[{}]", index),
                 process: process.clone(),
-                swapchain: None,
-                last_swapchain_with_completed_draws: None,
+                swapchain: [None,None],
+                last_swapchain_with_completed_draws: [None,None],
                 aux_chan_host_endpoint: None,
             });
         }

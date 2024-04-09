@@ -41,14 +41,14 @@ pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
     pub process: BuildProcess,
-    pub swapchain: Option<cx_stdin::Swapchain<Texture >>,
+    pub swapchain: [Option<cx_stdin::Swapchain<Texture >>;2],
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
     ///
     /// While not strictly necessary, it can also accept *new* draws to any of
     /// its images, which allows the client to catch up a frame or two, visually.
-    pub last_swapchain_with_completed_draws: Option<cx_stdin::Swapchain<Texture >>,
+    pub last_swapchain_with_completed_draws: [Option<cx_stdin::Swapchain<Texture >>;2],
     
     pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
@@ -173,7 +173,7 @@ impl BuildManager {
         for (item_id, active_build) in &mut self.active.builds {
             self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
             self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
-            active_build.swapchain = None;
+            active_build.swapchain = [None,None];
             //active_build.last_swapchain_with_completed_draws = None;
             active_build.aux_chan_host_endpoint = None;
         }
