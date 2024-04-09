@@ -121,6 +121,7 @@ impl RunView {
     }
     
     pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &mut BuildManager) {
+        let window_id = self.window_id;
         match msg {
             
             StdinToHost::SetCursor(cursor) => {
@@ -162,15 +163,15 @@ impl RunView {
                             Some(())
                         };
     
-                        if try_present_through(&v.swapchain).is_some() {
+                        if try_present_through(&v.swapchain[window_id]).is_some() {
                             // The client is now drawing to the current swapchain,
                             // we can discard any previous one we were stashing.
-                            v.last_swapchain_with_completed_draws = None;
+                            v.last_swapchain_with_completed_draws[self.window_id] = None;
                         } else {
                             // New draws to a previous swapchain are fine, just means
                             // the client hasn't yet drawn on the current swapchain,
                             // what lets us accept draws is their target `Texture`s.
-                            try_present_through(&v.last_swapchain_with_completed_draws);
+                            try_present_through(&v.last_swapchain_with_completed_draws[window_id]);
                         }
                     }
                 }
@@ -218,7 +219,7 @@ impl RunView {
                 .get_mut(&run_view_id)
                 .filter(|v| v.aux_chan_host_endpoint.is_some())
                 .filter(|v| {
-                    v.swapchain.as_ref().map(|swapchain| {
+                    v.swapchain[self.window_id].as_ref().map(|swapchain| {
                         min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
                     }).unwrap_or(true)
                 });
@@ -227,14 +228,14 @@ impl RunView {
                 // the current swapchain, but the absence of an older swapchain
                 // (i.e. `last_swapchain_with_completed_draws`) implies either
                 // zero draws so far, or a draw to the current one discarded it.
-                if v.last_swapchain_with_completed_draws.is_none() {
-                    v.last_swapchain_with_completed_draws = v.swapchain.take();
+                if v.last_swapchain_with_completed_draws[self.window_id].is_none() {
+                    v.last_swapchain_with_completed_draws[self.window_id] = v.swapchain[self.window_id].take();
                 }
 
                 // `Texture`s can be reused, but all `PresentableImageId`s must
                 // be regenerated, to tell apart swapchains when e.g. resizing
                 // constantly, so textures keep getting created and replaced.
-                if let Some(swapchain) = &mut v.swapchain {
+                if let Some(swapchain) = &mut v.swapchain[self.window_id] {
                     for pi in &mut swapchain.presentable_images {
                         pi.id = cx_stdin::PresentableImageId::alloc();
                     }
@@ -245,7 +246,7 @@ impl RunView {
                 let alloc_width = min_width.max(64).next_power_of_two();
                 let alloc_height = min_height.max(64).next_power_of_two();
                 
-                let swapchain = v.swapchain.get_or_insert_with(|| {
+                let swapchain = v.swapchain[self.window_id].get_or_insert_with(|| {
                     Swapchain::new(self.window_id, alloc_width, alloc_height).images_map(|pi| {
                         // Prepare a version of the swapchain for cross-process sharing.
                         Texture::new_with_format(cx, TextureFormat::SharedBGRAu8 {
