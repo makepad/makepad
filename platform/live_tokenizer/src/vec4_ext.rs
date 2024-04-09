@@ -6,7 +6,7 @@ pub trait Vec4Ext{
     fn from_hex_str(hex: &str) -> Result<Vec4, ()> {Self::from_hex_bytes(hex.as_bytes())}
     fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4, ()>;
     fn append_hex_to_string(&self, out:&mut String);
-    fn from_html_color(value: &str) -> Vec4;
+    fn from_hex_color(value: &str) -> Vec4;
 }
 
 impl Vec4Ext for Vec4{
@@ -29,7 +29,7 @@ impl Vec4Ext for Vec4{
         out.push(int_to_hex((b) & 0xf));
     }
     
-    fn from_html_color(value: &str) -> Vec4 {
+    fn from_hex_color(value: &str) -> Vec4 {
         if let Ok(val) = Self::from_hex_str(value) {
             val
         }
