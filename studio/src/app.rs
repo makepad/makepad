@@ -263,7 +263,6 @@ impl MatchEvent for App{
                 _=>()
             }
         }
-
     }        
         
     fn handle_key_down(&mut self, cx: &mut Cx, event: &KeyEvent){

@@ -48,7 +48,14 @@ impl Widget for Image {
 }
 
 impl Image {
-    
+    /// Returns the original size of the image in pixels (not its displayed size).
+    ///
+    /// Returns `None` if the image has not been loaded into a texture yet.
+    pub fn size_in_pixels(&self, cx: &mut Cx) -> Option<(usize, usize)> {
+        self.texture.as_ref()
+            .and_then(|t| t.get_format(cx).vec_width_height())
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
         // alright we get a walk. depending on our aspect ratio
         // we change either nothing, or width or height
@@ -151,6 +158,15 @@ impl ImageRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
-    }    
+    }
+
+    /// See [`Image::size_in_pixels()`].
+    pub fn size_in_pixels(&self, cx: &mut Cx) -> Option<(usize, usize)> {
+        if let Some(inner) = self.borrow() {
+            inner.size_in_pixels(cx)
+        } else {
+            None
+        }
+    }
 }
 
