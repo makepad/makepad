@@ -143,7 +143,7 @@ impl CxFontsAtlasAlloc {
     }
 }
 
-#[derive(Clone, Live, LiveRegister)]
+#[derive(Debug, Clone, Live, LiveRegister)]
 pub struct Font {
     #[rust] pub font_id: Option<usize>,
     #[live] pub path: LiveDependency
