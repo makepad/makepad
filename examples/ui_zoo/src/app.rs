@@ -93,6 +93,26 @@ live_design!{
                     <View> {
                         width: Fill, height: Fit,
                         flow: Down,
+                        show_bg: true,
+                        draw_bg: { color: (COLOR_CONTAINER) }
+                        padding: 20.,
+                        <P> { text: "- Shader-based: what does that mean for how things work." }
+                        <P> { text: "- Inheritance mechanisms in the DSL." }
+                        <P> { text: "- Introduction to the layout system." }
+                        <P> { text: "- Typographic system. Base font-size and contrast." }
+                        <P> { text: "- Space constants to control denseness of the design." }
+                        <P> { text: "- Transparency mechanism of the widgets. Nesting for structure." }
+                    }
+                }
+
+                <ZooHeader> {
+                    title = {text: "Typography"}
+                    <ZooDesc> {
+                        text: "Typography."
+                    }
+                    <View> {
+                        width: Fill, height: Fit,
+                        flow: Down,
                         
                         <H1> { text: "H1 headline" }
                         <H1italic> { text: "H1 italic headline" }
