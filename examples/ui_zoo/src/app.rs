@@ -433,9 +433,9 @@ live_design!{
                         }
                         <View> {
                             width: Fill, height: Fit,
-                            <Slider> { text: "Parameter" }
-                            <Slider> { text: "Parameter" }
-                            <Slider> { text: "Parameter" }
+                            <SliderBig> { text: "SliderBig" }
+                            <SliderBig> { text: "SliderBig" }
+                            <SliderBig> { text: "SliderBig" }
                         }
                     }
                 }
