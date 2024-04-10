@@ -24,6 +24,10 @@ impl LiveHook for Root {
         match apply.from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
+                    // only open the design window 
+                    if id == live_id!(design_window) && !cx.in_makepad_studio(){
+                        return nodes.skip_node(index);
+                    }
                     if cx.os_type().is_single_window() && id != live_id!(mobile){
                         return nodes.skip_node(index);
                     }
