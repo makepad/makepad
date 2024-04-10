@@ -415,26 +415,23 @@ live_design!{
                     <ZooDesc> { text:"A parameter dragger" }
                     <ZooGroup> {
                         width: Fill, height: Fit,
-                        flow: Down,
+                        flow: Right,
+                        align: { x: 0., y: 0.}
                         <View> {
                             width: Fill, height: Fit,
+                            flow: Down,
                             <Slider> { text: "Default" }
                             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                             <Slider> { text: "min/max", min: 0., max: 100. }
-                        }
-                        <View> {
-                            width: Fill, height: Fit,
                             <Slider> { text: "precision", precision: 20 }
                             <Slider> { text: "step", step: 0.1 }
                         }
                         <View> {
                             width: Fill, height: Fit,
+                            flow: Down,
                             <SliderBig> { text: "Default" }
                             <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                             <SliderBig> { text: "min/max", min: 0., max: 100. }
-                        }
-                        <View> {
-                            width: Fill, height: Fit,
                             <SliderBig> { text: "precision", precision: 20 }
                             <SliderBig> { text: "step", step: 0.1 }
                         }
