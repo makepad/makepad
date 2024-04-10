@@ -112,11 +112,11 @@ impl Widget for Markdown {
                 },
                 MarkdownNode::BeginInlineCode=>{
                     tf.push_fixed();
-                    tf.begin_inline_code(cx);     
+                    tf.push_inline_code(cx);     
                 },
                 MarkdownNode::EndInlineCode=>{
                     tf.pop_fixed();
-                    tf.end_inline_code(cx);                 
+                    tf.pop_inline_code(cx);                 
                 },
                 MarkdownNode::BeginCode=>{
                     cx.turtle_new_line();

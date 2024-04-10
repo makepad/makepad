@@ -99,7 +99,7 @@ impl Html {
             some_id!(code) => {
                 tf.push_size_abs_scale(0.85);
                 tf.push_fixed();
-                tf.begin_inline_code(cx); // inline code block doesn't work properly
+                tf.push_inline_code(cx); // inline code block doesn't work properly
             }
             some_id!(pre) => {
                 cx.turtle_new_line();
@@ -253,7 +253,7 @@ impl Html {
             }
             some_id!(blockquote) => tf.end_quote(cx),
             some_id!(code) => {
-                tf.end_inline_code(cx); // doesn't work properly
+                tf.pop_inline_code(cx); // doesn't work properly
                 tf.pop_size();
                 tf.pop_fixed(); 
             }

@@ -58,6 +58,7 @@ pub struct TextFlow {
     #[rust] fixed_counter: usize,
     #[rust] underline_counter: usize,
     #[rust] strikethrough_counter: usize,
+    #[rust] inline_code_counter: usize,
     
     #[rust] text_style_stack: Vec<TextStyleOptions>,
     #[rust] font_size_stack: FontSizeStack,
@@ -276,6 +277,7 @@ impl TextFlow{
         self.fixed_counter = 0;
         self.underline_counter = 0;
         self.strikethrough_counter = 0;
+        self.inline_code_counter = 0;
     }
     
     pub fn end(&mut self, cx: &mut Cx2d){
@@ -379,16 +381,16 @@ impl TextFlow{
         self.draw_block.end(cx);
     }
     
-    pub fn begin_inline_code(&mut self, cx:&mut Cx2d){
+    pub fn push_inline_code(&mut self, cx:&mut Cx2d){
         // alright we are going to push a block with a layout and a walk
-        self.draw_block.block_type = FlowBlockType::InlineCode;
+        /*self.draw_block.block_type = FlowBlockType::InlineCode;
         self.draw_block.begin(cx, self.inline_code_walk, self.inline_code_layout);
-        self.area_stack.push(self.draw_block.draw_vars.area);
+        self.area_stack.push(self.draw_block.draw_vars.area);*/
     } 
         
-    pub fn end_inline_code(&mut self, cx:&mut Cx2d){
-        self.draw_block.draw_vars.area = self.area_stack.pop();
-        self.draw_block.end(cx);
+    pub fn pop_inline_code(&mut self, cx:&mut Cx2d){
+        /*self.draw_block.draw_vars.area = self.area_stack.pop();
+        self.draw_block.end(cx);*/
     }
       
     pub fn begin_list_item(&mut self, cx:&mut Cx2d, dot:&str, pad:f64){
@@ -491,7 +493,14 @@ impl TextFlow{
             dt.text_style.font_size = font_size;
 
             // the turtle is at pos X so we walk it.
-            if self.strikethrough_counter > 0{
+            if self.inline_code_counter > 0{
+                let db = &mut self.draw_block;
+                db.block_type = FlowBlockType::InlineCode;
+                dt.draw_walk_word_with(cx, text, |cx, rect|{
+                    db.draw_abs(cx, rect);
+                });
+            }
+            else if self.strikethrough_counter > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::Strikethrough;
                 dt.draw_walk_word_with(cx, text, |cx, rect|{
