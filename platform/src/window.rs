@@ -158,6 +158,10 @@ impl WindowHandle {
         cx.windows[self.window_id()].get_position()
     }
     
+    pub fn set_kind_id(&mut self, cx: &mut Cx,kind_id:usize) {
+        cx.windows[self.window_id()].kind_id = kind_id;
+    }
+    
     pub fn minimize(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::MinimizeWindow(self.window_id()));
     }
@@ -208,6 +212,7 @@ pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<DVec2>,
     pub create_inner_size: Option<DVec2>,
+    pub kind_id: usize,
     pub dpi_override: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,

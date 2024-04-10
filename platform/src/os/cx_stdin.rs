@@ -416,7 +416,6 @@ pub enum HostToStdin{
         inner_height: f64,
     },
     Tick,
-    PollSwapChain{window_id: usize},
     /*
     Tick{
         buffer_id: u64,
@@ -452,6 +451,7 @@ pub struct PresentableDraw {
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
+    CreateWindow{window_id: usize, kind_id:usize},
     ReadyToStart,
     SetCursor(MouseCursor),
     // the client is done drawing, and the texture is completely updated
