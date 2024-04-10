@@ -292,9 +292,6 @@ live_design! {
         list_item_layout:{flow: RightWrap, padding:{left:0,top:0,right:10,bottom:0}},
         list_item_walk:{height:Fit,width:Fill}
         
-        inline_code_layout:{flow: RightWrap,  padding:{left:3,top:2,right:3,bottom:2}},
-        inline_code_walk:{height:Fit,width:Fit,margin:{top:-2}} 
-                  
         sep_walk:{height:4, width: Fill},
                 
         a = <HtmlLink> {
@@ -411,9 +408,6 @@ live_design! {
         code_layout:{flow: RightWrap,align:{x:0.0,y:0.0}, padding:{left:10,top:10,right:10,bottom:10}},
         code_walk:{height:Fit,width:Fill}
         
-        inline_code_layout:{flow: RightWrap,  padding:{left:3,top:2,right:3,bottom:2}},
-        inline_code_walk:{height:Fit,width:Fit,margin:{top:-4}} 
-                        
         quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
         quote_walk:{height:Fit,width:Fill}
                 

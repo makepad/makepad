@@ -72,8 +72,6 @@ pub struct TextFlow {
     #[live] sep_walk: Walk, 
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
-    #[live] inline_code_layout: Layout,
-    #[live] inline_code_walk: Walk,
     
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
@@ -386,11 +384,15 @@ impl TextFlow{
         /*self.draw_block.block_type = FlowBlockType::InlineCode;
         self.draw_block.begin(cx, self.inline_code_walk, self.inline_code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);*/
+        self.inline_code_counter +=1;
     } 
         
     pub fn pop_inline_code(&mut self, cx:&mut Cx2d){
         /*self.draw_block.draw_vars.area = self.area_stack.pop();
         self.draw_block.end(cx);*/
+        if self.inline_code_counter>0{
+            self.inline_code_counter -= 1;
+        }
     }
       
     pub fn begin_list_item(&mut self, cx:&mut Cx2d, dot:&str, pad:f64){
