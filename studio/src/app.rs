@@ -168,7 +168,6 @@ impl MatchEvent for App{
             BuildManagerAction::StdinToHost {build_id, msg} => {
                 match msg{
                     StdinToHost::CreateWindow{window_id, kind_id}=>{
-                        log!("CREATE WINDOW");
                         let panel_id = build_id.add(window_id as u64);
                         if let Some(name) = self.data.build_manager.process_name(build_id){
                             
