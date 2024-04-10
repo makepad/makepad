@@ -665,6 +665,10 @@ impl Dock {
                         if *closable {
                             self.unsplit_tabs(cx, tabs_id);
                         }
+                        if !keep_item {
+                            self.dock_items.remove(&tab_id);
+                            self.items.remove(&tab_id);
+                        }
                         self.area.redraw(cx);
                         return None
                     }
@@ -673,6 +677,7 @@ impl Dock {
                         self.select_tab(cx, next_tab);
                         if !keep_item {
                             self.dock_items.remove(&tab_id);
+                            self.items.remove(&tab_id);
                         }
                         self.area.redraw(cx);
                         return Some(tabs_id)
