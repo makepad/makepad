@@ -306,6 +306,11 @@ live_design! {
         }
         
         draw_block:{
+            line_color: #9
+            sep_color: #9
+            quote_bg_color: #4
+            quote_fg_color: #7
+            block_color: #3
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -418,6 +423,11 @@ live_design! {
         sep_walk:{height:4, width: Fill},
                 
         draw_block:{
+            line_color: #9
+            sep_color: #9
+            quote_bg_color: #4
+            quote_fg_color: #7
+            block_color: #3
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
