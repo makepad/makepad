@@ -635,7 +635,7 @@ impl DrawText {
             padded_rect.size.x,
             font_size_logical * self.font_scale, 
         );
-        
+        let mut last_rect = None;
         while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
             let walk_rect = cx.walk_turtle(Walk {
                 abs_pos: None,
@@ -643,7 +643,22 @@ impl DrawText {
                 width: Size::Fixed(word.width),
                 height: Size::Fixed(line_drop)
             });
-            cb(cx, walk_rect);
+            if last_rect.is_none(){
+                last_rect = Some(walk_rect)
+            }
+            else{
+                let rect = last_rect.unwrap();
+                if walk_rect.pos.y > rect.pos.y { // we emit the last rect
+                    cb(cx, rect);
+                    last_rect = Some(walk_rect);
+                }
+                else{
+                    last_rect.as_mut().unwrap().size.x += walk_rect.size.x;
+                }
+            }
+            if let Some(rect) = last_rect{
+                cb(cx, rect);
+            }
             // make sure our iterator uses the xpos from the turtle
             self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
         }
