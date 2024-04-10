@@ -382,7 +382,7 @@ impl AppMain for App {
                 }
             }
         }*/
-        
+         
         if let Some(mut dock_items) = dock.needs_save(){
             dock_items.retain(|di| {
                 if let DockItemStore::Tab{kind,..} = di{
