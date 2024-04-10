@@ -293,6 +293,7 @@ live_design! {
         list_item_walk:{height:Fit,width:Fill}
         
         inline_code_padding:3,
+        inline_code_margin: 3,
         
         sep_walk:{height:4, width: Fill},
                 
@@ -419,7 +420,8 @@ live_design! {
         sep_walk:{height:4, width: Fill},
         
         inline_code_padding:3,
-                
+        inline_code_margin: 3,
+                        
         draw_block:{
             line_color: #9
             sep_color: #9
