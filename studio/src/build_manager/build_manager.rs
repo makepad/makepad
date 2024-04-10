@@ -8,6 +8,10 @@ use {
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,
+            StdinMouseDown,
+            StdinMouseUp,
+            StdinMouseMove,
+            StdinScroll
         },
         makepad_platform::studio::{AppToStudio,AppToStudioVec,EventSample, GPUSample, StudioToAppVec, StudioToApp},
         build_manager::{
@@ -262,13 +266,56 @@ impl BuildManager {
         }
     }
     
+    pub fn broadcast_to_stdin(&mut self, msg: HostToStdin){
+        for build_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(msg.to_json()));
+        }
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
         if let Some(_) = self.tick_timer.is_event(event) {
-            for build_id in self.active.builds.keys() {
-                self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(HostToStdin::Tick.to_json()));
-            }
+            self.broadcast_to_stdin(HostToStdin::Tick);
         }
-    
+        
+        match event {
+            Event::MouseDown(e) => {
+                self.broadcast_to_stdin(HostToStdin::MouseDown(StdinMouseDown {
+                    time: e.time,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                    button: e.button,
+                }));
+            }
+            Event::MouseMove(e) => {
+                // we send this one to what window exactly?
+                self.broadcast_to_stdin(HostToStdin::MouseMove(StdinMouseMove {
+                    time: e.time,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                }));
+            }
+            Event::MouseUp(e) => {
+                self.broadcast_to_stdin(HostToStdin::MouseUp(StdinMouseUp {
+                    time: e.time,
+                    button: e.button,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                }));
+            }
+            Event::Scroll(e) => {
+                self.broadcast_to_stdin(HostToStdin::Scroll(StdinScroll {
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                    sx: e.scroll.x,
+                    sy: e.scroll.y
+                }));
+            }
+            _ => ()
+        }
+                        
+            
         if let Event::Signal = event {
             let log = &mut self.log;
             let active = &mut self.active;       
