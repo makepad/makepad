@@ -129,6 +129,8 @@ live_design! {
     THEME_COLOR_SLIDER_BIG_NUB_BOTTOM = #282828
     THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER = #3
 
+    THEME_COLOR_CTRL_SCROLLBAR_HOVER = (THEME_COLOR_U_4)
+
     // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
     THEME_COLOR_HIGH = #C00
     THEME_COLOR_MID = #FA0
@@ -832,11 +834,7 @@ live_design! {
                 }
                 return sdf.fill( mix(
                     THEME_COLOR_CTRL_DEFAULT,
-                    mix(
-                        THEME_COLOR_CTRL_HOVER,
-                        THEME_COLOR_CTRL_PRESSED,
-                        self.pressed
-                    ),
+                    THEME_COLOR_CTRL_SCROLLBAR_HOVER,
                     self.hover
                 ));
             }
