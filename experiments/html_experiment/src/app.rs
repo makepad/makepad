@@ -32,6 +32,22 @@ live_design!{
         }
     }
 
+    // This is an HTML subwidget used to handle `<font>` and `<span>` tags,
+    // specifically: foreground text color, background color, and spoilers.
+    MatrixHtmlSpan = {{MatrixHtmlSpan}}<Label> {
+        width: Fit,
+        height: Fit,
+
+        draw_text: {
+            color: (MESSAGE_TEXT_COLOR),
+            text_style: <MESSAGE_TEXT_STYLE> { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) },
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+        }
+        text: "MatrixHtmlSpan placeholder",
+
+    }
 
     TextOrImage = {{TextOrImage}}{
         margin:{left:10, right:10}
@@ -133,10 +149,17 @@ live_design!{
                         text: "Hello world"
                     }
 
-                    img = <HtmlImage> {
-                    }
+                    img = <HtmlImage> { }
+                    font = <MatrixHtmlSpan> { }
+                    span = <MatrixHtmlSpan> { }
 
                     body: "
+                        testing direct font color: <font color=#00FF00>green font</font> <font color=\"#FF0000\">red font</font> <br />
+                        testing rainbow: <font color=\"#ff00be\">t</font><font color=\"#ff0082\">e</font><font color=\"#ff0047\">s</font><font color=\"#ff5800\">t</font><font color=\"#ff8400\">i</font><font color=\"#ffa300\">n</font><font color=\"#d2ba00\">g</font> <font color=\"#3ed500\">r</font><font color=\"#00dd00\">a</font><font color=\"#00e251\">i</font><font color=\"#00e595\">n</font><font color=\"#00e7d6\">b</font><font color=\"#00e7ff\">o</font><font color=\"#00e6ff\">w</font> <font color=\"#00dbff\">m</font><font color=\"#00ceff\">e</font><font color=\"#00baff\">s</font><font color=\"#769eff\">s</font><font color=\"#f477ff\">a</font><font color=\"#ff3aff\">g</font><font color=\"#ff00fb\">e</font> <br />
+                        testing span with colors, purple text on aqua background: <span data-mx-bg-color=\"#00FFFF\" data-mx-color=\"#800080\">this is my funny text color</span> <br />
+                        testing spoiler: <span data-mx-spoiler=\"reason here\">hidden spoiler content</span> <br />
+                        <br />
+                        <sep>
                         test underline: <u>Underlined Text</u> <br />
                         test strikethrough: <del>Strikethrough Text</del> <br />
                         testing nested subscript zero<sub>one<sub>two<sub>three</sub>two</sub>one</sub>zero<br />
@@ -298,6 +321,82 @@ impl AppMain for App {
 //////////////////////////// NEW HTML WIDGET STUFF /////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////
+
+
+#[derive(Live, Widget)]
+pub struct MatrixHtmlSpan {
+    /// The URL of the image to display.
+    #[deref] ll: Label,
+    /// Background color: the `data-mx-bg-color` attribute.
+    #[rust] bg_color: Option<Vec4>,
+    /// Foreground (text) color: the `data-mx-color` or `color` attributes.
+    #[rust] fg_color: Option<Vec4>,
+    /// There are three possible spoiler variants:
+    /// 1. `None`: no spoiler attribute was present at all.
+    /// 2. `Some(empty)`: there was a spoiler but no reason was given.
+    /// 3. `Some(reason)`: there was a spoiler with a reason given for it being hidden.
+    #[rust] spoiler: Option<String>,
+}
+
+impl Widget for MatrixHtmlSpan {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.ll.handle_event(cx, event, scope);
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.ll.draw_walk(cx, scope, walk)
+    }
+
+    fn set_text(&mut self, v: &str) {
+        self.ll.set_text(v);
+    }
+}
+
+impl LiveHook for MatrixHtmlSpan {
+    // After an MatrixHtmlSpan instance has been instantiated ("applied"),
+    // populate its struct fields from the `<span>` tag's attributes.
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        // The attributes we care about in `<font>` and `<span>` tags are:
+        // * data-mx-bg-color, data-mx-color, data-mx-spoiler, color.
+
+        if let ApplyFrom::NewFromDoc {..} = apply.from {
+            if let Some(scope) = apply.scope.as_ref() {
+                if let Some(doc) = scope.props.get::<HtmlDoc>() {
+                    let mut walker = doc.new_walker_with_index(scope.index + 1);
+                    while let Some((lc, attr)) = walker.while_attr_lc(){
+                        log!("Looking at attribute: {:?} = {:?}, trimmed {:?}", lc, attr, attr.trim_matches(&['"', '\'']));
+                        let attr = attr.trim_matches(&['"', '\'']);
+                        match lc {
+                            live_id!(color)
+                            | live_id!(data-mx-color) => self.fg_color = Vec4::from_hex_str(attr).ok(),
+                            live_id!(data-mx-bg-color) => self.bg_color = Vec4::from_hex_str(attr).ok(),
+                            live_id!(data-mx-spoiler) => self.spoiler = Some(attr.into()),
+                            _ => ()
+                        }
+                    }
+
+                    log!("MatrixHtmlSpan::after_apply(): fg_color: {:?}, bg_color: {:?}, spoiler: {:?}",
+                        self.fg_color, self.bg_color, self.spoiler,
+                    );
+
+                    // Set the Label's foreground text color and background color
+                    if let Some(fg_color) = self.fg_color {
+                        self.ll.apply_over(cx, live!{ draw_text: { color: (fg_color) } });
+                    };
+                    if let Some(bg_color) = self.bg_color {
+                        self.ll.apply_over(cx, live!{ draw_bg: { color: (bg_color) } });
+                    };
+
+                    // TODO: need to use a link label to handle the spoiler, so we can toggle it upon click.
+                }
+            } else {
+                warning!("MatrixHtmlSpan::after_apply(): scope not found, cannot set attributes.");
+            }
+        }
+    }
+}
+
+
 
 /// A view that holds an image or text content, and can switch between the two.
 ///

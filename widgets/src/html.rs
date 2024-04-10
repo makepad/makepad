@@ -17,7 +17,7 @@ live_design!{
 
     HtmlLinkBase = {{HtmlLink}} {
         link = {
-            draw_text = {
+            draw_text: {
                 // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
                 color: #1a0dab
             }

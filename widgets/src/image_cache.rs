@@ -198,7 +198,6 @@ pub trait ImageCacheImpl {
         image_path: &str,
         id: usize,
     ) -> Result<(), ImageError> {
-        log!("LOADING FROM DISK  {}", image_path);
         if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
             self.set_texture(Some(texture.clone()), id);
             Ok(())
