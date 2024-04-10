@@ -55,7 +55,7 @@ impl PlistValues{
             <plist version="1.0">
             <dict>
                 <key>BuildMachineOSBuild</key>
-                <string>23A344</string>
+                <string>23B2082</string>
                 <key>CFBundleDevelopmentRegion</key>
                 <string>en</string>
                 <key>CFBundleExecutable</key>
@@ -93,7 +93,7 @@ impl PlistValues{
                 <key>DTXcode</key>
                 <string>1500</string>
                 <key>DTXcodeBuild</key>
-                <string>15A240d</string>
+                <string>15A507</string>
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
