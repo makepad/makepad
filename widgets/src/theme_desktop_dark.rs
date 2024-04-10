@@ -2997,22 +2997,37 @@ live_design! {
                 match self.slider_type {
                     SliderType::Horizontal => {
 
-                        sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
+                        sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
 
-                        sdf.rect(0, self.rect_size.y - slider_height * 0.3, self.rect_size.x, slider_height)
+                        sdf.rect(0, self.rect_size.y - slider_height * 0.5, self.rect_size.x, slider_height)
                         sdf.fill(THEME_COLOR_BEVEL_LIGHT);
 
-                        sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
+                        sdf.rect(
+                            0,
+                            self.rect_size.y - slider_height * 1.25,
+                            self.slide_pos * (self.rect_size.x - nub_size) + nub_size,
+                            slider_height
+                        )
                         sdf.fill(slider_color);
 
                         let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
-                        sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
+                        sdf.rect(
+                            nubbg_x,
+                            self.rect_size.y - slider_height * 1.25,
+                            nubbg_size,
+                            slider_height
+                        )
                         sdf.fill(nubbg_color);
 
                         // the nub
                         let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
-                        sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
+                        sdf.rect(
+                            nub_x,
+                            self.rect_size.y - slider_height * 1.25,
+                            nub_size,
+                            slider_height
+                        )
                         sdf.fill(nub_color);
                     }
                     SliderType::Vertical => {
