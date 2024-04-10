@@ -20,7 +20,7 @@ live_design!{
         width: Fill, height: Fit,
         flow: Down,
         align: { x: 0.0, y: 0.5},
-        margin: <THEME_MSPACE_3> {}, 
+        margin: <THEME_MSPACE_3> {},
         spacing: 10.,
         show_bg: false,
         title = <H2> { text: "Makepad UI Zoo" }
@@ -39,7 +39,7 @@ live_design!{
         height: Fit, width: Fill,
         flow: Right,
         align: { x: 0.0, y: 0.5},
-        margin: 0., 
+        margin: 0.,
         show_bg: false;
         draw_bg: { color: (COLOR_CONTAINER) }
     }
@@ -48,7 +48,7 @@ live_design!{
 
     ZooBlock = <RoundedView> {
         width: 50., height: 50.
-        margin: 0., 
+        margin: 0.,
         spacing: 0.,
 
         show_bg: true;
@@ -80,7 +80,7 @@ live_design!{
                 width: Fill, height: Fill,
                 flow: Down,
                 spacing: 10.,
-                margin: 0., 
+                margin: 0.,
                 scroll_bars: <ScrollBars> {}
 
                 <ZooTitle> {}
@@ -113,7 +113,7 @@ live_design!{
                     <View> {
                         width: Fill, height: Fit,
                         flow: Down,
-                        
+
                         <H1> { text: "H1 headline" }
                         <H1italic> { text: "H1 italic headline" }
                         <H2> { text: "H2 headline" }
@@ -285,7 +285,7 @@ live_design!{
                         <Label> { text: "<ButtonFlat>"}
                         <View> {
                             flow: Right,
-                            align: { x: 0., y: 0.5 } 
+                            align: { x: 0., y: 0.5 }
                             width: Fill, height: Fit,
                             <ButtonFlat> {
                                 draw_icon: {
@@ -455,7 +455,7 @@ live_design!{
                     title = {text:"<FileTree>"}
                     <ZooDesc> {text:"File Tree"}
                     <ZooGroup> {
-                        
+
                         show_bg: false,
                         <DemoFileTree> { file_tree:{ height: 400. } }
                     }
@@ -507,25 +507,63 @@ live_design!{
                     title = {text:"<Image>"}
                     <ZooDesc> {text:"A static inline image from a resource."}
                     <ZooGroup> {
-                        height: 150, width: Fill,
+                        height: Fit, width: Fill,
                         spacing: (THEME_SPACE_2)
-                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
-                            <Image> { source: dep("crate://self/resources/ducky.png" ), min_width: 140, min_height: 160 }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250, flow: Down,
+                                <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                            }
+                            <P> { text: "Default" }
                         }
-                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
-                            <Image> { source: dep("crate://self/resources/ducky.png"), fit: Stretch }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                <Image> { height: Fill, source: dep("crate://self/resources/ducky.png" ), min_height: 100 }
+                            }
+                            <P> { text: "min_height: 100" }
                         }
-                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
-                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png"), fit: Stretch }
+                            }
+                            <P> { text: "fit: Stretch" }
                         }
-                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
-                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
+                            }
+                            <P> { text: "fit: Horizontal" }
                         }
-                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
-                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
+                            }
+                            <P> { text: "fit: Vertical" }
                         }
-                        <View> { show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 150,
-                            <Image> { source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
+                            }
+                            <P> { text: "fit: Smallest" }
+                        }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
+                            }
+                            <P> { text: "fit: Biggest" }
                         }
                     }
                 }
