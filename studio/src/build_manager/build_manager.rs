@@ -211,9 +211,10 @@ impl BuildManager {
         for (build_id, active_build) in &mut self.active.builds {
             self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
             self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
-            //active_build.swapchain = [None;MAX_WINDOWS];
-            //active_build.last_swapchain_with_completed_draws = None;
-            //active_build.aux_chan_host_endpoint = None;
+            
+            active_build.swapchain.clear();
+            active_build.last_swapchain_with_completed_draws.clear();
+            active_build.aux_chan_host_endpoint = None;
         }
     }
     

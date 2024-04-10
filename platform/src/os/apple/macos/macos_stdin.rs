@@ -382,7 +382,6 @@ impl Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    println!("CREATING WINDOW");
                     // we should call to the host to make a window with this id
                     let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
                 },
