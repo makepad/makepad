@@ -23,7 +23,7 @@ use {
     std::{
         sync::{Arc,Mutex},
         cell::RefCell,
-        collections::HashMap,
+        collections::{HashMap,hash_map},
         io::prelude::*,
         path::PathBuf,
         path::Path,
@@ -41,17 +41,47 @@ pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
     pub process: BuildProcess,
-    pub swapchain: [Option<cx_stdin::Swapchain<Texture >>;2],
+    pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
+    pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
     ///
     /// While not strictly necessary, it can also accept *new* draws to any of
     /// its images, which allows the client to catch up a frame or two, visually.
-    pub last_swapchain_with_completed_draws: [Option<cx_stdin::Swapchain<Texture >>;2],
-    
     pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
+impl ActiveBuild{
+    pub fn swapchain_mut(&mut self, index:usize)->&mut Option<cx_stdin::Swapchain<Texture >>{
+       match self.swapchain.entry(index) {
+            hash_map::Entry::Occupied(o) => o.into_mut(),
+            hash_map::Entry::Vacant(v) => v.insert(None),
+        }
+    }
+    pub fn last_swapchain_with_completed_draws_mut(&mut self, index:usize)->&mut Option<cx_stdin::Swapchain<Texture >>{
+        match self.last_swapchain_with_completed_draws.entry(index) {
+            hash_map::Entry::Occupied(o) => o.into_mut(),
+            hash_map::Entry::Vacant(v) => v.insert(None),
+        }
+    }
+    pub fn swapchain(&self, index:usize)->Option<&cx_stdin::Swapchain<Texture >>{
+        if let Some(e) = self.swapchain.get(&index){
+            if let Some(e) = e{
+                return Some(e)
+            }
+        }
+        None
+    }
+    pub fn last_swapchain_with_completed_draws(&mut self, index:usize)->Option<&cx_stdin::Swapchain<Texture >>{
+        if let Some(e) = self.last_swapchain_with_completed_draws.get(&index){
+            if let Some(e) = e{
+                return Some(e)
+            }
+        }
+        None
+    }
+}
+
 
 #[derive(Default)]
 pub struct ActiveBuilds {
@@ -93,6 +123,7 @@ pub struct BuildManager {
     pub studio_http: String,
     pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
+    pub tick_timer: Timer,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, mpsc::Sender<Vec<u8>>)>>>>,
 }
@@ -104,7 +135,7 @@ pub struct BuildBinary {
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum BuildManagerAction {
-    StdinToHost {run_view_id: LiveId, msg: StdinToHost},
+    StdinToHost {build_id: LiveId, msg: StdinToHost},
     None
 }
 
@@ -117,7 +148,7 @@ impl BuildManager {
         else{
              8001
         };
-        
+        self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
         
@@ -153,6 +184,13 @@ impl BuildManager {
             }
         }
     }
+    
+    pub fn process_name(&mut self, tab_id: LiveId) -> Option<String> {
+        if let Some(build) = self.active.builds.get(&tab_id){
+            return Some(build.process.binary.clone())
+        }
+        None
+    }
      
     pub fn handle_tab_close(&mut self, tab_id: LiveId) -> bool {
         let len = self.active.builds.len();
@@ -170,19 +208,19 @@ impl BuildManager {
     
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
         // alright so. a file was changed. now what.
-        for (item_id, active_build) in &mut self.active.builds {
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
-            active_build.swapchain = [None,None];
+        for (build_id, active_build) in &mut self.active.builds {
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
+            //active_build.swapchain = [None;MAX_WINDOWS];
             //active_build.last_swapchain_with_completed_draws = None;
-            active_build.aux_chan_host_endpoint = None;
+            //active_build.aux_chan_host_endpoint = None;
         }
     }
     
     pub fn clear_active_builds(&mut self) {
         // alright so. a file was changed. now what.
-        for item_id in self.active.builds.keys() {
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
+        for build_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
         }
         self.active.builds.clear();
     }
@@ -224,7 +262,12 @@ impl BuildManager {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
-
+        if let Some(_) = self.tick_timer.is_event(event) {
+            for build_id in self.active.builds.keys() {
+                self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(HostToStdin::Tick.to_json()));
+            }
+        }
+    
         if let Event::Signal = event {
             let log = &mut self.log;
             let active = &mut self.active;       
@@ -335,7 +378,7 @@ impl BuildManager {
                         match msg {
                             Ok(msg) => {
                                 cx.action(BuildManagerAction::StdinToHost {
-                                    run_view_id: wrap.cmd_id,
+                                    build_id: wrap.cmd_id,
                                     msg
                                 })
                             }
