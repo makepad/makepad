@@ -34,6 +34,19 @@ impl CxWindowPool {
         WindowHandle(self.0.alloc())
     }
     
+    pub fn window_id_contains(&self, pos:DVec2)->(WindowId, DVec2){
+        for (index,item) in self.0.pool.iter().enumerate(){
+            let window = &item.item;
+            if pos.x>= window.window_geom.position.x &&
+                pos.y>= window.window_geom.position.y && 
+                pos.x<= window.window_geom.position.x+window.window_geom.inner_size.x  &&
+                pos.y<= window.window_geom.position.x+window.window_geom.inner_size.y{
+                return (WindowId(index, item.generation), window.window_geom.position)
+            }
+        }
+        return (WindowId(0, self.0.pool[0].generation), self.0.pool[0].item.window_geom.position)
+    }
+    
     pub fn is_valid(&self, v: WindowId)->bool{
         if v.0 < self.0.pool.len(){
             if self.0.pool[v.0].generation == v.1{

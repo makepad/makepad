@@ -172,30 +172,37 @@ impl Cx {
                         e.time
                     );
                     self.fingers.mouse_down(e.button);
+                    // lets figure out what window we are on
                     
-                    self.call_event_handler(&Event::MouseDown(e.into()));
+                    let (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    self.call_event_handler(&Event::MouseDown(e.into_event(window_id, pos)));
                 }
                 HostToStdin::MouseMove(e) => {
-                    self.call_event_handler(&Event::MouseMove(e.into()));
+                    let  (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
                 HostToStdin::MouseUp(e) => {
                     let button = e.button;
-                    self.call_event_handler(&Event::MouseUp(e.into()));
+                    let  (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    self.call_event_handler(&Event::MouseUp(e.into_event(window_id, pos)));
                     self.fingers.mouse_up(button);
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                 }
                 HostToStdin::Scroll(e) => {
-                    self.call_event_handler(&Event::Scroll(e.into()))
+                    let  (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
                 }
-                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height, window_id } => {
+                HostToStdin::WindowGeomChange { dpi_factor, left, top, width, height, window_id } => {
                     let window_id = CxWindowPool::from_usize(window_id);
+                    
                     if self.windows.is_valid(window_id){
                         let old_geom = self.windows[window_id].window_geom.clone();
                         let new_geom = WindowGeom {
+                            position: dvec2(left, top),
                             dpi_factor,
-                            inner_size: dvec2(inner_width, inner_height),
+                            inner_size: dvec2(width, height),
                             ..Default::default()
                         };
                         self.windows[window_id].window_geom = new_geom.clone();

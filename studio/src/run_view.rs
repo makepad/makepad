@@ -63,7 +63,7 @@ pub struct RunView {
     #[animator] animator: Animator,
     #[redraw] #[live] draw_app: DrawQuad,
     //#[live] frame_delta: f64,
-    #[rust] last_size: DVec2,
+    #[rust] last_rect: Rect,
     #[rust(100usize)] redraw_countdown: usize,
    // #[rust] time: f64,
    // #[rust] frame: u64,
@@ -81,7 +81,7 @@ impl LiveHook for RunView {
     
     fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc{..} = apply.from{
-            self.last_size = dvec2(0.0,0.0);
+            self.last_rect = Default::default();
             self.animator_cut(cx, id!(started.on));
         }
     }
@@ -164,7 +164,7 @@ impl RunView {
     pub fn ready_to_start(&mut self, cx: &mut Cx){
         self.animator_play(cx, id!(recompiling.off));
         // cause a resize event to fire
-        self.last_size = Default::default();
+        self.last_rect = Default::default();
         self.redraw(cx);
     }
     
@@ -174,7 +174,7 @@ impl RunView {
     
     
     pub fn resend_framebuffer(&mut self, _cx: &mut Cx) {
-        self.last_size = dvec2(0.0,0.0);
+        self.last_rect = Default::default();
     }
     
     pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager, walk:Walk) {
@@ -188,24 +188,20 @@ impl RunView {
             self.redraw_countdown -= 1;
             self.redraw(cx);
         }
-        if self.last_size != rect.size {
-            self.last_size = rect.size;
-            // FIXME(eddyb) there's no type or naming scheme that tells apart
-            // DPI-scaled and non-DPI-scaled values (other than float-vs-int).
-            let DVec2 { x: inner_width, y: inner_height } = self.last_size;
-
-            // Try to only send the new geometry information to the client
-            // most of the time, letting it draw on its existing swapchain,
-            // and only replace the swapchain when a larger one is needed.
+        if self.last_rect != rect{
             manager.send_host_to_stdin(run_view_id, HostToStdin::WindowGeomChange {
                 window_id: self.window_id,
                 dpi_factor,
-                inner_width,
-                inner_height,
+                left: rect.pos.x,
+                top: rect.pos.y,
+                width: rect.size.x,
+                height: rect.size.y,
             });
+        }
+        if self.last_rect.size != rect.size {
 
-            let min_width = ((inner_width * dpi_factor).ceil() as u32).max(1);
-            let min_height = ((inner_height * dpi_factor).ceil() as u32).max(1);
+            let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
+            let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
             let active_build_needs_new_swapchain = manager.active.builds
                 .get_mut(&run_view_id)
                 .filter(|v| v.aux_chan_host_endpoint.is_some())
@@ -288,6 +284,7 @@ impl RunView {
                 }
             }
         }
+        self.last_rect = rect;
         self.draw_app.draw_abs(cx, rect);
     }
 }
@@ -322,51 +319,7 @@ impl Widget for RunView {
             }
             _ => ()
         }
-        let rect = self.draw_app.area().rect(cx);
-        match event {
-            Event::MouseDown(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseDown(StdinMouseDown {
-                    window_id: self.window_id,
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                    button: e.button,
-                }));
-            }
-            Event::MouseMove(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseMove(StdinMouseMove {
-                    window_id: self.window_id,
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                }));
-            }
-            Event::MouseUp(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::MouseUp(StdinMouseUp {
-                    window_id: self.window_id,
-                    time: e.time,
-                    button: e.button,
-                    x: rel.x,
-                    y: rel.y,
-                }));
-            }
-            Event::Scroll(e) => {
-                let rel = e.abs - rect.pos;
-                manager.send_host_to_stdin(run_view_id, HostToStdin::Scroll(StdinScroll {
-                    window_id: self.window_id,
-                    is_mouse: e.is_mouse,
-                    time: e.time,
-                    x: rel.x,
-                    y: rel.y,
-                    sx: e.scroll.x,
-                    sy: e.scroll.y
-                }));
-            }
-            _ => ()
-        }
+
     }
     
 }
