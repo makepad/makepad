@@ -842,12 +842,13 @@ impl Dock {
         }
     }
     
-    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
-        self.create_tab(cx, parent, item, kind, name, closable);
+    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable)->Option<WidgetRef> {
+        let ret =self.create_tab(cx, parent, item, kind, name, closable);
         self.select_tab(cx, item);
+        ret
     }
     
-    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable)->Option<WidgetRef> {
         if let Some(DockItem::Tabs {tabs, ..}) = self.dock_items.get_mut(&parent) {
             tabs.push(item);
             self.needs_save = true;
@@ -856,7 +857,10 @@ impl Dock {
                 closable: closable.as_bool(),
                 kind
             });
-            self.item_or_create(cx, item, kind);
+            self.item_or_create(cx, item, kind)
+        }
+        else{
+            None
         }
     }
     
@@ -1136,15 +1140,21 @@ impl DockRef {
         }
     }
     
-    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable)->Option<WidgetRef> {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_and_select_tab(cx, parent, item, kind, name, closable);
+            dock.create_and_select_tab(cx, parent, item, kind, name, closable)
         }
+        else{
+            None
+        }        
     }
     
-    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable)->Option<WidgetRef> {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_tab(cx, parent, item, kind, name, closable);
+            dock.create_tab(cx, parent, item, kind, name, closable)
+        }
+        else{
+            None
         }
     }
     

@@ -153,8 +153,6 @@ impl Cx {
                     };
                     self.redraw_all();
                 }
-                HostToStdin::PollSwapChain{..}=>{
-                }
                 HostToStdin::Swapchain(new_swapchain) => {
                     let new_swapchain = new_swapchain.images_map(|pi| {
                         let mut new_texture = Texture::new(self);

@@ -9,7 +9,6 @@ live_design!{
     import makepad_draw::shader::std::*;
     
     RunView = {{RunView}} {
-        frame_delta: 0.008,
         draw_app: {
             texture tex: texture2d
             instance recompiling: 0.0
@@ -56,28 +55,27 @@ live_design!{
         }
     }
 }
-
+ 
 
 #[derive(Live, Widget)]
 pub struct RunView {
     #[walk] walk: Walk,
     #[animator] animator: Animator,
     #[redraw] #[live] draw_app: DrawQuad,
-    #[live] frame_delta: f64,
+    //#[live] frame_delta: f64,
     #[rust] last_size: DVec2,
-    #[rust] tick: NextFrame,
-    #[rust] timer: Timer,
-    #[rust(100usize)] redraw_countdown: usize,
-    #[rust] time: f64,
-    #[rust] frame: u64,
+    //#[rust(100usize)] redraw_countdown: usize,
+   // #[rust] time: f64,
+   // #[rust] frame: u64,
     #[rust] started: bool,
-    #[live] window_id: usize,
+    #[rust] pub build_id: LiveId,
+    #[rust] pub window_id: usize,
 }
 
 impl LiveHook for RunView {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.tick = cx.new_next_frame(); //start_interval(self.frame_delta);
-        self.time = 0.0;
+        //self.tick = cx.new_next_frame(); //start_interval(self.frame_delta);
+        //self.time = 0.0;
         self.draw_app.set_texture(0, &cx.null_texture());
     }
     
@@ -87,19 +85,17 @@ impl LiveHook for RunView {
             self.animator_cut(cx, id!(started.on));
         }
     }
-    
-    
 }
 
 impl RunView {
-    
-    pub fn run_tick(&mut self, cx: &mut Cx, run_view_id: LiveId, manager: &mut BuildManager) {
+    /*
+    pub fn run_tick(&mut self, cx: &mut Cx, manager: &mut BuildManager) {
         self.frame += 1;
         
-        manager.send_host_to_stdin(run_view_id, HostToStdin::PollSwapChain{window_id: self.window_id});
+        manager.send_host_to_stdin(self.build_id, HostToStdin::PollSwapChain{window_id: self.window_id});
         
         if self.window_id == 0{
-            manager.send_host_to_stdin(run_view_id, HostToStdin::Tick);
+            manager.send_host_to_stdin(self.build_id, HostToStdin::Tick);
         }
             
         if self.redraw_countdown>0 {
@@ -110,8 +106,8 @@ impl RunView {
         else {
             self.timer = cx.start_timeout(0.008);
         }
-    }
-    
+    }*/
+    /*
     pub fn pump_event_loop(&mut self, cx: &mut Cx, event: &Event, run_view_id: LiveId, manager: &mut BuildManager) {
         let run_view_id = run_view_id.sub(self.window_id as u64);
         if let Some(_) = self.timer.is_event(event) {
@@ -120,65 +116,55 @@ impl RunView {
         if let Some(_) = self.tick.is_event(event) {
             self.run_tick(cx, run_view_id, manager)
         }
-    }
+    }*/
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, msg: &StdinToHost, run_view_id: LiveId, manager: &mut BuildManager) {
+    pub fn draw_complete_and_flip(&mut self, cx: &mut Cx, presentable_draw: &PresentableDraw, manager: &mut BuildManager){
         let window_id = self.window_id;
-        match msg {
-            
-            StdinToHost::SetCursor(cursor) => {
-                cx.set_cursor(*cursor)
-            }
-            StdinToHost::ReadyToStart => {
-                self.animator_play(cx, id!(recompiling.off));
-                // cause a resize event to fire
-                self.last_size = Default::default();
-                self.redraw(cx);
-            }
-            StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
-                if self.window_id == presentable_draw.window_id{
-                    if let Some(v) = manager.active.builds.get_mut(&run_view_id){
-                        // Only allow presenting images in the current host swapchain
-                        // (or the previous one, before any draws on the current one),
-                        // and look them up by their unique IDs, to avoid rendering
-                        // different textures than the ones the client just drew to.
-                        let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
-                            let swapchain = swapchain.as_ref()?;
-                            let drawn = swapchain.get_image(presentable_draw.target_id)?;
-    
-                            self.draw_app.set_texture(0, &drawn.image);
-                            self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
-                                (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
-                                (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
-                            ]);
-                            self.draw_app.draw_vars.set_var_instance(cx, id!(tex_size), &[
-                                (swapchain.alloc_width as f32),
-                                (swapchain.alloc_height as f32),
-                            ]);
-    
-                            if !self.started {
-                                self.started = true;
-                                self.animator_play(cx, id!(started.on));
-                            }
-                            self.redraw_countdown = 20;
-                            
-                            Some(())
-                        };
-    
-                        if try_present_through(&v.swapchain[window_id]).is_some() {
-                            // The client is now drawing to the current swapchain,
-                            // we can discard any previous one we were stashing.
-                            v.last_swapchain_with_completed_draws[self.window_id] = None;
-                        } else {
-                            // New draws to a previous swapchain are fine, just means
-                            // the client hasn't yet drawn on the current swapchain,
-                            // what lets us accept draws is their target `Texture`s.
-                            try_present_through(&v.last_swapchain_with_completed_draws[window_id]);
-                        }
-                    }
+        if let Some(v) = manager.active.builds.get_mut(&self.build_id){
+            // Only allow presenting images in the current host swapchain
+            // (or the previous one, before any draws on the current one),
+            // and look them up by their unique IDs, to avoid rendering
+            // different textures than the ones the client just drew to.
+            let mut try_present_through = |swapchain: &Option<Swapchain<Texture>>| {
+                let swapchain = swapchain.as_ref()?;
+                let drawn = swapchain.get_image(presentable_draw.target_id)?;
+                        
+                self.draw_app.set_texture(0, &drawn.image);
+                self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
+                    (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
+                    (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
+                ]);
+                self.draw_app.draw_vars.set_var_instance(cx, id!(tex_size), &[
+                    (swapchain.alloc_width as f32),
+                    (swapchain.alloc_height as f32),
+                ]);
+                        
+                if !self.started {
+                    self.started = true;
+                    self.animator_play(cx, id!(started.on));
                 }
+                self.redraw(cx);
+                Some(())
+            };
+                    
+            if try_present_through(&v.swapchain_mut(window_id)).is_some() {
+                // The client is now drawing to the current swapchain,
+                // we can discard any previous one we were stashing.
+                *v.last_swapchain_with_completed_draws_mut(window_id) = None;
+            } else {
+                // New draws to a previous swapchain are fine, just means
+                // the client hasn't yet drawn on the current swapchain,
+                // what lets us accept draws is their target `Texture`s.
+                try_present_through(&v.last_swapchain_with_completed_draws_mut(window_id));
             }
         }
+    }
+    
+    pub fn ready_to_start(&mut self, cx: &mut Cx){
+        self.animator_play(cx, id!(recompiling.off));
+        // cause a resize event to fire
+        self.last_size = Default::default();
+        self.redraw(cx);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -200,7 +186,7 @@ impl RunView {
 
         if self.last_size != rect.size {
             self.last_size = rect.size;
-            self.redraw_countdown = 20;
+            //self.redraw_countdown = 20;
             // FIXME(eddyb) there's no type or naming scheme that tells apart
             // DPI-scaled and non-DPI-scaled values (other than float-vs-int).
             let DVec2 { x: inner_width, y: inner_height } = self.last_size;
@@ -221,7 +207,7 @@ impl RunView {
                 .get_mut(&run_view_id)
                 .filter(|v| v.aux_chan_host_endpoint.is_some())
                 .filter(|v| {
-                    v.swapchain[self.window_id].as_ref().map(|swapchain| {
+                    v.swapchain(self.window_id).map(|swapchain| {
                         min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
                     }).unwrap_or(true)
                 });
@@ -230,14 +216,15 @@ impl RunView {
                 // the current swapchain, but the absence of an older swapchain
                 // (i.e. `last_swapchain_with_completed_draws`) implies either
                 // zero draws so far, or a draw to the current one discarded it.
-                if v.last_swapchain_with_completed_draws[self.window_id].is_none() {
-                    v.last_swapchain_with_completed_draws[self.window_id] = v.swapchain[self.window_id].take();
+                if v.last_swapchain_with_completed_draws(self.window_id).is_none() {
+                    let chain = v.swapchain_mut(self.window_id).take();
+                    *v.last_swapchain_with_completed_draws_mut(self.window_id) = chain;
                 }
 
                 // `Texture`s can be reused, but all `PresentableImageId`s must
                 // be regenerated, to tell apart swapchains when e.g. resizing
                 // constantly, so textures keep getting created and replaced.
-                if let Some(swapchain) = &mut v.swapchain[self.window_id] {
+                if let Some(swapchain) = v.swapchain_mut(self.window_id) {
                     for pi in &mut swapchain.presentable_images {
                         pi.id = cx_stdin::PresentableImageId::alloc();
                     }
@@ -248,7 +235,7 @@ impl RunView {
                 let alloc_width = min_width.max(64).next_power_of_two();
                 let alloc_height = min_height.max(64).next_power_of_two();
                 
-                let swapchain = v.swapchain[self.window_id].get_or_insert_with(|| {
+                let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
                     Swapchain::new(self.window_id, alloc_width, alloc_height).images_map(|pi| {
                         // Prepare a version of the swapchain for cross-process sharing.
                         Texture::new_with_format(cx, TextureFormat::SharedBGRAu8 {
