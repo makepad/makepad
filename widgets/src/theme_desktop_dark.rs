@@ -2563,10 +2563,10 @@ live_design! {
                         sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                         sdf.stroke(
                             mix(
-                                THEME_COLOR_BEVEL_SHADOW,
-                                THEME_COLOR_U_HIDDEN,
+                                mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.hover),
+                                THEME_COLOR_BEVEL_LIGHT,
                                 self.selected
-                            ), THEME_BEVEL_BORDER * 2.)
+                            ), THEME_DOCK_BORDER_SIZE)
 
                         sdf.box(
                             1.,
@@ -2995,7 +2995,7 @@ live_design! {
                 let nubbg_color = mix(THEME_COLOR_SLIDER_NUB_HOVER, THEME_COLOR_SLIDER_NUB_ACTIVE, self.drag);
 
                 match self.slider_type {
-                    SliderType::Horizontal => {
+SliderType::Horizontal => {
 
                         sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
@@ -3007,16 +3007,16 @@ live_design! {
                             0,
                             self.rect_size.y - slider_height * 1.25,
                             self.slide_pos * (self.rect_size.x - nub_size) + nub_size,
-                            slider_height1.
+                            slider_height
                         )
                         sdf.fill(slider_color);
 
                         let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
                         sdf.rect(
                             nubbg_x,
-                            self.rect_size.y - slider_height * .5,
+                            self.rect_size.y - slider_height * 1.25,
                             nubbg_size,
-                            slider_height * .5
+                            slider_height
                         )
                         sdf.fill(nubbg_color);
 
@@ -3024,9 +3024,9 @@ live_design! {
                         let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
                         sdf.rect(
                             nub_x,
-                            self.rect_size.y - slider_height * .5,
+                            self.rect_size.y - slider_height * 1.25,
                             nub_size,
-                            slider_height * .5
+                            slider_height
                         )
                         sdf.fill(nub_color);
                     }
