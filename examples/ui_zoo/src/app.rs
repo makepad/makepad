@@ -93,9 +93,6 @@ live_design!{
                     <View> {
                         width: Fill, height: Fit,
                         flow: Down,
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
-                        padding: 20.,
                         <P> { text: "- Shader-based: what does that mean for how things work." }
                         <P> { text: "- Inheritance mechanisms in the DSL." }
                         <P> { text: "- Introduction to the layout system." }
@@ -421,21 +418,25 @@ live_design!{
                         flow: Down,
                         <View> {
                             width: Fill, height: Fit,
-                            <Slider> { text: "Parameter" }
-                            <Slider> { text: "Parameter" }
-                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "Default" }
+                            <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+                            <Slider> { text: "min/max", min: 0., max: 100. }
                         }
                         <View> {
                             width: Fill, height: Fit,
-                            <Slider> { text: "Parameter" }
-                            <Slider> { text: "Parameter" }
-                            <Slider> { text: "Parameter" }
+                            <Slider> { text: "precision", precision: 20 }
+                            <Slider> { text: "step", step: 0.1 }
                         }
                         <View> {
                             width: Fill, height: Fit,
-                            <SliderBig> { text: "SliderBig" }
-                            <SliderBig> { text: "SliderBig" }
-                            <SliderBig> { text: "SliderBig" }
+                            <SliderBig> { text: "Default" }
+                            <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+                            <SliderBig> { text: "min/max", min: 0., max: 100. }
+                        }
+                        <View> {
+                            width: Fill, height: Fit,
+                            <SliderBig> { text: "precision", precision: 20 }
+                            <SliderBig> { text: "step", step: 0.1 }
                         }
                     }
                 }
