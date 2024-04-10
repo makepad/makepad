@@ -179,7 +179,6 @@ impl MatchEvent for App{
                             };
                             
                             // we might already have it
-                            if dock.
                             
                             let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), TabClosable::Yes).unwrap();
                             
