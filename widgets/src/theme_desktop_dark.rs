@@ -2563,10 +2563,10 @@ live_design! {
                         sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.hover),
-                                THEME_COLOR_BEVEL_LIGHT,
+                                THEME_COLOR_BEVEL_SHADOW,
+                                THEME_COLOR_U_HIDDEN,
                                 self.selected
-                            ), THEME_DOCK_BORDER_SIZE)
+                            ), THEME_BEVEL_BORDER * 2.)
 
                         sdf.box(
                             1.,
@@ -3007,16 +3007,16 @@ live_design! {
                             0,
                             self.rect_size.y - slider_height * 1.25,
                             self.slide_pos * (self.rect_size.x - nub_size) + nub_size,
-                            slider_height
+                            slider_height1.
                         )
                         sdf.fill(slider_color);
 
                         let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
                         sdf.rect(
                             nubbg_x,
-                            self.rect_size.y - slider_height * 1.25,
+                            self.rect_size.y - slider_height * .5,
                             nubbg_size,
-                            slider_height
+                            slider_height * .5
                         )
                         sdf.fill(nubbg_color);
 
@@ -3024,9 +3024,9 @@ live_design! {
                         let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
                         sdf.rect(
                             nub_x,
-                            self.rect_size.y - slider_height * 1.25,
+                            self.rect_size.y - slider_height * .5,
                             nub_size,
-                            slider_height
+                            slider_height * .5
                         )
                         sdf.fill(nub_color);
                     }
