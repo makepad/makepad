@@ -2770,7 +2770,8 @@ live_design! {
     }
     
     Root = <RootBase>{
-        <Window>{
+        design_window = <Window>{
+            kind_id: 1
         }
     }
     // StackView DSL end

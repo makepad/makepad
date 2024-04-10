@@ -19,6 +19,7 @@ pub struct Window {
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
     #[live] demo: bool,
+    #[live] kind_id: usize,
     #[rust] demo_next_frame: NextFrame,
     #[live] cursor_draw_list: DrawList2d,
     #[live] draw_cursor: DrawQuad,
@@ -58,6 +59,7 @@ enum DrawState {
 impl LiveHook for Window {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
+        self.window.set_kind_id(cx, self.kind_id);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
             size:TextureSize::Auto
