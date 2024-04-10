@@ -73,7 +73,8 @@ pub struct TextFlow {
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
     #[live] inline_code_padding: Padding,
-    
+    #[live] inline_code_margin: Margin,
+        
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
@@ -499,10 +500,20 @@ impl TextFlow{
             if self.inline_code_counter > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
+                cx.walk_turtle(Walk{
+                    width: Size::Fixed(self.inline_code_margin.left),
+                    height: Size::Fixed(0.0),
+                    ..Default::default()
+                });
                 dt.draw_walk_word_with(cx, text, |cx, mut rect|{
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
+                });
+                cx.walk_turtle(Walk{
+                    width:Size::Fixed(self.inline_code_margin.right),
+                    height:Size::Fixed(0.0),
+                    ..Default::default()
                 });
             }
             else if self.strikethrough_counter > 0{
