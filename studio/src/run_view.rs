@@ -64,7 +64,7 @@ pub struct RunView {
     #[redraw] #[live] draw_app: DrawQuad,
     //#[live] frame_delta: f64,
     #[rust] last_size: DVec2,
-    //#[rust(100usize)] redraw_countdown: usize,
+    #[rust(100usize)] redraw_countdown: usize,
    // #[rust] time: f64,
    // #[rust] frame: u64,
     #[rust] started: bool,
@@ -143,6 +143,7 @@ impl RunView {
                     self.started = true;
                     self.animator_play(cx, id!(started.on));
                 }
+                self.redraw_countdown = 10;
                 self.redraw(cx);
                 Some(())
             };
@@ -183,10 +184,12 @@ impl RunView {
         let dpi_factor = cx.current_dpi_factor();
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-
+        if self.redraw_countdown > 0{
+            self.redraw_countdown -= 1;
+            self.redraw(cx);
+        }
         if self.last_size != rect.size {
             self.last_size = rect.size;
-            //self.redraw_countdown = 20;
             // FIXME(eddyb) there's no type or naming scheme that tells apart
             // DPI-scaled and non-DPI-scaled values (other than float-vs-int).
             let DVec2 { x: inner_width, y: inner_height } = self.last_size;
