@@ -509,10 +509,11 @@ live_design!{
                     <ZooGroup> {
                         height: Fit, width: Fill,
                         spacing: (THEME_SPACE_2)
+                        scroll_bars: <ScrollBars> {}
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250, flow: Down,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250, flow: Down,
                                 <Image> { source: dep("crate://self/resources/ducky.png" ) }
                             }
                             <P> { text: "Default" }
@@ -520,15 +521,23 @@ live_design!{
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
                                 <Image> { height: Fill, source: dep("crate://self/resources/ducky.png" ), min_height: 100 }
                             }
-                            <P> { text: "min_height: 100" }
+                            <P> { text: "min_height: 100" } // TODO: get this to work correctly
                         }
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                <Image> { width: Fill, source: dep("crate://self/resources/ducky.png" ), width_scale: 1.1 }
+                            }
+                            <P> { text: "width_scale: 1.5" } // TODO: get this to work correctly
+                        }
+                        <View> {
+                            width: Fit, height: Fit, flow: Down,
+                            <View> {
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
                                 <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png"), fit: Stretch }
                             }
                             <P> { text: "fit: Stretch" }
@@ -536,7 +545,7 @@ live_design!{
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
                                 <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
                             }
                             <P> { text: "fit: Horizontal" }
@@ -544,7 +553,7 @@ live_design!{
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
                                 <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
                             }
                             <P> { text: "fit: Vertical" }
@@ -552,7 +561,7 @@ live_design!{
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
                                 <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
                             }
                             <P> { text: "fit: Smallest" }
@@ -560,7 +569,7 @@ live_design!{
                         <View> {
                             width: Fit, height: Fit, flow: Down,
                             <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 150, height: 250,
+                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
                                 <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
                             }
                             <P> { text: "fit: Biggest" }
