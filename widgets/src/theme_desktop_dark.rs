@@ -949,7 +949,7 @@ live_design! {
                 sdf.stroke(
                     mix(
                         THEME_COLOR_BEVEL_SHADOW,
-                        THEME_COLOR_BEVEL_LIGHT,
+                        THEME_COLOR_U_HIDDEN,
                         self.pressed
                     ), THEME_BEVEL_BORDER
                 )
