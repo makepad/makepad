@@ -31,59 +31,19 @@ use crate::derive_from_live_id::*;
 #[proc_macro] 
 pub fn live_id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
-
-    let mut parser = TokenParser::new(item);
-    if let Some(name) = parser.eat_any_ident() {
-        let id = from_str_unchecked(&name);
-        tb.add("LiveId (").suf_u64(id).add(")");
-        tb.end()
-    }
-    else if let Some(punct) = parser.eat_any_punct(){
-        let id = from_str_unchecked(&punct);
-        tb.add("LiveId (").suf_u64(id).add(")");
-        tb.end()
-    }
-    else if let Some(v) = parser.eat_literal(){
-        if let Ok(v) = v.to_string().parse::<u64>(){
-            tb.add("LiveId (").suf_u64(v).add(")");
-            return tb.end()
-        }
-        else{
-            parser.unexpected()
-        }
-    }
-    else{
-        parser.unexpected()
-    }
+    let v = item.to_string();
+    let id = from_str_unchecked(&v);
+    tb.add("LiveId (").suf_u64(id).add(")");
+    tb.end()
 }
 
 #[proc_macro] 
 pub fn some_id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
-    
-    let mut parser = TokenParser::new(item);
-    if let Some(name) = parser.eat_any_ident() {
-        let id = from_str_unchecked(&name);
-        tb.add("Some(LiveId (").suf_u64(id).add("))");
-        tb.end()
-    }
-    else if let Some(punct) = parser.eat_any_punct(){
-        let id = from_str_unchecked(&punct);
-        tb.add("Some(LiveId (").suf_u64(id).add("))");
-        tb.end()
-    }
-    else if let Some(v) = parser.eat_literal(){
-        if let Ok(v) = v.to_string().parse::<u64>(){
-            tb.add("Some(LiveId (").suf_u64(v).add("))");
-            return tb.end()
-        }
-        else{
-            parser.unexpected()
-        }
-    }
-    else{
-        parser.unexpected()
-    }
+    let v = item.to_string();
+    let id = from_str_unchecked(&v);
+    tb.add("Some(LiveId (").suf_u64(id).add("))");
+    tb.end()
 }
 
 #[proc_macro] 
