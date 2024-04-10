@@ -122,15 +122,15 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         self.seen_hdr = true;
 
         let frame_info = FrameInfo {
-            seq_number:  0,
+            _seq_number:  0,
             width:       self.png_info.width,
             height:      self.png_info.height,
-            x_offset:    0,
-            y_offset:    0,
-            delay_num:   0,
-            delay_denom: 0,
-            dispose_op:  DisposeOp::None,
-            blend_op:    BlendOp::Source
+            _x_offset:    0,
+            _y_offset:    0,
+            _delay_num:   0,
+            _delay_denom: 0,
+            _dispose_op:  DisposeOp::None,
+            _blend_op:    BlendOp::Source
         };
 
         self.frames.push(SingleFrame::new(vec![], Some(frame_info)));
@@ -245,12 +245,12 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             self.stream.skip(chunk.length + 4);
         }
         // extract num_frames
-        let num_frames = self.stream.get_u32_be();
-        let num_plays = self.stream.get_u32_be();
+        let _num_frames = self.stream.get_u32_be();
+        let _num_plays = self.stream.get_u32_be();
 
         let actl = ActlChunk {
-            num_frames,
-            num_plays
+            _num_frames,
+            _num_plays
         };
         self.actl_info = Some(actl);
 
@@ -536,26 +536,26 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         if chunk.length != 26 {
             return Err(PngDecodeErrors::GenericStatic("Invalid fcTL length"));
         }
-        let seq_number = self.stream.get_u32_be();
+        let _seq_number = self.stream.get_u32_be();
         let width = self.stream.get_u32_be() as usize;
         let height = self.stream.get_u32_be() as usize;
-        let x_offset = self.stream.get_u32_be() as usize;
-        let y_offset = self.stream.get_u32_be() as usize;
-        let delay_num = self.stream.get_u16_be();
-        let delay_denom = self.stream.get_u16_be();
-        let dispose_op = DisposeOp::from_int(self.stream.get_u8())?;
-        let blend_op = BlendOp::from_int(self.stream.get_u8())?;
+        let _x_offset = self.stream.get_u32_be() as usize;
+        let _y_offset = self.stream.get_u32_be() as usize;
+        let _delay_num = self.stream.get_u16_be();
+        let _delay_denom = self.stream.get_u16_be();
+        let _dispose_op = DisposeOp::from_int(self.stream.get_u8())?;
+        let _blend_op = BlendOp::from_int(self.stream.get_u8())?;
 
         let fctl_info = FrameInfo {
-            seq_number,
+            _seq_number,
             width,
             height,
-            x_offset,
-            y_offset,
-            delay_num,
-            delay_denom,
-            dispose_op,
-            blend_op
+            _x_offset,
+            _y_offset,
+            _delay_num,
+            _delay_denom,
+            _dispose_op,
+            _blend_op
         };
         // skip crc
         self.stream.skip(4);

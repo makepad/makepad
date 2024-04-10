@@ -277,6 +277,8 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) { 
+        crate::log!("TVOS APP.");
+        panic!("IZ HERE");
         self.os.start_time = Some(Instant::now());
         #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
