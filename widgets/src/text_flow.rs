@@ -72,6 +72,7 @@ pub struct TextFlow {
     #[live] sep_walk: Walk, 
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
+    #[live] inline_code_padding: Padding,
     
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
@@ -498,7 +499,9 @@ impl TextFlow{
             if self.inline_code_counter > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
-                dt.draw_walk_word_with(cx, text, |cx, rect|{
+                dt.draw_walk_word_with(cx, text, |cx, mut rect|{
+                    rect.pos -= self.inline_code_padding.left_top();
+                    rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
                 });
             }
