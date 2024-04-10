@@ -310,7 +310,7 @@ live_design! {
             sep_color: #9
             quote_bg_color: #4
             quote_fg_color: #7
-            block_color: #3
+            code_color: #3
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -427,7 +427,7 @@ live_design! {
             sep_color: #9
             quote_bg_color: #4
             quote_fg_color: #7
-            block_color: #3
+            code_color: #3
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -439,7 +439,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(#6)
+                        sdf.fill(self.quote_bg_color)
                         sdf.box(
                             4.,
                             3.,
@@ -447,7 +447,7 @@ live_design! {
                             self.rect_size.y-6, 
                             1.
                         );
-                        sdf.fill(#8);
+                        sdf.fill(self.quote_fg_color);
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -458,7 +458,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(#6);
+                        sdf.fill(self.sep_color);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
@@ -469,7 +469,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(#7);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -480,7 +480,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(#7);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -491,7 +491,7 @@ live_design! {
                             1.5,
                             0.5
                         );
-                        sdf.fill(#f);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
@@ -502,7 +502,7 @@ live_design! {
                             1.5,
                             0.5
                         );
-                        sdf.fill(#f);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                 }
