@@ -301,8 +301,7 @@ live_design!{
                     }
                 }
             }
-            RunView = <RunView> {window_id:0}
-            DesignView = <RunView> {window_id:1}
+            RunView = <RunView> {}
             StudioFileTree = <StudioFileTree> {}
             LogList = <LogList> {}
             Profiler = <Profiler> {}
