@@ -3188,12 +3188,16 @@ live_design! {
                 let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 3) - 3;
                 sdf.box(nub_x + in_side, top + 1.0, 11, 11, 1.)
 
-                sdf.fill_keep(
+                sdf.fill_keep(mix(
                     mix(
                         mix(THEME_COLOR_SLIDER_BIG_NUB_TOP, THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER, self.hover),
                         mix(THEME_COLOR_SLIDER_BIG_NUB_BOTTOM, THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER, self.hover),
-                        self.pos.y)
-                    ); // Nub background gradient
+                        self.pos.y
+                    ),
+                    mix(THEME_COLOR_SLIDER_BIG_NUB_BOTTOM, THEME_COLOR_SLIDER_BIG_NUB_TOP, pow(self.pos.y, 1.5)),
+                    self.drag
+                    ) // Nub background gradient
+                )
                 sdf.stroke(
                     mix(
                         mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_LIGHT * 1.2, self.hover),
