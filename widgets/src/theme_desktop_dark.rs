@@ -2772,6 +2772,16 @@ live_design! {
     Root = <RootBase>{
         design_window = <Window>{
             kind_id: 1
+            show_bg: true
+            width: Fill,
+            height: Fill
+                            
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    // test
+                    return mix(#3, #7, self.pos.y);
+                }
+            }
         }
     }
     // StackView DSL end
