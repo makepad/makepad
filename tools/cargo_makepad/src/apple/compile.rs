@@ -54,65 +54,65 @@ impl PlistValues{
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0">
             <dict>
-                <key>BuildMachineOSBuild</key>
-                <string>23B2082</string>
-                <key>CFBundleDevelopmentRegion</key>
-                <string>en</string>
-                <key>CFBundleExecutable</key>
-                <string>{3}</string>
-                <key>CFBundleIdentifier</key>
-                <string>{0}</string>
-                <key>CFBundleInfoDictionaryVersion</key>
-                <string>6.0</string>
-                <key>CFBundleDisplayName</key>
-                <string>{1}</string>
-                <key>CFBundleName</key>
-                <string>{2}</string>
-                <key>CFBundlePackageType</key>
-                <string>APPL</string>
-                <key>CFBundleShortVersionString</key>
-                <string>1.0</string>
-                <key>CFBundleSupportedPlatforms</key>
-                <array>
-                    <string>AppleTVOS</string>
-                </array>
-                <key>CFBundleVersion</key>
-                <string>{4}</string>
-                <key>DTCompiler</key>
-                <string>com.apple.compilers.llvm.clang.1_0</string>
-                <key>DTPlatformBuild</key>
-                <string>21J351</string>
-                <key>DTPlatformName</key>
-                <string>appletvos</string>
-                <key>DTPlatformVersion</key>
-                <string>17.0</string>
-                <key>DTSDKBuild</key>
-                <string>21J351</string>
-                <key>DTSDKName</key>
-                <string>appletvos17.0</string>
-                <key>DTXcode</key>
-                <string>1500</string>
-                <key>DTXcodeBuild</key>
-                <string>15A507</string>
-                <key>LSRequiresIPhoneOS</key>
-                <true/>
-                <key>MinimumOSVersion</key>
-                <string>17.0</string>
-                <key>UIDeviceFamily</key>
-                <array>
-                    <integer>3</integer>
-                </array>
-                <key>UILaunchScreen</key>
-                <dict>
-                <key>UILaunchScreen</key>
-                <dict/>
-                </dict>
-                <key>UIRequiredDeviceCapabilities</key>
-                <array>
-                    <string>arm64</string>
-                </array>
-                <key>UIUserInterfaceStyle</key>
-                <string>Automatic</string>
+            <key>BuildMachineOSBuild</key>
+            <string>23B2082</string>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleExecutable</key>
+            <string>{3}</string>
+            <key>CFBundleIdentifier</key>
+            <string>{0}</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleDisplayName</key>
+            <string>{1}</string>
+            <key>CFBundleName</key>
+            <string>{2}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>CFBundleSupportedPlatforms</key>
+            <array>
+            <string>AppleTVOS</string>
+            </array>
+            <key>CFBundleVersion</key>
+            <string>{4}</string>
+            <key>DTCompiler</key>
+            <string>com.apple.compilers.llvm.clang.1_0</string>
+            <key>DTPlatformBuild</key>
+            <string>21J351</string>
+            <key>DTPlatformName</key>
+            <string>appletvos</string>
+            <key>DTPlatformVersion</key>
+            <string>17.0</string>
+            <key>DTSDKBuild</key>
+            <string>21J351</string>
+            <key>DTSDKName</key>
+            <string>appletvos17.0</string>
+            <key>DTXcode</key>
+            <string>1501</string>
+            <key>DTXcodeBuild</key>
+            <string>15A507</string>
+            <key>LSRequiresIPhoneOS</key>
+            <true/>
+            <key>MinimumOSVersion</key>
+            <string>17.0</string>
+            <key>UIDeviceFamily</key>
+            <array>
+            <integer>3</integer>
+            </array>
+            <key>UILaunchScreen</key>
+            <dict>
+            <key>UILaunchScreen</key>
+            <dict/>
+            </dict>
+            <key>UIRequiredDeviceCapabilities</key>
+            <array>
+            <string>arm64</string>
+            </array>
+            <key>UIUserInterfaceStyle</key>
+            <string>Automatic</string>
             </dict>
             </plist>"#,
             self.identifier,
@@ -123,6 +123,7 @@ impl PlistValues{
         )
     }
 }
+
 
 pub struct Scent{
     app_id: String,
@@ -180,7 +181,7 @@ pub fn build(org: &str, product: &str, args: &[String], apple_target: AppleTarge
         args_out.push("-Z");
         args_out.push("build-std=std");
     }
-    
+    println!("BUILDING {} {}", org,product);
     shell_env(&[("MAKEPAD", "lines"),], &cwd, "rustup", &args_out) ?;
     
     // alright lets make the .app file with manifest

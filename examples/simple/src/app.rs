@@ -5,7 +5,7 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*; 
     
     App = {{App}} {
-        ui: <Root>{
+        ui: 
             <Window>{
                 show_bg: true
                 width: Fill,
@@ -41,7 +41,7 @@ live_design!{
                     }
                 }
             }
-        }
+        
     }
 }  
               
@@ -66,7 +66,7 @@ impl MatchEvent for App{
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
-            log!("TOTAL : {}",TrackingHeap.total());
+            //log!("TOTAL : {}",TrackingHeap.total());
             
         }
     }
@@ -79,7 +79,7 @@ impl AppMain for App {
     }
 } 
 
-
+/*
 
 // This is our custom allocator!
 use std::{
@@ -128,4 +128,4 @@ unsafe impl GlobalAlloc for TrackingHeapWrap {
 
 // Register our custom allocator.
 #[global_allocator]
-static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();
+static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();*/
