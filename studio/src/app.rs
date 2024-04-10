@@ -178,6 +178,9 @@ impl MatchEvent for App{
                                 dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap()
                             };
                             
+                            // we might already have it
+                            if dock.
+                            
                             let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), TabClosable::Yes).unwrap();
                             
                             if let Some(mut item) = item.as_run_view().borrow_mut(){

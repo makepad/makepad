@@ -843,9 +843,15 @@ impl Dock {
     }
     
     fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable)->Option<WidgetRef> {
-        let ret =self.create_tab(cx, parent, item, kind, name, closable);
-        self.select_tab(cx, item);
-        ret
+        if self.items.get(&item).is_some(){
+            self.select_tab(cx, item);
+            Some(self.items.get(&item).unwrap().1.clone())
+        }
+        else{
+            let ret =self.create_tab(cx, parent, item, kind, name, closable);
+            self.select_tab(cx, item);
+            ret
+        }
     }
     
     fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable)->Option<WidgetRef> {
