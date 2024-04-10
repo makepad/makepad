@@ -2563,10 +2563,10 @@ live_design! {
                         sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                         sdf.stroke(
                             mix(
-                                mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.hover),
-                                THEME_COLOR_BEVEL_LIGHT,
+                                THEME_COLOR_BEVEL_SHADOW,
+                                THEME_COLOR_U_HIDDEN,
                                 self.selected
-                            ), THEME_DOCK_BORDER_SIZE)
+                            ), THEME_BEVEL_BORDER * 2.)
 
                         sdf.box(
                             1.,
@@ -2995,8 +2995,7 @@ live_design! {
                 let nubbg_color = mix(THEME_COLOR_SLIDER_NUB_HOVER, THEME_COLOR_SLIDER_NUB_ACTIVE, self.drag);
 
                 match self.slider_type {
-SliderType::Horizontal => {
-
+                    SliderType::Horizontal => {
                         sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
 
