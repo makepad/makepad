@@ -181,12 +181,10 @@ impl Cx {
                     self.redraw_all();
                     self.stdin_handle_platform_ops(Some(swapchain), present_index);
                 }
-                HostToStdin::PollSwapChain{..} => {
-                }
                 HostToStdin::Tick => if swapchain.is_some() {
                     
                     // probe current time
-                    let start_time = ::std::time::SystemTime::now();
+                    //let start_time = ::std::time::SystemTime::now();
 
                     // poll the service for updates
                     // check signals

@@ -465,23 +465,19 @@ impl TextFlow{
             let dt = if self.fixed_counter > 0{
                 &mut self.draw_fixed
             }
-            else {
-                if self.bold_counter > 0{
-                    if self.italic_counter > 0{
-                        &mut self.draw_bold_italic
-                    }
-                    else{
-                        &mut self.draw_bold
-                    }
+            else if self.bold_counter > 0{
+                if self.italic_counter > 0{
+                    &mut self.draw_bold_italic
                 }
                 else{
-                    if self.italic_counter>0{
-                        &mut self.draw_italic
-                    }
-                    else{
-                        &mut self.draw_normal
-                    }
+                    &mut self.draw_bold
                 }
+            }
+            else if self.italic_counter>0{
+                    &mut self.draw_italic
+            }
+            else{
+                &mut self.draw_normal
             };
 
             // Apply the text style options before the font size options,

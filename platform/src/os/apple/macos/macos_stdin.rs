@@ -218,42 +218,41 @@ impl Cx {
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
                 }
-                HostToStdin::PollSwapChain{window_id}  => if windows[window_id].swapchain.is_some() {
-                    
-                    let window = &mut windows[window_id];
-                    let swapchain = window.swapchain.as_mut().unwrap();
-                    let [presentable_image] = &swapchain.presentable_images;
-                    // lets fetch the framebuffers
-                    if presentable_image.image.is_none() {
-                        
-                        let tx_fb = window.tx_fb.clone();
-                        fetch_xpc_service_texture(
-                            service_proxy.as_id(),
-                            presentable_image.id,
-                            move |objcid| {let _ = tx_fb.send(objcid); },
-                        ); 
-                        // this is still pretty bad at 100ms if the service is still starting up
-                        // we should 
-                        if let Ok(fb) = window.rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
-                            
-                            let format = TextureFormat::SharedBGRAu8 {
-                                id: presentable_image.id,
-                                width: swapchain.alloc_width as usize,
-                                height: swapchain.alloc_height as usize,
-                            };
-                            let texture = Texture::new_with_format(self, format);
-                            if self.textures[texture.texture_id()].update_from_shared_handle(
-                                metal_cx,
-                                fb.as_id(),
-                            ) {
-                                let [presentable_image] = &mut swapchain.presentable_images;
-                                presentable_image.image = Some(texture);
+                HostToStdin::Tick=>{
+                    for window in &mut windows{
+                        if window.swapchain.is_some() {
+                            let swapchain = window.swapchain.as_mut().unwrap();
+                            let [presentable_image] = &swapchain.presentable_images;
+                            // lets fetch the framebuffers
+                            if presentable_image.image.is_none() {
+                                                        
+                                let tx_fb = window.tx_fb.clone();
+                                fetch_xpc_service_texture(
+                                    service_proxy.as_id(),
+                                    presentable_image.id,
+                                    move |objcid| {let _ = tx_fb.send(objcid); },
+                                ); 
+                                // this is still pretty bad at 100ms if the service is still starting up
+                                // we should 
+                                if let Ok(fb) = window.rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
+                                                                
+                                    let format = TextureFormat::SharedBGRAu8 {
+                                        id: presentable_image.id,
+                                        width: swapchain.alloc_width as usize,
+                                        height: swapchain.alloc_height as usize,
+                                    };
+                                    let texture = Texture::new_with_format(self, format);
+                                    if self.textures[texture.texture_id()].update_from_shared_handle(
+                                        metal_cx,
+                                        fb.as_id(),
+                                    ) {
+                                        let [presentable_image] = &mut swapchain.presentable_images;
+                                        presentable_image.image = Some(texture);
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                HostToStdin::Tick=>{
-// check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
@@ -383,6 +382,9 @@ impl Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
+                    println!("CREATING WINDOW");
+                    // we should call to the host to make a window with this id
+                    let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
