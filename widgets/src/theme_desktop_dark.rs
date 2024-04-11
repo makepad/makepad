@@ -1550,7 +1550,7 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(THEME_COLOR_D_HIDDEN);
+                sdf.clear(THEME_COLOR_BG_APP);
 
                 if self.is_vertical > 0.5 {
                     sdf.box(
