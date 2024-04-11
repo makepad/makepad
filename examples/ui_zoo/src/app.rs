@@ -103,6 +103,31 @@ live_design!{
                 }
 
                 <ZooHeader> {
+                    title = {text: "Control heights"}
+                    <ZooDesc> {
+                        text: "Control heights"
+                    }
+                    <View> {
+                        width: Fill, height: Fit,
+                        flow: Right,
+                        spacing: (THEME_SPACE_1)
+                        <P> { text: "TestButtong", width: Fit}
+                        <LinkLabel> { text: "TestButtong", width: Fit}
+                        <ButtonFlat> { text: "TestButtong"}
+                        <Button> { text: "TestButtong"}
+                        <TextInput> { text: "TestButtong"}
+                        <DropDown> { }
+                        <Slider> { text: "TestButtong"}
+                        <SliderBig> { text: "TestButtong"}
+                        // <RadioButton> { }
+                        // <RadioButtonTextual> { }
+                        // <RadioButtonTab> { }
+                        <CheckBox> { text: "TestButtong"}
+                        <CheckBoxToggle> { text: "TestButtong"}
+                    }
+                }
+
+                <ZooHeader> {
                     title = {text: "Typography"}
                     <ZooDesc> {
                         text: "Typography."
