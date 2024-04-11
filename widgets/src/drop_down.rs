@@ -89,6 +89,7 @@ impl DropDown {
     
     pub fn set_open(&mut self, cx: &mut Cx) {
         self.is_open = true;
+        self.draw_bg.apply_over(cx, live!{open: 1.0});
         self.draw_bg.redraw(cx);
         let global = cx.global::<PopupMenuGlobal>().clone();
         let mut map = global.map.borrow_mut();
@@ -100,6 +101,7 @@ impl DropDown {
     
     pub fn set_closed(&mut self, cx: &mut Cx) {
         self.is_open = false;
+        self.draw_bg.apply_over(cx, live!{open: 0.0});
         self.draw_bg.redraw(cx);
         cx.sweep_unlock(self.draw_bg.area());
     }
