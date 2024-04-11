@@ -819,8 +819,8 @@ live_design!{
                     title = {text:"<Dock>"}
                     <ZooDesc> {text:"Dock"}
                     <CachedRoundedView> {
-                        width: Fill, height: Fit,
                         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                        width: Fill, height: Fit,
                             <View> {
                                 height: Fit, width: Fill
                                 show_bg: true,
@@ -878,31 +878,24 @@ live_design!{
                                     Container_A = <RectView> {
                                         height: Fill, width: Fill
                                         padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_3) }
                                         <Label> {text: "Hallo"}
                                     }
 
                                     Container_B = <RectView> {
                                         height: Fill, width: Fill
                                         padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_3) }
-
                                         <Label> {text: "Kuckuck"}
                                     }
 
                                     Container_C = <RectView> {
                                         height: Fill, width: Fill
                                         padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_3) }
-
                                         <Label> {text: "Ahoy"}
                                     }
 
                                     Container_D = <RectView> {
                                         height: Fill, width: Fill
                                         padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_3) }
-
                                         <Label> {text: "Hi"}
                                     }
 

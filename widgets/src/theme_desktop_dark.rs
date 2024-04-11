@@ -132,6 +132,10 @@ live_design! {
 
     THEME_COLOR_CTRL_SCROLLBAR_HOVER = (THEME_COLOR_U_3)
 
+    THEME_COLOR_DOCK_CONTAINER = (THEME_COLOR_BG_CONTAINER)
+    THEME_COLOR_DOCK_TAB_SELECTED = (THEME_COLOR_BG_CONTAINER)
+
+
     // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
     THEME_COLOR_HIGH = #C00
     THEME_COLOR_MID = #FA0
@@ -1457,7 +1461,7 @@ live_design! {
     WindowMenu = <WindowMenuBase> { height: 0, width: 0, }
 
     Window = <WindowBase> {
-        pass: {clear_color: (THEME_COLOR_BG_APP)}
+        pass: { clear_color: (THEME_COLOR_BG_APP) }
         flow: Down
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
@@ -1684,7 +1688,7 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_INACTIVE,
                         THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
@@ -1710,7 +1714,7 @@ live_design! {
                 sdf.fill_keep(
                     mix(
                         THEME_COLOR_U_HIDDEN,
-                        THEME_COLOR_CTRL_SELECTED,
+                        THEME_COLOR_DOCK_TAB_SELECTED,
                         self.selected
                     )
                 )
@@ -1822,6 +1826,12 @@ live_design! {
         tab_bar: <TabBar> {}
         splitter: <Splitter> {}
     }
+
+    RectView = <View> {
+        show_bg: true,
+        draw_bg: { color: (THEME_COLOR_DOCK_CONTAINER) }
+    }
+
 
     PopupMenuItem = <PopupMenuItemBase> {
         width: Fill, height: Fit,
