@@ -453,8 +453,6 @@ live_design!{
                     title = {text:"<FileTree>"}
                     <ZooDesc> {text:"File Tree"}
                     <ZooGroup> {
-
-                        show_bg: false,
                         <DemoFileTree> { file_tree:{ height: 400. } }
                     }
                 }
