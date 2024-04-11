@@ -15,7 +15,7 @@ pub fn rustup_toolchain_install(apple_targets:&[AppleTarget]) -> Result<(), Stri
             target.toolchain(),
             "--toolchain",
             "nightly"
-        ]) ?
+            ]) ?
     }
     /*
     let cwd = std::env::current_dir().unwrap();
