@@ -38,7 +38,8 @@ live_design! {
 
 
     // COLOR PALETTE
-    THEME_COLOR_CONTRAST = 1.0 // HIGHER VALUE = HIGHER CONTRAST, RECOMMENDED VALUES: 0.5 - 2.5
+    THEME_COLOR_CONTRAST = 1.0
+    // HIGHER VALUE = HIGHER CONTRAST, RECOMMENDED VALUES: 0.5 - 2.5
 
     THEME_COLOR_WHITE = #FFFFFFFF
     THEME_COLOR_U_5 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.35, THEME_COLOR_CONTRAST)))
@@ -94,7 +95,7 @@ live_design! {
     THEME_COLOR_CTRL_PRESSED_SOLID = (THEME_COLOR_D_1_SOLID)
     THEME_COLOR_CTRL_HOVER_SOLID = (THEME_COLOR_U_2_SOLID)
     THEME_COLOR_CTRL_ACTIVE = (THEME_COLOR_D_1)
-    THEME_COLOR_CTRL_SELECTED = (THEME_COLOR_U_5)
+    THEME_COLOR_CTRL_SELECTED = (THEME_COLOR_U_2)
     THEME_COLOR_CTRL_INACTIVE = (THEME_COLOR_D_HIDDEN)
 
     THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
@@ -1162,7 +1163,7 @@ live_design! {
                         THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
-                    THEME_COLOR_CTRL_SELECTED,
+                    THEME_COLOR_TEXT_DEFAULT,
                     self.selected
                 )
             }
@@ -1684,7 +1685,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_CTRL_SELECTED,
+                        THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -1698,12 +1699,22 @@ live_design! {
             instance selected: float
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                return mix(
-                    THEME_COLOR_BG_CONTAINER,
-                    THEME_COLOR_CTRL_SELECTED,
-                    self.selected
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y + 1.0,
+                    1.
                 )
+                sdf.fill_keep(
+                    mix(
+                        THEME_COLOR_U_HIDDEN,
+                        THEME_COLOR_CTRL_SELECTED,
+                        self.selected
+                    )
+                )
+                return sdf.result
             }
         }
 
@@ -1758,7 +1769,7 @@ live_design! {
             color: (THEME_COLOR_BG_CONTAINER)
         }
         draw_fill: {
-            color: (THEME_COLOR_BG_CONTAINER)
+            color: (THEME_COLOR_U_HIDDEN)
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
@@ -1775,11 +1786,12 @@ live_design! {
     }
 
     Dock = <DockBase> {
+        flow: Down
+
         round_corner: {
             draw_depth: 6.0
             border_radius: (THEME_CONTAINER_CORNER_RADIUS)
             fn pixel(self) -> vec4 {
-
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
                     mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
@@ -1801,7 +1813,6 @@ live_design! {
         }
         border_size: (THEME_DOCK_BORDER_SIZE)
 
-        flow: Down
         padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
         padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
         drag_quad: {
@@ -1827,7 +1838,7 @@ live_design! {
                 return mix(
                     mix(
                         THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_CTRL_SELECTED,
+                        THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
                     THEME_COLOR_TEXT_HOVER,
@@ -2107,14 +2118,26 @@ live_design! {
 
         draw_bg: {
             fn pixel(self) -> vec4 {
-                return mix(
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y + 1.0,
+                    1.
+                )
+                sdf.fill_keep(
                     mix(
-                    THEME_COLOR_BG_EVEN,
-                    THEME_COLOR_BG_ODD,
-                    self.is_even
-                ),
-                THEME_COLOR_CTRL_SELECTED,
-                self.selected)
+                        mix(
+                            THEME_COLOR_BG_EVEN,
+                            THEME_COLOR_BG_ODD,
+                            self.is_even
+                        ),
+                        THEME_COLOR_CTRL_SELECTED,
+                        self.selected
+                    )
+                )
+                return sdf.result
             }
         }
 
@@ -2128,7 +2151,7 @@ live_design! {
                 sdf.union();
                 return sdf.fill(mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_CTRL_SELECTED,
+                    THEME_COLOR_TEXT_SELECTED,
                     self.selected
                 ));
             }
@@ -2138,7 +2161,7 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_CTRL_SELECTED,
+                    THEME_COLOR_TEXT_SELECTED,
                     self.selected
                 )
             }
