@@ -158,6 +158,15 @@ impl RadioButtonRef{
             inner.animator_play(cx, id!(selected.off));
         }
     }
+
+    pub fn select(&self, cx: &mut Cx, scope: &mut Scope){
+        if let Some(mut inner) = self.borrow_mut(){
+            if inner.animator_in_state(cx, id!(selected.off)) {
+                inner.animator_play(cx, id!(selected.on));
+                cx.widget_action(inner.widget_uid(), &scope.path, RadioButtonAction::Clicked);
+            }
+        }
+    }
 }
 
 impl RadioButtonSet{
