@@ -818,203 +818,209 @@ live_design!{
                 <ZooHeader> {
                     title = {text:"<Dock>"}
                     <ZooDesc> {text:"Dock"}
-                    <View> {
-                        height: Fit, width: Fill
-                        <Dock> {
-                            height: 500., width: Fill
+                    <CachedRoundedView> {
+                        width: Fill, height: Fit,
+                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                            <View> {
+                                height: Fit, width: Fill
+                                show_bg: true,
+                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
+                                <Dock> {
+                                    height: 500., width: Fill
 
-                            root = Splitter {
-                                axis: Horizontal,
-                                align: FromA(300.0),
-                                a: tab_set_1,
-                                b: tab_set_2
+                                    root = Splitter {
+                                        axis: Horizontal,
+                                        align: FromA(300.0),
+                                        a: tab_set_1,
+                                        b: tab_set_2
+                                    }
+
+                                    tab_set_1 = Tabs {
+                                        tabs: [tab_a, tab_b],
+                                        selected: 1
+                                    }
+
+                                    tab_set_2 = Tabs {
+                                        tabs: [tab_c, tab_d],
+                                        selected: 1
+                                    }
+
+                                    tab_a = Tab {
+                                        name: "Tab A"
+                                        kind: Container_A
+                                    }
+
+                                    tab_b = Tab {
+                                        name: "Tab B"
+                                        kind: Container_B
+                                    }
+
+                                    tab_c = Tab {
+                                        name: "Tab C"
+                                        kind: Container_C
+                                    }
+
+                                    tab_d = Tab {
+                                        name: "Tab D"
+                                        kind: Container_D
+                                    }
+
+                                    tab_e = Tab {
+                                        name: "Tab E"
+                                        kind: Container_E
+                                    }
+
+                                    tab_f = Tab {
+                                        name: "Tab F"
+                                        kind: Container_F
+                                    }
+
+                                    Container_A = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_3) }
+                                        <Label> {text: "Hallo"}
+                                    }
+
+                                    Container_B = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_3) }
+
+                                        <Label> {text: "Kuckuck"}
+                                    }
+
+                                    Container_C = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_3) }
+
+                                        <Label> {text: "Ahoy"}
+                                    }
+
+                                    Container_D = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_3) }
+
+                                        <Label> {text: "Hi"}
+                                    }
+
+                                    Container_E = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_3) }
+
+                                        <Label> {text: "Ahoy"}
+                                    }
+
+                                    Container_F = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_3) }
+
+                                        <Label> {text: "Hi"}
+                                    }
+                                }
+
                             }
-
-                            tab_set_1 = Tabs {
-                                tabs: [tab_a, tab_b],
-                                selected: 1
-                            }
-
-                            tab_set_2 = Tabs {
-                                tabs: [tab_c, tab_d],
-                                selected: 1
-                            }
-
-                            tab_a = Tab {
-                                name: "Tab A"
-                                kind: Container_A
-                            }
-
-                            tab_b = Tab {
-                                name: "Tab B"
-                                kind: Container_B
-                            }
-
-                            tab_c = Tab {
-                                name: "Tab C"
-                                kind: Container_C
-                            }
-
-                            tab_d = Tab {
-                                name: "Tab D"
-                                kind: Container_D
-                            }
-
-                            tab_e = Tab {
-                                name: "Tab E"
-                                kind: Container_E
-                            }
-
-                            tab_f = Tab {
-                                name: "Tab F"
-                                kind: Container_F
-                            }
-
-                            Container_A = <RectView> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                draw_bg: { color: (THEME_COLOR_D_3) }
-                                <Label> {text: "Hallo"}
-                            }
-
-                            Container_B = <RectView> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                draw_bg: { color: (THEME_COLOR_D_3) }
-
-                                <Label> {text: "Kuckuck"}
-                            }
-
-                            Container_C = <RectView> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                draw_bg: { color: (THEME_COLOR_D_3) }
-
-                                <Label> {text: "Ahoy"}
-                            }
-
-                            Container_D = <RectView> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                draw_bg: { color: (THEME_COLOR_D_3) }
-
-                                <Label> {text: "Hi"}
-                            }
-
-                            Container_E = <RectView> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                draw_bg: { color: (THEME_COLOR_D_3) }
-
-                                <Label> {text: "Ahoy"}
-                            }
-
-                            Container_F = <RectView> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                draw_bg: { color: (THEME_COLOR_D_3) }
-
-                                <Label> {text: "Hi"}
-                            }
-
                         }
                     }
+
+                    // TODO: SHOW
+                    // SEEMS NOT TO WORK WITHOUT DUMMY DATA
+                    // <ZooHeader> {
+                    //     title = {text:"Portal List"}
+                    //     <ZooDesc> {text:"Portal List"}
+                    //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
+                    // }
+
+                    // TODO: SHOW
+                    // <ZooHeader> {
+                    //     title = {text:"Stack Navigation"}
+                    //     <ZooDesc> {text:"Stack Navigation"}
+                    //     <ZooGroup> { <StackNavigation> { width: Fill, height: 100.} }
+                    // }
+
+                    // TODO: SHOW
+                    // <ZooHeader> {
+                    //     title = {text:"Flat list"}
+                    //     <ZooDesc> {text:"Flat list"}
+                    //     <ZooGroup> { <FlatList> { width: Fill, height: 100.} }
+                    // }
+
+                    // TODO: SHOW
+                    // REFERENCE: https://github.com/project-robius/makepad_wonderous/blob/main/src/timeline/timeline_screen.rs#L242-L264
+                    // <ZooHeader> {
+                    //     title = {text: "Expandable Panel"}
+                    //     <ZooDesc> {text: "Expandable Panel"}
+                    //     <ZooGroup> {
+                    //         expandable_panel = <ExpandablePanel> {
+                    //             body = {
+                    //                 flow: Down,
+                    //                 spacing: 10,
+                    //                 header = <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_2)} }
+                    //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_1)} }
+                    //             }
+
+                    //             panel = {
+                    //                 draw_bg: { color: (DEMO_COLOR_3) }
+
+                    //                 scroll_handler = {
+                    //                     draw_bg: {
+                    //                         color: #aaa
+                    //                         radius: 2.
+                    //                     }
+                    //                 }
+
+                    //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #ff0} }
+                    //             }
+                    //         }
+                    //     }
+                    // }
+
                 }
-
-                // TODO: SHOW
-                // SEEMS NOT TO WORK WITHOUT DUMMY DATA
-                // <ZooHeader> {
-                //     title = {text:"Portal List"}
-                //     <ZooDesc> {text:"Portal List"}
-                //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
-                // }
-
-                // TODO: SHOW
-                // <ZooHeader> {
-                //     title = {text:"Stack Navigation"}
-                //     <ZooDesc> {text:"Stack Navigation"}
-                //     <ZooGroup> { <StackNavigation> { width: Fill, height: 100.} }
-                // }
-
-                // TODO: SHOW
-                // <ZooHeader> {
-                //     title = {text:"Flat list"}
-                //     <ZooDesc> {text:"Flat list"}
-                //     <ZooGroup> { <FlatList> { width: Fill, height: 100.} }
-                // }
-
-                // TODO: SHOW
-                // REFERENCE: https://github.com/project-robius/makepad_wonderous/blob/main/src/timeline/timeline_screen.rs#L242-L264
-                // <ZooHeader> {
-                //     title = {text: "Expandable Panel"}
-                //     <ZooDesc> {text: "Expandable Panel"}
-                //     <ZooGroup> {
-                //         expandable_panel = <ExpandablePanel> {
-                //             body = {
-                //                 flow: Down,
-                //                 spacing: 10,
-                //                 header = <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_2)} }
-                //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_1)} }
-                //             }
-
-                //             panel = {
-                //                 draw_bg: { color: (DEMO_COLOR_3) }
-
-                //                 scroll_handler = {
-                //                     draw_bg: {
-                //                         color: #aaa
-                //                         radius: 2.
-                //                     }
-                //                 }
-
-                //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #ff0} }
-                //             }
-                //         }
-                //     }
-                // }
-
             }
         }
     }
-}
 
-app_main!(App);
+    app_main!(App);
 
-#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
-pub enum DropDownEnum {
-    #[pick]
-    ValueOne,
-    ValueTwo,
-    Thrice,
-    FourthValue,
-    OptionE,
-    Hexagons,
-}
-
-#[derive(Live, LiveHook, LiveRead, LiveRegister)]
-pub struct DataBindingsForApp {
-    #[live] fnumber: f32,
-    #[live] inumber: i32,
-    #[live] dropdown: DropDownEnum,
-}
-#[derive(Live, LiveHook)]
-pub struct App {
-    #[live] ui: WidgetRef,
-    #[rust] counter: usize,
-    #[rust(DataBindingsForApp::new(cx))] bindings: DataBindingsForApp
- }
-
-impl LiveRegister for App {
-    fn live_register(cx: &mut Cx) {
-        crate::makepad_widgets::live_design(cx);
-        crate::demofiletree::live_design(cx);
+    #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+    pub enum DropDownEnum {
+        #[pick]
+        ValueOne,
+        ValueTwo,
+        Thrice,
+        FourthValue,
+        OptionE,
+        Hexagons,
     }
-}
+
+    #[derive(Live, LiveHook, LiveRead, LiveRegister)]
+    pub struct DataBindingsForApp {
+        #[live] fnumber: f32,
+        #[live] inumber: i32,
+        #[live] dropdown: DropDownEnum,
+    }
+    #[derive(Live, LiveHook)]
+    pub struct App {
+        #[live] ui: WidgetRef,
+        #[rust] counter: usize,
+        #[rust(DataBindingsForApp::new(cx))] bindings: DataBindingsForApp
+    }
+
+    impl LiveRegister for App {
+        fn live_register(cx: &mut Cx) {
+            crate::makepad_widgets::live_design(cx);
+            crate::demofiletree::live_design(cx);
+        }
+    }
 
 
-impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        let ui = self.ui.clone();
+    impl MatchEvent for App{
+        fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+            let ui = self.ui.clone();
 
         ui.radio_button_set(ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4))
             .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
