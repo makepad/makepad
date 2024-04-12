@@ -1629,7 +1629,7 @@ live_design! {
 
     TabCloseButton = <TabCloseButtonBase> {
         height: 10.0, width: 10.0,
-        margin: { right: 5 },
+        margin: { right: (THEME_SPACE_2), left: -2.5 },
         draw_button: {
 
             instance hover: float;
@@ -1657,7 +1657,7 @@ live_design! {
             hover = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_button: {hover: 0.0}
                     }
@@ -1678,7 +1678,7 @@ live_design! {
         width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
 
         align: {x: 0.0, y: 0.5}
-        padding: <THEME_MSPACE_3> {}
+        padding: <THEME_MSPACE_3> { }
 
         close_button: <TabCloseButton> {}
         draw_name: {
@@ -1859,7 +1859,7 @@ live_design! {
 
         draw_bg: {
             instance selected: 0.0
-            instance hover: 0.0
+           instance hover: 0.0
             instance color: (THEME_COLOR_FLOATING_BG)
             instance color_selected: (THEME_COLOR_CTRL_HOVER)
 
