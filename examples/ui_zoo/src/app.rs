@@ -96,6 +96,7 @@ live_design!{
                         <P> { text: "- Shader-based: what does that mean for how things work." }
                         <P> { text: "- Inheritance mechanisms in the DSL." }
                         <P> { text: "- Introduction to the layout system." }
+                        <P> { text: "- Base theme parameters." }
                         <P> { text: "- Typographic system. Base font-size and contrast." }
                         <P> { text: "- Space constants to control denseness of the design." }
                         <P> { text: "- Transparency mechanism of the widgets. Nesting for structure." }
