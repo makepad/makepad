@@ -4,8 +4,16 @@ live_design! {
     import makepad_draw::shader::std::*;
     import crate::base::*;
 
-    // DIMENSIONS
+    // GLOBAL PARAMETERS
+    THEME_COLOR_CONTRAST = 1.0
+    THEME_COLOR_TINT = #7 
     THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
+    THEME_CORNER_RADIUS = 2.5
+    THEME_BEVELING = 0.75
+    THEME_FONT_SIZE_BASE = 7.5
+    THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
+
+    // DIMENSIONS
     THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
     THEME_SPACE_2 = (1 * (THEME_SPACE_FACTOR))
     THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
@@ -23,10 +31,8 @@ live_design! {
     THEME_DATA_ICON_WIDTH = 16.0
     THEME_DATA_ICON_HEIGHT = 24.0
 
-    THEME_CTRL_CORNER_RADIUS = 2.5
-    THEME_CONTAINER_CORNER_RADIUS = 5.0
-    THEME_TEXTSELECTION_CORNER_RADIUS = 1.25
-    THEME_BEVEL_BORDER = .75
+    THEME_CONTAINER_CORNER_RADIUS = (THEME_CORNER_RADIUS * 2.)
+    THEME_TEXTSELECTION_CORNER_RADIUS = (THEME_CORNER_RADIUS * .5)
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
     THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
@@ -36,9 +42,7 @@ live_design! {
     THEME_SPLITTER_SIZE = 5.0
     THEME_DOCK_BORDER_SIZE: 0.0
 
-
     // COLOR PALETTE
-    THEME_COLOR_CONTRAST = 1.0
     // HIGHER VALUE = HIGHER CONTRAST, RECOMMENDED VALUES: 0.5 - 2.5
 
     THEME_COLOR_WHITE = #FFFFFFFF
@@ -58,7 +62,7 @@ live_design! {
     // BASICS
     THEME_COLOR_MAKEPAD = #FF5C39FF
 
-    THEME_COLOR_BG_APP = (mix(#000000FF, #7, pow(0.5,THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BG_APP = (mix((THEME_COLOR_TINT) * 0.0, (THEME_COLOR_TINT) * 0.6, pow(0.5,THEME_COLOR_CONTRAST)))
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
 
@@ -148,9 +152,6 @@ live_design! {
 
 
     // TYPOGRAPHY
-    THEME_FONT_SIZE_BASE = 7.5
-    THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
-
     THEME_FONT_SIZE_CODE = 9.0
     THEME_FONT_LINE_SPACING = 1.43
 
@@ -346,12 +347,12 @@ live_design! {
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
         <View> {
-            width: Fill, height: (THEME_BEVEL_BORDER * 2.0),
+            width: Fill, height: (THEME_BEVELING * 2.0),
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
         }
         <View> {
-            width: Fill, height: (THEME_BEVEL_BORDER * 0.5),
+            width: Fill, height: (THEME_BEVELING * 0.5),
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
         }
@@ -364,12 +365,12 @@ live_design! {
 //         spacing: 0.,
 //         margin: <THEME_MSPACE_V_2> {}
 //         <View> {
-//             width: (THEME_BEVEL_BORDER * 2.0), height: Fill
+//             width: (THEME_BEVELING * 2.0), height: Fill
 //             show_bg: true,
 //             draw_bg: { color: #f00 }
 //         }
 //         <View> {
-//             width: (THEME_BEVEL_BORDER * 0.5), height: Fill,
+//             width: (THEME_BEVELING * 0.5), height: Fill,
 //             show_bg: true,
 //             draw_bg: { color: #f0f }
 //         }
@@ -934,7 +935,7 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            uniform border_radius: (THEME_CTRL_CORNER_RADIUS)
+            uniform border_radius: (THEME_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
             instance bodybottom: (THEME_COLOR_CTRL_HOVER)
             fn pixel(self) -> vec4 {
@@ -960,7 +961,7 @@ live_design! {
                         THEME_COLOR_BEVEL_SHADOW,
                         THEME_COLOR_U_HIDDEN,
                         self.pressed
-                    ), THEME_BEVEL_BORDER
+                    ), THEME_BEVELING
                 )
 
                 sdf.box(
@@ -974,7 +975,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVEL_BORDER * 1.5
+                    THEME_BEVELING * 1.5
                 )
 
                 return sdf.result
@@ -1087,7 +1088,7 @@ live_design! {
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVEL_BORDER)
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
@@ -1105,7 +1106,7 @@ live_design! {
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVEL_BORDER)
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
@@ -1131,7 +1132,7 @@ live_design! {
                                 THEME_COLOR_BEVEL_SHADOW,
                                 THEME_COLOR_BEVEL_LIGHT,
                                 clamp(self.pos.y - 0.2, 0, 1)),
-                            THEME_BEVEL_BORDER
+                            THEME_BEVELING
                         )
 
                         sdf.fill(
@@ -2108,7 +2109,7 @@ live_design! {
                 )
                 sdf.fill_keep(self.get_color())
                 if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), THEME_BEVEL_BORDER)
+                    sdf.stroke(self.get_border_color(), THEME_BEVELING)
                 }
                 return sdf.result;
             }
@@ -2138,7 +2139,7 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
             instance pressed: 0.0
-            uniform border_radius: (THEME_CTRL_CORNER_RADIUS)
+            uniform border_radius: (THEME_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_U_HIDDEN)
             instance bodybottom: (THEME_COLOR_CTRL_HOVER)
 
@@ -2180,7 +2181,7 @@ live_design! {
                     ),
                     THEME_COLOR_BEVEL_SHADOW,
                     self.focus
-                    ), THEME_BEVEL_BORDER
+                    ), THEME_BEVELING
                 )
 
                 sdf.box(
@@ -2194,7 +2195,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVEL_BORDER * 1.5
+                    THEME_BEVELING * 1.5
                 )
 
                 // lets draw a little triangle in the corner
@@ -2693,7 +2694,7 @@ live_design! {
             // uniform color_inactive: (THEME_COLOR_D_3)
 
             // instance pressed: 0.0
-            uniform border_radius: (THEME_CTRL_CORNER_RADIUS)
+            uniform border_radius: (THEME_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
             instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
 
@@ -2706,7 +2707,7 @@ live_design! {
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), (THEME_BEVEL_BORDER))
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), (THEME_BEVELING))
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
@@ -2746,7 +2747,7 @@ live_design! {
                                 THEME_COLOR_BEVEL_SHADOW,
                                 THEME_COLOR_U_HIDDEN,
                                 self.selected
-                            ), THEME_BEVEL_BORDER * 2.)
+                            ), THEME_BEVELING * 2.)
 
                         sdf.box(
                             1.,
@@ -2757,7 +2758,7 @@ live_design! {
                         )
                         sdf.fill_keep(body)
 
-                        sdf.stroke(bot_gradient, THEME_BEVEL_BORDER * 1.5)
+                        sdf.stroke(bot_gradient, THEME_BEVELING * 1.5)
                     }
                 }
                 return sdf.result
@@ -3048,7 +3049,7 @@ live_design! {
         }
 
         draw_bg: {
-            instance radius: (THEME_CTRL_CORNER_RADIUS)
+            instance radius: (THEME_CORNER_RADIUS)
             instance hover: 0.0
             instance focus: 0.0
             instance bodytop: (THEME_COLOR_INSET_DEFAULT)
@@ -3096,7 +3097,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVEL_BORDER * 0.9
+                    THEME_BEVELING * 0.9
                 )
 
                 return sdf.result
