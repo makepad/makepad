@@ -463,8 +463,16 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     let home_dir = std::env::var("HOME").unwrap();
     let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
     
-    let provision = apple_args.provisioning_profile.as_ref().and_then(|v|
-        ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v))));
+    let provision = apple_args.provisioning_profile.as_ref().and_then(
+        |v|{
+            if v.contains('/'){
+                ProvisionData::parse(&PathBuf::from(v))
+            }
+            else{
+                ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v)))
+            }
+        }
+    );
     
     if provision.is_none() || apple_args.provisioning_profile.is_none() || apple_args.signing_identity.is_none() || apple_args.device_identifier.is_none(){
         // lets list the provisioning profiles.
