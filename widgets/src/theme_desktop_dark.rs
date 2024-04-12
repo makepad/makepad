@@ -1609,6 +1609,7 @@ live_design! {
             instance hover: 0.0
             instance pressed: 0.0
             instance focus: 0.0,
+            instance open: 0.0,
             uniform border_radius: 0.5
 
             fn get_bg(self, inout sdf: Sdf2d) {
