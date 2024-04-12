@@ -754,7 +754,6 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
-                                        color_active: #f00,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -784,7 +783,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
-                                        color_active: #f0f,
+                                        color_active: #f00,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }

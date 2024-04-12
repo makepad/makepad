@@ -6,7 +6,7 @@ live_design! {
 
     // GLOBAL PARAMETERS
     THEME_COLOR_CONTRAST = 1.0
-    THEME_COLOR_TINT = #7 
+    THEME_COLOR_TINT = #7
     THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
     THEME_CORNER_RADIUS = 2.5
     THEME_BEVELING = 0.75
@@ -919,14 +919,15 @@ live_design! {
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
+                        self.color,
+                        mix(self.color, #f, 0.5),
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                    self.color * 0.75,
                     self.pressed
                 )
             }
@@ -1051,21 +1052,6 @@ live_design! {
             }
         }
 
-        draw_icon: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                )
-            }
-        }
     }
 
     CheckBox = <CheckBoxBase> {
@@ -1182,16 +1168,18 @@ live_design! {
             instance focus: 0.0
             instance hover: 0.0
             instance selected: 0.0
+            uniform color: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_INSET_PIT_TOP,
-                        THEME_COLOR_CTRL_HOVER,
+                        self.color,
+                        mix(self.color, #f, 0.4),
                         self.hover
                     ),
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
+                        self.color_active,
+                        mix(self.color_active, #f, 0.75),
                         self.hover
                     ),
                     self.selected
@@ -2746,14 +2734,15 @@ live_design! {
             instance focus: 0.0
             instance hover: 0.0
             instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
+                        self.color,
+                        mix(self.color, #f, 0.5),
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                    self.color * 0.75,
                     self.pressed
                 )
             }
@@ -2878,14 +2867,20 @@ live_design! {
         draw_icon: {
             instance hover: 0.0
             instance selected: 0.0
+            uniform color: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_INSET_PIT_TOP,
-                        THEME_COLOR_CTRL_HOVER,
+                        self.color,
+                        mix(self.color, #f, 0.4),
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_ACTIVE,
+                    mix(
+                        self.color_active,
+                        mix(self.color_active, #f, 0.75),
+                        self.hover
+                    ),
                     self.selected
                 )
             }
