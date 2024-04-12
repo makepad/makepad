@@ -40,14 +40,14 @@ println!("    wasm [options] run <cargo args>              Build and run a wasm 
     println!(" in order for makepad to be able to install an ios application on a real device a provisioning");
     println!(" profile is needed. To create one make an empty application in xcode and give it an organisation");
     println!(" name and product name you copy exactly and without spaces/odd characters into --org=x and --app=x");
-    println!(" Also run it on the device it atleast once, so the profile is created");
+    println!(" Also run it on the device it at least once, so the profile is created");
     println!("                         --org=organisation_name");
     println!("                         --app=product_name");
     println!(" If you have multiple signing identities or devices or provision profiles you might have to set it explicitly");
-    println!("                         --signing-identity=");
     println!("                         --provisioning-profile=");
-    println!("                         --device-uuid=");
-    println!();     
+    println!("                         --signing-identity=");
+    println!("                         --device-identifier=");
+    println!();
     println!("Android commands:");
     println!();
     println!("    android [options] install-toolchain          Download and install the android sdk and rust toolchains");
