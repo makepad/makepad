@@ -247,7 +247,13 @@ impl<'a> HtmlWalker<'a>{
      }
  }
  
- pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>)->HtmlDoc{
+ #[derive(Clone, Copy)]
+ pub enum KeepWhitespace{
+     Yes,
+     No
+ }
+ 
+ pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>, kws:KeepWhitespace)->HtmlDoc{
      enum State{
          Text(usize, usize),
          ElementName(usize),
@@ -271,7 +277,7 @@ impl<'a> HtmlWalker<'a>{
          CommentBody
      }
              
-     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, last_was_ws:&mut bool, errors:&mut Option<Vec<HtmlError>>){
+     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, last_was_ws:&mut bool, errors:&mut Option<Vec<HtmlError>>, kws:KeepWhitespace){
          if c=='&'{
              if in_entity.is_some(){
                  if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected & inside entity".into(), position:i})};
@@ -295,9 +301,13 @@ impl<'a> HtmlWalker<'a>{
          }
          else{
              if c.is_whitespace(){
-                 if !*last_was_ws && c != '\n'{
+                 if let KeepWhitespace::Yes = kws{
+                    decoded.push(c);                      
+                 }
+                 else if !*last_was_ws && c != '\n'{
                      decoded.push(' ');
                  }
+                 
                  *last_was_ws = true;
              }
              else{
@@ -349,7 +359,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementName(i+1)
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors, kws);
                      State::Text(start, dec_start)
                  }
              }
@@ -499,7 +509,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors, kws);
                      State::AttribValueSq(lc,nc, start)
                  }
              }
@@ -512,7 +522,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors, kws);
                      State::AttribValueDq(lc,nc, start)
                  }
              }
