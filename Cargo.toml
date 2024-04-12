@@ -4,6 +4,7 @@ workspace.members = [
 #   "experiments/websocket-windows",
 #   "experiments/svgloader",
     "experiments/empty",
+    "experiments/homescreens",
     "experiments/html_experiment",
     "examples/fractal_zoom", 
     "examples/ui_zoo", 
