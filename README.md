@@ -14,7 +14,7 @@ Most recent talk about makepad: https://www.youtube.com/watch?v=rC4FCS-oMpg
 # Makepad
 
 ## Overview
- 
+
 This is the repository for Makepad, a new way to build UIs in Rust for both native and the web.
 
 Makepad consists of Makepad Framework and Makepad Studio.
@@ -218,11 +218,11 @@ For iOS, the process is slightly more complicated. The steps involved are:
 
 ### Makepad Install
 
-We will run the `cargo makepad apple ios` command, similar to Android build above, but there are some 2 to 4 additional parameters that need to be filled in:
+We will run the `cargo makepad apple ios` command, similar to Android build above, but there are some 2 to 6 additional parameters that need to be filled in:
 
 **`--org`**
 
-First few parts of the organization identifier (which makes up the Bundle Identifier). Usually in the form of *com.somecompany* or *org.orgname*, etc.
+First few parts of the organization identifier. Usually in the form of *com.somecompany* or *org.orgname*, etc.
 This is the same value used to setup the initial skeleton app above. For this example:
 > `my.test`
 
@@ -231,38 +231,62 @@ This is the same value used to setup the initial skeleton app above. For this ex
 The name of the application or the project. This is the same as the Product Name used to setup the initial skeleton app above. In this case:
 > `makepad-example-simple`
 
-**`--org-id`** (real-device only)
-
-Find the `<key>ApplicationIdentifierPrefix</key>` and use the value in the `<string>ORGIDVALUE</string>`, from the newest `**.mobileprovision` file located in the `~/Library/MobileDevice/Provisioning Profiles` directory.
-`ORGIDVALUE` should be a 10 digit alpha-numeric value.
-
-**`--ios-version`** (Optional)
-
-Defaults to 17. Set it to 16 or other values if the device is not running iOS 17.
-
 ### Example
-
-For this example, we have the Bundle Identifier of **`my.test.makepad-example-simple`**
 
 ### Install app on IOS simulator
 
 ```bash
 cd ~/projects/makepad
-cargo makepad apple ios --org=my.test --app=makepad-example-simple run-sim -p makepad-example-simple --release
+cargo makepad apple ios \
+  --org=my.test \
+  --app=makepad-example-simple \
+  run-sim -p makepad-example-simple --release
 ```
 
 ### Install app on IOS device
 
+For installing on real device, the process is more involved due to possibility of multiple profiles and signing identies and target devices. For this reason, Makepad will print out the possible values when run without the proper arguments.
+
+For example, first run the following command:
+
 ```bash
 cd ~/projects/makepad
-cargo makepad apple ios --org-id=ORGIDVALUE --org=my.test --app=makepad-example-simple run-device -p makepad-example-simple --release
+cargo makepad apple ios \
+  --org=my.test \
+  --app=makepad-example-simple \
+  run-device -p makepad-example-simple --release
 ```
 
-The application will be installed and launched on either the emulator or real device.
+This command will result in an error and print out the list of all provisioning profiles, signing identies, and device identifiers on the current system. The user has to decide and choose the ones that he/she needs to use for each type. Once decided, run the folloiwng command and fill in the values chosen from the output.
+
+```bash
+cargo makepad apple ios \
+ --provisioning-profile=a-long-profile-hex-string-with-dashes \
+ --signing-identity=A_LONG_SIGNING_IDENTITY_HEX_STRING \
+ --device-identifier=A-LONG-DEVICE-HEX-STRING-WITH-DASHES \
+ --org=my.test \
+ --app=makepad-example-simple \
+ run-device -p makepad-example-simple –release
+ 
+```
+
+The application will be installed and launched on either the emulator or real device. (Make sure the device is connected and unlocked)
 
 ## 6. WASM Build
 
-*To Be Updated*
+Running the Makepad application as a WASM build is as simple as a single command. The sript will automatically generate the necessary index.html and other files and also start a local webserver at port 8010. After running the command below, just open your browser to <http://127.0.0.1:8010/> in order for the app to load and run.
+
+### Install WASM toolchain (First time)
+
+```bash
+cargo makepad wasm install-toolchain
+```
+
+### Install app as WASM binary for browsers
+
+```bash
+cargo makepad wasm run -p makepad-example-simple --release
+```
 
 ---
 
@@ -280,8 +304,11 @@ rustup toolchain install nightly
 
 cd ~/projects/makepad
 cargo install --path ./tools/cargo_makepad
-cargo makepad android toolchain-install
-cargo makepad apple ios toolchain-install
+cargo makepad android install-toolchain
+cargo makepad apple ios install-toolchain
+cargo makepad apple tv install-toolchain
+cargo makepad wasm install-toolchain
+
 ```
 
 ### Android
@@ -314,16 +341,18 @@ cargo makepad apple ios --org=my.test --app=makepad-example-news-feed run-sim -p
 
 ### IOS Device
 
-Command for installing the app onto a physical IOS device:
+Command for installing the app onto a physical IOS device.
+
+**See Step 5 above for more detailed instructions.**
 
 ```bash
-cargo makepad apple ios --org-id=ORGIDVALUE --org=my.test --app=makepad-example-simple run-device -p makepad-example-simple --release
+cargo makepad apple ios --org=my.test --app=makepad-example-simple run-device -p makepad-example-simple --release
 
-cargo makepad apple ios --org-id=ORGIDVALUE --org=my.test --app=makepad-example-fractal-zoom run-device -p makepad-example-fractal-zoom --release
+cargo makepad apple ios --org=my.test --app=makepad-example-fractal-zoom run-device -p makepad-example-fractal-zoom --release
 
-cargo makepad apple ios --org-id=ORGIDVALUE --org=my.test --app=makepad-example-ironfish run-device -p makepad-example-ironfish --release
+cargo makepad apple ios --org=my.test --app=makepad-example-ironfish run-device -p makepad-example-ironfish --release
 
-cargo makepad apple ios --org-id=ORGIDVALUE --org=my.test --app=makepad-example-news-feed run-device -p makepad-example-news-feed --release
+cargo makepad apple ios --org=my.test --app=makepad-example-news-feed run-device -p makepad-example-news-feed --release
 ```
 
 ### Cargo Check Builds
