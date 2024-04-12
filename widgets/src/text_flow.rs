@@ -381,7 +381,7 @@ impl TextFlow{
         self.draw_block.end(cx);
     }
     
-    pub fn push_inline_code(&mut self, cx:&mut Cx2d){
+    pub fn push_inline_code(&mut self, _cx:&mut Cx2d){
         // alright we are going to push a block with a layout and a walk
         /*self.draw_block.block_type = FlowBlockType::InlineCode;
         self.draw_block.begin(cx, self.inline_code_walk, self.inline_code_layout);
@@ -389,7 +389,7 @@ impl TextFlow{
         self.inline_code_counter +=1;
     } 
         
-    pub fn pop_inline_code(&mut self, cx:&mut Cx2d){
+    pub fn pop_inline_code(&mut self, _cx:&mut Cx2d){
         /*self.draw_block.draw_vars.area = self.area_stack.pop();
         self.draw_block.end(cx);*/
         if self.inline_code_counter>0{
