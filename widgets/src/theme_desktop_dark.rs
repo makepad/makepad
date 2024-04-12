@@ -839,7 +839,11 @@ live_design! {
                 }
                 return sdf.fill( mix(
                     THEME_COLOR_CTRL_DEFAULT,
-                    THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                    mix(
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
+                        self.pressed
+                    ),
                     self.hover
                 ));
             }
@@ -1577,8 +1581,8 @@ live_design! {
                 return sdf.fill_keep(mix(
                     THEME_COLOR_D_HIDDEN,
                     mix(
-                        THEME_COLOR_CTRL_HOVER,
-                        THEME_COLOR_CTRL_PRESSED,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
                         self.pressed
                     ),
                     self.hover
@@ -1629,7 +1633,7 @@ live_design! {
 
     TabCloseButton = <TabCloseButtonBase> {
         height: 10.0, width: 10.0,
-        margin: { right: (THEME_SPACE_2), left: -2.5 },
+        margin: { right: (THEME_SPACE_2), left: -3.5 },
         draw_button: {
 
             instance hover: float;
@@ -1824,6 +1828,149 @@ live_design! {
             color: (THEME_COLOR_DRAG_QUAD)
         }
         tab_bar: <TabBar> {}
+        splitter: <Splitter> {}
+    }
+
+    TabMinimal = <TabBase> {
+        width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
+
+        align: {x: 0.0, y: 0.5}
+        padding: <THEME_MSPACE_3> { }
+
+        close_button: <TabCloseButton> {}
+        draw_name: {
+            text_style: <THEME_FONT_REGULAR> {}
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_INACTIVE,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+            }
+        }
+
+        draw_bg: {
+            instance hover: float
+            instance selected: float
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let marker_height = 2.
+
+                sdf.rect(0, self.rect_size.y - marker_height, self.rect_size.x, marker_height)
+                sdf.fill(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_TEXT_ACTIVE), self.selected));
+                return sdf.result
+            }
+        }
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                    }
+                }
+
+                on = {
+                    cursor: Hand,
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {hover: [{time: 0.0, value: 1.0}]}
+                        draw_name: {hover: [{time: 0.0, value: 1.0}]}
+                    }
+                }
+            }
+
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.3}}
+                    apply: {
+                        close_button: {draw_button: {selected: 0.0}}
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                    }
+                }
+
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        close_button: {draw_button: {selected: 1.0}}
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                    }
+                }
+            }
+        }
+    }
+
+    TabBarMinimal = <TabBarBase> {
+        tab: <TabMinimal> {}
+        draw_drag: {
+            draw_depth: 10
+            color: (THEME_COLOR_BG_CONTAINER)
+        }
+        draw_fill: {
+            color: (THEME_COLOR_U_HIDDEN)
+        }
+
+        width: Fill, height: (THEME_TAB_HEIGHT)
+
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true
+            show_scroll_y: false
+            scroll_bar_x: {
+                draw_bar: {bar_width: 3.0}
+                bar_size: 4
+                use_vertical_finger_scroll: true
+            }
+        }
+    }
+
+    DockMinimal = <DockBase> {
+        flow: Down,
+
+        round_corner: {
+            draw_depth: 6.0
+            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            fn pixel(self) -> vec4 {
+                let pos = vec2(
+                    mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
+                    mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
+                )
+
+                let sdf = Sdf2d::viewport(pos * self.rect_size);
+                sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
+                sdf.box(
+                    0.25,
+                    0.25,
+                    self.rect_size.x * 2.0,
+                    self.rect_size.y * 2.0,
+                    4.0
+                );
+
+                sdf.subtract()
+                return sdf.fill(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead
+            }
+        }
+        border_size: (THEME_DOCK_BORDER_SIZE)
+
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
+        drag_quad: {
+            draw_depth: 10.0
+            color: (THEME_COLOR_DRAG_QUAD)
+        }
+        tab_bar: <TabBarMinimal> {}
         splitter: <Splitter> {}
     }
 

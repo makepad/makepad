@@ -866,7 +866,7 @@ live_design!{
                                     }
 
                                     tab_set_2 = Tabs {
-                                        tabs: [tab_c, tab_d],
+                                        tabs: [tab_c, tab_d, tab_e, tab_f],
                                         selected: 1
                                     }
 
@@ -933,16 +933,125 @@ live_design!{
                                     Container_E = <RectView> {
                                         height: Fill, width: Fill
                                         padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_3) }
-
                                         <Label> {text: "Ahoy"}
                                     }
 
                                     Container_F = <RectView> {
                                         height: Fill, width: Fill
                                         padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_3) }
+                                        <Label> {text: "Hi"}
+                                    }
+                                }
 
+                            }
+                        }
+                    }
+
+                <ZooHeader> {
+                    title = {text:"<DockMinimal>"}
+                    <ZooDesc> {text:"DockMinimal"}
+                    <CachedRoundedView> {
+                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                        width: Fill, height: Fit,
+                            <View> {
+                                height: Fit, width: Fill
+                                show_bg: true,
+                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
+                                <DockMinimal> {
+                                    height: 500., width: Fill
+
+                                    root = Splitter {
+                                        axis: Horizontal,
+                                        align: FromA(300.0),
+                                        a: tab_set_1,
+                                        b: tab_set_2
+                                    }
+
+                                    tab_set_1 = Tabs {
+                                        tabs: [tab_a, tab_b],
+                                        selected: 1
+                                    }
+
+                                    tab_set_2 = Tabs {
+                                        tabs: [tab_c, tab_d, tab_e, tab_f],
+                                        selected: 1
+                                    }
+
+                                    tab_a = Tab {
+                                        name: "Tab A"
+                                        closable: true,
+                                        kind: Container_A
+                                    }
+
+                                    tab_b = Tab {
+                                        name: "Tab B"
+                                        closable: false,
+                                        kind: Container_B
+                                    }
+
+                                    tab_c = Tab {
+                                        name: "Tab C"
+                                        closable: true,
+                                        kind: Container_C
+                                    }
+
+                                    tab_d = Tab {
+                                        name: "Tab D"
+                                        closable: true,
+                                        kind: Container_D
+                                    }
+
+                                    tab_e = Tab {
+                                        name: "Tab E"
+                                        closable: true,
+                                        kind: Container_E
+                                    }
+
+                                    tab_f = Tab {
+                                        name: "Tab F"
+                                        closable: true,
+                                        kind: Container_F
+                                    }
+
+                                    Container_A = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                                        <Label> {text: "Hallo"}
+                                    }
+
+                                    Container_B = <RectView> {
+                                        height: Fill, width: Fill
+                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                                        padding: 10.,
+                                        <Label> {text: "Kuckuck"}
+                                    }
+
+                                    Container_C = <RectView> {
+                                        height: Fill, width: Fill
+                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                                        padding: 10.,
+                                        <Label> {text: "Ahoy"}
+                                    }
+
+                                    Container_D = <RectView> {
+                                        height: Fill, width: Fill
+                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                                        padding: 10.,
+                                        <Label> {text: "Hi"}
+                                    }
+
+                                    Container_E = <RectView> {
+                                        height: Fill, width: Fill
+                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                                        padding: 10.,
+                                        <Label> {text: "Ahoy"}
+                                    }
+
+                                    Container_F = <RectView> {
+                                        height: Fill, width: Fill
+                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                                        padding: 10.,
                                         <Label> {text: "Hi"}
                                     }
                                 }
