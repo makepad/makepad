@@ -173,7 +173,7 @@ struct WordIteratorItem {
     start: usize,
     end: usize,
     width: f64,
-    with_newline: bool
+    with_new_line: bool
 }
 
 impl<'a> WordIterator<'a> {
@@ -199,7 +199,7 @@ impl<'a> WordIterator<'a> {
                     start: self.word_start,
                     end: i,
                     width: self.word_width,
-                    with_newline: false
+                    with_new_line: false
                 };
                 
                 let adv = if let Some(glyph) = font.get_glyph(c) {
@@ -213,7 +213,7 @@ impl<'a> WordIterator<'a> {
                     self.last_is_whitespace = false;
                     self.word_start = i + 1;
                     self.word_width = 0.0;
-                    return Some(WordIteratorItem {with_newline: true, end: i, ..ret})
+                    return Some(WordIteratorItem {with_new_line: true, end: i, ..ret})
                 }
                 else if c.is_whitespace() { // we only return words where whitespace turns to word
                     self.last_is_whitespace = true;
@@ -241,7 +241,7 @@ impl<'a> WordIterator<'a> {
                 start: self.word_start,
                 end: self.last_index + char_bytes_len,
                 width: self.word_width,
-                with_newline: false
+                with_new_line: false
             });
         }
         else {
@@ -564,7 +564,7 @@ impl DrawText {
                         measured_width += word.width;
                     }
                     if measured_width > max_width {max_width = measured_width}
-                    if word.with_newline {
+                    if word.with_new_line {
                         measured_height += line_height * self.text_style.line_spacing;
                         measured_width = 0.0;
                     }
@@ -661,6 +661,9 @@ impl DrawText {
             }
             // make sure our iterator uses the xpos from the turtle
             self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
+            if word.with_new_line{
+                cx.turtle_new_line();
+            }
         }
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
@@ -757,7 +760,7 @@ impl DrawText {
                         self.draw_inner(cx, rect.pos + pos, &text[word.start..word.end], fonts_atlas);
                         pos.x += word.width;
                         
-                        if word.with_newline {
+                        if word.with_new_line {
                             pos.y += line_height * self.text_style.line_spacing;
                             pos.x = 0.0;
                         }
