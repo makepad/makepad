@@ -872,31 +872,37 @@ live_design!{
 
                                     tab_a = Tab {
                                         name: "Tab A"
+                                        closable: true,
                                         kind: Container_A
                                     }
 
                                     tab_b = Tab {
                                         name: "Tab B"
+                                        closable: false,
                                         kind: Container_B
                                     }
 
                                     tab_c = Tab {
                                         name: "Tab C"
+                                        closable: true,
                                         kind: Container_C
                                     }
 
                                     tab_d = Tab {
                                         name: "Tab D"
+                                        closable: true,
                                         kind: Container_D
                                     }
 
                                     tab_e = Tab {
                                         name: "Tab E"
+                                        closable: true,
                                         kind: Container_E
                                     }
 
                                     tab_f = Tab {
                                         name: "Tab F"
+                                        closable: true,
                                         kind: Container_F
                                     }
 
