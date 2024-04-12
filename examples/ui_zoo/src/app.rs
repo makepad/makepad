@@ -621,6 +621,7 @@ live_design!{
                             <LinkLabelIcon> {
                                 text: "Click me!"
                                 draw_icon: {
+                                    color: #f00,
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
 
@@ -701,6 +702,7 @@ live_design!{
                                 text:"Check me out!"
                                 draw_check: { check_type: None }
                                 draw_icon: {
+                                    color_active: #f00,
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
                             }
@@ -752,6 +754,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
+                                        color_active: #f00,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -761,6 +764,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
+                                        color_active: #0f0,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -770,6 +774,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
+                                        color_active: #0ff,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -779,6 +784,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
+                                        color_active: #f0f,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
