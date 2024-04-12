@@ -11,7 +11,7 @@ use {
         //makepad_live_id::*,
         os::{
             apple::apple_sys::*,
-            apple::apple_util::nsstring_to_string,
+            apple::apple_util::{nsstring_to_string,str_to_nsstring},
             cx_native::EventFlow,
             apple::{
                 tvos::{
@@ -37,6 +37,10 @@ use {
 };
 
 impl Cx {
+    
+    pub fn trace(val:&str){
+        unsafe{NSLog(str_to_nsstring(val))};
+    }
     
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
@@ -277,8 +281,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) { 
-        crate::log!("TVOS APP.");
-        panic!("IZ HERE");
+        
         self.os.start_time = Some(Instant::now());
         #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
