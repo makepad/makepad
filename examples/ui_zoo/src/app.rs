@@ -299,6 +299,7 @@ live_design!{
                         <Label> { text: "<ButtonIcon>"}
                         iconbutton = <ButtonIcon> {
                             draw_icon: {
+                                color: #f00,
                                 svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                             }
                             text: "I can have a icon!"
@@ -312,6 +313,7 @@ live_design!{
                             width: Fill, height: Fit,
                             <ButtonFlat> {
                                 draw_icon: {
+                                    color: #f00,
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
                                 text: "I can have a lovely icon!"
