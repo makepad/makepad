@@ -663,13 +663,6 @@ impl TextInputRef {
         None
     }
     
-    pub fn return_key(&self, actions: &Actions) -> Option<String> {
-        if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
-            return Some(val);
-        }
-        None
-    }
-    
     pub fn set_cursor(&self, head:usize, tail: usize){
         if let Some(mut inner) = self.borrow_mut(){
             inner.set_cursor(head, tail);
