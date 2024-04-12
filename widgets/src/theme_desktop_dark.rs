@@ -1646,7 +1646,7 @@ live_design! {
                 sdf.move_to(min.x, max.y);
                 sdf.line_to(max.x, min.y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_INACTIVE,
                     THEME_COLOR_TEXT_HOVER,
                     self.hover
                 ), 1.0);
@@ -1859,7 +1859,7 @@ live_design! {
 
         draw_bg: {
             instance selected: 0.0
-           instance hover: 0.0
+            instance hover: 0.0
             instance color: (THEME_COLOR_FLOATING_BG)
             instance color_selected: (THEME_COLOR_CTRL_HOVER)
 
