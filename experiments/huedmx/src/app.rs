@@ -674,7 +674,7 @@ impl App {
                 // and finally the moving head
                 let spot1 = 200;
                 let spot2 = 250;
-                /*
+                
                 dmx_f32(state.fade[7], dmx, &[spot1, spot2], 6);
                 dmx_f32(state.dial_a[0], dmx, &[spot1], 1);
                 dmx_f32(state.dial_a[0], dmx, &[spot2], 1);
@@ -683,7 +683,7 @@ impl App {
                 map_wargb(state.dial_a[3], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
                 dmx_f32(state.dial_a[4], dmx, &[spot1, spot2], 12);
                 dmx_f32(state.dial_a[5], dmx, &[spot1, spot2], 13);
-                */
+                
 
                 
                 dmx_f32(state.dial_a[6], dmx, &[spot1, spot2], 10);
@@ -708,19 +708,21 @@ impl App {
                 dmx_f32(state.dial_b[6], dmx, &[smoke2], 2);
                 
                 // laser: 400
-                let laser = 400;
-                dmx_f32(state.dial_a[0], dmx, &[laser], 1);
-                dmx_f32(state.dial_a[1], dmx, &[laser], 2);
-                dmx_f32(state.dial_a[2], dmx, &[laser], 3);
-                dmx_f32(state.dial_a[3], dmx, &[laser], 4); 
-                dmx_f32(state.dial_a[4], dmx, &[laser], 5);
-                dmx_f32(state.dial_a[5], dmx, &[laser], 6);
-                dmx_f32(state.dial_b[0], dmx, &[laser], 7);
-                dmx_f32(state.dial_b[1], dmx, &[laser], 8); 
-                dmx_f32(state.dial_b[2], dmx, &[laser], 9); 
-                dmx_f32(state.dial_b[3], dmx, &[laser], 10); 
-                dmx_f32(state.dial_b[4], dmx, &[laser], 11); 
-                dmx_f32(state.dial_b[5], dmx, &[laser], 12); 
+                let laser1 = 400;
+                let laser2 = 420;
+                let laser3 = 440;
+                dmx_f32(state.dial_b[0], dmx, &[laser1,laser2,laser3], 1);
+                dmx_f32(state.dial_b[1], dmx, &[laser1,laser2,laser3], 2);
+                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 3);
+                dmx_f32(0.3, dmx, &[laser1,laser2,laser3], 4); 
+                dmx_f32(state.dial_b[2], dmx, &[laser1,laser2,laser3], 5);
+                dmx_f32(state.dial_b[3], dmx, &[laser1,laser2,laser3], 6);
+                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 7);
+                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 8); 
+                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 10); 
+                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 9); // y position
+                dmx_f32(state.dial_b[4], dmx, &[laser1,laser2,laser3], 11); 
+                dmx_f32(state.dial_b[5], dmx, &[laser1,laser2,laser3], 12); 
                                                                                                 
                 
                 //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
