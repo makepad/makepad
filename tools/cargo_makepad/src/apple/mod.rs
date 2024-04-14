@@ -90,6 +90,9 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
         "tvos"=>{
             AppleOs::Tvos
         }
+        "list"=>{
+            return list_profiles();
+        }
         _=>{
             return Err(format!("please enter ios or tvos"))
         }
@@ -97,13 +100,13 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut args = &args[1..];
     for i in 0..args.len() {
         let v = &args[i];
-        if let Some(opt) = v.strip_prefix("--signing-identity=") {
+        if let Some(opt) = v.strip_prefix("--cert=") {
             signing_identity = Some(opt.to_string());
         } 
-        else if let Some(opt) = v.strip_prefix("--provisioning-profile=") {
+        else if let Some(opt) = v.strip_prefix("--profile=") {
             provisioning_profile = Some(opt.to_string());
         } 
-        else if let Some(opt) = v.strip_prefix("--device-identifier=") {
+        else if let Some(opt) = v.strip_prefix("--device=") {
             device_identifier = Some(opt.to_string());
         }
         else if let Some(opt) = v.strip_prefix("--app=") {

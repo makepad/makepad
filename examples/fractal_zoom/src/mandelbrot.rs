@@ -29,13 +29,13 @@ live_design!{
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
             
-            return vec4(Pal::iq4(index - self.color_cycle*-1.0),1);
+            return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
             
         }
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 256,
+        max_iter: 2560,
     }
 }
 
@@ -517,6 +517,14 @@ impl Widget for Mandelbrot {
                 if KeyCode::Space == k.key_code{
                     self.space.zoom = 0.5;
                     self.space.center = dvec2(-0.5,0.0);
+                }
+                if KeyCode::KeyW == k.key_code{
+                    self.max_iter += 10;
+                                        
+                }
+                if KeyCode::KeyE == k.key_code{
+                    self.max_iter -= 10;
+                                        
                 }
             }
             Hit::FingerMove(fe) => {

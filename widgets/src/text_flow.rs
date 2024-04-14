@@ -12,7 +12,7 @@ live_design!{
         font_size: 8,
         flow: RightWrap,
     }
-}  
+}
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
@@ -36,7 +36,7 @@ pub struct DrawFlowBlock {
     #[live] quote_bg_color: Vec4,
     #[live] quote_fg_color: Vec4,
     #[live] block_type: FlowBlockType
-} 
+}
 
       
 // this widget has a retained and an immediate mode api
