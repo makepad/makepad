@@ -353,13 +353,13 @@ impl<'a> HtmlWalker<'a>{
              }
              State::Text(start, dec_start, last_non_whitespace)=>{ 
                  if c == '<'{
-                        if let Some(start) = in_entity{
-                            if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
-                        }
-                        decoded.truncate(last_non_whitespace);
-                        if dec_start != decoded.len(){
+                    if let Some(start) = in_entity{
+                        if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
+                    }
+                    decoded.truncate(last_non_whitespace);
+                    if dec_start != decoded.len(){
                         nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
-                    } 
+                     } 
                      State::ElementName(i+1)
                  }
                  else{
