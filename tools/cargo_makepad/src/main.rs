@@ -37,6 +37,7 @@ println!("    wasm [options] run <cargo args>              Build and run a wasm 
     println!("    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup");
     println!("    apple <ios|tvos> --org=x --app=x run-sim <cargo args>    runs the project on the aarch64 simulator");
     println!("    apple <ios|tvos> --org=x --app=x run-device <cargo args>   runs the project on a real device");
+    println!("    apple list                                   Lists all certificates/profiles/devices");
     println!(" in order for makepad to be able to install an ios application on a real device a provisioning");
     println!(" profile is needed. To create one make an empty application in xcode and give it an organisation");
     println!(" name and product name you copy exactly and without spaces/odd characters into --org=x and --app=x");
