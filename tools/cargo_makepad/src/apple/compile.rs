@@ -11,6 +11,100 @@ pub struct PlistValues {
     version: String,
 }
 
+struct ParsedProfiles{
+    profiles:Vec<ProvisionData>,
+    certs: Vec<(String,String)>,
+}
+
+impl ParsedProfiles{
+    fn println(&self){
+        println!("--------------  Profiles found: --------------");
+        for prov in &self.profiles{
+            println!("Profile: {}", prov.uuid);
+            println!("    team: {}", prov.team_ident);
+            println!("    app-identifier: {}", prov.app_identifier);
+            for device in &prov.devices{
+                println!("    device: {}", device);
+            }
+        }
+        println!("please set --profile=<> to the right profile hex string start or filename\n");
+        println!("-------------- Signing certificates: --------------");
+    }
+}
+
+pub fn parse_profiles()->Result<ParsedProfiles, String>{
+    let cwd = std::env::current_dir().unwrap();
+    let home_dir = std::env::var("HOME").unwrap();
+    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
+        
+    let profile_files = std::fs::read_dir(profile_dir).unwrap();
+    let mut profiles = Vec::new();
+    for file in profile_files {
+        // lets read it
+        let profile_path = file.unwrap().path();
+        if let Some(profile) = ProvisionData::parse(&profile_path) {
+            profiles.push(profile);
+        }
+    }
+    let mut certs = Vec::new();
+    let identities = shell_env_cap(&[], &cwd, "security", &[
+        "find-identity",
+        "-v",
+        "-p",
+        "codesigning"
+    ]) ?;
+    // alright lets parse identities
+    
+    Ok(ParsedProfiles{
+        profiles,
+        certs
+    })
+}
+
+pub fn list_profiles()->Result<(), String>{
+    let cwd = std::env::current_dir().unwrap();
+    let home_dir = std::env::var("HOME").unwrap();
+    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
+    
+    let profiles = std::fs::read_dir(profile_dir).unwrap();
+
+    println!("--------------  Scanning profiles: --------------");
+   
+    for profile in profiles {
+        // lets read it
+        let profile_path = profile.unwrap().path();
+        if let Some(prov) = ProvisionData::parse(&profile_path) {
+            println!("Profile: {}", prov.uuid);
+            println!("    team: {}", prov.team_ident);
+            println!("    app-identifier: {}", prov.app_identifier);
+            for device in prov.devices{
+                println!("    device: {}", device);
+            }
+        }
+    }
+    println!("please set --profile=<> to the right profile hex string start or filename\n");
+    // parse identities for code signing
+    println!("-------------- Scanning signing certificates: --------------");
+    
+    shell_env_cap(&[], &cwd, "security", &[
+        "find-identity",
+        "-v",
+        "-p",
+        "codesigning"
+    ]) ?;
+    println!("please set --cert=<> to the right signing certificate hex string start\n");
+            
+    println!("--------------  Scanning devices identifiers: --------------");
+    shell_env(&[], &cwd, "xcrun", &[
+        "devicectl",
+        "list",
+        "devices",
+    ]) ?;
+    println!("please set --device=<> to the right device hex string or name, multiple comma separated without spaces: a,b,c\n");
+    
+    Ok(())
+}
+
 impl PlistValues{
     fn to_plist_file(&self, os: AppleOs)->String{
         match os{
@@ -461,6 +555,10 @@ pub struct AppleArgs {
 pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: AppleTarget) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let home_dir = std::env::var("HOME").unwrap();
+    // lets parse the inputs
+    let parsed = parse_profiles()?;
+    parsed.println();
+    //return Ok(());
     let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
     
     let provision = apple_args.provisioning_profile.as_ref().and_then(
@@ -477,38 +575,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     if provision.is_none() || apple_args.provisioning_profile.is_none() || apple_args.signing_identity.is_none() || apple_args.device_identifier.is_none(){
         // lets list the provisioning profiles.
         println!("Error: missing provisioning profile, signing idenity or device identifier");
-        let profiles = std::fs::read_dir(profile_dir).unwrap();
-        println!("--------------  Scanning provisioning profiles: --------------");
-        for profile in profiles {
-            // lets read it
-            let profile_path = profile.unwrap().path();
-            if let Some(prov) = ProvisionData::parse(&profile_path) {
-                println!("Profile: {}", prov.uuid);
-                println!("    team: {}", prov.team_ident);
-                println!("    app-identifier: {}", prov.app_identifier);
-                for device in prov.devices{
-                    println!("    device: {}", device);
-                }
-            }
-        }
-        println!("please set --provisioning-profile=<> to the right profile hex string\n");
-        // parse identities for code signing
-        println!("-------------- Scanning signing identities: --------------");
-        shell_env(&[], &cwd, "security", &[
-            "find-identity",
-            "-v",
-            "-p",
-            "codesigning"
-        ]) ?;
-        println!("please set --signing-identity=<> to the right signing identity hex string\n");
-        
-        println!("--------------  Scanning devices identifiers: --------------");
-        shell_env(&[], &cwd, "xcrun", &[
-            "devicectl",
-            "list",
-            "devices",
-        ]) ?;
-        println!("please set --device-identifier=<> to the right device hex string, multiple comma separated without spaces: a,b,c\n");
+        list_profiles()?;
         return Err("please provide missing arguments BEFORE run-device".into());
     }
     let provision = provision.unwrap();
