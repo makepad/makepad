@@ -47,6 +47,10 @@ pub struct Html {
     /// The character used to separate an ordered list's item number from the content.
     #[live] ol_separator: String,
 
+    /// Whether to keep internal whitespace when parsing HTML.
+    /// If `true`, only whitespace that exists within other text will be kept;
+    /// all text nodes that consist of only whitespace will be removed,
+    /// and leading and trailing whitespace will be trimmed off of text nodes.
     #[live(false)] keep_whitespace: bool,
 
     /// The stack of list levels encountered so far, used to track nested lists.
