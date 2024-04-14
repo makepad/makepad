@@ -353,13 +353,13 @@ impl<'a> HtmlWalker<'a>{
              }
              State::Text(start, dec_start, last_non_whitespace)=>{ 
                  if c == '<'{
-                     if start != i{
-                         if let Some(start) = in_entity{
-                              if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
-                         }
-                         decoded.truncate(last_non_whitespace);
-                         nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
-                     }
+                        if let Some(start) = in_entity{
+                            if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
+                        }
+                        decoded.truncate(last_non_whitespace);
+                        if dec_start != decoded.len(){
+                        nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
+                    } 
                      State::ElementName(i+1)
                  }
                  else{
@@ -594,11 +594,11 @@ impl<'a> HtmlWalker<'a>{
      if let Some(start) = in_entity{
           if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
      }
-     if let State::Text(start, dec_start, last_non_whitespace) = state{
-         if start != body.len() && dec_start != last_non_whitespace{
-             decoded.truncate(last_non_whitespace);
-             nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
-         }
+     if let State::Text(_, dec_start, last_non_whitespace) = state{
+         decoded.truncate(last_non_whitespace);
+        if dec_start != decoded.len(){
+            nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
+        }
      }
      else{ // if we didnt end in text state something is wrong
           if let Some(errors) = errors{errors.push(HtmlError{message:"HTML Parsing endstate is not HtmlNode::Text".into(), position:body.len()})};
