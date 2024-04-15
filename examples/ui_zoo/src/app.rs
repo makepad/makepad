@@ -511,7 +511,7 @@ live_design!{
                     <ZooGroup> {
                         <Html> {
                             width:Fill, height:Fit,
-                            body:"This is <b>bold text</b>&nbsp;and&nbsp;<i>italic text</i>. <br/> <sep> <b><i>Bold italic</i></b>, <u>underlined</u>, and <s>strike through</s> text.<br/> <Button>Button</Button><br/> <block_quote>Blockquote<br/> <block_quote>Nested blockquote</block_quote> </block_quote><br/><code>This is a code block</code>"
+                            body:"<H1>H1 Headline</H1><H2>H2 Headline</H2><H3>H3 Headline</H3><H4>H4 Headline</H4><H5>H5 Headline</H5>This is <b>bold</b>&nbsp;and <i>italic text</i>.<sep><b><i>Bold italic</i></b>, <u>underlined</u>, and <s>strike through</s> text. <p>This is a paragraph</p> <code>A code block</code>. <br/> And this is a <a href='https://www.google.com/'>link</a><br/><ul><li>lorem</li><li>ipsum</li><li>dolor</li></ul><ol><li>lorem</li><li>ipsum</li><li>dolor</li></ol><br/> <blockquote>Blockquote</blockquote>"
                         }
                     }
                 }
