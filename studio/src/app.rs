@@ -3,6 +3,7 @@ use crate::{
     makepad_widgets::*,
     makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
+    makepad_platform::os::cx_stdin::*,
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
@@ -18,7 +19,7 @@ use crate::{
 use std::fs::File;
 use std::io::Write;
 use std::env;
-
+  
 live_design!{
     import crate::app_ui::*;
 
@@ -164,9 +165,58 @@ impl MatchEvent for App{
         }
                 
         match action.cast(){
-            BuildManagerAction::StdinToHost {run_view_id, msg} => {
-                if let Some(mut run_view) = dock.item(run_view_id).as_run_view().borrow_mut() {
-                    run_view.handle_stdin_to_host(cx, &msg, run_view_id, &mut self.data.build_manager);
+            BuildManagerAction::StdinToHost {build_id, msg} => {
+                match msg{
+                    StdinToHost::CreateWindow{window_id, kind_id}=>{
+                        let panel_id = build_id.add(window_id as u64);
+                        if let Some(name) = self.data.build_manager.process_name(build_id){
+                            
+                            let tab_bar_id = if kind_id == 0{
+                                dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap()
+                            }
+                            else{
+                                dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap()
+                            };
+                            
+                            // we might already have it
+                            
+                            let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), TabClosable::Yes).unwrap();
+                            
+                            if let Some(mut item) = item.as_run_view().borrow_mut(){
+                                item.window_id = window_id;
+                                item.build_id = build_id;
+                            }
+                            
+                            dock.redraw(cx);
+                            log_list.redraw(cx);                        
+                        }
+                    }
+                    StdinToHost::SetCursor(cursor) => {
+                        cx.set_cursor(cursor)
+                    }
+                    StdinToHost::ReadyToStart => {
+                        // lets fetch all our runviews
+                        if let Some(mut dock) = dock.borrow_mut() {
+                            for (_, (_, item)) in dock.items().iter() {
+                                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                                    if run_view.build_id == build_id{
+                                        run_view.ready_to_start(cx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
+                        if let Some(mut dock) = dock.borrow_mut() {
+                            for (_, (_, item)) in dock.items().iter() {
+                                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                                    if run_view.build_id == build_id && run_view.window_id == presentable_draw.window_id{
+                                        run_view.draw_complete_and_flip(cx, &presentable_draw, &mut self.data.build_manager);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             BuildManagerAction::None=>()
@@ -189,14 +239,12 @@ impl MatchEvent for App{
         }
                 
         match action.cast(){
-            RunListAction::Create(run_view_id, name) => {
-                let tab_bar_id = dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap();
-                dock.create_and_select_tab(cx, tab_bar_id, run_view_id, live_id!(RunView), name, TabClosable::Yes);
-                dock.redraw(cx);
-                log_list.redraw(cx);
+            RunListAction::Create(..) => {
+                
             }
             RunListAction::Destroy(run_view_id) => {
                 dock.close_tab(cx, run_view_id);
+                dock.close_tab(cx, run_view_id.add(1));
                 dock.redraw(cx);
                 log_list.redraw(cx);
             }
@@ -326,14 +374,15 @@ impl AppMain for App {
 
         // process events on all run_views
         let dock = self.ui.dock(id!(dock));
+        /*
         if let Some(mut dock) = dock.borrow_mut() {
             for (id, (_, item)) in dock.items().iter() {
                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
                     run_view.pump_event_loop(cx, event, *id, &mut self.data.build_manager);
                 }
             }
-        }
-        
+        }*/
+         
         if let Some(mut dock_items) = dock.needs_save(){
             dock_items.retain(|di| {
                 if let DockItemStore::Tab{kind,..} = di{

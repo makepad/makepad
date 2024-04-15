@@ -1133,8 +1133,8 @@ impl Animator {
                 let first_time = Self::first_keyframe_time_from_array(&reader);
                 
                 let mut timeline = Vec::new();
-                timeline.open_array(live_id!(0));
-                timeline.push_id(live_id!(0), track);
+                timeline.open_array(LiveId(0));
+                timeline.push_id(LiveId(0), track);
                 if first_time != 0.0 { // insert first key from the last value
                     timeline.push_live(state.node_slice(last_index));
                 }

@@ -419,11 +419,8 @@ impl App {
         if let Some(current) = self.db.image_files.iter().position(|v| v.image_id == image_id){
             for (_id, ip, sender) in self.remote_screens.lock().unwrap().borrow_mut().iter(){
                 log!("{:?}", ip);
-                let index = if *ip == Ipv4Addr::new(10,0,0,116){4} //tv1
-                else if *ip == Ipv4Addr::new(10,0,0,117){3} //tv2
-                else if *ip == Ipv4Addr::new(10,0,0,114){2} //tv5
-                else if *ip == Ipv4Addr::new(10,0,0,101){1} //tv3
-                else{0}; // tv4
+                let index = if *ip == Ipv4Addr::new(10,0,0,117){1} //tv5
+                else {0}; //tv3
                 if let Some(data) = get_data_for_index(&self.db, current, current+index, single){
                     let _= sender.send(data);
                 }

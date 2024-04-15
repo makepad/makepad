@@ -60,10 +60,10 @@ enum OutlineNode {
 
 #[derive(Live, Widget)]
 pub struct Designer {
+    #[deref] ui: View,
     #[live] container: Option<LivePtr>,
     #[rust] outline_nodes: Vec<OutlineNode>,
     #[rust] components: ComponentMap<LivePtr, (WidgetRef, WidgetRef)>,
-    #[deref] ui: View,
 }
 
 impl LiveHook for Designer {
