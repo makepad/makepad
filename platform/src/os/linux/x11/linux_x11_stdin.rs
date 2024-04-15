@@ -34,7 +34,7 @@ impl Cx {
         self.repaint_id += 1;
         for &pass_id in &passes_todo {
             match self.passes[pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
+                CxPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     if let Some(swapchain) = swapchain {
                         let current_image = &swapchain.presentable_images[*present_index];
@@ -49,6 +49,7 @@ impl Cx {
                         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
                         let presentable_draw = PresentableDraw {
+                            window_id: window_id.id(),
                             target_id: current_image.id,
                             width: (pass_rect.size.x * dpi_factor) as u32,
                             height: (pass_rect.size.y * dpi_factor) as u32,
@@ -144,8 +145,8 @@ impl Cx {
                 HostToStdin::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
-                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
-                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height,window_id } => {
+                    self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
                         dpi_factor,
                         inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
@@ -185,7 +186,7 @@ impl Cx {
                     self.stdin_handle_platform_ops(Some(swapchain), present_index);
                 }
 
-                HostToStdin::Tick {frame: _, time, buffer_id: _} => if swapchain.is_some() {
+                HostToStdin::Tick  => if swapchain.is_some() {
 
                     // poll the service for updates
                     // check signals
@@ -208,7 +209,7 @@ impl Cx {
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(time);
+                        self.call_next_frame_event(0.0);
                     }
                     
                     if self.need_redrawing() {

@@ -11,6 +11,167 @@ pub struct PlistValues {
     version: String,
 }
 
+pub struct ParsedProfiles{
+    profiles:Vec<ProvisionData>,
+    certs: Vec<(String,String)>,
+    devices: Vec<(String,String)>,
+}
+
+impl ParsedProfiles{
+    fn profile(&self, v:&str)->Option<&str>{
+        for profile in &self.profiles{
+            if profile.uuid.starts_with(v){
+                return Some(&profile.uuid)
+            }
+        }
+        None
+    }
+    
+    fn cert<'a>(&'a self, v:&'a str)->Option<&str>{
+        for cert in &self.certs{
+            if cert.0.starts_with(v){
+                return Some(&cert.0)
+            }
+        }
+        Some(v)
+    }
+    
+    fn device<'a>(&'a self, v:&'a str)->Option<&str>{
+        for device in &self.devices{
+            if device.0 == v{
+                return Some(&device.1)
+            }
+            if device.1.starts_with(v){
+                return Some(&device.1)
+            }
+        }
+        Some(v)
+    }
+    
+    pub fn println(&self){
+        println!("--------------  Provisioning profiles found: --------------");
+        for prov in &self.profiles{
+            println!("Hex: {}", prov.uuid);
+            println!("    team: {}", prov.team_ident);
+            println!("    app-identifier: {}", prov.app_identifier);
+            for device in &prov.devices{
+                println!("    device: {}", device);
+            }
+        }
+        println!("\nplease set --profile=<> to the right profile unique hex string start or filename\n");
+        println!("-------------- Signing certificates: --------------");
+        
+        for cert in &self.certs{
+            println!("Hex: {}    Desc: {}", cert.0, cert.1);
+        }
+        println!("\nplease set --cert=<> to the right signing certificate unique hex string start\n");
+        
+        println!("-------------- Devices: --------------");
+        for device in &self.devices{
+            println!("Hex: {}   Name: {}", device.1, device.0);
+        }
+        println!("\nplease set --device=<> to the right device name or hex string, comma separated for multiple\n");
+    }
+}
+
+pub fn parse_profiles()->Result<ParsedProfiles, String>{
+    let cwd = std::env::current_dir().unwrap();
+    let home_dir = std::env::var("HOME").unwrap();
+    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
+        
+    let profile_files = std::fs::read_dir(profile_dir).unwrap();
+    let mut profiles = Vec::new();
+    for file in profile_files {
+        // lets read it
+        let profile_path = file.unwrap().path();
+        if let Some(profile) = ProvisionData::parse(&profile_path) {
+            profiles.push(profile);
+        }
+    }
+    let mut certs = Vec::new();
+    let identities = shell_env_cap(&[], &cwd, "security", &[
+        "find-identity",
+        "-v",
+        "-p",
+        "codesigning"
+    ]) ?;
+    for line in identities.split('\n'){
+        if let Some(cert) = line.split(')').nth(1){
+            if let Some(cert) = cert.trim().split(' ').next(){
+                if let Some(name) = line.split('"').nth(1){
+                    certs.push((cert.trim().into(), name.into()));
+                }
+            }
+        }
+    }
+    
+    let device_list = shell_env_cap(&[], &cwd, "xcrun", &[
+        "devicectl",
+        "list",
+        "devices",
+    ]) ?;
+    let mut devices = Vec::new();
+    for device in device_list.split('\n'){
+        if let Some(name) = device.split_whitespace().nth(0){
+            if let Some(ident) = device.split_whitespace().nth(2){
+                if ident.split("-").count() == 5{
+                    devices.push((name.into(), ident.into()));
+                }
+            }
+        }
+    }
+    
+    Ok(ParsedProfiles{
+        profiles,
+        certs,
+        devices
+    })
+}
+/*
+pub fn list_profiles()->Result<(), String>{
+    let cwd = std::env::current_dir().unwrap();
+    let home_dir = std::env::var("HOME").unwrap();
+    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
+    
+    let profiles = std::fs::read_dir(profile_dir).unwrap();
+
+    println!("--------------  Scanning profiles: --------------");
+   
+    for profile in profiles {
+        // lets read it
+        let profile_path = profile.unwrap().path();
+        if let Some(prov) = ProvisionData::parse(&profile_path) {
+            println!("Profile: {}", prov.uuid);
+            println!("    team: {}", prov.team_ident);
+            println!("    app-identifier: {}", prov.app_identifier);
+            for device in prov.devices{
+                println!("    device: {}", device);
+            }
+        }
+    }
+    println!("please set --profile=<> to the right profile hex string start or filename\n");
+    // parse identities for code signing
+    println!("-------------- Scanning signing certificates: --------------");
+    
+    shell_env(&[], &cwd, "security", &[
+        "find-identity",
+        "-v",
+        "-p",
+        "codesigning"
+    ]) ?;
+    println!("please set --cert=<> to the right signing certificate hex string start\n");
+            
+    println!("--------------  Scanning devices identifiers: --------------");
+    shell_env(&[], &cwd, "xcrun", &[
+        "devicectl",
+        "list",
+        "devices",
+    ]) ?;
+    println!("please set --device=<> to the right device hex string or name, multiple comma separated without spaces: a,b,c\n");
+
+    Ok(())
+}
+*/
 impl PlistValues{
     fn to_plist_file(&self, os: AppleOs)->String{
         match os{
@@ -54,65 +215,65 @@ impl PlistValues{
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0">
             <dict>
-                <key>BuildMachineOSBuild</key>
-                <string>23A344</string>
-                <key>CFBundleDevelopmentRegion</key>
-                <string>en</string>
-                <key>CFBundleExecutable</key>
-                <string>{3}</string>
-                <key>CFBundleIdentifier</key>
-                <string>{0}</string>
-                <key>CFBundleInfoDictionaryVersion</key>
-                <string>6.0</string>
-                <key>CFBundleDisplayName</key>
-                <string>{1}</string>
-                <key>CFBundleName</key>
-                <string>{2}</string>
-                <key>CFBundlePackageType</key>
-                <string>APPL</string>
-                <key>CFBundleShortVersionString</key>
-                <string>1.0</string>
-                <key>CFBundleSupportedPlatforms</key>
-                <array>
-                    <string>AppleTVOS</string>
-                </array>
-                <key>CFBundleVersion</key>
-                <string>{4}</string>
-                <key>DTCompiler</key>
-                <string>com.apple.compilers.llvm.clang.1_0</string>
-                <key>DTPlatformBuild</key>
-                <string>21J351</string>
-                <key>DTPlatformName</key>
-                <string>appletvos</string>
-                <key>DTPlatformVersion</key>
-                <string>17.0</string>
-                <key>DTSDKBuild</key>
-                <string>21J351</string>
-                <key>DTSDKName</key>
-                <string>appletvos17.0</string>
-                <key>DTXcode</key>
-                <string>1500</string>
-                <key>DTXcodeBuild</key>
-                <string>15A240d</string>
-                <key>LSRequiresIPhoneOS</key>
-                <true/>
-                <key>MinimumOSVersion</key>
-                <string>17.0</string>
-                <key>UIDeviceFamily</key>
-                <array>
-                    <integer>3</integer>
-                </array>
-                <key>UILaunchScreen</key>
-                <dict>
-                <key>UILaunchScreen</key>
-                <dict/>
-                </dict>
-                <key>UIRequiredDeviceCapabilities</key>
-                <array>
-                    <string>arm64</string>
-                </array>
-                <key>UIUserInterfaceStyle</key>
-                <string>Automatic</string>
+            <key>BuildMachineOSBuild</key>
+            <string>23B2082</string>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleExecutable</key>
+            <string>{3}</string>
+            <key>CFBundleIdentifier</key>
+            <string>{0}</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleDisplayName</key>
+            <string>{1}</string>
+            <key>CFBundleName</key>
+            <string>{2}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>CFBundleSupportedPlatforms</key>
+            <array>
+            <string>AppleTVOS</string>
+            </array>
+            <key>CFBundleVersion</key>
+            <string>{4}</string>
+            <key>DTCompiler</key>
+            <string>com.apple.compilers.llvm.clang.1_0</string>
+            <key>DTPlatformBuild</key>
+            <string>21J351</string>
+            <key>DTPlatformName</key>
+            <string>appletvos</string>
+            <key>DTPlatformVersion</key>
+            <string>17.0</string>
+            <key>DTSDKBuild</key>
+            <string>21J351</string>
+            <key>DTSDKName</key>
+            <string>appletvos17.0</string>
+            <key>DTXcode</key>
+            <string>1501</string>
+            <key>DTXcodeBuild</key>
+            <string>15A507</string>
+            <key>LSRequiresIPhoneOS</key>
+            <true/>
+            <key>MinimumOSVersion</key>
+            <string>17.0</string>
+            <key>UIDeviceFamily</key>
+            <array>
+            <integer>3</integer>
+            </array>
+            <key>UILaunchScreen</key>
+            <dict>
+            <key>UILaunchScreen</key>
+            <dict/>
+            </dict>
+            <key>UIRequiredDeviceCapabilities</key>
+            <array>
+            <string>arm64</string>
+            </array>
+            <key>UIUserInterfaceStyle</key>
+            <string>Automatic</string>
             </dict>
             </plist>"#,
             self.identifier,
@@ -123,6 +284,7 @@ impl PlistValues{
         )
     }
 }
+
 
 pub struct Scent{
     app_id: String,
@@ -460,46 +622,28 @@ pub struct AppleArgs {
 pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: AppleTarget) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let home_dir = std::env::var("HOME").unwrap();
+    // lets parse the inputs
+    let parsed = parse_profiles()?;
+    
+    //return Ok(());
     let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
     
-    let provision = apple_args.provisioning_profile.as_ref().and_then(|v|
-        ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v))));
+    let provision = apple_args.provisioning_profile.as_ref().and_then(
+        |v|{
+            if v.contains('/'){
+                ProvisionData::parse(&PathBuf::from(v))
+            }
+            else{
+                let v = parsed.profile(v).expect("cannot find provisioning profile");
+                ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v)))
+            }
+        }
+    );
     
     if provision.is_none() || apple_args.provisioning_profile.is_none() || apple_args.signing_identity.is_none() || apple_args.device_identifier.is_none(){
         // lets list the provisioning profiles.
         println!("Error: missing provisioning profile, signing idenity or device identifier");
-        let profiles = std::fs::read_dir(profile_dir).unwrap();
-        println!("--------------  Scanning provisioning profiles: --------------");
-        for profile in profiles {
-            // lets read it
-            let profile_path = profile.unwrap().path();
-            if let Some(prov) = ProvisionData::parse(&profile_path) {
-                println!("Profile: {}", prov.uuid);
-                println!("    team: {}", prov.team_ident);
-                println!("    app-identifier: {}", prov.app_identifier);
-                for device in prov.devices{
-                    println!("    device: {}", device);
-                }
-            }
-        }
-        println!("please set --provisioning-profile=<> to the right profile hex string\n");
-        // parse identities for code signing
-        println!("-------------- Scanning signing identities: --------------");
-        shell_env(&[], &cwd, "security", &[
-            "find-identity",
-            "-v",
-            "-p",
-            "codesigning"
-        ]) ?;
-        println!("please set --signing-identity=<> to the right signing identity hex string\n");
-        
-        println!("--------------  Scanning devices identifiers: --------------");
-        shell_env(&[], &cwd, "xcrun", &[
-            "devicectl",
-            "list",
-            "devices",
-        ]) ?;
-        println!("please set --device-identifier=<> to the right device hex string, multiple comma separated without spaces: a,b,c\n");
+        parsed.println();
         return Err("please provide missing arguments BEFORE run-device".into());
     }
     let provision = provision.unwrap();
@@ -525,11 +669,13 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     
     copy_resources(Path::new(&app_dir), build_crate, &result.build_dir, apple_target) ?;
     
+    let cert = parsed.cert(apple_args.signing_identity.as_ref().unwrap()).expect("cannot find signing certificate");
+    
     shell_env_cap(&[], &cwd, "codesign", &[
         "--force",
         "--timestamp=none",
         "--sign",
-        apple_args.signing_identity.as_ref().unwrap(),
+        cert,
         &result.dst_bin.into_os_string().into_string().unwrap()
     ]) ?;
     
@@ -537,7 +683,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
         "--force",
         "--timestamp=none",
         "--sign",
-        apple_args.signing_identity.as_ref().unwrap(),
+        cert,
         "--entitlements",
         &scent_file.into_os_string().into_string().unwrap(),
         "--generate-entitlement-der",
@@ -545,8 +691,10 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     ]) ?;
     
     
+    
     let cwd = std::env::current_dir().unwrap();
     for device_identifier in apple_args.device_identifier.unwrap().split(","){
+        let device_identifier = parsed.device(device_identifier).expect("cannot find signing device");
         let answer = shell_env_cap(&[], &cwd, "xcrun", &[
             "devicectl",
             "device",

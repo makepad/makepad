@@ -52,6 +52,7 @@ impl Cx {
                             let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
+                                window_id: 0,
                                 target_id: current_image.id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
                                 height: (pass_rect.size.y * dpi_factor) as u32,
@@ -112,9 +113,9 @@ impl Cx {
         
         self.call_event_handler(&Event::Startup);
 
-        let mut previous_tick_time_s: Option<f64> = None;
-        let mut previous_elapsed_s = 0f64;
-        let mut allow_rendering = true;
+        //let mut previous_tick_time_s: Option<f64> = None;
+        //let mut previous_elapsed_s = 0f64;
+        //let mut allow_rendering = true;
         
         while let Ok(msg) = json_msg_rx.recv() {
 
@@ -151,8 +152,8 @@ impl Cx {
                 HostToStdin::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
                 }
-                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height } => {
-                    self.windows[CxWindowPool::id_zero()].window_geom = WindowGeom {
+                HostToStdin::WindowGeomChange { dpi_factor, inner_width, inner_height, window_id } => {
+                    self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
                         dpi_factor,
                         inner_size: dvec2(inner_width, inner_height),
                         ..Default::default()
@@ -180,10 +181,10 @@ impl Cx {
                     self.redraw_all();
                     self.stdin_handle_platform_ops(Some(swapchain), present_index);
                 }
-                HostToStdin::Tick {frame: _, time, ..} => if swapchain.is_some() {
+                HostToStdin::Tick => if swapchain.is_some() {
                     
                     // probe current time
-                    let start_time = ::std::time::SystemTime::now();
+                    //let start_time = ::std::time::SystemTime::now();
 
                     // poll the service for updates
                     // check signals
@@ -202,7 +203,7 @@ impl Cx {
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(time);
+                        self.call_next_frame_event(0.0);
                     }
 
                     if self.need_redrawing() {
@@ -214,7 +215,7 @@ impl Cx {
                     self.stdin_handle_repaint(d3d11_cx, swapchain.as_ref(), &mut present_index);
 
                     // only allow rendering if it didn't take too much time last time
-                    if allow_rendering {
+                    //if allow_rendering {
 
                         // check if GPU is ready to flip frames
                         if let Some(presentable_draw) = self.os.new_frame_being_rendered {
@@ -224,9 +225,10 @@ impl Cx {
                             let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
                             self.os.new_frame_being_rendered = None;
                         }
-                    }
+                    //}
 
                     // probe how long this took
+                    /*
                     let elapsed_s = (start_time.elapsed().unwrap().as_nanos() as f64) / 1000000000.0;
 
                     if let Some(previous_tick_time_s) = previous_tick_time_s {
@@ -240,7 +242,7 @@ impl Cx {
 
                     // store current tick time and elapsed time
                     previous_tick_time_s = Some(time);
-                    previous_elapsed_s = elapsed_s;
+                    previous_elapsed_s = elapsed_s;*/
                 }
             }
         }
