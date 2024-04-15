@@ -133,6 +133,10 @@ impl LiveApply for WindowHandle {
                     let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_title = v;
                 }
+                live_id!(kind_id) => {
+                    let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    cx.windows[self.window_id()].kind_id = v;
+                }
                 live_id!(position) => {
                     let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());

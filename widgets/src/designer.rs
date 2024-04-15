@@ -7,37 +7,13 @@ use crate::{
 };
 
 live_design!{
-    import makepad_widgets::base::*
-    import makepad_widgets::theme_desktop_dark::*
-    import makepad_draw::shader::std::*
+    DesignerBase = {{Designer}} {
+    }
     
-    Designer = {{Designer}} {
-        has_view: true,
-        flow: Right
-        container: <RoundedView> {
-            draw_bg: {color: #3}
-            width: Fill, height: 400
-            flow: Down, spacing: 10, padding:10
-            <RoundedView>{
-                width: Fill, height: Fit
-                padding:5
-                draw_bg:{color:#5}
-                label = <Label> {text: "HI", draw_text:{color:#f}}
-            }
-        }
-        <Splitter> {
-            align: FromStart(300),
-            a: <View> {
-                outline = <FileTree> {
-                }
-            },
-            b: <CachedScrollXY> {
-                dpi_factor: 1.5
-                draw_bg: {color: #4}
-                width: Fill, height: Fill
-                flow: Down
-            },
-        }
+    DesignerOutlineBase = {{DesignerOutline}}{
+    }
+    
+    DesignerViewBase = {{DesignerView}}{
     }
 }
 
@@ -58,20 +34,59 @@ enum OutlineNode {
     }
 }
 
+#[derive(Live, Widget, LiveHook)]
+pub struct DesignerView {
+    #[walk] walk:Walk,
+    #[redraw] area:Area,
+}
+
+impl Widget for DesignerView {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    }
+        
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
+    }
+}
+
+#[derive(Live, Widget, LiveHook)]
+pub struct DesignerOutline {
+    #[walk] walk:Walk,
+    #[redraw] area:Area,
+}
+
+impl Widget for DesignerOutline {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    }
+            
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
+    }
+}
+
+#[derive(Default)]
+pub struct DesignerData{
+    _outline_nodes: Vec<OutlineNode>,
+}
+
 #[derive(Live, Widget)]
 pub struct Designer {
     #[deref] ui: View,
     #[live] container: Option<LivePtr>,
-    #[rust] outline_nodes: Vec<OutlineNode>,
+    #[rust] _data: DesignerData,
     #[rust] components: ComponentMap<LivePtr, (WidgetRef, WidgetRef)>,
 }
 
 impl LiveHook for Designer {
     
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+        return
+        /*
         // lets take the doc we need (app_mobile for instance)
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = &*live_registry_rc.borrow();
+        
+        // lets 
         let file_id = live_registry.file_name_to_file_id("examples/ironfish/src/app_desktop.rs").unwrap();
         // now we fetch the unexpanded nodes
         // and build a list
@@ -87,6 +102,7 @@ impl LiveHook for Designer {
                     let class = live_registry.ptr_to_node(class_parent.unwrap()).id;
                     let ptr = base_ptr.with_index(index);
                     index = recur_walk(live_registry, base_ptr, index + 1, nodes, &mut children);
+                    
                     out.insert(0, OutlineNode::Component {
                         uid: LiveId::unique().into(),
                         name,
@@ -95,6 +111,7 @@ impl LiveHook for Designer {
                         ptr,
                         children
                     });
+                    
                 }
                 else if nodes[index].value.is_close() {
                     return index + 1;
@@ -106,14 +123,15 @@ impl LiveHook for Designer {
             index
         }
         let base_ptr = live_registry.file_id_index_to_live_ptr(file_id, 0);
-        recur_walk(live_registry, base_ptr, 1, nodes, &mut self.outline_nodes);
+        recur_walk(live_registry, base_ptr, 1, nodes, &mut self.data.outline_nodes);
+        */
     }
     // ok now we can iterate our top level components
     // and instance them
 }
 
 impl Designer {
-    
+    /*
     fn draw_design(&mut self, cx: &mut Cx2d) {
         // alrigh so. lets draw the designs
         let mut count = 0;
@@ -139,7 +157,8 @@ impl Designer {
         }
         
     }
-    
+    */
+    /*
     fn draw_outline(&mut self, cx: &mut Cx2d, outline: &mut FileTree) {
         fn recur_walk(cx: &mut Cx2d, outline: &mut FileTree, children: &[OutlineNode]) {
             for child in children {
@@ -165,7 +184,7 @@ impl Designer {
         }
         recur_walk(cx, outline, &self.outline_nodes);
     }
-    
+    */
 }
 
 impl Widget for Designer {
@@ -180,11 +199,11 @@ impl Widget for Designer {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let outline = self.ui.file_tree(id!(outline));
         while let Some(next) = self.ui.draw(cx, scope).step() {
-            if let Some(mut outline) = outline.has_widget(&next).borrow_mut() {
-                self.draw_outline(cx, &mut *outline);
+            if let Some(mut _outline) = outline.has_widget(&next).borrow_mut() {
+                //self.draw_outline(cx, &mut *outline);
             }
             else if next == self.ui.widget(id!(design)) {
-                self.draw_design(cx);
+                //self.draw_design(cx);
             }
         }
         DrawStep::done()
