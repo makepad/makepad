@@ -106,7 +106,7 @@ live_design!{
                 <ZooHeader> {
                     title = {text: "Control heights"}
                     <ZooDesc> {
-                        text: "Control heights"
+                        text: "Control heights and text baselines"
                     }
                     <View> {
                         width: Fill, height: Fit,
