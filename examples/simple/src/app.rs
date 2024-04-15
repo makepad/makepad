@@ -1,11 +1,11 @@
 use makepad_widgets::*;
-      
+       
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
     
     App = {{App}} {
-        ui: 
+        ui: <Root>{
             <Window>{
                 show_bg: true
                 width: Fill,
@@ -41,7 +41,7 @@ live_design!{
                     }
                 }
             }
-        
+        }
     }
 }  
               

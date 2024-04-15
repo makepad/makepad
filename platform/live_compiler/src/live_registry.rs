@@ -209,6 +209,16 @@ impl LiveRegistry {
         None
     }
     
+    pub fn main_file_id(&self) -> Option<LiveFileId> {
+        if let Some(m) = self.main_module{
+            if let Some(m) =  self.module_id_to_file_id.get(&m.0){
+                return Some(m.clone())
+            }
+        }
+        None
+    }
+        
+    
     pub fn live_node_as_string(&self, node: &LiveNode) -> Option<String> {
         match &node.value {
             LiveValue::Str(v) => {
