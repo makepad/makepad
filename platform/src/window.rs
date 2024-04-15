@@ -19,6 +19,10 @@ pub struct WindowHandle(PoolId);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct WindowId(usize, u64);
 
+impl WindowId{
+    pub fn id(&self)->usize{self.0}
+}
+
 impl WindowHandle {
     pub fn window_id(&self) -> WindowId {WindowId(self.0.id, self.0.generation)}
 }
@@ -30,8 +34,34 @@ impl CxWindowPool {
         WindowHandle(self.0.alloc())
     }
     
+    pub fn window_id_contains(&self, pos:DVec2)->(WindowId, DVec2){
+        for (index,item) in self.0.pool.iter().enumerate(){
+            let window = &item.item;
+            if pos.x>= window.window_geom.position.x &&
+                pos.y>= window.window_geom.position.y && 
+                pos.x<= window.window_geom.position.x+window.window_geom.inner_size.x  &&
+                pos.y<= window.window_geom.position.x+window.window_geom.inner_size.y{
+                return (WindowId(index, item.generation), window.window_geom.position)
+            }
+        }
+        return (WindowId(0, self.0.pool[0].generation), self.0.pool[0].item.window_geom.position)
+    }
+    
+    pub fn is_valid(&self, v: WindowId)->bool{
+        if v.0 < self.0.pool.len(){
+            if self.0.pool[v.0].generation == v.1{
+                return true
+            }
+        }
+        false
+    }
+    
     pub fn id_zero()->WindowId{
         WindowId(0, 0)
+    }
+    
+    pub fn from_usize(v:usize)->WindowId{
+        WindowId(v, 0)
     }
 }
 
@@ -141,6 +171,10 @@ impl WindowHandle {
         cx.windows[self.window_id()].get_position()
     }
     
+    pub fn set_kind_id(&mut self, cx: &mut Cx,kind_id:usize) {
+        cx.windows[self.window_id()].kind_id = kind_id;
+    }
+    
     pub fn minimize(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::MinimizeWindow(self.window_id()));
     }
@@ -191,6 +225,7 @@ pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<DVec2>,
     pub create_inner_size: Option<DVec2>,
+    pub kind_id: usize,
     pub dpi_override: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,

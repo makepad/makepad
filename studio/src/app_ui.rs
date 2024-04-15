@@ -104,9 +104,16 @@ live_design!{
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: edit_tabs,
+                b: split3
+            }
+            
+            split3 = Splitter {
+                axis: Horizontal,
+                align: Weighted(0.5),
+                a: design_tabs,
                 b: run_tabs
             }
-                
+            
             file_tree_tabs = Tabs {
                 tabs: [file_tree, search, run_list],
                 selected: 2
@@ -126,6 +133,11 @@ live_design!{
                 tabs: [run_first],
                 selected: 0
             }
+            
+            design_tabs = Tabs {
+                tabs: [design_first],
+                selected: 0
+            }
                 
             file_tree = Tab {
                 name: "Explore",
@@ -140,11 +152,17 @@ live_design!{
             }
                 
             run_first = Tab {
-                name: "View"
+                name: "Run"
                 closable: false,
                 kind: RunFirst
             }
-                
+            
+            design_first = Tab {
+                name: "Design"
+                closable: false,
+                kind: DesignFirst
+            }
+            
             edit_first = Tab {
                 name: "Edit"
                 closable: false,
@@ -188,7 +206,7 @@ live_design!{
                     flow: Down
                     <Logo> {}
                     <Label> {
-                        text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
+                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
                         width: Fit,
                         margin: {left: 200}
                         draw_text: {
@@ -197,6 +215,25 @@ live_design!{
                                 height_factor: 1.0,
                                 font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
                             },
+                        }
+                    }
+                }
+            }
+            DesignFirst = <RectView> {
+                draw_bg: {color: #4}
+                <View> {
+                    width: Fill,
+                    height: Fill
+                    align: {
+                        x: 0.5,
+                        y: 0.5
+                    }
+                    flow: Down
+                    <Logo> {
+                        draw_icon: {
+                            fn get_color(self) -> vec4 {
+                                return #755
+                            }
                         }
                     }
                 }

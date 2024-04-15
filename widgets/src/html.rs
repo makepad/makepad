@@ -4,7 +4,7 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        text_flow::TextFlow,
+        text_flow::{TextFlow, TextStyleOptions},
         link_label::LinkLabel,
     },
     std::rc::Rc,
@@ -47,6 +47,12 @@ pub struct Html {
     /// The character used to separate an ordered list's item number from the content.
     #[live] ol_separator: String,
 
+    /// Whether to keep internal whitespace when parsing HTML.
+    /// If `true`, only whitespace that exists within other text will be kept;
+    /// all text nodes that consist of only whitespace will be removed,
+    /// and leading and trailing whitespace will be trimmed off of text nodes.
+    #[live(false)] keep_whitespace: bool,
+
     /// The stack of list levels encountered so far, used to track nested lists.
     #[rust] list_stack: Vec<ListLevel>,
 }
@@ -55,7 +61,8 @@ pub struct Html {
 impl LiveHook for Html {
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        let new_doc = parse_html(&*self.body, &mut errors);
+        let kws = if self.keep_whitespace { KeepWhitespace::Yes } else { KeepWhitespace::No };
+        let new_doc = parse_html(&*self.body, &mut errors, kws);
         if new_doc != self.doc{
             self.doc = new_doc;
             self.text_flow.clear_items();
@@ -99,7 +106,7 @@ impl Html {
             some_id!(code) => {
                 tf.push_size_abs_scale(0.85);
                 tf.push_fixed();
-                tf.begin_inline_code(cx); // inline code block doesn't work properly
+                tf.push_inline_code(cx); // inline code block doesn't work properly
             }
             some_id!(pre) => {
                 cx.turtle_new_line();
@@ -128,11 +135,26 @@ impl Html {
             | some_id!(em) => tf.push_italic(),
 
             some_id!(sub) => {
-                // TODO: adjust baseline downwards
-                tf.push_size_abs_scale(0.6);
+                // Adjust the top drop to move the text slightly downwards.
+                let curr_top_drop = tf.latest_text_style_options()
+                    .and_then(|ts| ts.top_drop)
+                    .unwrap_or(1.1);
+                // A 55% increase in top_drop seems to look good for subscripts,
+                // which should be slightly below the halfway point in the line
+                let new_top_drop = curr_top_drop * 1.55;
+                tf.push_text_style_options(TextStyleOptions {
+                    top_drop: Some(new_top_drop),
+                    ..Default::default()
+                });
+                tf.push_size_rel_scale(0.7);
             }
             some_id!(sup) => {
-                tf.push_size_abs_scale(0.6);
+                // TODO: should superscript set top_drop as well?
+                //       It currently workw without it, but may be better with it.
+                tf.push_text_style_options(TextStyleOptions {
+                    ..Default::default()
+                });
+                tf.push_size_rel_scale(0.7);
             }
             some_id!(ul) => {
                 list_stack.push(ListLevel {
@@ -238,7 +260,7 @@ impl Html {
             }
             some_id!(blockquote) => tf.end_quote(cx),
             some_id!(code) => {
-                tf.end_inline_code(cx); // doesn't work properly
+                tf.pop_inline_code(cx); // doesn't work properly
                 tf.pop_size();
                 tf.pop_fixed(); 
             }
@@ -248,6 +270,7 @@ impl Html {
             }
             some_id!(sub)
             | some_id!(sup) => {
+                tf.pop_text_style_options();
                 tf.pop_size();
             }
             some_id!(ul)
@@ -312,7 +335,8 @@ impl Widget for Html {
     fn set_text(&mut self, v:&str){
         self.body = Rc::new(v.to_string());
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(&*self.body, &mut errors);
+        let kws = if self.keep_whitespace { KeepWhitespace::Yes } else { KeepWhitespace::No };
+        self.doc = parse_html(&*self.body, &mut errors, kws);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }

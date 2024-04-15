@@ -7,42 +7,31 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
- 
-    // ARIAL_FONT = { 
-    //     font_size: 9.4,
-    //     top_drop: 1.2,
-    //     font: {
-    //         path: dep("crate://self/resources/Arial-Unicode.ttf")
-    //     }
-    // }
-    // NOTO_SANS_SYMBOLS2_REGULAR = {
-    //     font_size: 9.4,
-    //     top_drop: 1.2,
-    //     font: {
-    //         path: dep("crate://self/resources/NotoSansSymbols2-Regular.ttf")
-    //     }
-    // }
+
+    // config copied from Robrix
+    HTML_LINE_SPACING = 8.0
+    HTML_TEXT_HEIGHT_FACTOR = 1.3
+    MESSAGE_FONT_SIZE = 12.0
+    MESSAGE_TEXT_COLOR = #x777
+    MESSAGE_TEXT_LINE_SPACING = 1.35
+    MESSAGE_TEXT_HEIGHT_FACTOR = 1.5
+    // This font should only be used for plaintext labels. Don't use this for Html content,
+    // as the Html widget sets different fonts for different text styles (e.g., bold, italic).
+    MESSAGE_TEXT_STYLE = {
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+        font_size: (MESSAGE_FONT_SIZE),
+        height_factor: (MESSAGE_TEXT_HEIGHT_FACTOR),
+        line_spacing: (MESSAGE_TEXT_LINE_SPACING),
+    }
+
     GO_NOTO_CURRENT_REGULAR = {
         font_size: 12,
-        top_drop: 1.2,
+        top_drop: 1.1,
         font: {
             path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")
         }
     }
-    // GO_NOTO_KURRENT_REGULAR = {
-    //     font_size: 9.4,
-    //     top_drop: 1.2,
-    //     font: {
-    //         path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
-    //     }
-    // }
-    // APPLE_COLOR_EMOJI = {
-    //     font_size: 9.4,
-    //     top_drop: 1.2,
-    //     font: {
-    //         path: dep("crate://self/resources/Apple-Color-Emoji.ttc")
-    //     }
-    // }
+
 
     TextOrImage = {{TextOrImage}}{
         margin:{left:10, right:10}
@@ -55,7 +44,6 @@ live_design!{
                     text_style: <GO_NOTO_CURRENT_REGULAR>{
                         font_size: 12, 
                     }
-                    draw_text:{color: #00f}
                 }
             }
         }
@@ -88,9 +76,9 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    //return #000
+                    return #fff
                     // test
-                    return mix(#7, #3, self.pos.y);
+                    // return mix(#7, #3, self.pos.y);
                 }
             }
             
@@ -123,19 +111,41 @@ live_design!{
                 }
 
                 html = <Html> {
-                    // font_size: 13,
-                    // flow: RightWrap,
-                    // width: 300.0,
-                    // height: Fit,
-                    // padding: 5,
-                    // line_spacing: 10,
+                    // padding: 0.0,
+                    line_spacing: (HTML_LINE_SPACING),
+                    width: Fill, height: Fit,
+                    font_size: (MESSAGE_FONT_SIZE),
+                    draw_normal:      { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
+                    draw_italic:      { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
+                    draw_bold:        { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
+                    draw_bold_italic: { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
+                    draw_fixed:       {                              text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
+                    draw_block:{ 
+                        line_color: (MESSAGE_TEXT_COLOR)
+                        sep_color: (MESSAGE_TEXT_COLOR)
+                        quote_bg_color: (#4)
+                        quote_fg_color: (#7)
+                        block_color: (#3)
+                    }
+                    list_item_layout: { line_spacing: 5.0, padding: {top: 1.0, bottom: 1.0}, }
+
                     Button = <Button> {
                         text: "Hello world"
                     }
+
                     img = <HtmlImage> {
                     }
 
                     body: "
+                        test underline: <u>Underlined Text</u> <br />
+                        test strikethrough: <del>Strikethrough Text</del> <br />
+                        testing nested subscript zero<sub>one<sub>two<sub>three</sub>two</sub>one</sub>zero<br />
+                        <br />
+                        another test nested subscript 0<sub>1<sub>2<sub>3</sub>2</sub>1</sub>0<br />
+                        <br />
+                        testing nested superscript one<sup>two<sup>three<sup>four</sup></sup></sup> <br />
+
+                        <sep>
                         text up top with inline image
                         <img src=\"experiments/html_experiment/resources/img/google_logo.png\" width=272 height=92 alt=\"Google Logo\" title=\"Google Logo\" />
                         text after image <br />
