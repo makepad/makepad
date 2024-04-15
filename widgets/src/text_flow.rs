@@ -1,9 +1,7 @@
-use {
-    crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*
-    },
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::{shader::draw_text::TextStyle, *},
+    widget::*,
 }; 
     
 live_design!{
@@ -14,7 +12,7 @@ live_design!{
         font_size: 8,
         flow: RightWrap,
     }
-}  
+}
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
@@ -32,8 +30,13 @@ pub enum FlowBlockType {
 #[repr(C)]
 pub struct DrawFlowBlock {
     #[deref] draw_super: DrawQuad,
+    #[live] line_color: Vec4,
+    #[live] sep_color: Vec4,
+    #[live] code_color: Vec4,
+    #[live] quote_bg_color: Vec4,
+    #[live] quote_fg_color: Vec4,
     #[live] block_type: FlowBlockType
-} 
+}
 
       
 // this widget has a retained and an immediate mode api
@@ -55,7 +58,9 @@ pub struct TextFlow {
     #[rust] fixed_counter: usize,
     #[rust] underline_counter: usize,
     #[rust] strikethrough_counter: usize,
+    #[rust] inline_code_counter: usize,
     
+    #[rust] text_style_stack: Vec<TextStyleOptions>,
     #[rust] font_size_stack: FontSizeStack,
     #[rust] area_stack: AreaStack,
     #[layout] layout: Layout,
@@ -67,9 +72,9 @@ pub struct TextFlow {
     #[live] sep_walk: Walk, 
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
-    #[live] inline_code_layout: Layout,
-    #[live] inline_code_walk: Walk,
-    
+    #[live] inline_code_padding: Padding,
+    #[live] inline_code_margin: Margin,
+        
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
@@ -138,6 +143,41 @@ impl AreaStack{
     }
 }
 
+#[derive(Default)]
+pub struct TextStyleOptions {
+    pub font: Option<Font>,
+    pub font_size: Option<f64>,
+    pub brightness: Option<f32>,
+    pub curve: Option<f32>,
+    pub line_spacing: Option<f64>,
+    pub top_drop: Option<f64>,
+    pub height_factor: Option<f64>,
+}
+impl TextStyleOptions {
+    pub fn apply_to(&self, style: &mut TextStyle) {
+        if let Some(font) = self.font.as_ref() {
+            style.font = font.clone();
+        }
+        if let Some(font_size) = self.font_size {
+            style.font_size = font_size;
+        }
+        if let Some(brightness) = self.brightness {
+            style.brightness = brightness;
+        }
+        if let Some(curve) = self.curve {
+            style.curve = curve;
+        }
+        if let Some(line_spacing) = self.line_spacing {
+            style.line_spacing = line_spacing;
+        }
+        if let Some(top_drop) = self.top_drop {
+            style.top_drop = top_drop;
+        }
+        if let Some(height_factor) = self.height_factor {
+            style.height_factor = height_factor;
+        }
+    }
+}
 
 #[derive(Default)]
 struct FontSizeStack{
@@ -229,6 +269,7 @@ impl TextFlow{
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
+        self.text_style_stack.clear();
         self.font_size_stack.clear();
         self.area_stack.clear();
         self.bold_counter = 0;
@@ -236,6 +277,7 @@ impl TextFlow{
         self.fixed_counter = 0;
         self.underline_counter = 0;
         self.strikethrough_counter = 0;
+        self.inline_code_counter = 0;
     }
     
     pub fn end(&mut self, cx: &mut Cx2d){
@@ -313,7 +355,18 @@ impl TextFlow{
             self.font_size * scale
         );
     }
-    
+
+    pub fn push_text_style_options(&mut self, style: TextStyleOptions) {
+        self.text_style_stack.push(style);
+    }
+
+    pub fn pop_text_style_options(&mut self) {
+        self.text_style_stack.pop();
+    }
+
+    pub fn latest_text_style_options(&self) -> Option<&TextStyleOptions> {
+        self.text_style_stack.last()
+    }
 
     
     pub fn begin_code(&mut self, cx:&mut Cx2d){
@@ -328,16 +381,20 @@ impl TextFlow{
         self.draw_block.end(cx);
     }
     
-    pub fn begin_inline_code(&mut self, cx:&mut Cx2d){
+    pub fn push_inline_code(&mut self, _cx:&mut Cx2d){
         // alright we are going to push a block with a layout and a walk
-        self.draw_block.block_type = FlowBlockType::InlineCode;
+        /*self.draw_block.block_type = FlowBlockType::InlineCode;
         self.draw_block.begin(cx, self.inline_code_walk, self.inline_code_layout);
-        self.area_stack.push(self.draw_block.draw_vars.area);
+        self.area_stack.push(self.draw_block.draw_vars.area);*/
+        self.inline_code_counter +=1;
     } 
         
-    pub fn end_inline_code(&mut self, cx:&mut Cx2d){
-        self.draw_block.draw_vars.area = self.area_stack.pop();
-        self.draw_block.end(cx);
+    pub fn pop_inline_code(&mut self, _cx:&mut Cx2d){
+        /*self.draw_block.draw_vars.area = self.area_stack.pop();
+        self.draw_block.end(cx);*/
+        if self.inline_code_counter>0{
+            self.inline_code_counter -= 1;
+        }
     }
       
     pub fn begin_list_item(&mut self, cx:&mut Cx2d, dot:&str, pad:f64){
@@ -414,28 +471,52 @@ impl TextFlow{
             let dt = if self.fixed_counter > 0{
                 &mut self.draw_fixed
             }
-            else {
-                if self.bold_counter > 0{
-                    if self.italic_counter > 0{
-                        &mut self.draw_bold_italic
-                    }
-                    else{
-                        &mut self.draw_bold
-                    }
+            else if self.bold_counter > 0{
+                if self.italic_counter > 0{
+                    &mut self.draw_bold_italic
                 }
                 else{
-                    if self.italic_counter>0{
-                        &mut self.draw_italic
-                    }
-                    else{
-                        &mut self.draw_normal
-                    }
+                    &mut self.draw_bold
                 }
+            }
+            else if self.italic_counter>0{
+                    &mut self.draw_italic
+            }
+            else{
+                &mut self.draw_normal
             };
-            let fs = self.font_size_stack.value(self.font_size);
-            dt.text_style.font_size = fs;
+
+            // Apply the text style options before the font size options,
+            // such that the font size stack can override the text style stack.
+            //
+            // In the future, we can combine font_size_stack into text_style_stack.
+            if let Some(style) = self.text_style_stack.last() {
+                style.apply_to(&mut dt.text_style);
+            }
+            let font_size = self.font_size_stack.value(self.font_size);
+            dt.text_style.font_size = font_size;
+
             // the turtle is at pos X so we walk it.
-            if self.strikethrough_counter > 0{
+            if self.inline_code_counter > 0{
+                let db = &mut self.draw_block;
+                db.block_type = FlowBlockType::InlineCode;
+                cx.walk_turtle(Walk{
+                    width: Size::Fixed(self.inline_code_margin.left),
+                    height: Size::Fixed(0.0),
+                    ..Default::default()
+                });
+                dt.draw_walk_word_with(cx, text, |cx, mut rect|{
+                    rect.pos -= self.inline_code_padding.left_top();
+                    rect.size += self.inline_code_padding.size();
+                    db.draw_abs(cx, rect);
+                });
+                cx.walk_turtle(Walk{
+                    width:Size::Fixed(self.inline_code_margin.right),
+                    height:Size::Fixed(0.0),
+                    ..Default::default()
+                });
+            }
+            else if self.strikethrough_counter > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::Strikethrough;
                 dt.draw_walk_word_with(cx, text, |cx, rect|{

@@ -11,11 +11,10 @@ macro_rules!app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os="android")))]
         pub fn app_main() {
-            
             if Cx::pre_start(){
                 return
             }
-            
+                        
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Startup = event {
@@ -26,7 +25,6 @@ macro_rules!app_main {
                 }
                 <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
-            
             cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();

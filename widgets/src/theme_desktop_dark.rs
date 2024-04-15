@@ -484,74 +484,31 @@ live_design! {
     Html = <HtmlBase> {
         width: Fill, height: Fit,
         flow: RightWrap,
-
-        font_size: (THEME_FONT_SIZE_P),
-        line_spacing: (THEME_FONT_LINE_SPACING),
-
-        draw_normal: {
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_italic: {
-            text_style: <THEME_FONT_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_bold: {
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_bold_italic: {
-            text_style: <THEME_FONT_BOLD_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_fixed: {
-            text_style: <THEME_FONT_CODE> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        code_layout: {
-            flow: RightWrap,
-            padding: <THEME_MSPACE_2> {}
-        }
-        code_walk: { width: Fill, height: Fit }
-
-        quote_layout: {
-            flow: RightWrap,
-            padding: <THEME_MSPACE_3> {}
-        }
-        quote_walk: { width: Fill, height: Fit }
-
-        list_item_layout: {
-            flow: RightWrap,
-            padding: { right: 10. }
-        }
-        list_item_walk: { width: Fill, height: Fit }
-
-        inline_code_layout: {
-            flow: RightWrap,
-            padding: <THEME_MSPACE_1> {}
-        }
-        inline_code_walk:{ height:Fit, width:Fit, margin: { top: -2 } }
-
-        sep_walk: {
-            width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
-        }
-
+        width:Fill,
+        height:Fit,
+        padding: 5,
+        line_spacing: 10,
+        
+        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
+        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
+        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
+        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
+        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
+        
+        code_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
+        code_walk:{height:Fit,width:Fill}
+        
+        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
+        quote_walk:{height:Fit,width:Fill}
+        
+        list_item_layout:{flow: RightWrap, padding:{left:0,top:0,right:10,bottom:0}},
+        list_item_walk:{height:Fit,width:Fill}
+        
+        inline_code_padding:3,
+        inline_code_margin: 3,
+        
+        sep_walk:{height:4, width: Fill},
+                
         a = <HtmlLink> {
             draw_text: {
                 text_style: {
@@ -559,8 +516,13 @@ live_design! {
                 }
             }
         }
-
-        draw_block: {
+        
+        draw_block:{
+            line_color: #9
+            sep_color: #9
+            quote_bg_color: #4
+            quote_fg_color: #7
+            code_color: #3
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -572,7 +534,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT)
+                        sdf.fill(self.quote_bg_color)
                         sdf.box(
                             THEME_SPACE_1,
                             THEME_SPACE_1,
@@ -580,7 +542,7 @@ live_design! {
                             self.rect_size.y - THEME_SPACE_2,
                             1.5
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT);
+                        sdf.fill(self.quote_fg_color);
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -591,7 +553,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_DIVIDER);
+                        sdf.fill(self.sep_color);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
@@ -602,7 +564,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -613,7 +575,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT_INLINE);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -624,7 +586,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
@@ -635,7 +597,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                 }
@@ -3639,6 +3601,21 @@ live_design! {
 
         root_view = <View> {}
     }
-
+    
+    Root = <RootBase>{
+        design_window = <Window>{
+            kind_id: 1
+            show_bg: true
+            width: Fill,
+            height: Fill
+                            
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    // test
+                    return mix(#3, #7, self.pos.y);
+                }
+            }
+        }
+    }
     // StackView DSL end
 }

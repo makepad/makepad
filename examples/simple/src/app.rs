@@ -1,46 +1,47 @@
 use makepad_widgets::*;
-   
+      
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
     
     App = {{App}} {
-
-        ui: <Window>{ 
-            show_bg: true
-            width: Fill,
-            height: Fill
-            
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    // test
-                    return mix(#7, #3, self.pos.y);
+        ui: 
+            <Window>{
+                show_bg: true
+                width: Fill,
+                height: Fill
+                
+                draw_bg: {
+                    fn pixel(self) -> vec4 {
+                        // test
+                        return mix(#7, #3, self.pos.y);
+                    }
                 }
-            }
-            
-            body = <ScrollXYView>{
-                flow: Down,
-                spacing:10,
-                align: {
-                    x: 0.5,
-                    y: 0.5
-                },
-                button1 = <Button> {
-                    text: "Hello world"
-                    draw_text:{color:#f00}
-                }
-                input1 = <TextInput> {
-                    width: 100, height: 30
-                    text: "Click to count"
-                }
-                label1 = <Label> {
-                    draw_text: {
-                        color: #f
+                
+                body = <ScrollXYView>{
+                    flow: Down,
+                    spacing:10,
+                    align: {
+                        x: 0.5,
+                        y: 0.5
                     },
-                    text: "Counter: 0"
+                    button1 = <Button> {
+                        text: "Hello world"
+                        draw_text:{color:#f00}
+                    }
+                    input1 = <TextInput> {
+                        width: 100, height: 30
+                        text: "Click to count"
+                    }
+                    label1 = <Label> {
+                        draw_text: {
+                            color: #f
+                        },
+                        text: "Counter: 0"
+                    }
                 }
             }
-        }
+        
     }
 }  
               
@@ -65,7 +66,7 @@ impl MatchEvent for App{
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
-            log!("TOTAL : {}",TrackingHeap.total());
+            //log!("TOTAL : {}",TrackingHeap.total());
             
         }
     }
@@ -78,7 +79,7 @@ impl AppMain for App {
     }
 } 
 
-
+/*
 
 // This is our custom allocator!
 use std::{
@@ -127,4 +128,4 @@ unsafe impl GlobalAlloc for TrackingHeapWrap {
 
 // Register our custom allocator.
 #[global_allocator]
-static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();
+static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();*/

@@ -275,6 +275,8 @@ pub enum ViewAction {
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
     FingerMove(FingerMoveEvent),
+    FingerHoverIn(FingerHoverEvent),
+    FingerHoverOut(FingerHoverEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
 }
@@ -301,6 +303,24 @@ impl ViewRef {
     pub fn finger_move(&self, actions: &Actions) -> Option<FingerMoveEvent> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::FingerMove(fd) = item.cast() {
+                return Some(fd);
+            }
+        }
+        None
+    }
+
+    pub fn finger_hover_in(&self, actions: &Actions) -> Option<FingerHoverEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerHoverIn(fd) = item.cast() {
+                return Some(fd);
+            }
+        }
+        None
+    }
+
+    pub fn finger_hover_out(&self, actions: &Actions) -> Option<FingerHoverEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerHoverOut(fd) = item.cast() {
                 return Some(fd);
             }
         }
@@ -634,7 +654,8 @@ impl Widget for View {
                         self.animator_play(cx, id!(down.off));
                     }
                 }
-                Hit::FingerHoverIn(_) => {
+                Hit::FingerHoverIn(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerHoverIn(e));
                     if let Some(cursor) = &self.cursor {
                         cx.set_cursor(*cursor);
                     }
@@ -642,7 +663,8 @@ impl Widget for View {
                         self.animator_play(cx, id!(hover.on));
                     }
                 }
-                Hit::FingerHoverOut(_) => {
+                Hit::FingerHoverOut(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerHoverOut(e));
                     if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(hover.off));
                     }

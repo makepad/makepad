@@ -458,13 +458,13 @@ impl Cx {
             DrawPassMode::MTKView(view)=>{
                 let drawable:ObjcId = unsafe {msg_send![view, currentDrawable]};
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::StdinMain(stdin_frame) => {
+                
                 self.commit_command_buffer(Some(stdin_frame), command_buffer, gpu_read_guards);
             }
             DrawPassMode::Drawable(drawable) => {

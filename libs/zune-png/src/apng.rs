@@ -17,8 +17,8 @@ use crate::error::PngDecodeErrors;
 // if it is 0, the animation should play indefinitely.
 // If nonzero, the animation should come to rest on the final frame at the end of the last play.
 pub struct ActlChunk {
-    pub num_frames: u32,
-    pub num_plays:  u32
+    pub _num_frames: u32,
+    pub _num_plays:  u32
 }
 
 #[derive(Clone, Copy)]
@@ -68,15 +68,15 @@ impl DisposeOp {
 /// Describes a single frame
 #[derive(Clone, Copy)]
 pub struct FrameInfo {
-    pub seq_number:  u32,
+    pub _seq_number:  u32,
     pub width:       usize,
     pub height:      usize,
-    pub x_offset:    usize,
-    pub y_offset:    usize,
-    pub delay_num:   u16,
-    pub delay_denom: u16,
-    pub dispose_op:  DisposeOp,
-    pub blend_op:    BlendOp
+    pub _x_offset:    usize,
+    pub _y_offset:    usize,
+    pub _delay_num:   u16,
+    pub _delay_denom: u16,
+    pub _dispose_op:  DisposeOp,
+    pub _blend_op:    BlendOp
 }
 
 /// Represents a single frame

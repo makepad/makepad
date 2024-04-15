@@ -162,50 +162,50 @@ live_design! {
                 }
             }
         }
-        ui: <Window> {
-            window: {inner_size: vec2(1280, 1000)},
-            pass: {clear_color: #2A}
-            block_signal_event: true;
-            /*body2 = <View>{
-                step4 = <BlurStage>{
-                    width: Fill,
-                    height: Fill,
-                    draw_bg:{blury: 0.0, blurx: 10.0}
-                    step3 = <BlurStage>{
+        ui: <Root>{
+            <Window> {
+                window: {inner_size: vec2(1280, 1000)},
+                pass: {clear_color: #2A}
+                block_signal_event: true;
+                /*body2 = <View>{
+                    step4 = <BlurStage>{
                         width: Fill,
                         height: Fill,
-                        draw_bg:{blury: 10.0, blurx: 0.0}
-                        step2 = <BlurStage>{
+                        draw_bg:{blury: 0.0, blurx: 10.0}
+                        step3 = <BlurStage>{
                             width: Fill,
                             height: Fill,
-                            draw_bg:{blury: 7.07, blurx: 7.07}
-                            step1 = <BlurStage>{
+                            draw_bg:{blury: 10.0, blurx: 0.0}
+                            step2 = <BlurStage>{
                                 width: Fill,
                                 height: Fill,
-                                draw_bg:{blury: -7.07, blurx: 7.07}
-                                <AppDesktop> {}
+                                draw_bg:{blury: 7.07, blurx: 7.07}
+                                step1 = <BlurStage>{
+                                    width: Fill,
+                                    height: Fill,
+                                    draw_bg:{blury: -7.07, blurx: 7.07}
+                                    <AppDesktop> {}
+                                }
                             }
                         }
                     }
-                }
-            }*/
-            body = <View>
-            {
-                
-                width: Fill,
-                height: Fill,
-                
-                shadowstep = <ShadowStage> {
+                }*/
+                body = <View>
+                {
+                    
                     width: Fill,
                     height: Fill,
-                    draw_bg:{shadowy: 10.0, shadowx: 10.0, shadowopacity: 2.0}
-                    padding: 10
-                    <AppDesktop> {}
+                    
+                    shadowstep = <ShadowStage> {
+                        width: Fill,
+                        height: Fill,
+                        draw_bg:{shadowy: 10.0, shadowx: 10.0, shadowopacity: 2.0}
+                        padding: 10
+                        <AppDesktop> {}
+                    }
                 }
             }
-
         }
-
     }
 }
 app_main!(App);
