@@ -114,6 +114,8 @@ live_design!{
                         spacing: (THEME_SPACE_1)
                         <P> { text: "TestButtong", width: Fit}
                         <LinkLabel> { text: "TestButtong", width: Fit}
+                        <CheckBox> { text: "TestButtong"}
+                        <CheckBoxToggle> { text: "TestButtong"}
                         <ButtonFlat> { text: "TestButtong"}
                         <Button> { text: "TestButtong"}
                         <TextInput> { text: "TestButtong"}
@@ -123,8 +125,6 @@ live_design!{
                         // <RadioButton> { }
                         // <RadioButtonTextual> { }
                         // <RadioButtonTab> { }
-                        <CheckBox> { text: "TestButtong"}
-                        <CheckBoxToggle> { text: "TestButtong"}
                     }
                 }
 
@@ -409,7 +409,7 @@ live_design!{
 
                 <ZooHeader> {
                     title = {text:"<Label>"}
-                    <ZooDesc> { text:"Simple 1 line textbox" }
+                    <ZooDesc> { text:"Default single line textbox" }
                     <ZooGroup> { <Label> { text: "This is a small line of text" } }
                     <ZooGroup> {
                         <Label> {

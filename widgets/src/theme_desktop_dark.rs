@@ -5,7 +5,7 @@ live_design! {
     import crate::base::*;
 
     // GLOBAL PARAMETERS
-    THEME_COLOR_CONTRAST = 1.
+    THEME_COLOR_CONTRAST = 1.0
     THEME_COLOR_TINT = #7
     THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
     THEME_CORNER_RADIUS = 2.5
@@ -291,7 +291,7 @@ live_design! {
 
     P = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -304,7 +304,7 @@ live_design! {
 
     Pbold = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -317,7 +317,7 @@ live_design! {
 
     Pitalic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -330,7 +330,7 @@ live_design! {
 
     Pbolditalic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_P), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -382,14 +382,10 @@ live_design! {
     }
 
     HtmlLink = <HtmlLinkBase> {
-        width: Fit,
-        height: Fit,
+        width: Fit, height: Fit,
         align: {x: 0., y: 0.}
 
-        label_walk: {
-            width: Fit,
-            height: Fit
-        }
+        label_walk: { width: Fit, height: Fit }
 
         draw_icon: {
             instance hover: 0.0
@@ -397,11 +393,11 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    #9,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -555,10 +551,10 @@ live_design! {
             margin: <THEME_MSPACE_V_3> {}
         }
                 
-        a = <HtmlLink> { }
+        a = <HtmlLink> {}
         
         draw_block:{
-            line_color: (THEME_COLOR_AMOUNT_WHITE)
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
             sep_color: (THEME_COLOR_DIVIDER)
             quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
             quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
@@ -2639,13 +2635,11 @@ live_design! {
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        padding: { bottom: 2. }
+        padding: { top: (THEME_SPACE_2), bottom: 2. }
         spacing: 7.5,
         align: {x: 0., y: 0.}
 
-        label_walk: {
-            width: Fit, height: Fit,
-        },
+        label_walk: { width: Fit, height: Fit, },
 
         draw_bg: {
             instance pressed: 0.0
@@ -3222,7 +3216,7 @@ live_design! {
         min: 0.0, max: 1.0,
         step: 0.0,
         label_align: { y: 0.0 }
-        margin: <THEME_MSPACE_1> {}
+        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
         height: Fit
 
