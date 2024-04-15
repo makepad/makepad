@@ -442,22 +442,21 @@ live_design! {
                 }
             }
 
-
-            draw_bg: {
-                instance pressed: 0.0
-                instance hover: 0.0
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let offset_y = 1.0
-                    sdf.move_to(0., self.rect_size.y - offset_y);
-                    sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                    return sdf.stroke(mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_PRESSED,
-                        self.pressed
-                    ), mix(0.0, 0.8, self.hover));
-                }
+        draw_bg: {
+            instance pressed: 0.0
+            instance hover: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                ), mix(0.0, 0.8, self.hover));
             }
+        }
 
         draw_text: {
             wrap: Word
@@ -466,7 +465,9 @@ live_design! {
             instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR>{}
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -486,43 +487,82 @@ live_design! {
         flow: RightWrap,
         width:Fill,
         height:Fit,
-        padding: 5,
-        line_spacing: 10,
+        padding: <THEME_MSPACE_1> {}
+
+        line_spacing: (THEME_FONT_LINE_SPACING),
+        font_size: (THEME_FONT_SIZE_P),
         
-        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
-        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
-        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
-        
-        code_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
-        code_walk:{height:Fit,width:Fill}
-        
-        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
-        quote_walk:{height:Fit,width:Fill}
-        
-        list_item_layout:{flow: RightWrap, padding:{left:0,top:0,right:10,bottom:0}},
-        list_item_walk:{height:Fit,width:Fill}
-        
-        inline_code_padding:3,
-        inline_code_margin: 3,
-        
-        sep_walk:{height:4, width: Fill},
-                
-        a = <HtmlLink> {
-            draw_text: {
-                text_style: {
-                    font_size: 12,
-                }
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
             }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
         }
         
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        code_walk: { width: Fill, height: Fit }
+
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        quote_walk: { width: Fill, height: Fit, }
+        
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
+        }
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_3> {}
+        }
+                
+        a = <HtmlLink> { }
+        
         draw_block:{
-            line_color: #9
-            sep_color: #9
-            quote_bg_color: #4
-            quote_fg_color: #7
-            code_color: #3
+            line_color: (THEME_COLOR_AMOUNT_WHITE)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -655,27 +695,18 @@ live_design! {
         }
         code_walk: { width: Fill, height: Fit }
 
-        inline_code_layout: {
-            flow: RightWrap,
-            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1) }
-        }
-        inline_code_walk: {
-            width: Fit, height: Fit,
-            margin: { top: -2. }
-        }
-
         quote_layout: {
             flow: RightWrap,
             padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         quote_walk: { width: Fill, height: Fit, }
 
-        list_item_walk: {
-            height: Fit, width: Fill,
-        }
         list_item_layout: {
             flow: RightWrap,
             padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
         }
 
         sep_walk: {
