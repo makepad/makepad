@@ -91,7 +91,9 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
             AppleOs::Tvos
         }
         "list"=>{
-            return list_profiles();
+            let pp = parse_profiles()?;
+            pp.println();
+            return Ok(())
         }
         _=>{
             return Err(format!("please enter ios or tvos"))
