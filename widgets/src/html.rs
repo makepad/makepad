@@ -47,6 +47,12 @@ pub struct Html {
     /// The character used to separate an ordered list's item number from the content.
     #[live] ol_separator: String,
 
+    /// Whether to keep internal whitespace when parsing HTML.
+    /// If `true`, only whitespace that exists within other text will be kept;
+    /// all text nodes that consist of only whitespace will be removed,
+    /// and leading and trailing whitespace will be trimmed off of text nodes.
+    #[live(false)] keep_whitespace: bool,
+
     /// The stack of list levels encountered so far, used to track nested lists.
     #[rust] list_stack: Vec<ListLevel>,
 }
@@ -55,7 +61,8 @@ pub struct Html {
 impl LiveHook for Html {
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        let new_doc = parse_html(&*self.body, &mut errors, KeepWhitespace::No);
+        let kws = if self.keep_whitespace { KeepWhitespace::Yes } else { KeepWhitespace::No };
+        let new_doc = parse_html(&*self.body, &mut errors, kws);
         if new_doc != self.doc{
             self.doc = new_doc;
             self.text_flow.clear_items();
@@ -328,7 +335,8 @@ impl Widget for Html {
     fn set_text(&mut self, v:&str){
         self.body = Rc::new(v.to_string());
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(&*self.body, &mut errors, KeepWhitespace::No);
+        let kws = if self.keep_whitespace { KeepWhitespace::Yes } else { KeepWhitespace::No };
+        self.doc = parse_html(&*self.body, &mut errors, kws);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
