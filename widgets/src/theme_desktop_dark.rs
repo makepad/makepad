@@ -2970,6 +2970,10 @@ live_design! {
         }
     }
 
+    RadioButtonImage = <RadioButton> {
+        
+    }
+
     RadioButtonTab = <RadioButton> {
         height: Fit,
         draw_radio: { radio_type: Tab }
