@@ -16,13 +16,8 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     ProfilerEventChart = {{ProfilerEventChart}}{
-        height: Fill,
-        width: Fill
-        draw_bg: {
-            fn pixel(self)->vec4{
-                return #3
-            }
-        }
+        height: Fill, width: Fill,
+        draw_bg: { fn pixel(self)->vec4{ return THEME_COLOR_BG_CONTAINER } }
         draw_line: {
             fn pixel(self)->vec4{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -32,7 +27,7 @@ live_design!{
                     self.rect_size.x - 2.0 ,
                     self.rect_size.y - 2.0
                 )
-                sdf.fill_keep(#6)
+                sdf.fill_keep(THEME_COLOR_DIVIDER)
                 return sdf.result
             }
         }
@@ -42,20 +37,24 @@ live_design!{
             }
         }
         draw_time:{ 
-            color: #f,
-            text_style: <THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_META)
         }
         draw_label:{
-            color: #0,
-            text_style: <THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT_DARK)
         }
     }
     
     Profiler = {{Profiler}}{
-        height: Fill,
-        width: Fill
-        <ProfilerEventChart>{
-        }
+        height: Fill, width: Fill
+        <ProfilerEventChart>{ }
     }
 }
 

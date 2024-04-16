@@ -119,11 +119,10 @@ live_design!{
         }
     }
     
-    LogItem = <RectView> {
-        height: Fit,
-        width: Fill
-        padding: {top: 6, bottom: 6}
-        
+    LogItem = <View> {
+        height: Fit, width: Fill
+        padding: <THEME_MSPACE_2> {}
+        show_bg: true,
         draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
@@ -178,30 +177,28 @@ live_design!{
     }
     
     LogList = {{LogList}}{
-        height: Fill,
-        width: Fill
+        height: Fill, width: Fill,
         list = <PortalList> {
             grab_key_focus: true
             auto_tail: true
             drag_scrolling: false
-            height: Fill,
-            width: Fill
+            height: Fill, width: Fill,
             flow: Down
             Location = <LogItem> {
                 icon = <LogIcon> {},
                 binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
                 location = <LinkLabel> {margin: 0, text: ""}
-                body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
+                body = <P> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
             }
             Bare = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
-                body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
+                binary = <P> { draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
+                body = <P> { }
             }
             Empty = <LogItem> {
                 cursor: Default
-                height: 24,
                 width: Fill
+                body = <P> { text: "" }
             }
         }
     }
