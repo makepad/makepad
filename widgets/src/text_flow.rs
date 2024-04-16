@@ -39,7 +39,7 @@ pub struct DrawFlowBlock {
 }
 
 #[derive(Default)]
-pub struct StackCounter(pub usize);
+pub struct StackCounter(usize);
 impl StackCounter{
     pub fn push(&mut self){
         self.0 += 1;
