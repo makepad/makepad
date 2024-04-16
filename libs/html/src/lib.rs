@@ -17,7 +17,7 @@ pub enum HtmlNode{
     OpenTag{lc:LiveId, nc:LiveId},
     CloseTag{lc:LiveId, nc:LiveId},
     Attribute{lc:LiveId, nc:LiveId, start:usize, end:usize},
-    Text{start: usize, end:usize}
+    Text{start: usize, end:usize, all_ws:bool}
 }
 /*
 /// A standalone owned copy of an HTML attribute.
@@ -160,7 +160,7 @@ impl<'a> HtmlWalker<'a>{
                 HtmlNode::CloseTag{..}=>{
                     return None
                 }
-                HtmlNode::Text{start, end} =>{
+                HtmlNode::Text{start, end,..} =>{
                     return Some(&self.decoded[*start..*end])
                 }
                 _=>()
@@ -171,10 +171,19 @@ impl<'a> HtmlWalker<'a>{
         
     pub fn text(&self)->Option<&'a str>{
         match self.nodes.get(self.index){
-            Some(HtmlNode::Text{start,end})=>{
+            Some(HtmlNode::Text{start,end,..})=>{
                 Some(&self.decoded[*start..*end])
             }
             _=> None
+        }
+    }
+    
+    pub fn text_is_all_ws(&self)->bool{
+        match self.nodes.get(self.index){
+            Some(HtmlNode::Text{all_ws,..})=>{
+                *all_ws
+            }
+            _=> false
         }
     }
     
@@ -253,7 +262,7 @@ impl<'a> HtmlWalker<'a>{
      No
  }
  
- pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>, kws:KeepWhitespace)->HtmlDoc{
+ pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>)->HtmlDoc{
      enum State{
          Text(usize, usize, usize),
          ElementName(usize),
@@ -277,7 +286,7 @@ impl<'a> HtmlWalker<'a>{
          CommentBody
      }
              
-     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, last_was_ws:&mut bool, errors:&mut Option<Vec<HtmlError>>, kws:KeepWhitespace,  last_non_whitespace:&mut usize){
+     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, errors:&mut Option<Vec<HtmlError>>, last_non_whitespace:&mut usize){
          if c=='&'{
              if in_entity.is_some(){
                  if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected & inside entity".into(), position:i})};
@@ -301,16 +310,9 @@ impl<'a> HtmlWalker<'a>{
          }
          else{
              if c.is_whitespace() {
-                if let KeepWhitespace::Yes = kws{
-                    decoded.push(c);                      
-                }
-                else if !*last_was_ws && c != '\n' {
-                    decoded.push(' ');
-                }
-                *last_was_ws = true;
+                decoded.push(c);                      
              }
              else{
-                 *last_was_ws = false;
                  decoded.push(c);
                  *last_non_whitespace = decoded.len();
              }
@@ -321,7 +323,6 @@ impl<'a> HtmlWalker<'a>{
      let mut state = State::Text(0, 0, 0);
      let mut decoded = String::new();
      let mut in_entity = None;
-     let mut last_was_ws = false;
      
      for (i, c) in body.char_indices(){
          state = match state{
@@ -354,17 +355,12 @@ impl<'a> HtmlWalker<'a>{
                     if let Some(start) = in_entity{
                         if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
                     }
-                    if dec_start != last_non_whitespace{
-                        nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
-                    } 
-                    else{
-                        decoded.truncate(dec_start);
-                    }
+                    nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len(), all_ws:dec_start == last_non_whitespace});
                     State::ElementName(i+1)
                  }
                  else{
                      let mut last_non_whitespace = last_non_whitespace;
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors, kws, &mut last_non_whitespace);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, errors, &mut last_non_whitespace);
                      State::Text(start, dec_start, last_non_whitespace)
                  }
              }
@@ -514,7 +510,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors, kws, &mut 0);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded, errors, &mut 0);
                      State::AttribValueSq(lc,nc, start)
                  }
              }
@@ -527,7 +523,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, &mut last_was_ws, errors, kws, &mut 0);
+                     process_entity(c, &body, &mut in_entity, i, &mut decoded,  errors, &mut 0);
                      State::AttribValueDq(lc,nc, start)
                  }
              }
@@ -595,12 +591,7 @@ impl<'a> HtmlWalker<'a>{
           if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
      }
      if let State::Text(_, dec_start, last_non_whitespace) = state{
-        if dec_start != last_non_whitespace{
-            nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len()});
-        }
-        else{
-            decoded.truncate(dec_start);
-        }
+        nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len(), all_ws:dec_start == last_non_whitespace});
      }
      else{ // if we didnt end in text state something is wrong
           if let Some(errors) = errors{errors.push(HtmlError{message:"HTML Parsing endstate is not HtmlNode::Text".into(), position:body.len()})};
