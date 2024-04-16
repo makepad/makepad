@@ -104,7 +104,7 @@ live_design!{
                 }
 
                 <ZooHeader> {
-                    title = {text: "Control heights and text baselines"}
+                    title = {text: "Control Heights & Text Baselines"}
                     <ZooDesc> {
                         text: "Control heights and text baselines"
                     }
@@ -113,15 +113,15 @@ live_design!{
                         flow: Right,
                         spacing: (THEME_SPACE_1)
                         <P> { text: "TestButtong", width: Fit}
-                        <LinkLabel> { text: "TestButtong", width: Fit}
-                        <CheckBox> { text: "TestButtong"}
-                        <CheckBoxToggle> { text: "TestButtong"}
-                        <ButtonFlat> { text: "TestButtong"}
-                        <Button> { text: "TestButtong"}
-                        <TextInput> { text: "TestButtong"}
+                        <LinkLabel> { text: "TestButton", width: Fit}
+                        <CheckBox> { text: "TestButton"}
+                        <CheckBoxToggle> { text: "TestButton"}
+                        <ButtonFlat> { text: "TestButton"}
+                        <Button> { text: "TestButton"}
+                        <TextInput> { text: "TestButton"}
                         <DropDown> { }
-                        <Slider> { text: "TestButtong"}
-                        <SliderBig> { text: "TestButtong"}
+                        <Slider> { text: "TestButton"}
+                        <SliderBig> { text: "TestButton"}
                         // <RadioButton> { }
                         // <RadioButtonTextual> { }
                         // <RadioButtonTab> { }
@@ -821,6 +821,37 @@ live_design!{
                             }
                         }
 
+                        <H4> { text: "Media"}
+                        <View> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5 }
+                            mediaradios_demo = <View> {
+                                width: Fit, height: Fit,
+                                flow: Right,
+                                spacing: (THEME_SPACE_2)
+                                radio1 = <RadioButtonImage> {
+                                    width: 50, height: 50,
+                                    media: Image,
+                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                }
+                                radio2 = <RadioButtonImage> {
+                                    width: 50, height: 50,
+                                    media: Image,
+                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                }
+                                radio3 = <RadioButtonImage> {
+                                    width: 50, height: 50,
+                                    media: Image,
+                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                }
+                                radio4 = <RadioButtonImage> {
+                                    width: 50, height: 50,
+                                    media: Image,
+                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1174,6 +1205,9 @@ live_design!{
 
         ui.radio_button_set(ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4))
             .selected_to_visible(cx, &ui, actions, ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4));
+
+        ui.radio_button_set(ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4))
+            .selected_to_visible(cx, &ui, actions, ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4));
 
         if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
             log!("TEXTBOX CHANGED {}", self.counter);
