@@ -131,11 +131,11 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    THEME_COLOR_BG_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 );
             }
