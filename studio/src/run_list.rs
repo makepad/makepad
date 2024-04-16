@@ -17,9 +17,7 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     BuildItem = <RectView> {
-        height: Fit,
-        width: Fill
-        padding: {top: 0, bottom: 0}
+        width: Fill, height: Fit,
         
         draw_bg: {
             instance is_even: 0.0
@@ -41,9 +39,6 @@ live_design!{
     
     RunButton = <CheckBox> {
         width: Fill,
-        height: 25,
-        margin: {left: 1},
-        label_walk: {margin: {top: 7}}
         draw_check: {
             uniform size: 3.5;
             instance open: 0.0
@@ -54,7 +49,7 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 match self.check_type {
                     CheckType::Check => {
-                        let left = 2;
+                        let left = 3;
                         let sz = self.size;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         
@@ -77,23 +72,18 @@ live_design!{
                 return sdf.result
             }
         }
-        draw_text: {text_style: <THEME_FONT_LABEL> {}}
     }
     
     
     RunList = {{RunList}}{
-        height: Fill,
-        width: Fill
+        width: Fill, height: Fill,
         list = <FlatList> {
-            grab_key_focus: true
-            drag_scrolling: false
-            height: Fill,
-            width: Fill
-            flow: Down
+            height: Fill, width: Fill,
+            flow: Down,
+            grab_key_focus: true,
+            drag_scrolling: false,
+
             Target = <BuildItem> {
-                align: { x: 0.0, y: 0.5}
-                padding: {top: 0, bottom: 0}
-                // label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
                 check = <RunButton> { margin: {left: 21} }
 
                 <Image> {
@@ -145,12 +135,12 @@ live_design!{
                 padding: {top: 0, bottom: 0}
                 flow: Right
                 fold = <FoldButton> {
-                    animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}
+                    height: 25, width: 15,
+                    margin: { left: (THEME_SPACE_2) }
+                    animator: { open = { default: no } },
                     draw_bg: {
                         uniform size: 3.75;
                         instance open: 0.0
-                        // uniform length: 3.0
-                        // uniform width: 1.0
                         
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
