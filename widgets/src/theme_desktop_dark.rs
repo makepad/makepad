@@ -55,6 +55,7 @@ live_design! {
 
     THEME_COLOR_D_HIDDEN = #00000000
     THEME_COLOR_D_1 = (mix(#000000FF, #00000000, pow(0.85, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_1_2 = (mix(#000000FF, #00000000, pow(0.75, THEME_COLOR_CONTRAST)))
     THEME_COLOR_D_2 = (mix(#000000FF, #00000000, pow(0.6, THEME_COLOR_CONTRAST)))
     THEME_COLOR_D_3 = (mix(#000000FF, #00000000, pow(0.4, THEME_COLOR_CONTRAST)))
     THEME_COLOR_BLACK = (mix(#000000FF, #00000000, pow(0.1, THEME_COLOR_CONTRAST)))
@@ -70,21 +71,23 @@ live_design! {
     THEME_COLOR_CURSOR_BORDER = (THEME_COLOR_WHITE)
 
     THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_DEFAULT_DARK = (THEME_COLOR_D_3)
     THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT_DEFAULT)
 
     THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_3)
     THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
     THEME_COLOR_TEXT_ACTIVE = (THEME_COLOR_U_5)
-    THEME_COLOR_TEXT_INACTIVE = (THEME_COLOR_U_4)
+    THEME_COLOR_TEXT_INACTIVE = (THEME_COLOR_U_5)
     THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_WHITE)
     THEME_COLOR_TEXT_FOCUSED = (THEME_COLOR_U_5)
     THEME_COLOR_TEXT_PLACEHOLDER = (THEME_COLOR_U_4)
+    THEME_COLOR_TEXT_META = (THEME_COLOR_U_4)
 
     THEME_COLOR_TEXT_CURSOR = (THEME_COLOR_WHITE)
 
-    THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_1)
+    THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_1_2)
     THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.75)
-    THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.25)
+    THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.2)
     THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1) // Code-blocks and quotes.
     THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_3) // i.e. inline code
 
@@ -117,7 +120,7 @@ live_design! {
     THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_3)
 
     // WIDGET SPECIFIC COLORS
-    THEME_COLOR_DIVIDER = (THEME_COLOR_D_2)
+    THEME_COLOR_DIVIDER = (THEME_COLOR_D_3)
 
     THEME_COLOR_SLIDER_NUB_DEFAULT = (THEME_COLOR_WHITE)
     THEME_COLOR_SLIDER_NUB_HOVER = (THEME_COLOR_WHITE)
@@ -135,6 +138,7 @@ live_design! {
 
     THEME_COLOR_DOCK_CONTAINER = (THEME_COLOR_BG_CONTAINER)
     THEME_COLOR_DOCK_TAB_SELECTED = (THEME_COLOR_BG_CONTAINER)
+    THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL = (THEME_COLOR_U_4)
 
 
     // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
@@ -173,7 +177,7 @@ live_design! {
     }
 
     Label = <LabelBase> {
-        width: Fit, height: Fit,
+        width: Fit, height: Fit, 
         draw_text: {
             color: (THEME_COLOR_TEXT_DEFAULT),
             text_style: <THEME_FONT_REGULAR> {},
@@ -1606,90 +1610,6 @@ live_design! {
         }
     }
 
-    SplitterMinimal = <SplitterBase> {
-        draw_splitter: {
-            uniform border_radius: 1.0
-            uniform splitter_pad: 1.0
-            uniform splitter_grabber: 110.0
-
-            instance pressed: 0.0
-            instance hover: 0.0
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(THEME_COLOR_U_1);
-
-                if self.is_vertical > 0.5 {
-                    sdf.box(
-                        self.splitter_pad,
-                        self.rect_size.y * 0.5 - self.splitter_grabber * 0.5,
-                        self.rect_size.x - 2.0 * self.splitter_pad,
-                        self.splitter_grabber,
-                        self.border_radius
-                    );
-                }
-                else {
-                    sdf.box(
-                        self.rect_size.x * 0.5 - self.splitter_grabber * 0.5,
-                        self.splitter_pad,
-                        self.splitter_grabber,
-                        self.rect_size.y - 2.0 * self.splitter_pad,
-                        self.border_radius
-                    );
-                }
-                return sdf.fill_keep(mix(
-                    THEME_COLOR_D_HIDDEN,
-                    mix(
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
-                        self.pressed
-                    ),
-                    self.hover
-                ));
-            }
-        }
-        split_bar_size: (THEME_SPLITTER_SIZE)
-        min_horizontal: (THEME_SPLITTER_MIN_HORIZONTAL)
-        max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
-        min_vertical: (THEME_SPLITTER_MIN_VERTICAL)
-        max_vertical: (THEME_SPLITTER_MAX_VERTICAL)
-
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_splitter: {pressed: 0.0, hover: 0.0}
-                    }
-                }
-
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                        state_down: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_splitter: {
-                            pressed: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
-                        }
-                    }
-                }
-
-                pressed = {
-                    from: { all: Forward { duration: 0.1 }}
-                    apply: {
-                        draw_splitter: {
-                            pressed: [{time: 0.0, value: 1.0}],
-                            hover: 1.0,
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     TabCloseButton = <TabCloseButtonBase> {
         height: 10.0, width: 10.0,
         margin: { right: (THEME_SPACE_2), left: -3.5 },
@@ -1920,10 +1840,10 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let marker_height = 2.
+                let marker_height = 2.5
 
                 sdf.rect(0, self.rect_size.y - marker_height, self.rect_size.x, marker_height)
-                sdf.fill(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_TEXT_ACTIVE), self.selected));
+                sdf.fill(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL), self.selected));
                 return sdf.result
             }
         }
@@ -2030,7 +1950,7 @@ live_design! {
             color: (THEME_COLOR_DRAG_QUAD)
         }
         tab_bar: <TabBarMinimal> {}
-        splitter: <SplitterMinimal> {}
+        splitter: <Splitter> {}
     }
 
     RectView = <View> {
