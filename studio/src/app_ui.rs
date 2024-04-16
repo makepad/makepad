@@ -28,13 +28,13 @@ live_design!{
             }
         }
         margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0}
-        padding: 0.0
-        text: ""
     }
     
     AppUI =  <Window> {
         caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
-        window: {inner_size: vec2(1600, 900)},
+        window: { inner_size: vec2(1600, 900) },
+        show_bg: true,
+        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
         window_menu = {
             main = Main {items: [app, file, edit, selection, view, run, window, help]}
                 
@@ -83,8 +83,7 @@ live_design!{
             line = Line,
         }
         body = {dock = <Dock> {
-            height: Fill,
-            width: Fill
+            width: Fill, height: Fill,
                 
             root = Splitter {
                 axis: Horizontal,
@@ -220,7 +219,6 @@ live_design!{
                 }
             }
             DesignFirst = <RectView> {
-                draw_bg: {color: #4}
                 <View> {
                     width: Fill,
                     height: Fill
@@ -229,76 +227,44 @@ live_design!{
                         y: 0.5
                     }
                     flow: Down
-                    <Logo> {
-                        draw_icon: {
-                            fn get_color(self) -> vec4 {
-                                return #755
-                            }
-                        }
-                    }
+                    <Logo> { }
                 }
             }
             RunFirst = <RectView> {
-                draw_bg: {color: #4}
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill,
                     flow: Down
-                        <Logo> {
-                        draw_icon: {
-                            fn get_color(self) -> vec4 {
-                                return #7
-                            }
-                        }
-                    }
+                    align: { x: 0.5, y: 0.5 }
+                    <Logo> {}
                 }
             }
-            RunList = <RunList> {
-            }
+            RunList = <RunList> {}
             Search = <RectView> {
-                draw_bg: {color: #x28}
-                //  margin:{left: 0, top: 0}
                 <View> {
-                    margin:10
                     flow: Down
-                    <View> 
-                    {
-                        flow: Right
+                    margin: <THEME_MSPACE_2> {}
+                    <View> {
                         height: Fit
-                        <TextInput>{
-                            draw_bg: {
-                                fn pixel(self) -> vec4 {
-                                    return #x00000044
-                                }
-                            }
-                            width: Fill,
-                            empty_message:"Search here"                           
-                        }
+                        flow: Right
+                        <TextInput> { empty_message:"Search here" }
                         //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
-                    // <Button> {
-                    //     text:"Search"
-                            
-                    //     draw_icon: {
-                    //         svg_file: (ICO_SEARCH)
-                    //         fn get_color(self) -> vec4 {
-                    //             return #8;
-                    //         }
-                    //     } 
-                    //     icon_walk:  {
-                    //         margin: {left: 10}
-                    //         width: Fit,
-                    //         // height: 12.0
-                    //     } 
-                    // }
-                }
-                    <Label>
-                    {
-                        text: "this does not work yet."
+                        // <Button> {
+                        //     text:"Search"
+                                
+                        //     draw_icon: {
+                        //         svg_file: (ICO_SEARCH)
+                        //         fn get_color(self) -> vec4 {
+                        //             return #8;
+                        //         }
+                        //     } 
+                        //     icon_walk:  {
+                        //         margin: {left: 10}
+                        //         width: Fit,
+                        //         // height: 12.0
+                        //     } 
+                        // }
                     }
+                    <Label> { text: "this does not work yet." }
                 }
             }
             RunView = <RunView> {}
