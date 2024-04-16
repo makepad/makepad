@@ -71,9 +71,9 @@ pub struct TextFlow {
     #[live] font_size: f64,
     #[walk] walk: Walk,
     
-    #[rust] area_stack: SmallVec<[Area;8]>,
+    #[rust] area_stack: SmallVec<[Area;4]>,
     #[rust] pub font_sizes: SmallVec<[f64;8]>,
-    #[rust] pub font: SmallVec<[Font;2]>,
+   // #[rust] pub font: SmallVec<[Font;2]>,
     #[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust] pub combine_spaces: SmallVec<[bool;4]>,
     #[rust] pub ignore_newlines: SmallVec<[bool;4]>,
@@ -184,7 +184,7 @@ impl TextFlow{
         self.underline.clear();
         self.strikethrough.clear();
         self.inline_code.clear();
-        self.font.clear();
+        //self.font.clear();
         self.font_sizes.clear();
         self.area_stack.clear();
         self.top_drop.clear();
@@ -316,6 +316,7 @@ impl TextFlow{
             dt.text_style.font_size = *font_size;
             dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
             dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
+            //if let Some(font) = self.font
             // the turtle is at pos X so we walk it.
             if self.inline_code.value() > 0{
                 let db = &mut self.draw_block;
