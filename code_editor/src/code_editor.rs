@@ -20,11 +20,15 @@ live_design! {
     import makepad_widgets::theme_desktop_dark::*;
 
     TokenColors = {{TokenColors}} {
+        whitespace: #6E6E6E,
+        delimiter: #a,
+        delimiter_highlight: #f,
+        error_decoration: #f00,
+        warning_decoration: #0f0,
+        
         unknown: #C0C0C0,
         branch_keyword: #C485BE,
-        comment: #638D54,
         constant: #CC917B,
-        delimiter: #a,
         identifier: #D4D4D4,
         loop_keyword: #FF8C00,
         number: #B6CEAA,
@@ -33,10 +37,7 @@ live_design! {
         string: #CC917B,
         function: #fffcc9,
         typename: #56C9B1,
-        whitespace: #6E6E6E,
-        delimiter_highlight: #f,
-        error_decoration: #f00,
-        warning_decoration: #0f0,
+        comment: #638D54,
     }
 
     DrawIndentGuide = {{DrawIndentGuide}} {
@@ -108,17 +109,15 @@ live_design! {
         }
     }
 
-    DrawCodeText = {{DrawCodeText}} {
-    }
+    DrawCodeText = {{DrawCodeText}} { }
 
     CodeEditor = {{CodeEditor}} {
-        width: Fill,
-        height: Fill,
+        height: Fill, width: Fill,
         margin: 0,
+
         scroll_bars: <ScrollBars> {}
         draw_bg: {
-           // draw_depth: 0.0,
-            color: #2a
+            color: (THEME_COLOR_BG_CONTAINER)
         }
         draw_gutter: {
             draw_depth: 1.0,

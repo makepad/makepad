@@ -82,12 +82,12 @@ live_design!{
                 
             line = Line,
         }
-        body = {dock = <Dock> {
+        body = {dock = <DockMinimal> {
             width: Fill, height: Fill,
                 
             root = Splitter {
                 axis: Horizontal,
-                align: FromA(230.0),
+                align: FromA(250.0),
                 a: file_tree_tabs,
                 b: split1
             }
@@ -125,7 +125,7 @@ live_design!{
                 
             log_tabs = Tabs {
                 tabs: [log_list, profiler],
-                selected: 0
+                selected: 1
             }
                 
             run_tabs = Tabs {
@@ -196,38 +196,23 @@ live_design!{
             EditFirst = <RectView> {
                 draw_bg: {color: #052329}
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill,
+                    align: { x: 0.5, y: 0.5 }
                     flow: Down
                     <Logo> {}
-                    <Label> {
-                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
+                    <H3> {
                         width: Fit,
-                        margin: {left: 200}
-                        draw_text: {
-                            text_style: {
-                                font_size: 20.0,
-                                height_factor: 1.0,
-                                font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
-                            },
-                        }
+                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
+                        margin: {left: 185}
                     }
                 }
             }
             DesignFirst = <RectView> {
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill
                     flow: Down
-                    <Logo> { }
+                    align: { x: 0.5, y: 0.5 }
+                    <Logo> {}
                 }
             }
             RunFirst = <RectView> {
@@ -243,28 +228,11 @@ live_design!{
                 <View> {
                     flow: Down
                     margin: <THEME_MSPACE_2> {}
-                    <View> {
-                        height: Fit
-                        flow: Right
-                        <TextInput> { empty_message:"Search here" }
-                        //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
-                        // <Button> {
-                        //     text:"Search"
-                                
-                        //     draw_icon: {
-                        //         svg_file: (ICO_SEARCH)
-                        //         fn get_color(self) -> vec4 {
-                        //             return #8;
-                        //         }
-                        //     } 
-                        //     icon_walk:  {
-                        //         margin: {left: 10}
-                        //         width: Fit,
-                        //         // height: 12.0
-                        //     } 
-                        // }
+                    <TextInput> {
+                        width: Fill,
+                        empty_message: "Search here",
                     }
-                    <Label> { text: "this does not work yet." }
+                    <P> { text: "this does not work yet." }
                 }
             }
             RunView = <RunView> {}
