@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
-    makepad_draw::{shader::draw_text::TextStyle, *},
+    makepad_draw::*,
     widget::*,
 }; 
     
