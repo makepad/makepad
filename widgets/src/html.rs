@@ -274,6 +274,7 @@ impl Html {
     }
     
     pub fn handle_text_node(cx: &mut Cx2d, tf: &mut TextFlow, node: &mut HtmlWalker) -> bool {
+        // we should ignore all whitespace nodes
         if node.text_is_all_ws(){
             return false;
         }

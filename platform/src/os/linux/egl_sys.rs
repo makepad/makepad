@@ -291,7 +291,7 @@ impl LibEgl {
             ffi::{CString, CStr},
             ptr::NonNull,
         };
-        
+        #[allow(non_local_definition)]
         impl Module {
             pub fn load(path: &str) -> Result<Self,()> {
                 let path = CString::new(path).unwrap();
