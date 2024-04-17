@@ -115,8 +115,9 @@ impl Html {
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
-                tf.push_size_rel_scale(0.85);
-                tf.top_drop.push(1.412); // to get back to top_drop of 1.2
+                const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                tf.top_drop.push(1.2/FIXED_FONT_SIZE_SCALE); // to achieve a top_drop of 1.2
                 tf.combine_spaces.push(false);
                 tf.fixed.push();
                 tf.inline_code.push();
