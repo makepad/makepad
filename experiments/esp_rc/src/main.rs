@@ -68,7 +68,7 @@ fn main() -> ! {
             gateway: IpAddress::v4(10,0,0,1)
         },
         main_wifi
-    );   
+    );
     loop{}
 }
 
