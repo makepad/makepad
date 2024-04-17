@@ -105,7 +105,7 @@ live_design! {
                 );
                 sdf.gloop(self.gloopiness);
             }
-            return sdf.fill(mix(#5558,#08f8,self.focus));
+            return sdf.fill(mix(THEME_COLOR_U_1 * 1.1, THEME_COLOR_U_3 * 0.8, self.focus));
         }
     }
 
@@ -151,18 +151,18 @@ live_design! {
             uniform blink: 0.0
             instance focus: 0.0
             fn pixel(self) -> vec4 {
-                let color = mix(#0000,mix(self.color, #0000, self.blink),self.focus);
+                let color = mix(THEME_COLOR_U_HIDDEN, mix(self.color, THEME_COLOR_U_HIDDEN, self.blink),self.focus);
                 return vec4(color.rgb*color.a, color.a);
             }
-            color: #C0C0C0,
+            color: (THEME_COLOR_WHITE),
         }
 
 
         draw_cursor_bg: {
             instance focus: 0.0
             fn pixel(self) -> vec4 {
-                let color = mix(#0000,THEME_COLOR_U_1,self.focus);
-                return vec4(color.rgb*color.a, color.a);
+                let color = mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_1, self.focus);
+                return vec4(color.rgb * color.a, color.a);
             }
         }
 
