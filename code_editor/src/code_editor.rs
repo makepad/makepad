@@ -116,13 +116,11 @@ live_design! {
         margin: 0,
 
         scroll_bars: <ScrollBars> {}
-        draw_bg: {
-            color: (THEME_COLOR_BG_CONTAINER)
-        }
+        draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
         draw_gutter: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {},
-            color: #5,
+            color: (THEME_COLOR_TEXT_META),
         }
         draw_text: {
             draw_depth: 1.0,
@@ -131,7 +129,7 @@ live_design! {
                 if self.outline < 0.5 {
                     return incol
                 }
-                if self.pos.y<0.12 {
+                if self.pos.y < 0.12 {
                     return #f
                 }
                 return incol
@@ -139,7 +137,7 @@ live_design! {
         }
         draw_indent_guide: {
            // draw_depth: 1.0,
-            color: #5,
+            color: (THEME_COLOR_U_2),
         }
         draw_decoration: {
           //  draw_depth: 2.0,
@@ -163,7 +161,7 @@ live_design! {
         draw_cursor_bg: {
             instance focus: 0.0
             fn pixel(self) -> vec4 {
-                let color = mix(#0000,#4447,self.focus);
+                let color = mix(#0000,THEME_COLOR_U_1,self.focus);
                 return vec4(color.rgb*color.a, color.a);
             }
         }
