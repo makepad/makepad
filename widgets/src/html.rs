@@ -155,7 +155,7 @@ impl Html {
             some_id!(sub) => {
                 // Adjust the top drop to move the text slightly downwards.
                 let curr_top_drop = tf.top_drop.last()
-                    .unwrap_or(&1.1);
+                    .unwrap_or(&1.2);
                 // A 55% increase in top_drop seems to look good for subscripts,
                 // which should be slightly below the halfway point in the line
                 let new_top_drop = curr_top_drop * 1.55;
