@@ -6,7 +6,8 @@ live_design! {
 
     // GLOBAL PARAMETERS
     THEME_COLOR_CONTRAST = 1.0
-    THEME_COLOR_TINT = #7
+    THEME_COLOR_TINT = #f00
+    THEME_COLOR_TINT_AMOUNT = 0.0
     THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
     THEME_CORNER_RADIUS = 2.5
     THEME_BEVELING = 0.75
@@ -64,7 +65,9 @@ live_design! {
     THEME_COLOR_MAKEPAD = #FF5C39FF
 
     // THEME_COLOR_BG_APP = #4
-    THEME_COLOR_BG_APP = (mix((THEME_COLOR_TINT) * 0.0, (THEME_COLOR_TINT) * 0.6, pow(0.5,THEME_COLOR_CONTRAST)))
+    // THEME_COLOR_BG_APP = (mix(#7 * 0.0, #7 * 0.6, 0.25))
+    THEME_COLOR_BG_APP = (mix(mix(#0, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(#7, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.5,THEME_COLOR_CONTRAST)))
+    // THEME_COLOR_BG_APP = (mix((THEME_COLOR_TINT) * 0.0, (THEME_COLOR_TINT) * 0.6, pow(0.5,THEME_COLOR_CONTRAST)))
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
 
@@ -170,9 +173,9 @@ live_design! {
     THEME_FONT_BOLD_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-BoldItalic.ttf") } }
     THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
-        // font_size: (THEME_FONT_SIZE_CODE)
-        // brightness: 1.1
-        // top_drop: 1.3
+        font_size: (THEME_FONT_SIZE_CODE)
+        brightness: 1.1
+        top_drop: 1.3
     }
 
     Label = <LabelBase> {
