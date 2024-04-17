@@ -33,6 +33,20 @@ live_design!{
     }
 }
 
+/// Whether to trim leading and trailing whitespace in the text body of an HTML tag.
+///
+/// Currently, *all* Unicode whitespace characters are trimmed, not just ASCII whitespace.
+///
+/// The default is to keep all whitespace.
+#[derive(Copy, Clone, PartialEq, Default)]
+pub enum TrimWhitespaceInText {
+    /// Leading and trailing whitespace will be preserved in the text.
+    #[default]
+    Keep,
+    /// Leading and trailing whitespace will be trimmed from the text.
+    Trim,
+}
+
 #[derive(Live, Widget)]
 pub struct Html {
     #[deref] pub text_flow: TextFlow,
@@ -75,42 +89,53 @@ impl Html {
         ul_markers: &Vec<String>,
         ol_markers: &Vec<OrderedListType>,
         ol_separator: &str,
-    ) -> Option<LiveId> {
+    ) -> (Option<LiveId>, TrimWhitespaceInText) {
 
-        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64) {
+        let mut trim_whitespace_in_text = TrimWhitespaceInText::default();
+
+        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64, trim: &mut TrimWhitespaceInText) {
+            *trim = TrimWhitespaceInText::Trim;
             tf.bold.push();
             tf.push_size_abs_scale(scale);
             cx.turtle_new_line();
         }
-            
+
         match node.open_tag_lc() {
-            some_id!(h1) => open_header_tag(cx, tf, 2.0),
-            some_id!(h2) => open_header_tag(cx, tf, 1.5),
-            some_id!(h3) => open_header_tag(cx, tf, 1.17),
-            some_id!(h4) => open_header_tag(cx, tf, 1.0),
-            some_id!(h5) => open_header_tag(cx, tf, 0.83),
-            some_id!(h6) => open_header_tag(cx, tf, 0.67),
+            some_id!(h1) => open_header_tag(cx, tf, 2.0, &mut trim_whitespace_in_text),
+            some_id!(h2) => open_header_tag(cx, tf, 1.5, &mut trim_whitespace_in_text),
+            some_id!(h3) => open_header_tag(cx, tf, 1.17, &mut trim_whitespace_in_text),
+            some_id!(h4) => open_header_tag(cx, tf, 1.0, &mut trim_whitespace_in_text),
+            some_id!(h5) => open_header_tag(cx, tf, 0.83, &mut trim_whitespace_in_text),
+            some_id!(h6) => open_header_tag(cx, tf, 0.67, &mut trim_whitespace_in_text),
 
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
                 cx.turtle_new_line();
                 cx.turtle_new_line();
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
                 tf.push_size_abs_scale(0.85);
+                tf.combine_spaces.push(false);
                 tf.fixed.push();
-                tf.inline_code.push(); // inline code block doesn't work properly
+                tf.inline_code.push();
             }
             some_id!(pre) => {
                 cx.turtle_new_line();
                 tf.fixed.push();
+                tf.ignore_newlines.push(false);
+                tf.combine_spaces.push(false);
                 tf.begin_code(cx);
             }
             some_id!(blockquote) => {
                 cx.turtle_new_line();
+                tf.ignore_newlines.push(false);
+                tf.combine_spaces.push(false);
                 tf.begin_quote(cx);
             }
-            some_id!(br) => cx.turtle_new_line(),
+            some_id!(br) => {
+                cx.turtle_new_line();
+            }
             some_id!(hr)
             | some_id!(sep) => {
                 cx.turtle_new_line();
@@ -141,6 +166,7 @@ impl Html {
                 tf.push_size_rel_scale(0.7);
             }
             some_id!(ul) => {
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 list_stack.push(ListLevel {
                     list_kind: ListKind::Unordered,
                     numbering_type: None,
@@ -149,6 +175,7 @@ impl Html {
                 });
             }
             some_id!(ol) => { 
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 // Handle the "start" attribute
                 let start_attr = node.find_attr_lc(live_id!(start));
                 let start: i32 = start_attr
@@ -167,6 +194,7 @@ impl Html {
                 });
             }
             some_id!(li) => {
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 let indent_level = list_stack.len();
                 let index = indent_level.saturating_sub(1);
                 // log!("indent_level: {indent_level}, index: {index}, list_stack: {list_stack:?}");
@@ -211,10 +239,10 @@ impl Html {
                 cx.turtle_new_line();
                 tf.begin_list_item(cx, marker, pad);
             }
-            Some(x) => { return Some(x) }
+            Some(x) => return (Some(x), trim_whitespace_in_text),
             _ => ()
-        } 
-        None
+        }
+        (None, trim_whitespace_in_text)
     }
     
     fn handle_close_tag(
@@ -242,14 +270,21 @@ impl Html {
                 cx.turtle_new_line();
                 cx.turtle_new_line();
             }
-            some_id!(blockquote) => tf.end_quote(cx),
+            some_id!(blockquote) => {
+                tf.ignore_newlines.pop();
+                tf.combine_spaces.pop();
+                tf.end_quote(cx);
+            }
             some_id!(code) => {
-                tf.inline_code.pop(); // doesn't work properly
+                tf.inline_code.pop();
                 tf.font_sizes.pop();
+                tf.combine_spaces.pop();
                 tf.fixed.pop(); 
             }
             some_id!(pre) => {
                 tf.fixed.pop();
+                tf.ignore_newlines.pop();
+                tf.combine_spaces.pop();
                 tf.end_code(cx);     
             }
             some_id!(sub)=>{
@@ -273,12 +308,18 @@ impl Html {
         None
     }
     
-    pub fn handle_text_node(cx: &mut Cx2d, tf: &mut TextFlow, node: &mut HtmlWalker) -> bool {
-        // we should ignore all whitespace nodes
-        if node.text_is_all_ws(){
-            return false;
-        }
+    pub fn handle_text_node(
+        cx: &mut Cx2d,
+        tf: &mut TextFlow,
+        node: &mut HtmlWalker,
+        trim: TrimWhitespaceInText,    
+    ) -> bool {
         if let Some(text) = node.text() {
+            let text = if trim == TrimWhitespaceInText::Trim {
+                text.trim_matches(char::is_whitespace)
+            } else {
+                text
+            };
             tf.draw_text(cx, text);
             true
         }
@@ -301,17 +342,19 @@ impl Widget for Html {
         let mut node = self.doc.new_walker();
         let mut auto_id = 0;
         while !node.done() {
+            let mut trim = TrimWhitespaceInText::default();
             match Self::handle_open_tag(cx, tf, &mut node, &mut self.list_stack, &self.ul_markers, &self.ol_markers, &self.ol_separator) {
-                Some(_)=>{
-                    
+                (Some(_), _tws) => {
                     handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id); 
                 }
-                _=>()
+                (None, tws) => {
+                    trim = tws;
+                }
             }
             match Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack) {
                 _ => ()
             }
-            Self::handle_text_node(cx, tf, &mut node);
+            Self::handle_text_node(cx, tf, &mut node, trim);
             node.walk();
         }
         tf.end(cx);
@@ -413,7 +456,6 @@ impl Widget for HtmlLink {
         event: &Event,
         scope: &mut Scope,
     ) {
-        // log!("HtmlLink::handle_event(): event: {:?}", event);
         self.link.handle_event(cx, event, scope);
         self.match_event(cx, event)
     }
