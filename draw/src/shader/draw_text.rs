@@ -198,12 +198,12 @@ impl<'a> WordIterator<'a> {
     
     fn next_char(&mut self){
         if let Some((i, c)) = self.char_iter.next() {
-            self.last_char = c;
             self.last_index = i;
+            self.last_char = c;
         }
         else{
+            self.last_index += self.last_char.len_utf8();
             self.last_char = '\0';
-            self.last_index += 1;
         };
     }
     

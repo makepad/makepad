@@ -94,7 +94,6 @@ impl ImageBuffer {
                 }
             }
             Err(err) => {
-                error!("Error decoding PNG: {:?}", err);
                 Err(ImageError::PngDecode(err))
             }
         }
@@ -111,7 +110,6 @@ impl ImageBuffer {
                 ImageBuffer::new(&data, info.width as usize, info.height as usize)
             },
             Err(err) => {
-                error!("Error decoding JPG: {:?}", err);
                 Err(ImageError::JpgDecode(err))
             }
         }
@@ -173,7 +171,6 @@ pub trait ImageCacheImpl {
                 Ok(())
             }
             Err(err)=>{
-                error!("load_png_from_data: Cannot load png image from data: {}", err);
                 Err(err)
             }
         }
@@ -186,7 +183,6 @@ pub trait ImageCacheImpl {
                 Ok(())
             }
             Err(err)=>{
-                error!("load_jpg_from_data: Cannot load png image from data: {}", err);
                 Err(err)
             }
         }
