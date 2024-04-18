@@ -32,7 +32,6 @@ live_design!{
         }
     }
 
-
     TextOrImage = {{TextOrImage}}{
         margin:{left:10, right:10}
         text_view: <View>{ 
@@ -90,6 +89,7 @@ live_design!{
                     y: 0.5
                 },
 
+
                 simple_img = <Image> {
                     width: 272,
                     height: 92,
@@ -108,6 +108,45 @@ live_design!{
                         color: #f
                     },
                     text: "Counter: 0"
+                }
+
+                message_menu = <View> {
+                    visible: true,
+                    width: Fill,
+                    height: Fit,
+                    margin: 0.0
+                    padding: 0.0,
+                    spacing: 0.0
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            return #f
+                        }
+                    }
+                    
+                    <View> {
+                        width: Fill,
+                        height: Fit,
+            
+                        annotations = <FlatList> {
+                            height: Fit,
+                            width: Fill,
+                            spacing: 10.0,
+                            padding: {left: 10.0, right: 10.0},
+                            flow: Right,
+                            drag_scrolling: true,
+            
+                            // TODO: use an IconButton later, so a user can click to add their own reaction.
+                            Reaction = <Label> {
+                                width: Fit,
+                                height: Fit,
+                                draw_text: {
+                                    color: #4c00b0, // dark purple
+                                }
+                                text: "TODO"
+                            }
+                            Empty = <View> { width: 24.0, height: 0.0 }
+                        }
+                    }
                 }
 
                 html = <Html> {
@@ -275,6 +314,25 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App {
+    fn handle_draw_2d(&mut self, cx: &mut Cx2d) {
+
+        // @rik: i must be missing a begin_turtle or somethign here.
+        //       Not exactly sure where the proper place to put this drawing logic is.
+
+        log!("handle_draw_2d(): drawing message_menu...");
+        let annotations = [
+            ":+1:", ":-1:", ":heart:", ":tada:", ":rocket:", ":eyes:", ":clap:", ":smile:", ":sob:", ":rage:", ":poop:", ":lips:", ":tongue:", ":ear:", ":nose:", ":eye:", ":eyes:"
+        ];
+        let annotation_list = self.ui.flat_list(id!(message_menu.annotations));
+
+        for (i, text_to_display) in annotations.iter().enumerate() {
+            let entry_id = LiveId::from_str(text_to_display);
+            let reaction_item = annotation_list.item(cx, entry_id, live_id!(Reaction)).unwrap().as_label();
+            reaction_item.set_text(&format!("{} {}", text_to_display, i));
+            reaction_item.draw_all(cx, &mut Scope::empty());
+        }
+    }
+
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             log!("BUTTON CLICKED {}", self.counter); 
@@ -288,6 +346,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
+        self.match_event_with_draw_2d(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
