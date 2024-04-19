@@ -6,6 +6,7 @@ workspace.members = [
 #    "experiments/empty",
     "experiments/dual-contouring",
     "experiments/esp-peer",
+    "experiments/esp-term",
     "experiments/homescreens",
     "experiments/html_experiment",
     "examples/fractal_zoom", 
