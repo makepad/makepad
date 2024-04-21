@@ -46,25 +46,30 @@ live_design! {
     // COLOR PALETTE
     // HIGHER VALUE = HIGHER CONTRAST, RECOMMENDED VALUES: 0.5 - 2.5
 
-    THEME_COLOR_WHITE = (mix(#FFFFFFFF, #FFFFFF00, pow(0.1, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_U_5 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.35, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_U_4 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.6, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_U_3 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.75, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_U_2 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.9, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_U_1 = (mix(#FFFFFFFF, #FFFFFF00, pow(0.95, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_U_HIDDEN = #FFFFFF00
+    THEME_COLOR_W = #FFFFFFFF
+    THEME_COLOR_W_H = #FFFFFF00
+    THEME_COLOR_B = #000000FF
+    THEME_COLOR_B_H = #00000000
 
-    THEME_COLOR_D_HIDDEN = #00000000
-    THEME_COLOR_D_1 = (mix(#000000FF, #00000000, pow(0.85, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_D_2 = (mix(#000000FF, #00000000, pow(0.75, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_D_3 = (mix(#000000FF, #00000000, pow(0.6, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_D_4 = (mix(#000000FF, #00000000, pow(0.4, THEME_COLOR_CONTRAST)))
-    THEME_COLOR_BLACK = (mix(#000000FF, #00000000, pow(0.1, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_WHITE = (mix(THEME_COLOR_W, #FFFFFF00, pow(0.1, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_5 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.35, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_4 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.6, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_3 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.75, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_2 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.9, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_1 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.95, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_HIDDEN = (THEME_COLOR_W_H)
+
+    THEME_COLOR_D_HIDDEN = (THEME_COLOR_B_H)
+    THEME_COLOR_D_1 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.85, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_2 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.75, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_3 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.6, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_4 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.4, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BLACK = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.1, THEME_COLOR_CONTRAST)))
 
     // BASICS
     THEME_COLOR_MAKEPAD = #FF5C39FF
 
-    THEME_COLOR_BG_APP = (mix(mix(#0, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(#7, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.5,THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BG_APP = (mix(mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.3, THEME_COLOR_CONTRAST)))
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
 
@@ -1020,7 +1025,13 @@ live_design! {
         margin: <THEME_MSPACE_H_1> {}
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_D_HIDDEN) } }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.fill(#f00)
+                return sdf.result
+            }
+        }
 
         draw_text: {
             instance hover: 0.0,
@@ -1126,7 +1137,7 @@ live_design! {
                         sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
                     }
                     CheckType::None => {
-                        return THEME_COLOR_D_HIDDEN
+                        sdf.fill(THEME_COLOR_D_HIDDEN);
                     }
                 }
                 return sdf.result
