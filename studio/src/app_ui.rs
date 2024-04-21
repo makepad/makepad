@@ -31,6 +31,7 @@ live_design!{
     }
     
     AppUI =  <Window> {
+        margin: 5. 
         caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
         window: { inner_size: vec2(1600, 900) },
         show_bg: true,
