@@ -136,121 +136,14 @@ live_design!{
                     img = <HtmlImage> {
                     }
 
+                    a = {
+                        draw_text: {
+                            text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING), top_drop: 1.2}
+                        }
+                    }
+
                     body: "
-                        test underline: <u>Underlined Text</u> <br />
-                        test strikethrough: <del>Strikethrough Text</del> <br />
-                        testing nested subscript zero<sub>one<sub>two<sub>three</sub>two</sub>one</sub>zero<br />
-                        <br />
-                        another test nested subscript 0<sub>1<sub>2<sub>3</sub>2</sub>1</sub>0<br />
-                        <br />
-                        testing nested superscript one<sup>two<sup>three<sup>four</sup></sup></sup> <br />
-
-                        <sep>
-                        text up top with inline image
-                        <img src=\"experiments/html_experiment/resources/img/google_logo.png\" width=272 height=92 alt=\"Google Logo\" title=\"Google Logo\" />
-                        text after image <br />
-                        <ol>
-                            <li> list item one </li>
-                            <li> list item two </li>
-                            <li> list item three</li>
-                            <li> list item four </li>
-                        </ol>
-
-                        <ol>
-                            <li> list item one </li>
-                            <li> list item two </li>
-                            <li> list item three</li>
-                            <li> list item four </li>
-                        </ol>
-
-                        <h1> Header 1 </h1>
-                        
-                        <ol>
-                            <li> list item one </li>
-                            <li> list item two </li>
-                            <li> list item three</li>
-                            <li> list item four </li>
-                        </ol>
-                        plain text at the top <sub> subscript </sub> <sup> superscript </sup> <br />
-
-                        text before link <a href=\"https://www.google.com/\" rel=noopener target=_blank>Go to Google...</a>
-
-                        <ol>
-                            <li> list item one </li>
-                            <li> list item two </li>
-                            <li> list item three</li>
-                            <li> list item four </li>
-
-                            <li> 
-                                Level 1 list item one
-                                <ul>
-                                    <li> Level 2 list item one </li>
-                                    <li>
-                                        Level 2 list item two
-                                        <ul>
-                                            <li> Level 3 list item one </li>
-                                            <li>      Level 3 list item two 
-                                                <ul>
-                                                    <li> Level 4 list item one </li>
-                                                    <li> Level 4 list item two </li>
-                                                </ul>
-                                            </li>
-                                        </ul>
-                                    </li>
-                                </ul>
-                            </li>
-                            <li> list item six </li>
-                            <li> list item seven 
-                                <ul>
-                                    <li> list item ul 7 </li>
-                                    <li> list item ul 7 </li>
-                                </ul>
-                                <ol>
-                                    <li> list item ol 7 </li>
-                                    <li>
-                                        list item ol 7 before
-                                        <ul>
-                                            <li> list item indent again </li>
-                                            <li> list item indent again 2 </li>
-                                        </ul>
-                                        list item old 7 after
-                                        <blockquote>Quoted Text</blockquote>
-                                    </li>
-                                    <li> list item ol 7, should be 3</li>
-                                </ol>
-                            </li>
-
-                            <li> list item one </li>
-                            <li> text <br />
-                                <ol>
-                                    <li> list item two </li>
-                                    <li> text here
-                                        <ul>
-                                            <li> list item three </li>
-                                            <li> list item four </li>
-                                            <li> sub item
-                                                <ol>
-                                                    <li> list item five </li>
-                                                    <li> list item six </li>
-                                                </ol>
-                                            </li>
-                                        </ul>                                    
-                                    </li>
-                                    <li> list item four </li>
-                                </ol>
-                            </li>
-                            <li> list item three</li>
-                            <li> list item four </li>
-                        </ol>
-
-                        <h2> Header 2 </h2>
-
-                        <ol type=1 start=16>
-                            <li> list item one </li>
-                            <li> list item two </li>
-                            <li> list item three</li>
-                            <li> list item four </li> 
-                        </ol>
+                        <a href=\"https://github.com/element-hq/element-web/releases/tag/v1.11.48\">https://github.com/element-hq/element-web/releases/tag/v1.11.48</a> I can find it? <b>text</b><br>
                         
                     "
 
