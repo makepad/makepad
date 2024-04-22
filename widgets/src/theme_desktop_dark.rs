@@ -1698,10 +1698,10 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y + 1.0,
+                    -1.,
+                    -1.,
+                    self.rect_size.x + 2,
+                    self.rect_size.y + 2,
                     1.
                 )
                 sdf.fill_keep(
