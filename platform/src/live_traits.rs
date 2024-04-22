@@ -91,18 +91,18 @@ pub trait LiveNew: LiveApply {
         {
             let live_registry_rc = cx.live_registry.clone();
             let mut live_registry = live_registry_rc.borrow_mut();
-            live_registry.main_module = Some((lti.module_id, lti.type_name));
+            live_registry.main_module = Some(lti.clone());
         }
         Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
     }
     
     fn update_main(&mut self, cx:&mut Cx){
-        let (module_id, id) = {
+        let lti = {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow_mut();
-            live_registry.main_module.unwrap()
+            live_registry.main_module.as_ref().unwrap().clone()
         };
-        self.update_from_module(cx, module_id, id);
+        self.update_from_module(cx, lti.module_id, lti.type_name);
     }
     
     fn new_local(cx: &mut Cx) -> Self where Self: Sized {
@@ -144,8 +144,8 @@ pub trait LiveApplyValue {
     fn apply_value(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
-pub trait LiveApplyUpdate { 
-    fn apply_update(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
+pub trait LiveApplyReset { 
+    fn apply_reset(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
 }
 
 pub trait LiveApply {
@@ -210,7 +210,6 @@ impl<'a,'b, 'c> From<ApplyFrom> for Apply<'a,'b,'c> {
     }
 }
 
-
 impl ApplyFrom {
     pub fn is_from_doc(&self) -> bool {
         match self {
@@ -227,7 +226,13 @@ impl ApplyFrom {
         }
     }
     
-        
+    pub fn should_apply_reset(&self) -> bool {
+        match self {
+            Self::UpdateFromDoc{..}  => true,
+            _ => false
+        }
+    }
+    
     pub fn is_update_from_doc(&self) -> bool {
         match self {
             Self::UpdateFromDoc {..} => true,
@@ -238,7 +243,7 @@ impl ApplyFrom {
     pub fn file_id(&self) -> Option<LiveFileId> {
         match self {
             Self::NewFromDoc {file_id} => Some(*file_id),
-            Self::UpdateFromDoc {file_id} => Some(*file_id),
+            Self::UpdateFromDoc {file_id,..} => Some(*file_id),
             _ => None
         }
     }

@@ -51,6 +51,8 @@ live_design!{
     import crate::markdown::MarkdownBase,
     import crate::root::RootBase;
     import crate::designer::DesignerBase;
+    import crate::designer::DesignerOutlineBase;
+    import crate::designer::DesignerViewBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
@@ -804,4 +806,6 @@ live_design!{
     StackNavigationBase = <StackNavigationBase>{}
     ExpandablePanelBase = <ExpandablePanelBase>{}
     DesignerBase = <DesignerBase>{}
+    DesignerOutlineBase = <DesignerOutlineBase>{}
+    DesignerViewBase = <DesignerViewBase>{}
 }

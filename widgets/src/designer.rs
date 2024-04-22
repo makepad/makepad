@@ -1,10 +1,12 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    widget_match_event::*,
     file_tree::*,
     view::View,
     widget::*,
 };
+use std::collections::HashMap;
 
 live_design!{
     DesignerBase = {{Designer}} {
@@ -18,19 +20,27 @@ live_design!{
 }
 
 #[allow(dead_code)]
-enum OutlineNode {
-    Global {
-        uid: FileNodeId,
-        name: LiveId,
-        ptr: LivePtr
+
+enum OutlineNode{
+    Virtual{
+        name: String,
+        children: SmallVec<[FileNodeId;4]>
     },
-    Component {
-        uid: FileNodeId,
+    File{
+        file_id: LiveFileId,
+        name: String,
+        children: SmallVec<[FileNodeId;4]>
+    },
+    Folder{
+        name: String,        
+        children: SmallVec<[FileNodeId;4]>
+    },
+    Component{
         name: LiveId,
         class: LiveId,
         prop_type: LivePropType,
         ptr: LivePtr,
-        children: Vec<OutlineNode>
+        children: SmallVec<[FileNodeId;4]>
     }
 }
 
@@ -38,94 +48,335 @@ enum OutlineNode {
 pub struct DesignerView {
     #[walk] walk:Walk,
     #[redraw] area:Area,
+    #[live] container: Option<LivePtr>,
+    #[rust] components: ComponentMap<LivePtr, WidgetRef>,
 }
 
 impl Widget for DesignerView {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
     }
         
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
+        // lets begin a turtle
+        cx.begin_turtle(self.walk, Layout::flow_down());
+        let data = scope.props.get::<DesignerData>().unwrap();
+        if let Some(selected) = &data.selected{
+            if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
+                let entry = self.components.get_or_insert(cx, *ptr, | cx | {
+                    WidgetRef::new_from_ptr(cx, Some(*ptr))
+                });
+                entry.draw_all(cx, scope);
+            }
+            
+            
+            /*if let Some(components) = data.get_node_by_node_id(selected){
+                // alright lets go draw these things!
+                
+                log!("HERE");
+            }else{
+               // clear out
+            }*/
+        }
+        
+        cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
 }
 
 #[derive(Live, Widget, LiveHook)]
 pub struct DesignerOutline {
-    #[walk] walk:Walk,
-    #[redraw] area:Area,
+    #[deref] view: View
 }
 
 impl Widget for DesignerOutline {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        self.view.handle_event(cx, event, scope);
     }
             
-    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
+        let file_tree = self.view.file_tree(id!(file_tree));
+        let data = scope.props.get::<DesignerData>().unwrap();
+        while let Some(next) = self.view.draw(cx, &mut Scope::empty()).step() {
+            if let Some(mut file_tree) = file_tree.borrow_mut_if_eq(&next) {
+                if let OutlineNode::Virtual{children,..} = &data.node_map.get(&data.root).as_ref().unwrap(){
+                    recur_nodes(cx,  &mut *file_tree, &data.node_map, children);
+                }
+                
+            }
+        }
+        
+        fn recur_nodes(cx: &mut Cx2d, file_tree: &mut FileTree,map:&HashMap<FileNodeId,OutlineNode>, children:&[FileNodeId]) {
+            for child in children{
+                match map.get(&child).unwrap(){
+                    OutlineNode::Folder{name, children}=>{
+                        if file_tree.begin_folder(cx, *child, &name).is_ok(){
+                            recur_nodes(cx, file_tree, map, children);
+                            file_tree.end_folder();
+                        }            
+                    }
+                    OutlineNode::File{name,  file_id:_, children}=>{
+                        if file_tree.begin_folder(cx, *child, &name).is_ok(){
+                            recur_nodes(cx, file_tree, map, children);
+                            file_tree.end_folder();
+                        }            
+                    }
+                    OutlineNode::Virtual{name, children}=>{
+                        if file_tree.begin_folder(cx, *child, &name).is_ok(){
+                            recur_nodes(cx, file_tree, map, children);
+                            file_tree.end_folder();
+                        }            
+                    }
+                    OutlineNode::Component{children, name, prop_type, class, ..}=>{
+                        if file_tree.begin_folder(cx, *child, &if !name.is_unique(){
+                            if let LivePropType::Field = prop_type {
+                                format!("{}: <{}>", name, class)
+                            }
+                            else {
+                                format!("{}=<{}>", name, class)
+                            }
+                        }else {
+                            format!("<{}>", class)
+                        }).is_ok() {
+                            recur_nodes(cx, file_tree, map, children);
+                            file_tree.end_folder();
+                        }
+                    }
+                }
+            }
+        }
         DrawStep::done()
     }
 }
 
 #[derive(Default)]
 pub struct DesignerData{
-    _outline_nodes: Vec<OutlineNode>,
+    root: FileNodeId,
+    node_map: HashMap<FileNodeId, OutlineNode>,
+    selected: Option<FileNodeId>
+}
+
+impl DesignerData{
+    fn remove_child(&mut self, find_node:FileNodeId){
+        for node in &mut self.node_map.values_mut(){
+            match node{
+                OutlineNode::Component{children,..} | OutlineNode::Virtual{children,..} | OutlineNode::File{children,..} | OutlineNode::Folder{children, ..} =>{
+                    if let Some(i) = children.iter().position(|v| *v == find_node){
+                        children.remove(i);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    fn find_component_by_path(&self, path:&[LiveId])->Option<FileNodeId>{
+        fn get_node(node:FileNodeId, path:&[LiveId],  map:&HashMap<FileNodeId, OutlineNode>)->Option<FileNodeId>{
+            match map.get(&node).as_ref(){
+                Some(OutlineNode::Virtual{children,..}) |
+                Some(OutlineNode::Folder{children,..}) |
+                Some(OutlineNode::File{children,..}) =>{
+                    for child in children{
+                        if let Some(v) = get_node(*child, path, map){
+                            return Some(v)
+                        }
+                    }
+                }
+                Some(OutlineNode::Component{children, name, ..}) => {
+                    if *name == path[0]{
+                        if path.len()>1{
+                            for child in children{
+                                 if let Some(v) = get_node(*child, &path[1..], map){
+                                     return Some(v)
+                                 }
+                            }
+                        }
+                        else{
+                            return Some(node)
+                        }
+                    }
+                    for child in children{
+                        if let Some(v) = get_node(*child, path, map){
+                            return Some(v)
+                        }
+                    }
+                }
+                _=>()
+            }
+            None
+        }
+        get_node(self.root, path, &self.node_map)
+    }
 }
 
 #[derive(Live, Widget)]
 pub struct Designer {
     #[deref] ui: View,
-    #[live] container: Option<LivePtr>,
-    #[rust] _data: DesignerData,
-    #[rust] components: ComponentMap<LivePtr, (WidgetRef, WidgetRef)>,
+    #[rust] data: DesignerData,
+
 }
 
 impl LiveHook for Designer {
     
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        return
-        /*
+    fn after_apply_from_doc(&mut self, cx: &mut Cx) {
+        
+        self.data.node_map.clear();
+        
+        // insert the root
+        let root_uid = live_id!(designer_root).into();
+        self.data.root = root_uid;
+        self.data.node_map.insert(root_uid, OutlineNode::Virtual{
+            name: "root".into(),
+            children: SmallVec::new()
+        });
+        
         // lets take the doc we need (app_mobile for instance)
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = &*live_registry_rc.borrow();
-        
-        // lets 
-        let file_id = live_registry.file_name_to_file_id("examples/ironfish/src/app_desktop.rs").unwrap();
-        // now we fetch the unexpanded nodes
-        // and build a list
-        let file = live_registry.file_id_to_file(file_id);
-        let nodes = &file.expanded.nodes;
-        // lets run over the file
-        fn recur_walk(live_registry: &LiveRegistry, base_ptr: LivePtr, mut index: usize, nodes: &[LiveNode], out: &mut Vec<OutlineNode>) -> usize {
-            while index < nodes.len() - 1 {
-                if let LiveValue::Class {class_parent, ..} = &nodes[index].value {
-                    // lets emit a class at our level
-                    let mut children = Vec::new();
-                    let name = nodes[index].id;
-                    let class = live_registry.ptr_to_node(class_parent.unwrap()).id;
-                    let ptr = base_ptr.with_index(index);
-                    index = recur_walk(live_registry, base_ptr, index + 1, nodes, &mut children);
+        let main_module_lti = live_registry.main_module.as_ref().unwrap().clone();
+        let mut path_hash = String::new();
+        for (file_path, file_id) in live_registry.file_ids(){
+            // now we fetch the unexpanded nodes
+            // and build a list
+            let file = live_registry.file_id_to_file(*file_id);
+            let nodes = &file.expanded.nodes;
+            // lets run over the file
+            fn recur_walk_components(
+                main_module_lti:&LiveTypeInfo, 
+                live_registry: &LiveRegistry, 
+                hash_id:LiveId, 
+                base_ptr: LivePtr, 
+                mut index: usize, 
+                nodes: &[LiveNode],
+                map: &mut HashMap<FileNodeId, OutlineNode>,
+                parent_children: &mut SmallVec<[FileNodeId;4]>) -> usize {
+                while index < nodes.len() - 1 { 
+                    if let LiveValue::Class {live_type, class_parent, ..} = &nodes[index].value {
+                        // lets check if its a widget
+                        let wr = live_registry.components.get::<WidgetRegistry>();
+                        if main_module_lti.live_type == *live_type || wr.map.get(live_type).is_some(){
+                            // lets emit a class at our level
+                            let name = nodes[index].id;
+                            let class = live_registry.ptr_to_node(class_parent.unwrap()).id;
+                            let ptr = base_ptr.with_index(index);
+                            let prop_type =  nodes[index].origin.prop_type();
+                            let uid = hash_id.bytes_append(&name.0.to_be_bytes());
+                            let mut children = SmallVec::new();
+                            index = recur_walk_components(main_module_lti, live_registry, uid, base_ptr, index + 1, nodes, map, &mut children);
+                            let uid = uid.into();
+                            parent_children.push(uid);
+                            map.insert(uid, OutlineNode::Component {
+                                name,
+                                prop_type,
+                                class,
+                                ptr,
+                                children
+                            });
+                        }
+                        else{
+                         //   log!("NOT A WIDGET {}", nodes[index].id);
+                           index = nodes.skip_node(index);
+                        }
+                    }
+                    else if nodes[index].value.is_close() {
+                        return index + 1;
+                    }
+                    else {
+                        index = nodes.skip_node(index);
+                    }
+                }
+                index
+            }
+            // alright lets iterate over the files
+            
+            let base_ptr = live_registry.file_id_index_to_live_ptr(*file_id, 0);
+            
+            path_hash.clear();
+            
+            let parent_id = path_split(self.data.root, &mut path_hash, file_path, &mut self.data.node_map, *file_id);
+            let base_id = LiveId(0).bytes_append(&file_id.0.to_be_bytes());
+            
+            let mut children_out = SmallVec::new();
+            recur_walk_components(
+                &main_module_lti, 
+                live_registry, 
+                base_id, 
+                base_ptr, 
+                1, 
+                nodes,
+                &mut self.data.node_map, 
+                &mut children_out
+            );
+            if let Some(OutlineNode::File{children,..}) = self.data.node_map.get_mut(&parent_id){
+                *children = children_out;
+            }
+            
+            fn path_split<'a>(parent_id: FileNodeId, path_hash:&mut String, name:&str, map:&mut HashMap<FileNodeId, OutlineNode>, file_id:LiveFileId)->FileNodeId{
+                if let Some((folder,rest)) = name.split_once("/"){
+                    path_hash.push_str(folder);
+                    path_hash.push_str("/");
                     
-                    out.insert(0, OutlineNode::Component {
-                        uid: LiveId::unique().into(),
-                        name,
-                        prop_type: nodes[index].origin.prop_type(),
-                        class,
-                        ptr,
-                        children
+                    if folder == "src"{ // flatten this
+                        return path_split(parent_id, path_hash, rest, map, file_id)
+                    }
+                                        
+                    let what_uid =  LiveId::from_str(&path_hash).into();
+                    
+                    // add node to pareht
+                    if let Some(OutlineNode::Folder{children, ..}) | Some(OutlineNode::Virtual{children, ..})= map.get_mut(&parent_id){
+                        if !children.contains(&what_uid){
+                            children.push(what_uid);
+                        }
+                    }
+                    
+                    if map.get_mut(&what_uid).is_some(){
+                        return path_split(what_uid, path_hash, rest, map, file_id)
+                    }
+                    
+                    map.insert(what_uid, OutlineNode::Folder{
+                        name: folder.to_string(),
+                        children: SmallVec::new()
                     });
                     
+                    return path_split(what_uid, path_hash, rest, map, file_id)
                 }
-                else if nodes[index].value.is_close() {
-                    return index + 1;
-                }
-                else {
-                    index = nodes.skip_node(index);
+                else{ // we're a file
+                    path_hash.push_str(name);
+                    path_hash.push_str("/");
+                    let what_uid =  LiveId::from_str(&path_hash).into();
+                    if let Some(OutlineNode::Folder{children, ..}) | Some(OutlineNode::Virtual{children, ..})= map.get_mut(&parent_id){
+                        if !children.contains(&what_uid){
+                            children.push(what_uid);
+                        }
+                    }
+                    map.insert(what_uid, OutlineNode::File{
+                        file_id,
+                        name: name.to_string(),
+                        children: SmallVec::new()
+                    });
+                    
+                    return what_uid
                 }
             }
-            index
+          
         }
-        let base_ptr = live_registry.file_id_index_to_live_ptr(file_id, 0);
-        recur_walk(live_registry, base_ptr, 1, nodes, &mut self.data.outline_nodes);
-        */
+        // alright lets move some nodes
+        // we should move theme_desktop_dark to the root
+        // and we should move main_window / body to the root
+        if let Some(node_id) = self.data.find_component_by_path(id!(main_window.body)){
+            self.data.remove_child(node_id);
+            let mut children = SmallVec::new();
+            children.push(node_id);
+            let app_uid = LiveId::from_str("app").into();
+            self.data.node_map.insert(app_uid, OutlineNode::Virtual{
+                name: "app".into(),
+                children
+            });
+            if let Some(OutlineNode::Virtual{children, ..})= self.data.node_map.get_mut(&self.data.root){
+                children.insert(0, app_uid)
+            }
+        }
     }
+    
     // ok now we can iterate our top level components
     // and instance them
 }
@@ -187,25 +438,30 @@ impl Designer {
     */
 }
 
-impl Widget for Designer {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        self.ui.handle_event(cx, event, scope);
-        for (component, container) in self.components.values_mut() {
-            component.handle_event(cx, event, scope);
-            container.handle_event(cx, event, scope);
+impl WidgetMatchEvent for Designer{
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
+        let file_tree = self.ui.file_tree(id!(file_tree));
+        if let Some(file_id) = file_tree.folder_clicked(&actions) {
+            self.data.selected = Some(file_id);
+            self.ui.widget(id!(designer_view)).redraw(cx);
         }
     }
+}
+
+impl Widget for Designer {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        self.widget_match_event(cx, event, scope);
+        let mut scope = Scope::with_props(&self.data);
+        self.ui.handle_event(cx, event, &mut scope);
+        /*
+        for (component, container) in self.components.values_mut() {
+            component.handle_event(cx, event, &mut scope);
+            container.handle_event(cx, event, &mut scope);
+        }*/
+    }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
-        let outline = self.ui.file_tree(id!(outline));
-        while let Some(next) = self.ui.draw(cx, scope).step() {
-            if let Some(mut _outline) = outline.has_widget(&next).borrow_mut() {
-                //self.draw_outline(cx, &mut *outline);
-            }
-            else if next == self.ui.widget(id!(design)) {
-                //self.draw_design(cx);
-            }
-        }
-        DrawStep::done()
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
+        let mut scope = Scope::with_props(&self.data);
+        self.ui.draw(cx, &mut scope)
     }
 }
