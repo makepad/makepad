@@ -222,8 +222,6 @@ This is the same value used to setup the initial skeleton app above. For this ex
 The name of the application or the project. This is the same as the Product Name used to setup the initial skeleton app above. In this case:
 > `makepad-example-simple`
 
-### Example
-
 ### Install app on iOS simulator
 
 ```bash
@@ -251,8 +249,8 @@ Once decided, run the folloiwng command and fill in the **unique starting charac
 
 ```bash
 cargo makepad apple ios \
- --provisioning-profile=unique-starting-hex-string-of-provisioning-profiles \
- --signing-identity=UNIQUE_STARTING_HEX_STRING-of-signing-certificates \
+ --profile=unique-starting-hex-string-of-provisioning-profiles \
+ --cert=UNIQUE_STARTING_HEX_STRING-of-signing-certificates \
  --device-identifier=UNIQUE-STARTING-HEX-STRING-of-devices \
  --org=my.test \
  --app=makepad-example-simple \
@@ -336,13 +334,13 @@ Command for installing the app onto a physical iOS device.
 **See Step 5 above for more detailed instructions.**
 
 ```bash
-cargo makepad apple ios --org=my.test --provisioning-profile=ABC --signing-identity=DEF --device-identifier=MyiPhone --app=makepad-example-simple run-device -p makepad-example-simple --release
+cargo makepad apple ios --org=my.test --profile=ABC --cert=DEF --device=MyiPhone --app=makepad-example-simple run-device -p makepad-example-simple --release
 
-cargo makepad apple ios --org=my.test --provisioning-profile=ABC --signing-identity=DEF --device-identifier=MyiPhone --app=makepad-example-fractal-zoom run-device -p makepad-example-fractal-zoom --release
+cargo makepad apple ios --org=my.test --profile=ABC --cert=DEF --device=MyiPhone --app=makepad-example-fractal-zoom run-device -p makepad-example-fractal-zoom --release
 
-cargo makepad apple ios --org=my.test --provisioning-profile=ABC --signing-identity=DEF --device-identifier=MyiPhone --app=makepad-example-ironfish -run-device -p makepad-example-ironfish --release
+cargo makepad apple ios --org=my.test --profile=ABC --cert=DEF --device=MyiPhone --app=makepad-example-ironfish -run-device -p makepad-example-ironfish --release
 
-cargo makepad apple ios --org=my.test --provisioning-profile=ABC --signing-identity=DEF --device-identifier=MyiPhone --app=makepad-example-news-feed run-device -p makepad-example-news-feed --release
+cargo makepad apple ios --org=my.test --profile=ABC --cert=DEF --device=MyiPhone --app=makepad-example-news-feed run-device -p makepad-example-news-feed --release
 ```
 
 ### Cargo Check Builds
