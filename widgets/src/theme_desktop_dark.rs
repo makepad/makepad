@@ -16,7 +16,7 @@ live_design! {
 
     // DIMENSIONS
     THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
-    THEME_SPACE_2 = (1 * (THEME_SPACE_FACTOR))
+    THEME_SPACE_2 = (1.0 * (THEME_SPACE_FACTOR))
     THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
 
     THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)} THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
@@ -69,7 +69,7 @@ live_design! {
     // BASICS
     THEME_COLOR_MAKEPAD = #FF5C39FF
 
-    THEME_COLOR_BG_APP = (mix(mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.3, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BG_APP = (mix(mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.28, THEME_COLOR_CONTRAST)))
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
 
@@ -91,7 +91,7 @@ live_design! {
 
     THEME_COLOR_TEXT_CURSOR = (THEME_COLOR_WHITE)
 
-    THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_2)
+    THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_3)
     THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.85)
     THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.15)
     THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1) // Code-blocks and quotes.
@@ -1706,7 +1706,7 @@ live_design! {
                 )
                 sdf.fill_keep(
                     mix(
-                        THEME_COLOR_U_HIDDEN,
+                        THEME_COLOR_D_2 * 0.75,
                         THEME_COLOR_DOCK_TAB_SELECTED,
                         self.selected
                     )
@@ -1766,7 +1766,7 @@ live_design! {
             color: (THEME_COLOR_BG_CONTAINER)
         }
         draw_fill: {
-            color: (THEME_COLOR_U_HIDDEN)
+            color: (THEME_COLOR_D_1)
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
@@ -1783,11 +1783,11 @@ live_design! {
     }
 
     Dock = <DockBase> {
-        flow: Down
+        flow: Down,
 
         round_corner: {
-            draw_depth: 6.0
-            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            draw_depth: 20.0
+            border_radius: 20.
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
@@ -1805,7 +1805,7 @@ live_design! {
                 );
 
                 sdf.subtract()
-                return sdf.fill(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead
+                return sdf.fill(THEME_COLOR_BG_APP)
             }
         }
         border_size: (THEME_DOCK_BORDER_SIZE)
@@ -1929,8 +1929,8 @@ live_design! {
         flow: Down,
 
         round_corner: {
-            draw_depth: 6.0
-            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            draw_depth: 20.0
+            border_radius: 20.
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
@@ -1948,7 +1948,7 @@ live_design! {
                 );
 
                 sdf.subtract()
-                return sdf.fill(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead
+                return sdf.fill(THEME_COLOR_BG_APP)
             }
         }
         border_size: (THEME_DOCK_BORDER_SIZE)
@@ -2256,7 +2256,7 @@ live_design! {
     }
 
     FileTreeNode = <FileTreeNodeBase> {
-        align: {y: 0.5}
+        align: { y: 0.5 }
         padding: { left: (THEME_SPACE_1) },
         is_folder: false,
         indent_width: 10.0
@@ -2267,9 +2267,9 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
                     0.,
-                    0.,
+                    -2.,
                     self.rect_size.x,
-                    self.rect_size.y + 1.0,
+                    self.rect_size.y + 3.0,
                     1.
                 )
                 sdf.fill_keep(
