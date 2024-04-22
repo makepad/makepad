@@ -26,7 +26,7 @@ workspace.members = [
     "examples/sdxl",
     "examples/slides",
     "examples/graph",
-    "libs/stitch",
+#    "libs/stitch",
 #    "libs/futures",
 #    "libs/wasm_bridge/test",
     "studio",

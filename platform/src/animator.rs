@@ -550,6 +550,7 @@ impl LiveNew for Animator {
 }
 impl LiveApply for Animator {
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
+
         if let Some(file_id) = apply.from.file_id() {
             self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
         }

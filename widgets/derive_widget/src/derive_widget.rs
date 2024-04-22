@@ -260,6 +260,22 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ").ident(&clean_name).add(" >> {");
             tb.add("       self.0.borrow_mut()");
             tb.add("   }");
+
+            tb.add("   pub fn borrow_if_eq(&self, widget:&WidgetRef) -> Option<std::cell::Ref<'_, ").ident(&clean_name).add(" >> {");
+            tb.add("        if self.0 == *widget{");
+            tb.add("             self.0.borrow()");
+            tb.add("        } else {");
+            tb.add("             None");
+            tb.add("        }");
+            tb.add("   }");
+            
+            tb.add("   pub fn borrow_mut_if_eq(&self, widget:&WidgetRef) -> Option<std::cell::RefMut<'_, ").ident(&clean_name).add(" >> {");
+            tb.add("        if self.0 == *widget{");
+            tb.add("             self.0.borrow_mut()");
+            tb.add("        } else {");
+            tb.add("             None");
+            tb.add("        }");
+            tb.add("   }");
             tb.add("}");
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);

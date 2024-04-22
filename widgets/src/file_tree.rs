@@ -299,7 +299,6 @@ impl FileTree {
                 }
                 (tree_node, live_id!(folder_node))
             });
-            
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened as f64 * scale);
             if tree_node.opened <= 0.001 {
@@ -479,6 +478,15 @@ impl FileTreeRef{
     pub fn file_clicked(&self, actions: &Actions) -> Option<FileNodeId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::FileClicked(file_id) = item.cast() {
+                return Some(file_id)
+            }
+        }
+        None
+    }
+    
+    pub fn folder_clicked(&self, actions: &Actions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FileTreeAction::FolderClicked(file_id) = item.cast() {
                 return Some(file_id)
             }
         }

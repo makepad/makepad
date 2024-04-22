@@ -66,8 +66,8 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
-mod base;
-mod theme_desktop_dark;
+pub mod base;
+pub mod theme_desktop_dark;
 pub mod image_cache;
 
 pub use crate::{
