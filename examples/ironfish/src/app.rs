@@ -15,12 +15,9 @@ live_design! {
     import makepad_audio_graph::mixer::Mixer;
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
-    import makepad_widgets::designer::Designer;
-
+    
     import makepad_draw::shader::std::*;
-
-
-
+/*
     BlurStage = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -151,7 +148,7 @@ live_design! {
             }
         }
     }
-
+*/
 
     App = {{App}} {
 
@@ -190,7 +187,8 @@ live_design! {
                         }
                     }
                 }*/
-                body = <View>
+                body = <AppDesktop> {}
+                /*<View>
                 {
                     
                     width: Fill,
@@ -203,7 +201,7 @@ live_design! {
                         padding: 10
                         <AppDesktop> {}
                     }
-                }
+                }*/
             }
         }
     }

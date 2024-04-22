@@ -4,7 +4,7 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        text_flow::{TextFlow, TextStyleOptions},
+        text_flow::{TextFlow},
         link_label::LinkLabel,
     },
     std::rc::Rc,
@@ -33,6 +33,20 @@ live_design!{
     }
 }
 
+/// Whether to trim leading and trailing whitespace in the text body of an HTML tag.
+///
+/// Currently, *all* Unicode whitespace characters are trimmed, not just ASCII whitespace.
+///
+/// The default is to keep all whitespace.
+#[derive(Copy, Clone, PartialEq, Default)]
+pub enum TrimWhitespaceInText {
+    /// Leading and trailing whitespace will be preserved in the text.
+    #[default]
+    Keep,
+    /// Leading and trailing whitespace will be trimmed from the text.
+    Trim,
+}
+
 #[derive(Live, Widget)]
 pub struct Html {
     #[deref] pub text_flow: TextFlow,
@@ -47,12 +61,6 @@ pub struct Html {
     /// The character used to separate an ordered list's item number from the content.
     #[live] ol_separator: String,
 
-    /// Whether to keep internal whitespace when parsing HTML.
-    /// If `true`, only whitespace that exists within other text will be kept;
-    /// all text nodes that consist of only whitespace will be removed,
-    /// and leading and trailing whitespace will be trimmed off of text nodes.
-    #[live(false)] keep_whitespace: bool,
-
     /// The stack of list levels encountered so far, used to track nested lists.
     #[rust] list_stack: Vec<ListLevel>,
 }
@@ -61,8 +69,7 @@ pub struct Html {
 impl LiveHook for Html {
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        let kws = if self.keep_whitespace { KeepWhitespace::Yes } else { KeepWhitespace::No };
-        let new_doc = parse_html(&*self.body, &mut errors, kws);
+        let new_doc = parse_html(&*self.body, &mut errors);
         if new_doc != self.doc{
             self.doc = new_doc;
             self.text_flow.clear_items();
@@ -82,81 +89,86 @@ impl Html {
         ul_markers: &Vec<String>,
         ol_markers: &Vec<OrderedListType>,
         ol_separator: &str,
-    ) -> Option<LiveId> {
+    ) -> (Option<LiveId>, TrimWhitespaceInText) {
 
-        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64) {
-            tf.push_bold();
+        let mut trim_whitespace_in_text = TrimWhitespaceInText::default();
+
+        fn open_header_tag(cx: &mut Cx2d, tf: &mut TextFlow, scale: f64, trim: &mut TrimWhitespaceInText) {
+            *trim = TrimWhitespaceInText::Trim;
+            tf.bold.push();
             tf.push_size_abs_scale(scale);
             cx.turtle_new_line();
         }
-            
+
         match node.open_tag_lc() {
-            some_id!(h1) => open_header_tag(cx, tf, 2.0),
-            some_id!(h2) => open_header_tag(cx, tf, 1.5),
-            some_id!(h3) => open_header_tag(cx, tf, 1.17),
-            some_id!(h4) => open_header_tag(cx, tf, 1.0),
-            some_id!(h5) => open_header_tag(cx, tf, 0.83),
-            some_id!(h6) => open_header_tag(cx, tf, 0.67),
+            some_id!(h1) => open_header_tag(cx, tf, 2.0, &mut trim_whitespace_in_text),
+            some_id!(h2) => open_header_tag(cx, tf, 1.5, &mut trim_whitespace_in_text),
+            some_id!(h3) => open_header_tag(cx, tf, 1.17, &mut trim_whitespace_in_text),
+            some_id!(h4) => open_header_tag(cx, tf, 1.0, &mut trim_whitespace_in_text),
+            some_id!(h5) => open_header_tag(cx, tf, 0.83, &mut trim_whitespace_in_text),
+            some_id!(h6) => open_header_tag(cx, tf, 0.67, &mut trim_whitespace_in_text),
 
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
                 cx.turtle_new_line();
                 cx.turtle_new_line();
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
-                tf.push_size_abs_scale(0.85);
-                tf.push_fixed();
-                tf.push_inline_code(cx); // inline code block doesn't work properly
+                const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                tf.top_drop.push(1.2/FIXED_FONT_SIZE_SCALE); // to achieve a top_drop of 1.2
+                tf.combine_spaces.push(false);
+                tf.fixed.push();
+                tf.inline_code.push();
             }
             some_id!(pre) => {
                 cx.turtle_new_line();
-                tf.push_fixed();
+                tf.fixed.push();
+                tf.ignore_newlines.push(false);
+                tf.combine_spaces.push(false);
                 tf.begin_code(cx);
             }
             some_id!(blockquote) => {
                 cx.turtle_new_line();
+                tf.ignore_newlines.push(false);
+                tf.combine_spaces.push(false);
                 tf.begin_quote(cx);
             }
-            some_id!(br) => cx.turtle_new_line(),
+            some_id!(br) => {
+                cx.turtle_new_line();
+            }
             some_id!(hr)
             | some_id!(sep) => {
                 cx.turtle_new_line();
                 tf.sep(cx);
                 cx.turtle_new_line();
             }
-            some_id!(u) => tf.push_underline(),
+            some_id!(u) => tf.underline.push(),
             some_id!(del)
             | some_id!(s)
-            | some_id!(strike) => tf.push_strikethrough(),
+            | some_id!(strike) => tf.strikethrough.push(),
 
             some_id!(b)
-            | some_id!(strong) => tf.push_bold(),
+            | some_id!(strong) => tf.bold.push(),
             some_id!(i)
-            | some_id!(em) => tf.push_italic(),
+            | some_id!(em) => tf.italic.push(),
 
             some_id!(sub) => {
                 // Adjust the top drop to move the text slightly downwards.
-                let curr_top_drop = tf.latest_text_style_options()
-                    .and_then(|ts| ts.top_drop)
-                    .unwrap_or(1.1);
+                let curr_top_drop = tf.top_drop.last()
+                    .unwrap_or(&1.2);
                 // A 55% increase in top_drop seems to look good for subscripts,
                 // which should be slightly below the halfway point in the line
                 let new_top_drop = curr_top_drop * 1.55;
-                tf.push_text_style_options(TextStyleOptions {
-                    top_drop: Some(new_top_drop),
-                    ..Default::default()
-                });
+                tf.top_drop.push(new_top_drop);
                 tf.push_size_rel_scale(0.7);
             }
             some_id!(sup) => {
-                // TODO: should superscript set top_drop as well?
-                //       It currently workw without it, but may be better with it.
-                tf.push_text_style_options(TextStyleOptions {
-                    ..Default::default()
-                });
                 tf.push_size_rel_scale(0.7);
             }
             some_id!(ul) => {
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 list_stack.push(ListLevel {
                     list_kind: ListKind::Unordered,
                     numbering_type: None,
@@ -165,6 +177,7 @@ impl Html {
                 });
             }
             some_id!(ol) => { 
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 // Handle the "start" attribute
                 let start_attr = node.find_attr_lc(live_id!(start));
                 let start: i32 = start_attr
@@ -183,6 +196,7 @@ impl Html {
                 });
             }
             some_id!(li) => {
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
                 let indent_level = list_stack.len();
                 let index = indent_level.saturating_sub(1);
                 // log!("indent_level: {indent_level}, index: {index}, list_stack: {list_stack:?}");
@@ -227,10 +241,10 @@ impl Html {
                 cx.turtle_new_line();
                 tf.begin_list_item(cx, marker, pad);
             }
-            Some(x) => { return Some(x) }
+            Some(x) => return (Some(x), trim_whitespace_in_text),
             _ => ()
-        } 
-        None
+        }
+        (None, trim_whitespace_in_text)
     }
     
     fn handle_close_tag(
@@ -246,49 +260,69 @@ impl Html {
             | some_id!(h4)
             | some_id!(h5)
             | some_id!(h6) => {
-                tf.pop_size();
-                tf.pop_bold();
+                tf.font_sizes.pop();
+                tf.bold.pop();
                 cx.turtle_new_line();
             }
             some_id!(b)
-            | some_id!(strong) => tf.pop_bold(),
+            | some_id!(strong) => tf.bold.pop(),
             some_id!(i)
-            | some_id!(em) => tf.pop_italic(),
+            | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
                 cx.turtle_new_line();
                 cx.turtle_new_line();
             }
-            some_id!(blockquote) => tf.end_quote(cx),
+            some_id!(blockquote) => {
+                tf.ignore_newlines.pop();
+                tf.combine_spaces.pop();
+                tf.end_quote(cx);
+            }
             some_id!(code) => {
-                tf.pop_inline_code(cx); // doesn't work properly
-                tf.pop_size();
-                tf.pop_fixed(); 
+                tf.inline_code.pop();
+                tf.top_drop.pop();
+                tf.font_sizes.pop();
+                tf.combine_spaces.pop();
+                tf.fixed.pop(); 
             }
             some_id!(pre) => {
-                tf.pop_fixed();
+                tf.fixed.pop();
+                tf.ignore_newlines.pop();
+                tf.combine_spaces.pop();
                 tf.end_code(cx);     
             }
-            some_id!(sub)
-            | some_id!(sup) => {
-                tf.pop_text_style_options();
-                tf.pop_size();
+            some_id!(sub)=>{
+                tf.top_drop.pop();
+                tf.font_sizes.pop();
+            }
+            some_id!(sup) => {
+                tf.font_sizes.pop();
             }
             some_id!(ul)
             | some_id!(ol) => {
                 list_stack.pop();
             }
             some_id!(li) => tf.end_list_item(cx),
-            some_id!(u) => tf.pop_underline(),
+            some_id!(u) => tf.underline.pop(),
             some_id!(del)
             | some_id!(s)
-            | some_id!(strike) => tf.pop_strikethrough(),
+            | some_id!(strike) => tf.strikethrough.pop(),
             _ => ()
         }
         None
     }
     
-    pub fn handle_text_node(cx: &mut Cx2d, tf: &mut TextFlow, node: &mut HtmlWalker) -> bool {
+    pub fn handle_text_node(
+        cx: &mut Cx2d,
+        tf: &mut TextFlow,
+        node: &mut HtmlWalker,
+        trim: TrimWhitespaceInText,    
+    ) -> bool {
         if let Some(text) = node.text() {
+            let text = if trim == TrimWhitespaceInText::Trim {
+                text.trim_matches(char::is_whitespace)
+            } else {
+                text
+            };
             tf.draw_text(cx, text);
             true
         }
@@ -311,17 +345,19 @@ impl Widget for Html {
         let mut node = self.doc.new_walker();
         let mut auto_id = 0;
         while !node.done() {
+            let mut trim = TrimWhitespaceInText::default();
             match Self::handle_open_tag(cx, tf, &mut node, &mut self.list_stack, &self.ul_markers, &self.ol_markers, &self.ol_separator) {
-                Some(_)=>{
-                    
+                (Some(_), _tws) => {
                     handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id); 
                 }
-                _=>()
+                (None, tws) => {
+                    trim = tws;
+                }
             }
             match Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack) {
                 _ => ()
             }
-            Self::handle_text_node(cx, tf, &mut node);
+            Self::handle_text_node(cx, tf, &mut node, trim);
             node.walk();
         }
         tf.end(cx);
@@ -335,8 +371,7 @@ impl Widget for Html {
     fn set_text(&mut self, v:&str){
         self.body = Rc::new(v.to_string());
         let mut errors = Some(Vec::new());
-        let kws = if self.keep_whitespace { KeepWhitespace::Yes } else { KeepWhitespace::No };
-        self.doc = parse_html(&*self.body, &mut errors, kws);
+        self.doc = parse_html(&*self.body, &mut errors);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -424,7 +459,6 @@ impl Widget for HtmlLink {
         event: &Event,
         scope: &mut Scope,
     ) {
-        // log!("HtmlLink::handle_event(): event: {:?}", event);
         self.link.handle_event(cx, event, scope);
         self.match_event(cx, event)
     }
