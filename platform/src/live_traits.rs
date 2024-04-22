@@ -76,6 +76,14 @@ pub trait LiveNew: LiveApply {
         return ret
     }
     
+    fn apply_from_ptr(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>) {
+        if let Some(live_ptr) = live_ptr{
+            cx.get_nodes_from_live_ptr(live_ptr, |cx, _file_id, index, nodes|{
+                self.apply(cx, &mut ApplyFrom::Over.into(), index, nodes)
+            });
+        }
+    }
+    
     fn new_from_ptr_with_scope<'a> (cx: &mut Cx, scope:&'a mut Scope, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         if let Some(live_ptr) = live_ptr{

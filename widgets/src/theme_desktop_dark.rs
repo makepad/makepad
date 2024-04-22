@@ -1909,6 +1909,216 @@ live_design! {
         scroll_bars: {}
     }
 
+    OutlineTreeNode = <OutlineTreeNodeBase> {
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    mix(
+                        THEME_COLOR_BG_UNFOCUSSED,
+                        THEME_COLOR_BG_SELECTED,
+                        self.focussed
+                    ),
+                    self.selected
+                );
+            }
+        }
+
+        draw_icon: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let w = self.rect_size.x;
+                let h = self.rect_size.y;
+                sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
+                sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
+                sdf.union();
+                return sdf.fill(mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT * self.scale,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                ));
+            }
+        }
+
+        draw_name: {
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT * self.scale,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+            }
+
+            text_style: <THEME_FONT_DATA> {
+                top_drop: 1.2,
+            }
+        }
+
+        align: {y: 0.5}
+        padding: {left: 5.0, bottom: 0,},
+
+        icon_walk: {
+            width: Fixed((THEME_DATA_ICON_WIDTH - 2)),
+            height: Fixed((THEME_DATA_ICON_HEIGHT)),
+            margin: {
+                left: 0
+                top: 0
+                right: 2
+                bottom: 0
+            },
+        }
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        hover: 0.0
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+
+                on = {
+                    cursor: Hand
+                    from: {all: Snap}
+                    apply: {
+                        hover: 1.0
+                        draw_bg: {hover: 1.0}
+                        draw_name: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    },
+                }
+            }
+
+            focus = {
+                default: on
+                on = {
+                    from: {all: Snap}
+                    apply: {focussed: 1.0}
+                }
+
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {focussed: 0.0}
+                }
+            }
+
+            select = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        selected: 0.0
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        selected: 1.0
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
+                    }
+                }
+
+            }
+
+            open = {
+                default: off
+                off = {
+                    //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
+                    //duration: 0.2
+                    redraw: true
+
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+
+                    //ease: Ease::OutExp
+                    apply: {
+                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                        draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        draw_name: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                    }
+                }
+
+                on = {
+                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
+
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.82, d2: 0.95}
+
+                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
+                    redraw: true
+                    apply: {
+                        opened: 1.0
+                        draw_bg: {opened: 1.0}
+                        draw_name: {opened: 1.0}
+                        draw_icon: {opened: 1.0}
+                    }
+                }
+            }
+        }
+        is_folder: false,
+        indent_width: 10.0
+        min_drag_distance: 10.0
+    }
+
+    OutlineTree = <OutlineTreeBase> {
+        scroll_bars: <ScrollBars>{}
+        node_height: (THEME_DATA_ITEM_HEIGHT),
+        file_node: <OutlineTreeNode> {
+            is_folder: false,
+            draw_bg: {is_folder: 0.0}
+            draw_name: {is_folder: 0.0}
+        }
+        folder_node: <OutlineTreeNode> {
+            is_folder: true,
+            draw_bg: {is_folder: 1.0}
+            draw_name: {is_folder: 1.0}
+        }
+        filler: {
+            fn pixel(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    mix(
+                        THEME_COLOR_BG_UNFOCUSSED,
+                        THEME_COLOR_BG_SELECTED,
+                        self.focussed
+                    ),
+                    self.selected
+                );
+            }
+        }
+        flow: Down,
+        clip_x: true,
+        clip_y: true
+        scroll_bars: {}
+    }
+
+
     FoldButton = <FoldButtonBase> {
         draw_bg: {
             instance open: 0.0
@@ -2775,7 +2985,22 @@ live_design! {
     }
     
     DesignerView = <DesignerViewBase>{
-        
+        draw_bg: {
+            texture image: texture2d
+            varying scale: vec2
+            varying shift: vec2
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
+            }
+        }
     }
         
     Designer = <DesignerBase>{
@@ -2795,17 +3020,18 @@ live_design! {
             align: FromA(300),
             a: <View> {
                 designer_outline = <DesignerOutline> {
-                    file_tree = <FileTree>{
+                    outline_tree = <OutlineTree>{
                         
                     }
                 }
             },
-            b: <CachedScrollXY> {
+            b: <View> {
                 dpi_factor: 1.5
                 draw_bg: {color: #4}
                 width: Fill, height: Fill
                 flow: Down
                 designer_view = <DesignerView> {
+                    
                 }
             },
         }   

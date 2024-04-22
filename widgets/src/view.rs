@@ -710,7 +710,7 @@ impl Widget for View {
                             }
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            if false {
+                            /*if false {
                                 // FIXME(eddyb) this was the previous logic,
                                 // but the only tested apps that use `CachedView`
                                 // are sized correctly (regardless of `dpi_factor`)
@@ -720,12 +720,12 @@ impl Widget for View {
                                     self.area,
                                     2.0 / self.dpi_factor.unwrap_or(1.0),
                                 );
-                            } else {
+                            } else {*/
                                 cx.set_pass_area(
                                     &texture_cache.pass,
                                     self.area,
                                 );
-                            }
+                            //}
                         }
                         return DrawStep::done();
                     }
@@ -860,7 +860,7 @@ impl Widget for View {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                        if false {
+                       /* if false {
                             // FIXME(eddyb) this was the previous logic,
                             // but the only tested apps that use `CachedView`
                             // are sized correctly (regardless of `dpi_factor`)
@@ -870,12 +870,12 @@ impl Widget for View {
                                 area,
                                 2.0 / self.dpi_factor.unwrap_or(1.0),
                             );
-                        } else {
+                        } else {*/
                             cx.set_pass_area(
                                 &texture_cache.pass,
                                 area,
                             );
-                        }
+                        //}
                     }
                 }
                 self.draw_state.end();

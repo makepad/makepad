@@ -11,6 +11,8 @@ live_design!{
     import crate::drop_down::DropDownBase;
     import crate::file_tree::FileTreeBase;
     import crate::file_tree::FileTreeNodeBase;
+    import crate::outline_tree::OutlineTreeBase;
+    import crate::outline_tree::OutlineTreeNodeBase;
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
     import crate::image::ImageBase;
@@ -776,6 +778,8 @@ live_design!{
     DropDownBase = <DropDownBase> {}
     FileTreeBase = <FileTreeBase> {}
     FileTreeNodeBase = <FileTreeNodeBase> {}
+    OutlineTreeBase = <OutlineTreeBase> {}
+    OutlineTreeNodeBase = <OutlineTreeNodeBase> {}
     FoldButtonBase = <FoldButtonBase> {}
     FoldHeaderBase = <FoldHeaderBase> {}
     ImageBase = <ImageBase> {}
