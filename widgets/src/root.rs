@@ -28,9 +28,6 @@ impl LiveHook for Root {
                     if id == live_id!(design_window) && !cx.in_makepad_studio(){
                         return nodes.skip_node(index);
                     }
-                    if cx.os_type().is_single_window() && id != live_id!(mobile){
-                        return nodes.skip_node(index);
-                    }
                     return self.windows.get_or_insert(cx, id, | cx | {Window::new(cx)})
                         .apply(cx, apply, index, nodes);
                 }
@@ -75,16 +72,6 @@ impl Widget for Root {
     
      fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         self.draw_state.begin(cx, DrawState::Window(0));
-        if cx.os_type().is_single_window(){
-            if let Some(DrawState::Window(_)) = self.draw_state.get(){
-                if let Some(window) = self.windows.get_mut(&live_id!(mobile)){
-                    let walk = window.walk(cx);
-                    window.draw_walk(cx, scope, walk)?; 
-                    self.draw_state.end();
-                }
-            }
-            return DrawStep::done()
-        }
         
         while let Some(DrawState::Window(step)) = self.draw_state.get() {
             
