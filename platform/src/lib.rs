@@ -243,7 +243,7 @@ pub use {
             LiveApply,
             LiveHook,
             LiveApplyValue,
-            LiveApplyUpdate,
+            LiveApplyReset,
             LiveRead,
             ToLiveValue,
             Apply,

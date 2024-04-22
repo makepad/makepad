@@ -6,7 +6,7 @@ live_design!{
     
     App = {{App}} {
         ui: <Root>{
-            <Window>{
+            main_window = <Window>{
                 show_bg: true
                 width: Fill,
                 height: Fill
@@ -55,6 +55,16 @@ pub struct App {
 
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
+        /*makepad_draw::live_design(cx);
+        makepad_widgets::base::live_design(cx);
+        makepad_widgets::theme_desktop_dark::live_design(cx);
+        makepad_widgets::label::live_design(cx);
+        makepad_widgets::view::live_design(cx);
+        makepad_widgets::button::live_design(cx);
+        makepad_widgets::window::live_design(cx);
+        makepad_widgets::scroll_bar::live_design(cx);
+        makepad_widgets::scroll_bars::live_design(cx);
+        makepad_widgets::root::live_design(cx);*/
         crate::makepad_widgets::live_design(cx);
     }
 }

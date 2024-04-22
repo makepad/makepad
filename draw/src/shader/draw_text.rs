@@ -266,7 +266,6 @@ impl<'a> WordIterator<'a> {
                 width += adv;
                 self.next_char();
             }
-            // make sure we advance atleast one char
             
             return Some(WordItem::Word{
                 start,
@@ -274,127 +273,9 @@ impl<'a> WordIterator<'a> {
                 width,
             });
         }
-        /*
-        if let Some(char_iter) = &mut self.char_iter {
-            if self.last_char.is_whitespace(){ // scan till non whitespace
-                while let Some((i, c)) = char_iter.next() {
-                    let adv = if let Some(glyph) = font.get_glyph(c) {
-                        glyph.horizontal_metrics.advance_width * self.font_size_total
-                    }else {0.0};
-                    self.last_index = i;
-                    self.last_char = c;
-                    if c == '\n' && !self.ignore_newlines{
-                        
-                    }
-                    if !c.is_whitespace(){
-                        if self.combine_spaces{
-                            
-                        }
-                        // we should return a whitespace block
-                        return Some(WordIteratorItem {
-                            start: self.word_start,
-                            end: i,
-                            width: self.word_width,
-                            with_new_line: false
-                        })
-                    }
-                }
-            }
-            else{ // scan till whitespace
-                
-            }
-        }
-            
-            while let Some((i, c)) = char_iter.next() {
-                
-                
-                
-                self.last_index = i;
-                self.last_char = c;
-                // when should we emit when spaces turn into chars
-                // and when chars turn into spaces
-                
-                
-                
-                // first we scan up all the spaces
-                // and check if we are collapsing them or not
-                // if not we emit a 'space' block 
-                // if we arent in 
-                let ret = WordIteratorItem {
-                    start: self.word_start,
-                    end: i,
-                    width: self.word_width,
-                    with_new_line: false
-                };
-                
-                let adv = if let Some(glyph) = font.get_glyph(c) {
-                    glyph.horizontal_metrics.advance_width * self.font_size_total
-                }else {0.0};
-                
-                if c == '\r' {
-                    continue;
-                }
-                if c == '\n' {
-                    if self.ignore_newlines{
-                        if self.word_start == i{
-                            self.word_start = i+1;
-                        }
-                        self.last_is_whitespace = true;
-                    }
-                    else{
-                        self.last_is_whitespace = false;
-                        self.word_start = i + 1;
-                        self.word_width = 0.0;
-                        return Some(WordIteratorItem {with_new_line: true, end: i, ..ret})
-                    }
-                }
-                else if c.is_whitespace() { // we only return words where whitespace turns to word
-                    if self.combine_spaces && self.last_is_whitespace{
-                        if self.word_start == i{
-                            self.word_width -= adv;
-                            self.word_start = i+1;
-                        }
-                    }
-                    self.last_is_whitespace = true;
-                }
-                else if self.last_is_whitespace {
-                    self.last_is_whitespace = false;
-                    self.word_start = i;
-                    self.word_width = adv;
-                    return Some(ret);
-                }
-                // this causes a character-based split if the word doesnt fit at all
-                if self.word_width + adv >= self.eval_width {
-                    self.word_start = i;
-                    self.word_width = adv;
-                    return Some(ret);
-                }
-                self.word_width += adv;
-            }
-            self.char_iter = None;
-            
-            let mut buffer = [0; 4];
-            let char_bytes_len = self.last_char.encode_utf8(&mut buffer).len();
-            
-            return Some(WordIteratorItem {
-                start: self.word_start,
-                end: self.last_index + char_bytes_len,
-                width: self.word_width,
-                with_new_line: false
-            });
-        }
-        else {
-            None
-        }*/
+        
     }
 }
-/*
-#[derive(Debug, Clone, Copy, Live, LiveHook)]
-pub enum Overflow {
-    #[live] Cut,
-    #[pick] Ellipsis,
-    #[live] None
-}*/
 
 pub struct TextGeom {
     pub eval_width: f64,
