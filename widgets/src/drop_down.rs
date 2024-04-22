@@ -84,7 +84,6 @@ pub enum DropDownAction {
     None
 }
 
-
 impl DropDown {
     
     pub fn set_open(&mut self, cx: &mut Cx) {
@@ -114,7 +113,10 @@ impl DropDown {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         //cx.clear_sweep_lock(self.draw_bg.area());
-        
+        // ok so what if. what do we have
+        // we have actions
+        // and we have applying states/values in response
+       
         self.draw_bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
         
@@ -149,7 +151,7 @@ impl DropDown {
                         }
                         popup_menu.draw_item(cx, node_id, &item);
                     }
-
+                    
                     // ok we shift the entire menu. however we shouldnt go outside the screen area
                     popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0, 0.0)));
                 }
@@ -164,7 +166,7 @@ impl DropDown {
                         x: 0.0,
                         y: area.size.y,
                     };
-
+                    
                     popup_menu.end(cx, self.draw_bg.area(), shift);
                 }
             }
