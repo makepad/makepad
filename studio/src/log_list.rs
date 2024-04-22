@@ -20,18 +20,16 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     Icon = <View> {
+        width: 10, height: 10
         show_bg: true,
-        width: 10,
-        height: 10
     }
     
     LogIcon = <PageFlip> {
+        width: Fit, height: Fit,
         active_page: log
         lazy_init: true,
-        width: Fit,
-        height: Fit,
-        margin: {top: 1, left: 5, right: 5}
         wait = <Icon> {
+            margin: { top: 2. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -49,6 +47,7 @@ live_design!{
             }
         },
         log = <Icon> {
+            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -63,6 +62,7 @@ live_design!{
             }
         }
         error = <Icon> {
+            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -79,6 +79,7 @@ live_design!{
             }
         },
         warning = <Icon> {
+            margin: { top: 7. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -121,7 +122,9 @@ live_design!{
     
     LogItem = <View> {
         height: Fit, width: Fill
-        padding: <THEME_MSPACE_2> {}
+        padding: <THEME_MSPACE_2> {} // TODO: Fix. Changing this value to i.e. '0.' causes Makepad Studio to freeze when switching to the log tab.
+        spacing: (THEME_SPACE_2)
+        align: { x: 0.0, y: 0.5 }
         show_bg: true,
         draw_bg: {
             instance is_even: 0.0

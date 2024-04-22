@@ -83,7 +83,7 @@ live_design!{
                 
             line = Line,
         }
-        body = {dock = <DockMinimal> {
+        body = {dock = <Dock> {
             width: Fill, height: Fill,
                 
             root = Splitter {
