@@ -45,9 +45,9 @@ println!("    wasm [options] run <cargo args>              Build and run a wasm 
     println!("                         --org=organisation_name");
     println!("                         --app=product_name");
     println!(" If you have multiple signing identities or devices or provision profiles you might have to set it explicitly");
-    println!("                         --provisioning-profile=");
-    println!("                         --signing-identity=");
-    println!("                         --device-identifier=");
+    println!("                         --profile=");
+    println!("                         --cert=");
+    println!("                         --device=");
     println!();
     println!("Android commands:");
     println!();
