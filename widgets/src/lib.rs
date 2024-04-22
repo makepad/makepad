@@ -49,6 +49,7 @@ pub mod page_flip;
 pub mod keyboard_view;
 pub mod flat_list;
 pub mod file_tree;
+pub mod outline_tree;
 pub mod slides_view;
 pub mod color_picker;
 pub mod root;
@@ -169,6 +170,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::dock::live_design(cx);
     crate::color_picker::live_design(cx);
     crate::file_tree::live_design(cx);
+    crate::outline_tree::live_design(cx);
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);

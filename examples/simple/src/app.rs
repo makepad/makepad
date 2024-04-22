@@ -26,12 +26,12 @@ live_design!{
                         y: 0.5
                     },
                     button1 = <Button> {
-                        text: "Hello world"
+                        text: "Hello world "
                         draw_text:{color:#f00}
                     }
                     input1 = <TextInput> {
                         width: 100, height: 30
-                        text: "Click to count"
+                        text: "Click to count "
                     }
                     label1 = <Label> {
                         draw_text: {
