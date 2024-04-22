@@ -50,6 +50,7 @@ live_design!{
     import crate::html::HtmlLinkBase;
     import crate::markdown::MarkdownBase,
     import crate::root::RootBase;
+    import crate::designer::DesignerBase;
     
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
@@ -802,4 +803,5 @@ live_design!{
     StackNavigationViewBase = <StackNavigationViewBase>{}
     StackNavigationBase = <StackNavigationBase>{}
     ExpandablePanelBase = <ExpandablePanelBase>{}
+    DesignerBase = <DesignerBase>{}
 }

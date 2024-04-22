@@ -18,7 +18,7 @@ live_design!{
     import crate::app_ui::AppUI;
     import crate::app_ui::AppWindow;
     App = {{App}} { 
-        ui: <MultiWindow> {
+        ui: <Root> {
             <Window> {
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
