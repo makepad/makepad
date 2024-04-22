@@ -189,8 +189,7 @@ live_design!{
                                         Level 2 list item two
                                         <ul>
                                             <li> Level 3 list item one </li>
-                                            <li> 
-                                                Level 3 list item two 
+                                            <li>      Level 3 list item two 
                                                 <ul>
                                                     <li> Level 4 list item one </li>
                                                     <li> Level 4 list item two </li>
