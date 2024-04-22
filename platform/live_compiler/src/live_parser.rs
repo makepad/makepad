@@ -797,7 +797,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_live_class(&mut self, root: bool, prop_id: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
-        let mut nameless_id = 0;
+        let mut nameless_id = 1;
         while self.peek_token() != LiveToken::Eof {
             match self.peek_token() {
                 LiveToken::Close(Delim::Brace) => {
@@ -821,7 +821,7 @@ impl<'a> LiveParser<'a> {
                     self.expect_token(LiveToken::Open(Delim::Brace))?;
                     ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
-                        id: LiveId::from_str(&format!("nameless_{}", nameless_id)),
+                        id: LiveId(nameless_id),
                         value: LiveValue::Clone(ident)
                     });
                     nameless_id += 1;

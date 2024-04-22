@@ -2770,9 +2770,17 @@ live_design! {
         root_view = <View> {}
     }
     
+    DesignerOutline = <DesignerOutlineBase>{
+        
+    }
+    
+    DesignerView = <DesignerViewBase>{
+        
+    }
+        
     Designer = <DesignerBase>{
         flow: Right
-        container: <RoundedView> {
+        /*container: <RoundedView> {
             draw_bg: {color: #3}
             width: Fill, height: 400
             flow: Down, spacing: 10, padding:10
@@ -2782,11 +2790,14 @@ live_design! {
                 draw_bg:{color:#5}
                 label = <Label> {text: "HI", draw_text:{color:#f}}
             }
-        }
+        }*/
         <Splitter> {
             align: FromA(300),
             a: <View> {
-                outline = <FileTree> {
+                designer_outline = <DesignerOutline> {
+                    file_tree = <FileTree>{
+                        
+                    }
                 }
             },
             b: <CachedScrollXY> {
@@ -2794,7 +2805,7 @@ live_design! {
                 draw_bg: {color: #4}
                 width: Fill, height: Fill
                 flow: Down
-                design = <View> {
+                designer_view = <DesignerView> {
                 }
             },
         }   
@@ -2808,9 +2819,19 @@ live_design! {
             height: Fill
                             
             draw_bg: {
+   
                 fn pixel(self) -> vec4 {
-                    // test
-                    return mix(#3, #7, self.pos.y);
+                    let pos = self.geom_pos * self.rect_size*0.1;
+                    let mask = floor(mod(pos.x+floor(mod(pos.y, 2.0)), 2.0))
+                    return #3+mask*#04
+                    /*
+                    let grid = abs(
+                        fract(coord - 0.5) - 0.5
+                    ) / (abs(dFdx(coord)) + abs(dFdy(coord)))*0.75;
+                    let line = min(grid.x, grid.y);
+                    let grid2 = 0.05 * vec4(vec3(1.0 - min(line, 1.0)), 1.0);
+                    return #5-grid2;
+                    */
                 }
             }
             designer = <Designer>{
