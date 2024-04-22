@@ -16,8 +16,9 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     
-    BuildItem = <RectView> {
+    BuildItem = <View> {
         width: Fill, height: Fit,
+        show_bg: true,
         
         draw_bg: {
             instance is_even: 0.0
@@ -97,56 +98,58 @@ live_design!{
             drag_scrolling: false,
 
             Target = <BuildItem> {
-                check = <RunButton> { margin: {left: 21} }
+                padding: 0,
+                check = <RunButton> { margin: {left: 23} }
 
-                <Image> {
-                    width: 20., height: 20.
-                    svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
-                }
-                platform = <Button> {
-                    width: 10., height: Fit,
-                    margin: { right: 5.0}
-                    align: { x: 0.5, y: 0.5 },
-                    padding: 0.0
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
-                        fn get_color(self) -> vec4 { return #FFF3 }
-                    }
-                    icon_walk: {
-                        width: 10., height: Fit
-                    }
-                    draw_bg: {
-                        fn pixel(self) -> vec4 {
-                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                            return sdf.result
-                        }
-                    }
-                    text: ""
-                }
-                mode = <Button> {
-                    width: 10., height: Fit,
-                    margin: { right: 15.0}
-                    align: { x: 0.5, y: 0.5 },
-                    padding: 0.0
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
-                        fn get_color(self) -> vec4 { return #FFF3 }
-                    }
-                    icon_walk: {
-                        width: 10., height: Fit
-                    }
-                    draw_bg: {
-                        fn pixel(self) -> vec4 {
-                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                            return sdf.result
-                        }
-                    }
-                    text: ""
-                }
+                // <Image> {
+                //     width: 20., height: 20.
+                //     svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                // }
+                // platform = <Button> {
+                //     width: 10., height: Fit,
+                //     margin: { right: 5.0}
+                //     align: { x: 0.5, y: 0.5 },
+                //     padding: 0.0
+                //     draw_icon: {
+                //         svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                //         fn get_color(self) -> vec4 { return #FFF3 }
+                //     }
+                //     icon_walk: {
+                //         width: 10., height: Fit
+                //     }
+                //     draw_bg: {
+                //         fn pixel(self) -> vec4 {
+                //             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                //             return sdf.result
+                //         }
+                //     }
+                //     text: ""
+                // }
+                // mode = <Button> {
+                //     width: 10., height: Fit,
+                //     margin: { right: 15.0}
+                //     align: { x: 0.5, y: 0.5 },
+                //     padding: 0.0
+                //     draw_icon: {
+                //         svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                //         fn get_color(self) -> vec4 { return #FFF3 }
+                //     }
+                //     icon_walk: {
+                //         width: 10., height: Fit
+                //     }
+                //     draw_bg: {
+                //         fn pixel(self) -> vec4 {
+                //             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                //             return sdf.result
+                //         }
+                //     }
+                //     text: ""
+                // }
             }
+
             Binary = <BuildItem> {
-                padding: {top: 0, bottom: 0}
                 flow: Right
+
                 fold = <FoldButton> {
                     height: 25, width: 15,
                     margin: { left: (THEME_SPACE_2) }
@@ -173,13 +176,13 @@ live_design!{
                         }
                     }
                 }
-                //label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
+                // label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
                 check = <RunButton> {}
             }
+
             Empty = <BuildItem> {
+                height: Fit, width: Fill,
                 cursor: Default
-                height: 24,
-                width: Fill
             }
         }
     }
