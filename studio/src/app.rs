@@ -77,7 +77,7 @@ pub enum AppAction{
     JumpTo(JumpTo),
     RedrawLog,
     RedrawProfiler,
-    RedrawFile(FileNodeId),
+    RedrawFile(LiveId),
     StartRecompile,
     ReloadFileTree,
     RecompileStarted,

@@ -96,11 +96,11 @@ pub struct FileTree {
     
     #[rust] draw_state: DrawStateWrap<()>,
     
-    #[rust] dragging_node_id: Option<FileNodeId>,
-    #[rust] selected_node_id: Option<FileNodeId>,
-    #[rust] open_nodes: HashSet<FileNodeId>,
+    #[rust] dragging_node_id: Option<LiveId>,
+    #[rust] selected_node_id: Option<LiveId>,
+    #[rust] open_nodes: HashSet<LiveId>,
     
-    #[rust] tree_nodes: ComponentMap<FileNodeId, (FileTreeNode, LiveId)>,
+    #[rust] tree_nodes: ComponentMap<LiveId, (FileTreeNode, LiveId)>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f64>,
@@ -120,9 +120,9 @@ impl LiveHook for FileTree {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum FileTreeAction {
     None,
-    FileClicked(FileNodeId),
-    FolderClicked(FileNodeId),
-    ShouldFileStartDrag(FileNodeId),
+    FileClicked(LiveId),
+    FolderClicked(LiveId),
+    ShouldFileStartDrag(LiveId),
 }
 
 pub enum FileTreeNodeAction {
@@ -197,8 +197,8 @@ impl FileTreeNode {
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        node_id: FileNodeId,
-        actions: &mut Vec<(FileNodeId, FileTreeNodeAction)>,
+        node_id: LiveId,
+        actions: &mut Vec<(LiveId, FileTreeNodeAction)>,
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -279,7 +279,7 @@ impl FileTree {
     pub fn begin_folder(
         &mut self,
         cx: &mut Cx2d,
-        node_id: FileNodeId,
+        node_id: LiveId,
         name: &str,
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
@@ -321,7 +321,7 @@ impl FileTree {
         self.stack.pop();
     }
     
-    pub fn file(&mut self, cx: &mut Cx2d, node_id: FileNodeId, name: &str) {
+    pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
         if scale > 0.2 {
@@ -340,11 +340,11 @@ impl FileTree {
         self.tree_nodes.clear();
     }
     
-    pub fn forget_node(&mut self, file_node_id: FileNodeId) {
+    pub fn forget_node(&mut self, file_node_id: LiveId) {
         self.tree_nodes.remove(&file_node_id);
     }
     
-    pub fn is_folder(&mut self, file_node_id: FileNodeId)->bool {
+    pub fn is_folder(&mut self, file_node_id: LiveId)->bool {
         if let Some((node,_)) = self.tree_nodes.get(&file_node_id){
             node.is_folder
         }
@@ -356,7 +356,7 @@ impl FileTree {
     pub fn set_folder_is_open(
         &mut self,
         cx: &mut Cx,
-        node_id: FileNodeId,
+        node_id: LiveId,
         is_open: bool,
         animate: Animate,
     ) {
@@ -374,7 +374,7 @@ impl FileTree {
     pub fn start_dragging_file_node(
         &mut self,
         cx: &mut Cx,
-        node_id: FileNodeId,
+        node_id: LiveId,
         items: Vec<DragItem>,
     ) {
         self.dragging_node_id = Some(node_id);
@@ -385,8 +385,9 @@ impl FileTree {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct FileNodeId(pub LiveId);
+//pub type LiveId = LiveId;
+//#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+//pub struct LiveId(pub LiveId);
 
 impl Widget for FileTree {
 
@@ -466,7 +467,7 @@ impl Widget for FileTree {
 }
 
 impl FileTreeRef{
-    pub fn should_file_start_drag(&self, actions: &Actions) -> Option<FileNodeId> {
+    pub fn should_file_start_drag(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::ShouldFileStartDrag(file_id) = item.cast() {
                 return Some(file_id)
@@ -475,7 +476,7 @@ impl FileTreeRef{
         None
     }
     
-    pub fn file_clicked(&self, actions: &Actions) -> Option<FileNodeId> {
+    pub fn file_clicked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::FileClicked(file_id) = item.cast() {
                 return Some(file_id)
@@ -484,7 +485,7 @@ impl FileTreeRef{
         None
     }
     
-    pub fn folder_clicked(&self, actions: &Actions) -> Option<FileNodeId> {
+    pub fn folder_clicked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let FileTreeAction::FolderClicked(file_id) = item.cast() {
                 return Some(file_id)
@@ -494,7 +495,7 @@ impl FileTreeRef{
     }
     
     
-    pub fn file_start_drag(&self, cx: &mut Cx, _file_id: FileNodeId, item: DragItem) {
+    pub fn file_start_drag(&self, cx: &mut Cx, _file_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
 }
