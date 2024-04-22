@@ -138,6 +138,11 @@ impl Widget for TextInput {
                 KeyCode::Tab => {
                     // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
                 }
+                KeyCode::ReturnKey if ke.modifiers.shift => {
+                    if self.change(cx, "\n"){
+                        self.push_change_action(uid, scope, cx)
+                    }
+                },
                 KeyCode::ReturnKey => {
                     cx.hide_text_ime();
                     cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
@@ -652,13 +657,6 @@ impl TextInputRef {
     }
 
     pub fn returned(&self, actions: &Actions) -> Option<String> {
-        if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
-            return Some(val);
-        }
-        None
-    }
-    
-    pub fn return_key(&self, actions: &Actions) -> Option<String> {
         if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
             return Some(val);
         }
