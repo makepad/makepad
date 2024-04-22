@@ -47,15 +47,15 @@ impl Widget for Markdown {
             match node{
                 MarkdownNode::BeginHead{level}=>{
                     tf.push_size_abs_scale(4.5 / *level as f64);
-                    tf.push_bold();
+                    tf.bold.push();
                 },
                 MarkdownNode::Separator=>{
                     cx.turtle_new_line();
                     tf.sep(cx);
                 }
                 MarkdownNode::EndHead=>{
-                    tf.pop_bold();
-                    tf.pop_size();
+                    tf.bold.pop();
+                    tf.font_sizes.pop();
                     cx.turtle_new_line();
                 },
                 MarkdownNode::NewLine=>{
@@ -105,39 +105,39 @@ impl Widget for Markdown {
                     tf.end_quote(cx);
                 },
                 MarkdownNode::BeginUnderline=>{
-                    tf.push_underline();
+                    tf.underline.push();
                 },
                 MarkdownNode::EndUnderline=>{
-                    tf.pop_underline();
+                    tf.underline.pop();
                 },
                 MarkdownNode::BeginInlineCode=>{
-                    tf.push_fixed();
-                    tf.push_inline_code(cx);     
+                    tf.fixed.push();
+                    tf.inline_code.push();     
                 },
                 MarkdownNode::EndInlineCode=>{
-                    tf.pop_fixed();
-                    tf.pop_inline_code(cx);                 
+                    tf.fixed.pop();
+                    tf.inline_code.pop();                 
                 },
                 MarkdownNode::BeginCode=>{
                     cx.turtle_new_line();
-                    tf.push_fixed();
+                    tf.fixed.push();
                     tf.begin_code(cx);     
                 },
                 MarkdownNode::EndCode=>{
-                    tf.pop_fixed();
+                    tf.fixed.pop();
                     tf.end_code(cx);
                 },
                 MarkdownNode::BeginBold=>{
-                    tf.push_bold();
+                    tf.bold.push();
                 },
                 MarkdownNode::BeginItalic=>{
-                    tf.push_italic();
+                    tf.italic.push();
                 },
                 MarkdownNode::EndBold=>{
-                    tf.pop_bold();          
+                    tf.bold.pop();          
                 },
                 MarkdownNode::EndItalic=>{
-                    tf.pop_italic();
+                    tf.italic.pop();
                 },
                 MarkdownNode::Text{start, end}=>{
                     tf.draw_text(cx, &self.doc.decoded[*start..*end]);

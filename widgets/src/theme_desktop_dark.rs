@@ -3558,9 +3558,39 @@ live_design! {
         root_view = <View> {}
     }
     
+    Designer = <DesignerBase>{
+        flow: Right
+        container: <RoundedView> {
+            draw_bg: {color: #3}
+            width: Fill, height: 400
+            flow: Down, spacing: 10, padding:10
+            <RoundedView>{
+                width: Fill, height: Fit
+                padding:5
+                draw_bg:{color:#5}
+                label = <Label> {text: "HI", draw_text:{color:#f}}
+            }
+        }
+        <Splitter> {
+            align: FromA(300),
+            a: <View> {
+                outline = <FileTree> {
+                }
+            },
+            b: <CachedScrollXY> {
+                dpi_factor: 1.5
+                draw_bg: {color: #4}
+                width: Fill, height: Fill
+                flow: Down
+                design = <View> {
+                }
+            },
+        }   
+    }
+    
     Root = <RootBase>{
         design_window = <Window>{
-            kind_id: 1
+            window:{kind_id: 1}
             show_bg: true
             width: Fill,
             height: Fill
@@ -3570,6 +3600,9 @@ live_design! {
                     // test
                     return mix(#3, #7, self.pos.y);
                 }
+            }
+            designer = <Designer>{
+                
             }
         }
     }
