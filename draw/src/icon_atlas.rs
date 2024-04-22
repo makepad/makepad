@@ -201,7 +201,7 @@ impl CxIconAtlas {
 
                     let mut errors = Some(Vec::new());
                     let svg_string = std::str::from_utf8(&data).unwrap();
-                    let  doc = parse_html(svg_string, &mut errors, KeepWhitespace::No);
+                    let  doc = parse_html(svg_string, &mut errors);
 
                     if errors.as_ref().unwrap().len()>0{
                         log!("SVG parser returned errors {:?}", errors)

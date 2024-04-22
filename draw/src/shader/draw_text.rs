@@ -159,42 +159,167 @@ pub enum TextWrap {
 }
 
 struct WordIterator<'a> {
-    char_iter: Option<std::str::CharIndices<'a >>,
+    char_iter: std::str::CharIndices<'a >,
     eval_width: f64,
-    word_width: f64,
-    word_start: usize,
-    last_is_whitespace: bool,
     last_char: char,
     last_index: usize,
     font_size_total: f64,
+    ignore_newlines: bool,
+    combine_spaces: bool,
 }
-
+/*
 struct WordIteratorItem {
     start: usize,
     end: usize,
     width: f64,
     with_new_line: bool
+}*/
+
+enum WordItem{
+    Spaces{start:usize, end: usize, width: f64},
+    Newline,
+    Word{start:usize, end: usize, width: f64}
 }
 
 impl<'a> WordIterator<'a> {
-    fn new(char_iter: std::str::CharIndices<'a>, eval_width: f64, font_size_total: f64) -> Self {
-        Self {
+    fn new(char_iter: std::str::CharIndices<'a>, eval_width: f64, font_size_total: f64, ignore_newlines:bool, combine_spaces:bool) -> Self {
+        let mut s = Self {
             eval_width,
-            char_iter: Some(char_iter),
-            last_is_whitespace: false,
-            word_width: 0.0,
-            word_start: 0,
-            last_char: '\0',
-            last_index: 0,
-            font_size_total
-        }
+            char_iter: char_iter,
+            last_char:'\0',
+            last_index:0,
+            font_size_total,
+            ignore_newlines,
+            combine_spaces
+        };
+        s.next_char();
+        s
     }
     
-    fn next_word(&mut self, font: &mut CxFont) -> Option<WordIteratorItem> {
+    fn next_char(&mut self){
+        if let Some((i, c)) = self.char_iter.next() {
+            self.last_char = c;
+            self.last_index = i;
+        }
+        else{
+            self.last_char = '\0';
+            self.last_index += 1;
+        };
+    }
+    
+    fn next_word(&mut self, font: &mut CxFont) -> Option<WordItem> {
+        if self.last_char == '\0'{
+            return None
+        }
+        else if self.last_char == '\n'{ // return newline
+            self.next_char();
+            if self.ignore_newlines{
+                return self.next_word(font);
+            }
+            return Some(WordItem::Newline);
+        }
+        else if self.last_char == ' '{
+            let adv = if let Some(glyph) = font.get_glyph(' ') {
+                glyph.horizontal_metrics.advance_width * self.font_size_total
+            }else {0.0};
+            let start = self.last_index;
+            let mut width = 0.0;
+            while self.last_char == ' '{
+                if width + adv >= self.eval_width{
+                    if start == self.last_index{// advance atleast one char
+                        width += adv;
+                        self.next_char();
+                    }
+                    break;
+                }
+                width += adv;
+                self.next_char();
+            }
+            // lets make sure we advance atleast one char
+            if self.combine_spaces{
+                return Some(WordItem::Spaces{
+                    start,
+                    end: start+1,
+                    width: adv,
+                });
+            }
+            return Some(WordItem::Spaces{
+                start,
+                end: self.last_index,
+                width,
+            });
+        }
+        else{
+            let start = self.last_index;
+            let mut width = 0.0;
+            while self.last_char != ' ' && self.last_char != '\0' && self.last_char != '\n' {
+                let adv = if let Some(glyph) = font.get_glyph(self.last_char) {
+                    glyph.horizontal_metrics.advance_width * self.font_size_total
+                }else {0.0};
+                if width + adv >= self.eval_width{
+                    if start == self.last_index{// advance atleast one char
+                        width += adv;
+                        self.next_char();
+                    }
+                    break;
+                }
+                width += adv;
+                self.next_char();
+            }
+            // make sure we advance atleast one char
+            
+            return Some(WordItem::Word{
+                start,
+                end: self.last_index,
+                width,
+            });
+        }
+        /*
         if let Some(char_iter) = &mut self.char_iter {
+            if self.last_char.is_whitespace(){ // scan till non whitespace
+                while let Some((i, c)) = char_iter.next() {
+                    let adv = if let Some(glyph) = font.get_glyph(c) {
+                        glyph.horizontal_metrics.advance_width * self.font_size_total
+                    }else {0.0};
+                    self.last_index = i;
+                    self.last_char = c;
+                    if c == '\n' && !self.ignore_newlines{
+                        
+                    }
+                    if !c.is_whitespace(){
+                        if self.combine_spaces{
+                            
+                        }
+                        // we should return a whitespace block
+                        return Some(WordIteratorItem {
+                            start: self.word_start,
+                            end: i,
+                            width: self.word_width,
+                            with_new_line: false
+                        })
+                    }
+                }
+            }
+            else{ // scan till whitespace
+                
+            }
+        }
+            
             while let Some((i, c)) = char_iter.next() {
+                
+                
+                
                 self.last_index = i;
                 self.last_char = c;
+                // when should we emit when spaces turn into chars
+                // and when chars turn into spaces
+                
+                
+                
+                // first we scan up all the spaces
+                // and check if we are collapsing them or not
+                // if not we emit a 'space' block 
+                // if we arent in 
                 let ret = WordIteratorItem {
                     start: self.word_start,
                     end: i,
@@ -210,12 +335,26 @@ impl<'a> WordIterator<'a> {
                     continue;
                 }
                 if c == '\n' {
-                    self.last_is_whitespace = false;
-                    self.word_start = i + 1;
-                    self.word_width = 0.0;
-                    return Some(WordIteratorItem {with_new_line: true, end: i, ..ret})
+                    if self.ignore_newlines{
+                        if self.word_start == i{
+                            self.word_start = i+1;
+                        }
+                        self.last_is_whitespace = true;
+                    }
+                    else{
+                        self.last_is_whitespace = false;
+                        self.word_start = i + 1;
+                        self.word_width = 0.0;
+                        return Some(WordIteratorItem {with_new_line: true, end: i, ..ret})
+                    }
                 }
                 else if c.is_whitespace() { // we only return words where whitespace turns to word
+                    if self.combine_spaces && self.last_is_whitespace{
+                        if self.word_start == i{
+                            self.word_width -= adv;
+                            self.word_start = i+1;
+                        }
+                    }
                     self.last_is_whitespace = true;
                 }
                 else if self.last_is_whitespace {
@@ -246,7 +385,7 @@ impl<'a> WordIterator<'a> {
         }
         else {
             None
-        }
+        }*/
     }
 }
 /*
@@ -273,6 +412,10 @@ pub struct DrawText {
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
     #[live] pub wrap: TextWrap,
+    
+    #[live] pub ignore_newlines: bool,
+    #[live] pub combine_spaces: bool,
+    
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
     
@@ -554,19 +697,28 @@ impl DrawText {
                 let mut measured_width = 0.0;
                 let mut measured_height = line_height;
                 
-                let mut iter = WordIterator::new(text.char_indices(), eval_width, font_size_logical * self.font_scale);
+                let mut iter = WordIterator::new(
+                    text.char_indices(),
+                    eval_width, font_size_logical * self.font_scale,
+                    self.ignore_newlines,
+                    self.combine_spaces,
+                );
                 while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
-                    if measured_width + word.width >= eval_width {
-                        measured_height += line_height * self.text_style.line_spacing;
-                        measured_width = word.width;
-                    }
-                    else {
-                        measured_width += word.width;
-                    }
-                    if measured_width > max_width {max_width = measured_width}
-                    if word.with_new_line {
-                        measured_height += line_height * self.text_style.line_spacing;
-                        measured_width = 0.0;
+                    match word{
+                        WordItem::Newline=>{
+                            measured_height += line_height * self.text_style.line_spacing;
+                            measured_width = 0.0;
+                        }
+                        WordItem::Spaces{width,..} | WordItem::Word{width,..}=>{
+                            if measured_width + width >= eval_width {
+                                measured_height += line_height * self.text_style.line_spacing;
+                                measured_width = width;
+                            }
+                            else {
+                                measured_width += width;
+                            }
+                            if measured_width > max_width {max_width = measured_width}
+                        }
                     }
                 }
                 
@@ -634,35 +786,41 @@ impl DrawText {
             text.char_indices(),
             padded_rect.size.x,
             font_size_logical * self.font_scale, 
+            self.ignore_newlines,
+            self.combine_spaces,
         );
         let mut last_rect = None;
         while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
-            let walk_rect = cx.walk_turtle(Walk {
-                abs_pos: None,
-                margin: Margin::default(),
-                width: Size::Fixed(word.width),
-                height: Size::Fixed(line_drop)
-            });
-            if last_rect.is_none(){
-                last_rect = Some(walk_rect)
-            }
-            else{
-                let rect = last_rect.unwrap();
-                if walk_rect.pos.y > rect.pos.y { // we emit the last rect
-                    cb(cx, rect);
-                    last_rect = Some(walk_rect);
+            match word{
+                WordItem::Newline=>{
+                    cx.turtle_new_line();
                 }
-                else{
-                    last_rect.as_mut().unwrap().size.x += walk_rect.size.x;
+                WordItem::Spaces{start,end,width,..} | WordItem::Word{start,end,width,..}=>{
+                    let walk_rect = cx.walk_turtle(Walk {
+                        abs_pos: None,
+                        margin: Margin::default(),
+                        width: Size::Fixed(width),
+                        height: Size::Fixed(line_drop)
+                    });
+                    if last_rect.is_none(){
+                        last_rect = Some(walk_rect)
+                    }
+                    else{
+                        let rect = last_rect.unwrap();
+                        if walk_rect.pos.y > rect.pos.y { // we emit the last rect
+                            cb(cx, rect);
+                            last_rect = Some(walk_rect);
+                        }
+                        else{
+                            last_rect.as_mut().unwrap().size.x += walk_rect.size.x;
+                        }
+                    }
+                    if let Some(rect) = last_rect{
+                        cb(cx, rect);
+                    }
+                    // make sure our iterator uses the xpos from the turtle
+                    self.draw_inner(cx, walk_rect.pos, &text[start..end], fonts_atlas);
                 }
-            }
-            if let Some(rect) = last_rect{
-                cb(cx, rect);
-            }
-            // make sure our iterator uses the xpos from the turtle
-            self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
-            if word.with_new_line{
-                cx.turtle_new_line();
             }
         }
         if self.many_instances.is_some() {
@@ -751,18 +909,27 @@ impl DrawText {
                     });
                     let mut pos = dvec2(0.0, 0.0);
                     
-                    let mut iter = WordIterator::new(text.char_indices(), geom.eval_width, font_size_logical * self.font_scale);
+                    let mut iter = WordIterator::new(
+                        text.char_indices(), 
+                        geom.eval_width, 
+                        font_size_logical * self.font_scale,
+                        self.ignore_newlines,
+                        self.combine_spaces,    
+                    );
                     while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
-                        if pos.x + word.width >= geom.eval_width {
-                            pos.y += line_height * self.text_style.line_spacing;
-                            pos.x = 0.0;
-                        }
-                        self.draw_inner(cx, rect.pos + pos, &text[word.start..word.end], fonts_atlas);
-                        pos.x += word.width;
-                        
-                        if word.with_new_line {
-                            pos.y += line_height * self.text_style.line_spacing;
-                            pos.x = 0.0;
+                        match word{
+                            WordItem::Newline=>{
+                                pos.y += line_height * self.text_style.line_spacing;
+                                pos.x = 0.0;
+                            }
+                            WordItem::Word{start, end, width} | WordItem::Spaces{start, end, width}=>{
+                                if pos.x + width >= geom.eval_width {
+                                    pos.y += line_height * self.text_style.line_spacing;
+                                    pos.x = 0.0;
+                                }
+                                self.draw_inner(cx, rect.pos + pos, &text[start..end], fonts_atlas);
+                                pos.x += width;
+                            }
                         }
                     }
                 }
