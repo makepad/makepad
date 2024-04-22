@@ -51,13 +51,26 @@ live_design!{
                     CheckType::Check => {
                         let left = 3;
                         let sz = self.size;
-                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        let c = vec2(left + sz, self.rect_size.y * 0.5 - 1);
                         
                         // PAUSE
-                        sdf.box(sz * 0.5, sz * 2.0, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
-                        sdf.box(sz * 1.75, sz * 2.0, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(
+                            sz * 0.5,
+                            sz * 1.0,
+                            sz * 0.9,
+                            sz * 3.0,
+                            1.0
+                        );
 
-                        sdf.fill(mix(#fff0, mix(#A, #F, self.hover), self.selected));
+                        sdf.box(
+                            sz * 1.75,
+                            sz * 1.0,
+                            sz * 0.9,
+                            sz * 3.0,
+                            1.0
+                        );
+
+                        sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_HOVER, self.hover), self.selected));
 
                         // PLAY
                         sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
@@ -65,7 +78,7 @@ live_design!{
                         sdf.line_to(c.x, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.close_path();
-                        sdf.fill(mix(mix(#44, #8, self.hover), #fff0, self.selected));
+                        sdf.fill(mix(mix(THEME_COLOR_U_2, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.selected));
 
                     }
                 }
