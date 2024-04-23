@@ -874,6 +874,28 @@ impl PortalListRef {
             }
         }
     }
+
+    /// Trigger an scrolling animation to the end of the list
+    ///
+    /// `max_delta`: This is the max number of items that are part of the animation.
+    /// It is used when the starting position is far from the end of the list.
+    ///
+    /// `speed`: This value controls how fast is the animation.
+    /// Note: This number should be large enough to reach the end, so it is important to
+    /// test the passed number. TODO provide a better implementation to ensure that the end
+    /// is always reached, no matter the speed value.
+    pub fn animate_scroll_to_end(&mut self, cx: &mut Cx, max_delta: usize, speed: f64) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        if inner.items.is_empty() { return };
+
+        let start_from = (inner.first_id as i16).max(inner.range_end as i16 - max_delta as i16);
+        inner.first_id = start_from as usize;
+
+        inner.scroll_state = ScrollState::Flick {
+            delta: -speed,
+            next_frame: cx.new_next_frame()
+        };
+    }
 }
 
 type ItemsWithActions = Vec<(usize, WidgetRef)>;
