@@ -117,10 +117,10 @@ impl FileSystem {
                         FileResponse::OpenFile(result) => {
                             match result {
                                 Ok((_unix_path, data, id)) => {
-                                    let file_id = LiveId(LiveId(id));
+                                    let file_id = LiveId(id);
                                     let dock = ui.dock(id!(dock));
                                     for (tab_id, file_id) in &self.tab_id_to_file_node_id {
-                                        if id == file_id.0.0 {
+                                        if id == file_id.0 {
                                             dock.redraw_tab(cx, *tab_id);
                                         }
                                     }
@@ -209,7 +209,7 @@ impl FileSystem {
         };
         self.open_documents.insert(file_id, OpenDoc::Decorations(dec));
         let path = self.file_node_path(file_id);
-        self.file_client.send_request(FileRequest::OpenFile(path, file_id.0.0));
+        self.file_client.send_request(FileRequest::OpenFile(path, file_id.0));
     }
     
     
@@ -220,7 +220,7 @@ impl FileSystem {
             if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
                 let text = doc.as_text().to_string();
                 let path = self.file_node_path(*file_id);
-                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0.0));
+                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0));
             }
         };
     }
