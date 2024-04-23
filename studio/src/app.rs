@@ -56,7 +56,7 @@ impl App {
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(id!(dock));            
-            let tab_id = dock.unique_tab_id(file_id.0.0);
+            let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), TabClosable::Yes);
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
@@ -123,7 +123,7 @@ impl MatchEvent for App{
                     }
                     else{
                         // lets open the editor
-                        let tab_id = dock.unique_tab_id(file_id.0.0);
+                        let tab_id = dock.unique_tab_id(file_id.0);
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
                         dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
@@ -300,7 +300,7 @@ impl MatchEvent for App{
                         }
                         else { // external file, we have to create a new tab
                             if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
-                                let tab_id = dock.unique_tab_id(file_id.0.0);
+                                let tab_id = dock.unique_tab_id(file_id.0);
                                 self.data.file_system.request_open_file(tab_id, file_id);
                                 dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
                                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
@@ -348,7 +348,7 @@ impl MatchEvent for App{
                             
         if let Some(file_id) = file_tree.file_clicked(&actions) {
             // ok lets open the file
-            let tab_id = dock.unique_tab_id(file_id.0.0);
+            let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
             dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
