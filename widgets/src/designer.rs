@@ -44,11 +44,18 @@ enum OutlineNode{
     }
 }
 
+struct FingerMove{
+    start_pan: DVec2,
+}
+
 #[derive(Live, Widget)]
 pub struct DesignerView {
     #[walk] walk:Walk,
     #[rust] area:Area,
     #[rust] reapply: bool,
+    #[rust(1.5)] zoom: f64,
+    #[rust] pan: DVec2,
+    #[rust] finger_move: Option<FingerMove>,
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,
     #[rust] components: ComponentMap<LivePtr, WidgetRef>,
@@ -59,13 +66,50 @@ pub struct DesignerView {
 
 impl LiveHook for DesignerView {
     fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
+        
         // hmm. we might need to re-apply the data
         self.reapply = true;
     }
 }
         
 impl Widget for DesignerView {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
+        match event.hits(cx, self.area) {
+            Hit::FingerDown(_fe) => {
+              self.finger_move = Some(FingerMove{
+                  start_pan: self.pan
+              });
+            },
+            Hit::KeyDown(_k)=>{
+               
+            }
+            Hit::FingerScroll(fs)=>{
+                let last_zoom = self.zoom;
+                if fs.scroll.y < 0.0{
+                    self.zoom *= 0.9;
+                }
+                else{
+                    self.zoom *= 1.1;
+                }
+                // we should shift the pan to stay in the same place
+                let pan1 = (fs.abs - fs.rect.pos) * last_zoom;
+                let pan2 = (fs.abs - fs.rect.pos) * self.zoom;
+                // we should keep it in the same place
+                
+                self.pan += pan1 - pan2;
+                
+                self.redraw(cx);
+            }
+            Hit::FingerMove(fe) => {
+                let fm = self.finger_move.as_ref().unwrap();
+                self.pan= fm.start_pan - (fe.abs - fe.abs_start) * self.zoom;
+                self.redraw(cx);
+            }
+            Hit::FingerUp(_) => {
+                self.finger_move = None;
+            }
+            _ => ()
+        }
     }
         
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
@@ -131,7 +175,7 @@ impl Widget for DesignerView {
             &self.pass,
             self.area,
         );
-        cx.set_pass_shift_scale(&self.pass, dvec2(-100.,-100.), dvec2(2.0,2.0));
+        cx.set_pass_shift_scale(&self.pass, self.pan, dvec2(self.zoom,self.zoom));
         
         DrawStep::done()
     }
