@@ -73,6 +73,8 @@ pub struct PortalList {
     #[rust] detect_tail_in_draw: bool,
     #[live(false)] auto_tail: bool,
     #[rust(false)] tail_range: bool,
+    #[rust(false)] at_end: bool,
+    #[rust(true)] not_filling_viewport: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(usize, LiveId), WidgetRef>,
@@ -139,11 +141,12 @@ impl PortalList {
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
-        
         // in this code we position all the drawn items 
-        
+
+        self.at_end = false;
+        self.not_filling_viewport = false;
+
         let vi = self.vec_index;
-        let mut at_end = false;
         let mut visible_items = 0;
 
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
@@ -179,7 +182,6 @@ impl PortalList {
                 
                 // compute if we are filling the viewport
                 // if not we have to trigger a stick-to-top
-                let mut not_filling_viewport = false;
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
                     for item in list.iter() {
@@ -188,7 +190,7 @@ impl PortalList {
                         }
                         total += item.size.index(vi);
                     }
-                    not_filling_viewport = total < viewport.size.index(vi);
+                    self.not_filling_viewport = total < viewport.size.index(vi);
                 }
                 
                 // in this case we manage the 'pull down' situation when we are at the top
@@ -214,13 +216,13 @@ impl PortalList {
                     // this is the normal case, however we have to here compute
                     // the 'stick to bottom' case 
                     let shift = if let Some(last_item_pos) = last_item_pos {
-                        if self.align_top_when_empty && not_filling_viewport {
+                        if self.align_top_when_empty && self.not_filling_viewport {
                             -first_pos
                         }
                         else {
                             let ret = (viewport.size.index(vi) - last_item_pos).max(0.0);
                             if ret > 0.0 {
-                                at_end = true;
+                                self.at_end = true;
                             }
                             ret
                         }
@@ -278,12 +280,12 @@ impl PortalList {
             log!("Draw state not at end in listview, please review your next_visible_item loop")
         }
         let rect = cx.turtle().rect();
-        if at_end || self.view_window == 0 || self.view_window > visible_items{
+        if self.at_end || self.view_window == 0 || self.view_window > visible_items{
             self.view_window = visible_items.max(4) - 3;
         }
         if self.detect_tail_in_draw{
             self.detect_tail_in_draw = false;
-            if self.auto_tail && at_end{
+            if self.auto_tail && self.at_end{
                 self.tail_range = true;
             }
         }
@@ -299,6 +301,7 @@ impl PortalList {
         if !self.keep_invisible{
             self.items.retain_visible();
         }
+
         cx.end_turtle_with_area(&mut self.area);
     }
     
@@ -873,6 +876,36 @@ impl PortalListRef {
                 }
             }
         }
+    }
+
+    /// Trigger an scrolling animation to the end of the list
+    ///
+    /// `max_delta`: This is the max number of items that are part of the animation.
+    /// It is used when the starting position is far from the end of the list.
+    ///
+    /// `speed`: This value controls how fast is the animation.
+    /// Note: This number should be large enough to reach the end, so it is important to
+    /// test the passed number. TODO provide a better implementation to ensure that the end
+    /// is always reached, no matter the speed value.
+    pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, max_delta: usize, speed: f64) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        if inner.items.is_empty() { return };
+
+        let start_from = (inner.first_id as i16).max(inner.range_end as i16 - max_delta as i16);
+        inner.first_id = start_from as usize;
+
+        inner.scroll_state = ScrollState::Flick {
+            delta: -speed,
+            next_frame: cx.new_next_frame()
+        };
+    }
+
+    /// It indicates if we have items not displayed towards the end of the list (below)
+    /// For instance, it is useful to show or hide a "jump to the most recent" button
+    /// on a chat messages list
+    pub fn further_items_bellow_exist(&self) -> bool {
+        let Some(inner) = self.borrow() else { return false };
+        !(inner.at_end || inner.not_filling_viewport)
     }
 }
 
