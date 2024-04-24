@@ -70,6 +70,8 @@ pub mod data_binding;
 pub mod base;
 pub mod theme_desktop_dark;
 pub mod image_cache;
+pub mod bare_step;
+pub mod turtle_step;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -181,4 +183,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::markdown::live_design(cx);
     crate::html::live_design(cx);
     crate::root::live_design(cx);
+    crate::bare_step::live_design(cx);
+    crate::turtle_step::live_design(cx);
 }
