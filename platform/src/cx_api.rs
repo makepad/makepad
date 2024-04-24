@@ -181,6 +181,9 @@ impl Cx {
             .push(CxOsOp::ShowClipboardActions(selected));
     }
 
+    /// Copies the given string to the clipboard.
+    /// 
+    /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops.push(CxOsOp::CopyToClipboard(content.to_owned()));
     }
