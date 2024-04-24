@@ -298,6 +298,13 @@ impl Cx {
                     size: (rect.size * dpi).ceil() / dpi,
                 })
             }
+            Some(CxPassRect::AreaOrigin(area, origin)) => {
+                let rect = area.rect(self);
+                Some(Rect {
+                    pos: origin,
+                    size: (rect.size * dpi).ceil() / dpi,
+                })
+            }
             /*Some(CxPassRect::ScaledArea(area, scale)) => {
                 let rect = area.rect(self);
                 Some(Rect {
