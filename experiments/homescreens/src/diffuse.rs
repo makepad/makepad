@@ -26,13 +26,15 @@ live_design!{
 
                 return vec2(A,B);
             },
-
+            fn  pal(self,   t: float,  a:vec3,  b:vec3, c:vec3, d:vec3 ) -> vec3            {
+                return a + b*cos( 6.28318*(c*t+d) );
+            },
             fn pixel(self) -> vec4{
 
                 let S = self.samp(self.pos);
-            
+                let C = self.pal( S.y, vec3(0.5,0.5,0.5),vec3(0.5,0.5,0.5),vec3(1.0,1.0,0.5),vec3(0.8,0.90,0.30) );
              //   return vec4(0.0, 0.0, 1.0, 1.0);
-                return vec4(S.x,S.y,0.0, 1.0);
+                return vec4(C.xyz, 1.0);
             }
         }
 
@@ -50,6 +52,7 @@ live_design!{
             },
 
             fn pixel(self) -> vec4{  
+                return self.tovec(vec2(1.0,0.0));
                 return self.tovec(vec2(sin(self.time*10.)*0.5+0.5,sin(self.time*10.123145)*0.5+0.5));
             }
         }
@@ -82,8 +85,8 @@ live_design!{
                 
                 let offset = vec2(0.0,0.0556);
                 let pos2 = self.pos + offset;
-                let Dx = 0.002;
-                let Dy = 0.002;
+                let Dx = 0.00125;
+                let Dy = 0.001;
 
 
                 let S1 = self.samp(pos2 );
@@ -106,8 +109,8 @@ live_design!{
 
                 let DA = 1.0;
                 let DB = 0.5;
-                let f = 0.06;
-                let k = 0.03;
+                let f = 0.07 - self.pos.x * 0.025;
+                let k = 0.07 - self.pos.y * 0.023;
 
                 let speed = 1.0;
 //                let aNew = S1.x + (avga.x - S1.x )  * 0.98;
