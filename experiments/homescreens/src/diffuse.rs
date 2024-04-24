@@ -18,14 +18,21 @@ live_design!{
             width: Fill,
             height: Fill,
             texture image: texture2d,
+            fn samp(self, pos:vec2) -> vec2{
+                let asamp = sample2d(self.image, pos);
+                
+                let A: float = asamp.x ;
+                let B: float = asamp.y ;
+
+                return vec2(A,B);
+            },
+
             fn pixel(self) -> vec4{
 
-                let samp = sample2d(self.image, self.pos);
-                let A = samp.y + samp.x * 10.0;
-                let B = samp.w + samp.z * 10.0;
-     
+                let S = self.samp(self.pos);
+            
              //   return vec4(0.0, 0.0, 1.0, 1.0);
-                return vec4(A/10.0, B/10.0, 0.0, 1.0);
+                return vec4(S.x,S.y,0.0, 1.0);
             }
         }
 
@@ -33,13 +40,17 @@ live_design!{
             width: Fill,
             height: Fill,
             texture image: texture2d,
-            fn pixel(self) -> vec4{
 
-                let samp = sample2d(self.image, self.pos);
-                let A = samp.y + samp.x * 10.0;
-                let B = samp.w + samp.z * 10.0;
-     
-                return vec4(1., 0., 0.0, 1.0);
+            fn tovec(self, inp:vec2) -> vec4{
+                let aNew = inp.x;
+                let bNew = inp.y;
+               
+
+                return vec4(aNew, bNew, 0, 1.0);
+            },
+
+            fn pixel(self) -> vec4{  
+                return self.tovec(vec2(sin(self.time*10.)*0.5+0.5,sin(self.time*10.123145)*0.5+0.5));
             }
         }
 
@@ -47,23 +58,66 @@ live_design!{
             width: Fill,
             height: Fill,
             texture image: texture2d,
-            fn pixel(self) -> vec4{
-                 let samp = sample2d(self.image, self.pos);
-                let A: float = samp.y + samp.x * 10.0;
-                let B: float = samp.w + samp.z * 10.0;
+
+           
+            fn tovec(self, inp:vec2) -> vec4{
+                let aNew = inp.x;
+                let bNew = inp.y;
+               
+
+                return vec4(aNew, bNew, 0, 1.0);
+            },
 
 
-                let bNew = B-A;
-                let aNew = A-B;
-
-                let Bh = floor(bNew);
-                let Ah = floor(aNew);
-                let Bl = (B-Bh);
-                let Al = (A-Ah);
+            fn samp(self, pos:vec2) -> vec2{
+                let asamp = sample2d(self.image, pos);
                 
-                return vec4(5., 1., 5.0, 1.0);
+                let A =   asamp.x;
+                let B = asamp.y;
+
+                return vec2(A,B);
+            },
+
+            fn pixel(self) -> vec4{
+                
+                let offset = vec2(0.0,0.0556);
+                let pos2 = self.pos + offset;
+                let Dx = 0.002;
+                let Dy = 0.002;
+
+
+                let S1 = self.samp(pos2 );
+               
+                let S2 = self.samp(pos2 + vec2(Dx,0.0));
+                let S3 = self.samp(pos2 + vec2(-Dx,0.0));
+                let S4 = self.samp(pos2 + vec2(0.0,Dy));
+                let S5 = self.samp(pos2 + vec2(0.0,-Dy));
+               
+                let S6 = self.samp(pos2 + vec2(Dx,Dy));
+                let S7 = self.samp(pos2 + vec2(-Dx,Dy));
+                let S8 = self.samp(pos2 + vec2(Dx,-Dy));
+                let S9 = self.samp(pos2 + vec2(-Dx,-Dy));
+             
+             
+                let avga = ((S2 + S3 + S4 + S5)*0.2) + ((S6 + S7 + S8 + S9)*0.05) -S1; 
+                
+                let a = S1.x;
+                let b = S1.y;
+
+                let DA = 1.0;
+                let DB = 0.5;
+                let f = 0.06;
+                let k = 0.03;
+
+                let speed = 1.0;
+//                let aNew = S1.x + (avga.x - S1.x )  * 0.98;
+  //              let bNew =  S1.y + (avga.y - S1.y )  * 0.98;
+                let aNew = a + (DA * (avga.x) - (a * b * b) + f * (1-a)) *speed;
+                let bNew = b + (DB * (avga.y) + (a * b * b) - (k+f)*b) * speed;
+                
+               // return vec4(0., 0., 0.0, 0.0);
       
-      //          return vec4(Ah, Al, Bh, Bl);
+                return self.tovec(vec2(aNew,bNew));
             }
         }
     }
@@ -121,7 +175,7 @@ impl Widget for DiffuseThing{
         if self.target_0.is_none(){
             self.target_0 = Some(Texture::new_with_format(
                 cx,
-                TextureFormat::RenderBGRAu8 {
+                TextureFormat::RenderBGRAu8   {
                     size: TextureSize::Auto,
                 },
             ));
@@ -146,13 +200,12 @@ impl Widget for DiffuseThing{
             match self.current_target {
                 0 => 
                 {
-                
                     self.current_target = 1;
                 }
                 1 => 
                 {
-                    target = self.target_0.as_ref().unwrap();
-                    source = self.target_1.as_ref().unwrap();
+                    target = self.target_1.as_ref().unwrap();
+                    source = self.target_0.as_ref().unwrap();
 
                     self.current_target = 0;
                 }
@@ -168,28 +221,26 @@ impl Widget for DiffuseThing{
             );        
 
             cx.make_child_pass(&self.pass);
-            cx.set_pass_area_with_origin(
-                &self.pass,
-                self.area,
-                dvec2(0.0,0.0)
-            );
+            
             cx.begin_pass(&self.pass, None);
             self.draw_list.begin_always(cx);
            
+          
             cx.begin_turtle(walk, Layout::flow_down());
             
 
             self.draw_reaction.draw_vars.set_texture(0, source);    
             
-            let rect:Rect = cx.turtle().rect();// = cx.walk_turtle_with_area(&mut self.area, walk);
+            let mut rect:Rect = cx.walk_turtle_with_area(&mut self.area, walk);
+           // rect.pos.y = 0.;
             self.draw_reaction.draw_abs(cx, rect);
 
-            let rect2 = rect.scale_and_shift(rect.center(), 0.3, DVec2{x: 0.0, y: 0.0});
+            let rect2 = rect.scale_and_shift(rect.center(), 0.1, DVec2{x: 0.0, y: 0.0});
             self.draw_thing.draw_abs(cx, rect2);
 
 
             cx.end_turtle();
-             self.draw_list.end(cx);
+            self.draw_list.end(cx);
             cx.end_pass(&self.pass);
 
           
@@ -199,7 +250,11 @@ impl Widget for DiffuseThing{
             self.draw_bg.draw_abs(cx, rect);
 
             
-          
+            cx.set_pass_area_with_origin(
+                &self.pass,
+                self.area,
+                dvec2(0.0,0.0)
+            );
 
         }
         DrawStep::done()
