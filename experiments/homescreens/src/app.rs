@@ -219,8 +219,9 @@ live_design!{
                                 }
                             }
                         }
-                         <ContainerStage>{   
-                            <DiffuseThing>{}
+                         <ContainerStage>{ 
+                            flow: Overlay,  
+                            <DiffuseThing>{width: Fill, height: Fill}
                             <IconSet> {}              
                          }
                 
