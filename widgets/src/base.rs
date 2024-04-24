@@ -55,7 +55,8 @@ live_design!{
     import crate::designer::DesignerBase;
     import crate::designer::DesignerOutlineBase;
     import crate::designer::DesignerViewBase;
-    
+    import crate::bare_step::BareStep;
+    import crate::turtle_step::TurtleStep;
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
 
@@ -812,4 +813,6 @@ live_design!{
     DesignerBase = <DesignerBase>{}
     DesignerOutlineBase = <DesignerOutlineBase>{}
     DesignerViewBase = <DesignerViewBase>{}
+    BareStep = <BareStep>{}
+    TurtleStep = <TurtleStep>{}
 }

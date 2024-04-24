@@ -17,6 +17,9 @@ live_design!{
     
     DesignerViewBase = {{DesignerView}}{
     }
+    
+    DesignerContainerBase = {{DesignerContainer}}{
+    }    
 }
 
 #[allow(dead_code)]
@@ -41,6 +44,22 @@ enum OutlineNode{
         prop_type: LivePropType,
         ptr: LivePtr,
         children: SmallVec<[LiveId;4]>
+    }
+}
+
+
+#[derive(Live, Widget, LiveHook)]
+pub struct DesignerContainer {
+    #[deref] view: View
+}
+
+impl Widget for DesignerContainer {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        self.view.handle_event(cx, event, scope);
+    }
+                
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
+       DrawStep::done()
     }
 }
 
@@ -127,50 +146,48 @@ impl Widget for DesignerView {
                 PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
             )
         }
-                
-        if !cx.will_redraw(&mut self.draw_list, walk) {
-            self.draw_bg.draw_vars.set_texture(0, self.color_texture.as_ref().unwrap());
-            let rect = cx.walk_turtle_with_area(&mut self.area, walk);
-            self.draw_bg.draw_abs(cx, rect);
-            return DrawStep::done();
-        }
         
-        cx.make_child_pass(&self.pass);
-        cx.begin_pass(&self.pass, None);
-        
-        self.draw_list.begin_always(cx);
-
-        cx.begin_turtle(walk, Layout::flow_down());
-        let data = scope.props.get::<DesignerData>().unwrap();
-        if let Some(selected) = &data.selected{
-            if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
-                let entry = self.components.get_or_insert(cx, *ptr, | cx | {
-                    WidgetRef::new_from_ptr(cx, Some(*ptr))
-                });
-                if self.reapply{
-                    self.reapply = false;
-                    entry.apply_from_ptr(cx, Some(*ptr));
+        if cx.will_redraw(&mut self.draw_list, walk) {
+            
+            cx.make_child_pass(&self.pass);
+            cx.begin_pass(&self.pass, None);
+            
+            self.draw_list.begin_always(cx);
+    
+            cx.begin_turtle(walk, Layout::flow_down());
+            
+            let data = scope.props.get::<DesignerData>().unwrap();
+            
+            if let Some(selected) = &data.selected{
+                if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
+                    let entry = self.components.get_or_insert(cx, *ptr, | cx | {
+                        WidgetRef::new_from_ptr(cx, Some(*ptr))
+                    });
+                    if self.reapply{
+                        self.reapply = false;
+                        entry.apply_from_ptr(cx, Some(*ptr));
+                    }
+                    entry.draw_all(cx, scope);
                 }
-                entry.draw_all(cx, scope);
+                
+                /*if let Some(components) = data.get_node_by_node_id(selected){
+                    // alright lets go draw these things!
+                    
+                    log!("HERE");
+                }else{
+                // clear out
+                }*/
             }
             
-            /*if let Some(components) = data.get_node_by_node_id(selected){
-                // alright lets go draw these things!
-                
-                log!("HERE");
-            }else{
-               // clear out
-            }*/
+            cx.end_turtle_with_area(&mut self.area);
+            self.draw_list.end(cx);
+            cx.end_pass(&self.pass);
         }
-        
-        cx.end_turtle_with_area(&mut self.area);
-        self.draw_list.end(cx);
-        cx.end_pass(&self.pass);
         
         self.draw_bg.draw_vars.set_texture(0, self.color_texture.as_ref().unwrap());
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_bg.draw_abs(cx, rect);
-        
+            
         cx.set_pass_area(
             &self.pass,
             self.area,
