@@ -168,6 +168,11 @@ impl Widget for DiffuseThing{
             );        
 
             cx.make_child_pass(&self.pass);
+            cx.set_pass_area_with_origin(
+                &self.pass,
+                self.area,
+                dvec2(0.0,0.0)
+            );
             cx.begin_pass(&self.pass, None);
             self.draw_list.begin_always(cx);
            
@@ -175,7 +180,8 @@ impl Widget for DiffuseThing{
             
 
             self.draw_reaction.draw_vars.set_texture(0, source);    
-            let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+            
+            let rect:Rect = cx.turtle().rect();// = cx.walk_turtle_with_area(&mut self.area, walk);
             self.draw_reaction.draw_abs(cx, rect);
 
             let rect2 = rect.scale_and_shift(rect.center(), 0.3, DVec2{x: 0.0, y: 0.0});
@@ -186,11 +192,15 @@ impl Widget for DiffuseThing{
              self.draw_list.end(cx);
             cx.end_pass(&self.pass);
 
+          
 
             self.draw_bg.draw_vars.set_texture(0, target);    
             let rect = cx.walk_turtle_with_area(&mut self.area, walk);
             self.draw_bg.draw_abs(cx, rect);
-        
+
+            
+          
+
         }
         DrawStep::done()
 
