@@ -120,11 +120,13 @@ impl Widget for Markdown {
                 },
                 MarkdownNode::BeginCode=>{
                     cx.turtle_new_line();
+                    tf.combine_spaces.push(false);
                     tf.fixed.push();
-                    tf.begin_code(cx);     
+                    tf.begin_code(cx);
                 },
                 MarkdownNode::EndCode=>{
                     tf.fixed.pop();
+                    tf.combine_spaces.pop();
                     tf.end_code(cx);
                 },
                 MarkdownNode::BeginBold=>{
@@ -154,7 +156,20 @@ impl Widget for Markdown {
     } 
     
     fn set_text(&mut self, v:&str){
-        self.body = Rc::new(v.to_string())
+        self.body = Rc::new(v.to_string());
+
+        let new_doc = parse_markdown(&*self.body);
+        if new_doc != self.doc{
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+        }
     }
-} 
+}
+
+impl MarkdownRef {
+    pub fn set_text(&mut self, v:&str) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.set_text(v)
+    }
+}
  
