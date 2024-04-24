@@ -3,10 +3,12 @@ use crate::{
     makepad_draw::*,
     widget_match_event::*,
     outline_tree::*,
+    turtle_step::*,
     view::View,
     widget::*,
 };
 use std::collections::HashMap;
+use std::fmt::Write;
 
 live_design!{
     DesignerBase = {{Designer}} {
@@ -59,6 +61,13 @@ impl Widget for DesignerContainer {
     }
                 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
+        let child = scope.props.get::<WidgetRef>().unwrap();
+        // alright lets draw the container, then the child
+        let _turtle_step = self.view.turtle_step(id!(inner));
+        while let Some(_next) = self.view.draw(cx, &mut Scope::empty()).step() {
+            child.draw_all(cx, &mut Scope::empty());
+        }
+        
        DrawStep::done()
     }
 }
@@ -78,6 +87,7 @@ pub struct DesignerView {
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,
     #[rust] components: ComponentMap<LivePtr, WidgetRef>,
+    #[rust] containers: ComponentMap<LivePtr, WidgetRef>,
     #[redraw] #[rust(DrawList2d::new(cx))] draw_list: DrawList2d,
     #[rust(Pass::new(cx))] pass: Pass,
     #[rust] color_texture: Option<Texture>,
@@ -154,32 +164,34 @@ impl Widget for DesignerView {
             
             self.draw_list.begin_always(cx);
     
-            cx.begin_turtle(walk, Layout::flow_down());
+            cx.begin_pass_sized_turtle_no_clip(Layout::flow_down());
             
             let data = scope.props.get::<DesignerData>().unwrap();
             
+            // lets draw the component container windows and components
+            
             if let Some(selected) = &data.selected{
                 if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
-                    let entry = self.components.get_or_insert(cx, *ptr, | cx | {
+                    let comp = self.components.get_or_insert(cx, *ptr, | cx | {
                         WidgetRef::new_from_ptr(cx, Some(*ptr))
                     });
+                    
+                    let cptr = self.container.unwrap();
+                    let container = self.containers.get_or_insert(cx, cptr, | cx | {
+                        WidgetRef::new_from_ptr(cx, Some(cptr))
+                    });
+                    
                     if self.reapply{
                         self.reapply = false;
-                        entry.apply_from_ptr(cx, Some(*ptr));
+                        container.apply_from_ptr(cx, Some(self.container.unwrap()));
+                        comp.apply_from_ptr(cx, Some(*ptr));
                     }
-                    entry.draw_all(cx, scope);
+                    // ok so we're going to draw the container with the widget inside
+                    container.draw_all(cx, &mut Scope::with_props(comp))
                 }
-                
-                /*if let Some(components) = data.get_node_by_node_id(selected){
-                    // alright lets go draw these things!
-                    
-                    log!("HERE");
-                }else{
-                // clear out
-                }*/
             }
             
-            cx.end_turtle();
+            cx.end_pass_sized_turtle_no_clip();
             self.draw_list.end(cx);
             cx.end_pass(&self.pass);
         }
@@ -188,9 +200,10 @@ impl Widget for DesignerView {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_bg.draw_abs(cx, rect);
             
-        cx.set_pass_area(
+        cx.set_pass_area_with_origin(
             &self.pass,
             self.area,
+            dvec2(0.0,0.0)
         );
         cx.set_pass_shift_scale(&self.pass, self.pan, dvec2(self.zoom,self.zoom));
         
@@ -211,48 +224,52 @@ impl Widget for DesignerOutline {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let file_tree = self.view.outline_tree(id!(outline_tree));
         let data = scope.props.get::<DesignerData>().unwrap();
+        let mut buf = String::new();
         while let Some(next) = self.view.draw(cx, &mut Scope::empty()).step() {
             if let Some(mut file_tree) = file_tree.borrow_mut_if_eq(&next) {
                 if let OutlineNode::Virtual{children,..} = &data.node_map.get(&data.root).as_ref().unwrap(){
-                    recur_nodes(cx,  &mut *file_tree, &data.node_map, children);
+                    recur_nodes(&mut buf, cx,  &mut *file_tree, &data.node_map, children);
                 }
-                
             }
         }
         
-        fn recur_nodes(cx: &mut Cx2d, outline_tree: &mut OutlineTree,map:&HashMap<LiveId,OutlineNode>, children:&[LiveId]) {
+        fn recur_nodes(buf:&mut String, cx: &mut Cx2d, outline_tree: &mut OutlineTree,map:&HashMap<LiveId,OutlineNode>, children:&[LiveId]) {
             for child in children{
                 match map.get(&child).unwrap(){
                     OutlineNode::Folder{name, children}=>{
                         if outline_tree.begin_folder(cx, *child, &name).is_ok(){
-                            recur_nodes(cx, outline_tree, map, children);
+                            recur_nodes(buf, cx, outline_tree, map, children);
                             outline_tree.end_folder();
                         }            
                     }
                     OutlineNode::File{name,  file_id:_, children}=>{
                         if outline_tree.begin_folder(cx, *child, &name).is_ok(){
-                            recur_nodes(cx, outline_tree, map, children);
+                            recur_nodes(buf, cx, outline_tree, map, children);
                             outline_tree.end_folder();
                         }            
                     }
                     OutlineNode::Virtual{name, children}=>{
                         if outline_tree.begin_folder(cx, *child, &name).is_ok(){
-                            recur_nodes(cx, outline_tree, map, children);
+                            recur_nodes(buf, cx, outline_tree, map, children);
                             outline_tree.end_folder();
                         }            
                     }
                     OutlineNode::Component{children, name, prop_type, class, ..}=>{
-                        if outline_tree.begin_folder(cx, *child, &if !name.is_unique(){
+                        buf.clear();
+                        if !name.is_unique(){
                             if let LivePropType::Field = prop_type {
-                                format!("{}: <{}>", name, class)
+                                write!(buf, "{}: <{}>", name, class);
                             }
                             else {
-                                format!("{}=<{}>", name, class)
+                                write!(buf, "{}=<{}>", name, class);
                             }
-                        }else {
-                            format!("<{}>", class)
-                        }).is_ok() {
-                            recur_nodes(cx, outline_tree, map, children);
+                        }
+                        else {
+                            write!(buf, "<{}>", class);
+                        }
+                        
+                        if outline_tree.begin_folder(cx, *child, &buf).is_ok() {
+                            recur_nodes(buf, cx, outline_tree, map, children);
                             outline_tree.end_folder();
                         }
                     }
