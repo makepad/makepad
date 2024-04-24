@@ -69,6 +69,7 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMacosMenu(MacosMenu),
     ShowClipboardActions(String),
+    CopyToClipboard(String),
 
     HttpRequest {
         request_id: LiveId,
@@ -178,6 +179,11 @@ impl Cx {
     pub fn show_clipboard_actions(&mut self, selected: String) {
         self.platform_ops
             .push(CxOsOp::ShowClipboardActions(selected));
+    }
+
+    pub fn copy_to_clipboard(&mut self, content: String) {
+        self.platform_ops
+            .push(CxOsOp::CopyToClipboard(content));
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
