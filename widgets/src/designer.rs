@@ -103,7 +103,15 @@ impl LiveHook for DesignerView {
         
 impl Widget for DesignerView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
+        
         match event.hits(cx, self.area) {
+            Hit::FingerHoverOver(fh) =>{
+                // alright so we hover over. lets determine the mouse cursor
+                
+            }
+            Hit::FingerHoverOut(fh)=>{
+                
+            }
             Hit::FingerDown(_fe) => {
               self.finger_move = Some(FingerMove{
                   start_pan: self.pan
