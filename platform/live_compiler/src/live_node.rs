@@ -442,9 +442,9 @@ impl InlineString {
             buffer[..bytes.len()].copy_from_slice(bytes);
             return Some(Self {length: bytes.len() as u8, buffer})
         }
-            None
+        None
     }
-    
+        
     pub fn as_str(&self) -> &str {
         unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer.as_ptr(), self.length as usize))}
     }

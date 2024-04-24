@@ -2984,6 +2984,17 @@ live_design! {
     }
     
     DesignerContainer = <DesignerContainerBase>{
+        width: 1200,
+        height: 1200,
+        <RoundedView>{
+            draw_bg:{
+                color:#3,
+                border_width:2
+                border_color:#5
+            }
+            padding: 10
+            inner = <BareStep>{}
+        }
     }
     
     DesignerView = <DesignerViewBase>{
