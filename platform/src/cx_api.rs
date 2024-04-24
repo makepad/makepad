@@ -181,9 +181,8 @@ impl Cx {
             .push(CxOsOp::ShowClipboardActions(selected));
     }
 
-    pub fn copy_to_clipboard(&mut self, content: String) {
-        self.platform_ops
-            .push(CxOsOp::CopyToClipboard(content));
+    pub fn copy_to_clipboard(&mut self, content: &str) {
+        self.platform_ops.push(CxOsOp::CopyToClipboard(content.to_owned()));
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
