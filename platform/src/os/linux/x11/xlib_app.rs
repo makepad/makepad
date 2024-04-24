@@ -449,7 +449,7 @@ impl XlibApp {
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            self.copy_to_clipboard(response, &window, &event);
+                                            self.copy_to_clipboard(response, window.window.unwrap(), event.xkey.time);
                                         }
                                     }
                                     KeyCode::KeyX => {
@@ -459,7 +459,7 @@ impl XlibApp {
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            self.copy_to_clipboard(response, &window, &event);
+                                            self.copy_to_clipboard(response, window.window.unwrap(), event.xkey.time);
                                         }
                                     }
                                     _ => ()
@@ -839,15 +839,15 @@ impl XlibApp {
         }
     }
 
-    unsafe fn copy_to_clipboard(&mut self, text: &String, window: &XlibWindow, event: &XEvent) {
+    pub unsafe fn copy_to_clipboard(&mut self, text: &String, window_id: c_ulong, time: u64) {
         // store the text on the clipboard
         self.clipboard = text.clone();
         // lets set the owner
         x11_sys::XSetSelectionOwner(
             self.display,
             self.atoms.clipboard,
-            window.window.unwrap(),
-            event.xkey.time
+            window_id,
+            time
         );
         x11_sys::XFlush(self.display);
     }
