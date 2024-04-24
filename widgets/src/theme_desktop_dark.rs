@@ -2981,7 +2981,9 @@ live_design! {
     }
     
     DesignerOutline = <DesignerOutlineBase>{
-        
+    }
+    
+    DesignerContainer = <DesignerContainerBase>{
     }
     
     DesignerView = <DesignerViewBase>{
@@ -3000,6 +3002,9 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return sample2d_rt(self.image, self.pos * self.scale + self.shift);
             }
+        }
+        container: <DesignerContainer>{
+            
         }
     }
         
