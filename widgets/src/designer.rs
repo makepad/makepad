@@ -179,7 +179,7 @@ impl Widget for DesignerView {
                 }*/
             }
             
-            cx.end_turtle_with_area(&mut self.area);
+            cx.end_turtle();
             self.draw_list.end(cx);
             cx.end_pass(&self.pass);
         }
