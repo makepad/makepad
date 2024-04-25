@@ -255,7 +255,7 @@ impl MatchEvent for App{
             match action.cast(){
                 CodeEditorAction::TextDidChange => {
                     // lets write the file
-                    self.data.file_system.request_save_file(action.path.get(0))
+                    self.data.file_system.request_save_file(action.path.last())
                 }
                 CodeEditorAction::None=>{}
             }
