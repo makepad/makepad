@@ -160,7 +160,7 @@ live_design! {
             }
         }
         ui: <Root>{
-            <Window> {
+            main_window = <Window> {
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 block_signal_event: true;

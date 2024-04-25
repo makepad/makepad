@@ -49,6 +49,7 @@ pub mod page_flip;
 pub mod keyboard_view;
 pub mod flat_list;
 pub mod file_tree;
+pub mod outline_tree;
 pub mod slides_view;
 pub mod color_picker;
 pub mod root;
@@ -66,9 +67,11 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
-mod base;
-mod theme_desktop_dark;
+pub mod base;
+pub mod theme_desktop_dark;
 pub mod image_cache;
+pub mod bare_step;
+pub mod turtle_step;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -169,6 +172,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::dock::live_design(cx);
     crate::color_picker::live_design(cx);
     crate::file_tree::live_design(cx);
+    crate::outline_tree::live_design(cx);
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);
@@ -179,4 +183,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::markdown::live_design(cx);
     crate::html::live_design(cx);
     crate::root::live_design(cx);
+    crate::bare_step::live_design(cx);
+    crate::turtle_step::live_design(cx);
 }
