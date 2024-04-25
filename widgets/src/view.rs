@@ -119,13 +119,13 @@ pub struct View {
     pub draw_bg: DrawColor,
 
     #[live(false)]
-    show_bg: bool,
+    pub show_bg: bool,
 
     #[layout]
-    layout: Layout,
+    pub layout: Layout,
 
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
 
     //#[live] use_cache: bool,
     #[live]
@@ -139,7 +139,7 @@ pub struct View {
     event_order: EventOrder,
 
     #[live(true)]
-    visible: bool,
+    pub visible: bool,
 
     #[live(true)]
     grab_key_focus: bool,
