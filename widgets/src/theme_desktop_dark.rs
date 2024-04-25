@@ -70,6 +70,7 @@ live_design! {
     THEME_COLOR_MAKEPAD = #FF5C39FF
 
     THEME_COLOR_BG_APP = (mix(mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.28, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
 
@@ -1547,7 +1548,7 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(THEME_COLOR_D_HIDDEN);
+                sdf.clear(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead.
 
                 if self.is_vertical > 0.5 {
                     sdf.box(
@@ -2467,13 +2468,13 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_CONTAINER,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
                         THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
+                        THEME_COLOR_BG_HIGHLIGHT,
                         self.focussed
                     ),
                     self.selected
@@ -2514,7 +2515,7 @@ live_design! {
                 )
             }
 
-            text_style: <THEME_FONT_DATA> {
+            text_style: <THEME_FONT_CODE> {
                 top_drop: 1.2,
             }
         }
@@ -2652,13 +2653,13 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_CONTAINER,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
                         THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
+                        THEME_COLOR_BG_HIGHLIGHT,
                         self.focussed
                     ),
                     self.selected
