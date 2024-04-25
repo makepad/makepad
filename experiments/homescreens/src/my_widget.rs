@@ -15,7 +15,6 @@ live_design!{
 #[derive(Live, Widget)]
 pub struct MyWidget {
     #[redraw] #[live] draw: DrawQuad,
-//    #[redraw] #[live] cube: DrawCube,
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[live] time: f32,

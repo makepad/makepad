@@ -162,6 +162,10 @@ impl LiveId {
         Self(self.0 + what)
     }
     
+    pub fn xor(&self, what:u64)->Self{
+        Self((self.0 ^ what)| 0x8000_0000_0000_0000)
+    }
+    
     pub fn sub(&self, what:u64)->Self{
         Self(self.0 - what)
     }

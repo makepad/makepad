@@ -44,7 +44,7 @@ pub struct LiveRegistry {
     pub live_files: Vec<LiveFile>,
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     //pub ignore_no_dsl: HashSet<LiveId>,
-    pub main_module: Option<(LiveModuleId, LiveId)>,
+    pub main_module: Option<LiveTypeInfo>,
     pub components: LiveComponentRegistries,
     pub package_root: Option<String>
 }
@@ -83,6 +83,9 @@ pub struct LiveFileChange {
 }
 
 impl LiveRegistry {
+    pub fn file_ids(&self)->&HashMap<String, LiveFileId>{
+        &self.file_ids
+    }
     
     pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
@@ -210,8 +213,8 @@ impl LiveRegistry {
     }
     
     pub fn main_file_id(&self) -> Option<LiveFileId> {
-        if let Some(m) = self.main_module{
-            if let Some(m) =  self.module_id_to_file_id.get(&m.0){
+        if let Some(m) = &self.main_module{
+            if let Some(m) =  self.module_id_to_file_id.get(&m.module_id){
                 return Some(m.clone())
             }
         }

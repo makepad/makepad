@@ -281,7 +281,12 @@ impl Cx {
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
-        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        
+        self.passes[pass_id].set_matrix(
+            pass_rect.pos, 
+            pass_rect.size
+        );
+        
         self.passes[pass_id].paint_dirty = false;
 
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
