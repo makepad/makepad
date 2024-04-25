@@ -209,10 +209,16 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         Kind::Normal=>{
                             let last_is_space = cursor.last_char == ' ';
                             cursor.next();
+                            let mut spaces = 0;
                             while cursor.chars[0] == ' '{
                                 cursor.next();
+                                spaces += 1;
                             }
-                            if cursor.chars[0] == '\n' || cursor.chars[0] == '\0'{
+                            if cursor.chars[0] == '#'{
+                                state = State::Root{spaces};
+                                nodes.push(MarkdownNode::EndNormal);
+                            }
+                            else if cursor.chars[0] == '\n' || cursor.chars[0] == '\0'{
                                 cursor.next();
                                 state = State::Root{spaces:0};
                                 nodes.push(MarkdownNode::EndNormal);
