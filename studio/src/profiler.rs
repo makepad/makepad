@@ -3,18 +3,33 @@ use {
     crate::{
         app::AppData,
         makepad_widgets::*,
-    },
-    std::{
-        fmt::Write,
-        env,
-    },
+    }, makepad_widgets::makepad_micro_serde::SerJson, std::{
+        env, fmt::Write, fs
+    }
 };
 
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    
+
+    ICO_EXPORT = dep("crate://self/resources/icons/Icon_Export.svg")
+
+    IconButton = <Button> {
+        draw_icon: {
+            svg_file: (ICO_EXPORT),
+        }
+        icon_walk: {width: 12, height: Fit}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.result
+            }
+        }
+        padding: 5.0
+        text: ""
+    }
+
     ProfilerEventChart = {{ProfilerEventChart}}{
         height: Fill,
         width: Fill
@@ -54,6 +69,21 @@ live_design!{
     Profiler = {{Profiler}}{
         height: Fill,
         width: Fill
+
+        flow: Right
+
+        side_panel = <View> {
+            show_bg: true
+            draw_bg: {
+                color: (THEME_COLOR_BG_EDITOR)
+            }
+            width: Fit
+            align: {x: 0.5, y: 0.0},
+            export_trace_button = <IconButton> {
+                margin: 5.0
+            }
+        }
+
         <ProfilerEventChart>{
         }
     }
@@ -221,6 +251,21 @@ impl Widget for Profiler {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        self.widget_match_event(cx, event, scope);
         self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl WidgetMatchEvent for Profiler {
+    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
+        let build_manager = &scope.data.get::<AppData>().build_manager;
+
+        if self.view.button(id!(side_panel.export_trace_button)).clicked(&actions) {
+            if let Some(pss) = build_manager.profile.values().next(){    
+                let serialized_samples = pss.serialize_json();
+
+                fs::write("profiler-trace.json", serialized_samples).expect("Could not write to trace export file");
+            }
+        }
     }
 }
