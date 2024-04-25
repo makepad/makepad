@@ -1,9 +1,9 @@
 use {
-    std::{collections::HashMap, sync::Arc},
-    stitch::{
+    makepad_stitch::{
         Engine, Error, ExternRef, Func, FuncRef, Global, GlobalType, Instance, Limits, Linker, Mem,
         MemType, Module, Mut, Ref, RefType, Store, Table, TableType, Val, ValType,
     },
+    std::{collections::HashMap, sync::Arc},
     wast::{
         core::{HeapType, NanPattern, WastArgCore, WastRetCore},
         parser,

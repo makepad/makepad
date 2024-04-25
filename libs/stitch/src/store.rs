@@ -67,7 +67,7 @@ impl Store {
     }
 
     /// Inserts the given [`FuncEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`FuncEntity`].
     pub(crate) fn insert_func(&mut self, func: FuncEntity) -> Handle<FuncEntity> {
         let func = AliasableBox::from_box(Box::new(func));
@@ -77,7 +77,7 @@ impl Store {
     }
 
     /// Inserts the given [`TableEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`TableEntity`].
     pub(crate) fn insert_table(&mut self, table: TableEntity) -> Handle<TableEntity> {
         let table = AliasableBox::from_box(Box::new(table));
@@ -87,7 +87,7 @@ impl Store {
     }
 
     /// Inserts the given [`MemEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`MemEntity`].
     pub(crate) fn insert_mem(&mut self, mem: MemEntity) -> Handle<MemEntity> {
         let mem = AliasableBox::from_box(Box::new(mem));
@@ -97,7 +97,7 @@ impl Store {
     }
 
     /// Inserts the given [`GlobalEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`GlobalEntity`].
     pub(crate) fn insert_global(&mut self, global: GlobalEntity) -> Handle<GlobalEntity> {
         let global = AliasableBox::from_box(Box::new(global));
@@ -107,7 +107,7 @@ impl Store {
     }
 
     /// Inserts the given [`ElemEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`ElemEntity`].
     pub(crate) fn insert_elem(&mut self, elem: ElemEntity) -> Handle<ElemEntity> {
         let elem = AliasableBox::from_box(Box::new(elem));
@@ -117,7 +117,7 @@ impl Store {
     }
 
     /// Inserts the given [`DataEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`DataEntity`].
     pub(crate) fn insert_data(&mut self, data: DataEntity) -> Handle<DataEntity> {
         let data = AliasableBox::from_box(Box::new(data));
@@ -127,7 +127,7 @@ impl Store {
     }
 
     /// Inserts the given [`ExternEntity`] into this [`Store`].
-    /// 
+    ///
     /// Returns a [`Handle`] to the inserted [`ExternEntity`].
     pub(crate) fn insert_extern(&mut self, extern_: ExternEntity) -> Handle<ExternEntity> {
         let mut extern_ = AliasableBox::from_box(Box::new(extern_));
