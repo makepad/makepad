@@ -198,6 +198,11 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn begin_pass_sized_turtle_no_clip(&mut self, layout: Layout) {
+        self.begin_pass_sized_turtle(layout);
+        *self.align_list.last_mut().unwrap() = AlignEntry::Unset;
+    }
+            
     pub fn begin_pass_sized_turtle(&mut self, layout: Layout) {
         let pass_size = self.current_pass_size();
         self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0),pass_size));
@@ -222,20 +227,31 @@ impl<'a> Cx2d<'a> {
         self.turtles.push(turtle);
     }
     
-    pub fn end_pass_sized_turtle(&mut self){
+    pub fn end_pass_sized_turtle_no_clip(&mut self) {
         let turtle = self.turtles.pop().unwrap();
-        // lets perform clipping on our alignlist.
-        self.align_list.push(AlignEntry::EndTurtle);
+                
         self.perform_nested_clipping_on_align_list_and_shift(turtle.align_start, self.align_list.len());
         //log!("{:?}", self.align_list[turtle.align_start]);
         self.align_list[turtle.align_start] = AlignEntry::SkipTurtle{skip:self.align_list.len()};
         self.turtle_walks.truncate(turtle.turtle_walks_start);
     }
-
+    
+    pub fn end_pass_sized_turtle(&mut self){
+        let turtle = self.turtles.pop().unwrap();
+        // lets perform clipping on our alignlist.
+        self.align_list.push(AlignEntry::EndTurtle);
+        
+        self.perform_nested_clipping_on_align_list_and_shift(turtle.align_start, self.align_list.len());
+        //log!("{:?}", self.align_list[turtle.align_start]);
+        self.align_list[turtle.align_start] = AlignEntry::SkipTurtle{skip:self.align_list.len()};
+        self.turtle_walks.truncate(turtle.turtle_walks_start);
+    }
+    
     pub fn end_pass_sized_turtle_with_shift(&mut self, area:Area, shift:DVec2){
         let turtle = self.turtles.pop().unwrap();
         // lets perform clipping on our alignlist.
         self.align_list.push(AlignEntry::EndTurtle);
+        
         self.perform_nested_clipping_on_align_list_and_shift(turtle.align_start, self.align_list.len());
         //log!("{:?}", self.align_list[turtle.align_start]);
         self.align_list[turtle.align_start] = AlignEntry::ShiftTurtle{
@@ -694,7 +710,8 @@ impl<'a> Cx2d<'a> {
                     rect_area.draw_clip.0 = *clip0;
                     rect_area.draw_clip.1 = *clip1;
                 }
-                _ => (),
+                AlignEntry::Unset=>{}
+                AlignEntry::Area(_)=>{}
             }
             i += 1;
         }

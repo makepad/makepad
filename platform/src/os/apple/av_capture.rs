@@ -173,6 +173,7 @@ impl AvCaptureAccess {
                 false
             }
         });
+        println!("USE VIDEO INPUT");
         for (index, d) in inputs.iter().enumerate() {
             if self.sessions.iter().find( | v | v.input_id == d.0 && v.format_id == d.1).is_none() {
                 let input = self.inputs.iter().find( | v | v.desc.input_id == d.0).unwrap();

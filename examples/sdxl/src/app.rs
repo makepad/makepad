@@ -128,7 +128,7 @@ impl LiveRegister for App{
 impl App {
     pub fn start_video_inputs(&mut self, cx: &mut Cx) {
         let video_sender = self.video_recv.sender();
-        cx.video_input(0, move | img | {
+        cx.video_input(0, move | img | { 
             let _ = video_sender.send((0, img.to_buffer()));
         });
     }
@@ -1030,8 +1030,8 @@ impl MatchEvent for App {
     }
     
     fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
-        //log!("HERE {:?}", devices);
-        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
+        println!("{:?}", devices);
+        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
         cx.use_video_input(&input);
     }
     
