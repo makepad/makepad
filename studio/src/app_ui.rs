@@ -206,7 +206,7 @@ live_design!{
                     flow: Down
                     <Logo> {}
                     <Label> {
-                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
+                        text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
                         width: Fit,
                         margin: {left: 200}
                         draw_text: {
