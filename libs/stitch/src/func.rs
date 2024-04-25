@@ -2,8 +2,8 @@ use {
     crate::{
         aliased_box::AliasableBox,
         decode::{Decode, DecodeError, Decoder},
-        exec,
         error::Error,
+        exec,
         instance::Instance,
         stack::StackGuard,
         store::{Handle, InternedFuncType, Store, StoreId, UnguardedHandle},
@@ -45,7 +45,10 @@ impl Func {
         };
         let instance = func.instance().clone();
         let code = match mem::replace(func.code_mut(), Code::Compiling) {
-            Code::Uncompiled(code) => store.engine().clone().compile(store, self, &instance, &code),
+            Code::Uncompiled(code) => store
+                .engine()
+                .clone()
+                .compile(store, self, &instance, &code),
             Code::Compiling => panic!(),
             Code::Compiled(state) => state,
         };

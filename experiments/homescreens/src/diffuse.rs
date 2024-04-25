@@ -52,7 +52,7 @@ live_design!{
             },
 
             fn pixel(self) -> vec4{  
-                return self.tovec(vec2(1.0,0.0));
+               // return self.tovec(vec2(1.0,0.0));
                 return self.tovec(vec2(sin(self.time*10.)*0.5+0.5,sin(self.time*10.123145)*0.5+0.5));
             }
         }
@@ -85,8 +85,8 @@ live_design!{
                 
                 let offset = vec2(0.0,0.0556);
                 let pos2 = self.pos + offset;
-                let Dx = 0.00125;
-                let Dy = 0.001;
+                let Dx = 0.0025;
+                let Dy = 0.002;
 
 
                 let S1 = self.samp(pos2 );
@@ -109,7 +109,7 @@ live_design!{
 
                 let DA = 1.0;
                 let DB = 0.5;
-                let f = 0.07 - self.pos.x * 0.025;
+                let f = 0.07 - self.pos.x * 0.035;
                 let k = 0.07 - self.pos.y * 0.023;
 
                 let speed = 1.0;
