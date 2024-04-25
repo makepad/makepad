@@ -45,7 +45,6 @@ impl Stack {
     }
 }
 
-
 #[derive(Debug)]
 pub struct StackGuard {
     stack: ManuallyDrop<Stack>,
