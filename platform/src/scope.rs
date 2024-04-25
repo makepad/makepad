@@ -9,8 +9,8 @@ pub struct HeapLiveIdPath{
 }
 
 impl HeapLiveIdPath{
-    pub fn get(&self, id:usize)->LiveId{
-        *self.data.get(id).unwrap_or(&LiveId(0))
+    pub fn last(&self)->LiveId{
+        *self.data.last().unwrap_or(&LiveId(0))
     }
     
     pub fn push(&mut self, id:LiveId){

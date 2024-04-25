@@ -76,6 +76,7 @@ struct FingerMove{
     start_pan: DVec2,
 }
 
+
 #[derive(Live, Widget)]
 pub struct DesignerView {
     #[walk] walk:Walk,
@@ -105,11 +106,11 @@ impl Widget for DesignerView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
         
         match event.hits(cx, self.area) {
-            Hit::FingerHoverOver(fh) =>{
+            Hit::FingerHoverOver(_fh) =>{
                 // alright so we hover over. lets determine the mouse cursor
                 
             }
-            Hit::FingerHoverOut(fh)=>{
+            Hit::FingerHoverOut(_fh)=>{
                 
             }
             Hit::FingerDown(_fe) => {
@@ -266,14 +267,14 @@ impl Widget for DesignerOutline {
                         buf.clear();
                         if !name.is_unique(){
                             if let LivePropType::Field = prop_type {
-                                write!(buf, "{}: <{}>", name, class);
+                                write!(buf, "{}: <{}>", name, class).unwrap();
                             }
                             else {
-                                write!(buf, "{}=<{}>", name, class);
+                                write!(buf, "{}=<{}>", name, class).unwrap();
                             }
                         }
                         else {
-                            write!(buf, "<{}>", class);
+                            write!(buf, "<{}>", class).unwrap();
                         }
                         
                         if outline_tree.begin_folder(cx, *child, &buf).is_ok() {
