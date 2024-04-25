@@ -4,3 +4,4 @@ pub use makepad_widgets::makepad_platform;
 pub mod app;
 pub mod my_widget;
 pub mod iconbutton;
+pub mod diffuse;

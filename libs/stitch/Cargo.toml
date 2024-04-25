@@ -1,0 +1,12 @@
+[package]
+name = "makepad-stitch"
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev]
+opt-level = 1  
+
+[dev-dependencies]
+wast = "200.0.0" 
+
+[workspace]

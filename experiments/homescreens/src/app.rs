@@ -8,6 +8,7 @@ live_design!{
     import makepad_experiments_homescreens::my_widget::MyWidget;
     import makepad_experiments_homescreens::iconbutton::IconButton;
     
+    import makepad_experiments_homescreens::diffuse::DiffuseThing;
     ContainerStage = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -159,7 +160,7 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab], selected:2}
+                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab], selected:0}
 
                     screen1tab = Tab{
                         name: "Screen 1"
@@ -218,7 +219,9 @@ live_design!{
                                 }
                             }
                         }
-                         <ContainerStage>{   
+                         <ContainerStage>{ 
+                            flow: Overlay,  
+                            <DiffuseThing>{width: Fill, height: Fill}
                             <IconSet> {}              
                          }
                 
@@ -341,6 +344,7 @@ impl LiveRegister for App {
         crate::makepad_widgets::live_design(cx);
         crate::my_widget::live_design(cx);
         crate::iconbutton::live_design(cx);
+        crate::diffuse::live_design(cx);
     }
 }
 

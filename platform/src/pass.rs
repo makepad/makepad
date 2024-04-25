@@ -255,7 +255,7 @@ pub enum PassMatrixMode {
 #[derive(Clone)]
 pub enum CxPassRect {
     Area(Area),
-    ScaledArea(Area,f64),
+    AreaOrigin(Area, DVec2),
     Size(DVec2)
 }
 
@@ -275,6 +275,8 @@ pub struct CxPass {
     pub parent: CxPassParent,
     pub paint_dirty: bool,
     pub pass_rect: Option<CxPassRect>,
+    pub view_shift: DVec2,
+    pub view_scale: DVec2,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
     pub os: CxOsPass,
@@ -296,6 +298,8 @@ impl Default for CxPass {
             clear_color: Vec4::default(),
             depth_init: 1.0,
             main_draw_list_id: None,
+            view_shift: dvec2(0.0,0.0),
+            view_scale: dvec2(1.0,1.0),
             parent: CxPassParent::None,
             paint_dirty: false,
             pass_rect: None,
@@ -323,6 +327,10 @@ impl CxPass {
     }
     
     pub fn set_matrix(&mut self, offset: DVec2, size: DVec2) {
+        
+        let offset = offset + self.view_shift;
+        let size = size * self.view_scale;
+        
         match self.matrix_mode {
             PassMatrixMode::Ortho => {
                 let ortho = Mat4::ortho(
