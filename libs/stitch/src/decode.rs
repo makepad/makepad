@@ -53,7 +53,8 @@ impl<'a> Decoder<'a> {
     #[inline]
     pub(crate) fn decode_string(&mut self) -> Result<&'a str, DecodeError> {
         let len: u32 = self.decode()?;
-        Ok(str::from_utf8(self.read_bytes(len as usize)?).map_err(|_| DecodeError::new("malformed string"))?)
+        Ok(str::from_utf8(self.read_bytes(len as usize)?)
+            .map_err(|_| DecodeError::new("malformed string"))?)
     }
 
     pub(crate) fn decode_iter<T>(&mut self) -> Result<DecodeIter<'_, 'a, T>, DecodeError>

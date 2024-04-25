@@ -7,6 +7,12 @@ edition = "2021"
 opt-level = 1  
 
 [dev-dependencies]
+criterion = "0.5.1"
+wasmi = "0.31.2"
 wast = "200.0.0" 
+
+[[bench]]
+name = "benches"
+harness = false
 
 [workspace]
