@@ -1,6 +1,6 @@
 use {
+    makepad_stitch::{Engine, Linker, Module, Store, Val},
     std::fs,
-    stitch::{Engine, Linker, Module, Store, Val},
 };
 
 fn main() {

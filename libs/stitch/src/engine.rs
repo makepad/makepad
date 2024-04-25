@@ -34,13 +34,8 @@ impl Engine {
         module: &ModuleBuilder,
         code: &UncompiledCode,
     ) -> Result<(), DecodeError> {
-        let mut validator = self
-            .inner
-            .validators
-            .lock()
-            .unwrap()
-            .pop_or_default();
-        let result = validator.validate( type_, module, code);
+        let mut validator = self.inner.validators.lock().unwrap().pop_or_default();
+        let result = validator.validate(type_, module, code);
         self.inner.validators.lock().unwrap().push(validator);
         result
     }
@@ -52,12 +47,7 @@ impl Engine {
         instance: &Instance,
         code: &UncompiledCode,
     ) -> CompiledCode {
-        let mut compiler = self
-            .inner
-            .compilers
-            .lock()
-            .unwrap()
-            .pop_or_default();
+        let mut compiler = self.inner.compilers.lock().unwrap().pop_or_default();
         let result = compiler.compile(store, func, instance, code);
         self.inner.compilers.lock().unwrap().push(compiler);
         result
@@ -78,17 +68,15 @@ struct EngineInner {
 
 #[derive(Debug)]
 struct Pool<T> {
-    items: Vec<T>
+    items: Vec<T>,
 }
 
 impl<T> Pool<T>
 where
-    T: Default
+    T: Default,
 {
     fn new() -> Self {
-        Self {
-            items: Vec::new()
-        }
+        Self { items: Vec::new() }
     }
 
     fn pop_or_default(&mut self) -> T {
