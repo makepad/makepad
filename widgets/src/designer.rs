@@ -80,6 +80,7 @@ impl Widget for DesignerContainer {
     }
 }
 
+#[allow(unused)]
 enum FingerMove{
     Pan{start_pan: DVec2},
     DragBody{ptr: LivePtr},
@@ -165,7 +166,7 @@ impl Widget for DesignerView {
         
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
-                let cp = (fh.abs -fh.rect.pos) * self.zoom + self.pan;
+                
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
                 //let corner_outer:f64  = 10.0 * self.zoom;
@@ -235,10 +236,10 @@ impl Widget for DesignerView {
                         self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
                         self.redraw(cx);
                     }
-                    FingerMove::DragEdge{edge, ptr}=>{
+                    FingerMove::DragEdge{edge:_, ptr:_}=>{
                         
                     }
-                    FingerMove::DragBody{ptr}=>{
+                    FingerMove::DragBody{ptr:_}=>{
                                                 
                     }
                 }
