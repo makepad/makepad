@@ -599,6 +599,18 @@ impl<'a> Cx2d<'a> {
             turtle.pos.y = next_y;
         }
     }
+
+    pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
+        let turtle = self.turtles.last_mut().unwrap();
+        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
+        let next_y = turtle.height_used + turtle.origin.y + spacing;
+        if turtle.pos.y == next_y{
+            turtle.pos.y += spacing;
+        }
+        else{
+            turtle.pos.y = next_y;
+        }
+    }
     
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
         //let current_dpi_factor = self.current_dpi_factor();
