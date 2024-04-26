@@ -27,11 +27,7 @@ pub struct Markdown{
 // alright lets parse the HTML
 impl LiveHook for Markdown{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
-        let new_doc = parse_markdown(&*self.body);
-        if new_doc != self.doc{
-            self.doc = new_doc;
-            self.text_flow.clear_items();
-        }
+        self.parse_text();
     }
 }
  
@@ -165,7 +161,12 @@ impl Widget for Markdown {
     
     fn set_text(&mut self, v:&str){
         self.body = Rc::new(v.to_string());
+        self.parse_text();
+    }
+}
 
+impl Markdown {
+    fn parse_text(&mut self) {
         let new_doc = parse_markdown(&*self.body);
         if new_doc != self.doc{
             self.doc = new_doc;
