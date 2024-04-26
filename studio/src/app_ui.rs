@@ -201,6 +201,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
                     flow: Down
                     <Logo> {}
+
                     <H3> {
                         width: Fit,
                         text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"

@@ -5,7 +5,7 @@ use {
         error::Error,
         extern_::UnguardedExtern,
         extern_ref::UnguardedExternRef,
-        func::{Func, FuncEntity, InstrSlot, UnguardedFunc, Code},
+        func::{Code, Func, FuncEntity, InstrSlot, UnguardedFunc},
         func_ref::UnguardedFuncRef,
         global::UnguardedGlobal,
         mem::UnguardedMem,
@@ -122,7 +122,7 @@ pub(crate) fn exec(
                     ControlFlow::Error => {
                         drop(context.stack.take().unwrap());
                         return Err(context.error.take().unwrap());
-                    },
+                    }
                 }
             }
             stack = context.stack.take().unwrap();
@@ -337,7 +337,11 @@ pub(crate) unsafe extern "C" fn call_host(
     let (func, ip): (UnguardedFunc, _) = read_imm(ip);
     let (offset, ip) = read_imm(ip);
     let (mem, ip): (Option<UnguardedMem>, _) = read_imm(ip);
-    (*cx).stack.as_mut().unwrap_unchecked().set_ptr(sp.cast::<u8>().add(offset).cast());
+    (*cx)
+        .stack
+        .as_mut()
+        .unwrap_unchecked()
+        .set_ptr(sp.cast::<u8>().add(offset).cast());
     let FuncEntity::Host(func) = func.as_ref() else {
         hint::unreachable_unchecked();
     };
@@ -350,7 +354,7 @@ pub(crate) unsafe extern "C" fn call_host(
         Err(error) => {
             (*cx).error = Some(error);
             return ControlFlow::Error.to_bits();
-        },
+        }
     };
     (*cx).stack = Some(stack);
     let md;
@@ -426,8 +430,8 @@ pub(crate) unsafe extern "C" fn call_indirect(
                 Ok(stack) => stack,
                 Err(error) => {
                     (*cx).error = Some(error);
-                    return ControlFlow::Error.to_bits()
-                },
+                    return ControlFlow::Error.to_bits();
+                }
             };
             (*cx).stack = Some(stack);
             let md;
@@ -2239,7 +2243,9 @@ pub(crate) unsafe extern "C" fn enter(
     let Code::Compiled(state) = func.code() else {
         hint::unreachable_unchecked();
     };
-    let stack_height = usize::try_from(sp.offset_from((*cx).stack.as_mut().unwrap_unchecked().base_ptr())).unwrap_unchecked();
+    let stack_height =
+        usize::try_from(sp.offset_from((*cx).stack.as_mut().unwrap_unchecked().base_ptr()))
+            .unwrap_unchecked();
     if state.max_stack_slot_count > Stack::SIZE - stack_height {
         return ControlFlow::Trap(Trap::StackOverflow).to_bits();
     }
