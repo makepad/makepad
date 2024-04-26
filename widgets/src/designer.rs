@@ -21,7 +21,8 @@ live_design!{
     }
     
     DesignerContainerBase = {{DesignerContainer}}{
-    }    
+    }
+    
 }
 
 #[allow(dead_code)]
@@ -78,8 +79,10 @@ impl Widget for DesignerContainer {
     }
 }
 
-struct FingerMove{
-    start_pan: DVec2,
+enum FingerMove{
+    Pan{start_pan: DVec2},
+    DragBody{ptr: LivePtr},
+    DragEdge{edge: Edge, ptr: LivePtr}
 }
 
 struct ContainerData{
@@ -166,37 +169,48 @@ impl Widget for DesignerView {
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
                 //let corner_outer:f64  = 10.0 * self.zoom;
-                cx.set_cursor(MouseCursor::Default);
+                let mut cursor = None;
                 for cd in self.containers.values(){
-                    match cd.get_edge((fh.abs -fh.rect.pos), self.zoom, self.pan){
-                        Some(Edge::Left)=>{
-                            cx.set_cursor(MouseCursor::EwResize);
+                    match cd.get_edge(fh.abs -fh.rect.pos, self.zoom, self.pan){
+                        Some(edge)=> {
+                            cursor = Some(match edge{
+                                Edge::Left|Edge::Right=>MouseCursor::EwResize,
+                                Edge::Top|Edge::Bottom=>MouseCursor::NsResize,
+                            });
+                            break;
                         }
-                        Some(Edge::Right)=>{
-                            cx.set_cursor(MouseCursor::EwResize);
-                        }
-                        Some(Edge::Top)=>{
-                            cx.set_cursor(MouseCursor::NsResize);
-                        }
-                        Some(Edge::Bottom)=>{
-                            cx.set_cursor(MouseCursor::NsResize);
-                        }
-                        None=>{
-                        }
+                        None=>{}
                     }
-                    
+                }
+                if let Some(cursor) = cursor{
+                    cx.set_cursor(cursor);
+                }
+                else{
+                    cx.set_cursor(MouseCursor::Move);
                 }
             }
             Hit::FingerHoverOut(_fh)=>{
-                
             }
-            Hit::FingerDown(_fe) => {
-              self.finger_move = Some(FingerMove{
-                  start_pan: self.pan
-              });
+            Hit::FingerDown(fe) => {
+                for (ptr, cd) in self.containers.iter(){
+                    match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
+                        Some(edge)=>{
+                            self.finger_move = Some(FingerMove::DragEdge{
+                                ptr: *ptr,
+                                edge
+                            });
+                            break;
+                        }
+                        None=>()
+                    }
+                }
+                if self.finger_move.is_none(){
+                    self.finger_move = Some(FingerMove::Pan{
+                        start_pan: self.pan
+                    });
+                }
             },
             Hit::KeyDown(_k)=>{
-               
             }
             Hit::FingerScroll(fs)=>{
                 let last_zoom = self.zoom;
@@ -216,9 +230,18 @@ impl Widget for DesignerView {
                 self.redraw(cx);
             }
             Hit::FingerMove(fe) => {
-                let fm = self.finger_move.as_ref().unwrap();
-                self.pan= fm.start_pan - (fe.abs - fe.abs_start) * self.zoom;
-                self.redraw(cx);
+                match self.finger_move.as_ref().unwrap(){
+                    FingerMove::Pan{start_pan} =>{
+                        self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
+                        self.redraw(cx);
+                    }
+                    FingerMove::DragEdge{edge, ptr}=>{
+                        
+                    }
+                    FingerMove::DragBody{ptr}=>{
+                                                
+                    }
+                }
             }
             Hit::FingerUp(_) => {
                 self.finger_move = None;
