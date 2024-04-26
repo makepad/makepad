@@ -147,7 +147,6 @@ impl Cx {
         
         // lets create 2 windows
 
-
         while let Ok(msg) =  json_msg_rx.recv(){
             match msg {
                /* HostToStdin::ReloadFile {file, contents} => {
@@ -171,21 +170,30 @@ impl Cx {
                         dvec2(e.x, e.y),
                         e.time
                     );
-                    self.fingers.mouse_down(e.button);
-                    // lets figure out what window we are on
-                    
+                    // lets log the window_id we mousedowned on
                     let (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    self.fingers.mouse_down(e.button, window_id);
                     self.call_event_handler(&Event::MouseDown(e.into_event(window_id, pos)));
                 }
                 HostToStdin::MouseMove(e) => {
-                    let  (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button{
+                        (window_id, self.windows[window_id].window_geom.position)
+                    }
+                    else{
+                        self.windows.window_id_contains(dvec2(e.x, e.y))
+                    };
                     self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
                 HostToStdin::MouseUp(e) => {
                     let button = e.button;
-                    let  (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button{
+                        (window_id, self.windows[window_id].window_geom.position)
+                    }
+                    else{
+                        self.windows.window_id_contains(dvec2(e.x, e.y))
+                    };
                     self.call_event_handler(&Event::MouseUp(e.into_event(window_id, pos)));
                     self.fingers.mouse_up(button);
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
@@ -221,7 +229,7 @@ impl Cx {
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
-                    //println!("STORING SWAPCHAIN {}", new_swapchain.window_id);
+                    
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
                 }

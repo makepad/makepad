@@ -171,7 +171,7 @@ impl Cx {
                     e.abs,
                     e.time
                 );
-                self.fingers.mouse_down(e.button);
+                self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
             Win32Event::MouseMove(e) => {
