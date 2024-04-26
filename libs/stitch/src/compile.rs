@@ -61,7 +61,7 @@ impl Compiler {
         {
             locals.push(Local {
                 type_,
-                first_opd_idx: None,
+                first_local_opd_idx: None,
             });
         }
         let local_count = locals.len() - type_.params().len();
@@ -152,32 +152,14 @@ impl<'a> Compile<'a> {
 
     /// Locals
 
-    /// Returns the type of the local with the given index.
-    fn local_type(&self, local_idx: usize) -> ValType {
-        self.locals[local_idx as usize].type_
-    }
-
-    fn push_local_opd(&mut self, local_idx: usize) {
-        let opd_idx = self.opds.len() - 1;
-        self.opds[opd_idx].local_idx = Some(local_idx);
-        self.opds[opd_idx].next_opd_idx = self.locals[local_idx].first_opd_idx;
-        self.locals[local_idx].first_opd_idx = Some(opd_idx);
-    }
-
-    fn pop_local_opd(&mut self, local_idx: usize) -> Option<usize> {
-        if let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
-            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
-            self.opds[opd_idx].local_idx = None;
-            self.opds[opd_idx].next_opd_idx = None;
-            Some(opd_idx)
-        } else {
-            None
-        }
-    }
-
     fn save_local(&mut self, local_idx: usize) {
-        while let Some(opd_idx) = self.pop_local_opd(local_idx) {
-            self.emit(copy_stack(self.local_type(local_idx)));
+        while let Some(opd_idx) = self.locals[local_idx].first_local_opd_idx {
+            let Opd::Local { next_local_opd_idx, .. } = self.opds[opd_idx] else {
+                unreachable!()
+            };
+            self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
+            self.opds[opd_idx] = Opd::Temp { type_: self.locals[local_idx].type_.into() };
+            self.emit(copy_stack(self.locals[local_idx].type_));
             self.emit_stack_offset(self.local_stack_idx(local_idx));
             self.emit_stack_offset(self.temp_stack_idx(opd_idx));
         }
@@ -260,11 +242,14 @@ impl<'a> Compile<'a> {
     }
 
     /// Returns the type of the operand at the given depth.
-    fn opd_type(&self, opd_idx: usize) -> OpdType {
-        if opd_idx >= self.opds.len() - self.block(0).first_opd_idx {
+    fn opd_type(&self, opd_depth: usize) -> OpdType {
+        if opd_depth >= self.opds.len() - self.block(0).first_opd_idx {
             OpdType::Unknown
         } else {
-            self.opds[self.opds.len() - 1 - opd_idx].type_
+            match self.opds[self.opds.len() - 1 - opd_depth] {
+                Opd::Local { local_idx, .. } => self.locals[local_idx].type_.into(),
+                Opd::Temp { type_ } => type_
+            }
         }
     }
 
@@ -274,10 +259,9 @@ impl<'a> Compile<'a> {
             None
         } else {
             let opd_idx = self.opds.len() - 1 - opd_depth;
-            if let Some(local_idx) = self.opds[opd_idx].local_idx {
-                self.local_stack_idx(local_idx)
-            } else {
-                self.temp_stack_idx(self.opds.len() - 1 - opd_depth)
+            match self.opds[opd_idx] {
+                Opd::Local { local_idx, .. } => self.local_stack_idx(local_idx),
+                Opd::Temp { .. } => self.temp_stack_idx(opd_idx),
             }
         }
     }
@@ -288,11 +272,17 @@ impl<'a> Compile<'a> {
     }
 
     /// Pushes an operand of the given type on the stack.
+    fn push_local_opd(&mut self, local_idx: usize) {
+        self.opds.push(Opd::Local {
+            local_idx,
+            next_local_opd_idx: self.locals[local_idx].first_local_opd_idx,
+        });
+        self.locals[local_idx].first_local_opd_idx = Some(self.opds.len() - 1);
+    }
+
     fn push_opd(&mut self, type_: impl Into<OpdType>) {
-        self.opds.push(Opd {
+        self.opds.push(Opd::Temp {
             type_: type_.into(),
-            local_idx: None,
-            next_opd_idx: None,
         });
         let stack_slot_count = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
         self.max_stack_height = self.max_stack_height.max(stack_slot_count);
@@ -316,10 +306,13 @@ impl<'a> Compile<'a> {
         if self.opds.len() == self.block(0).first_opd_idx {
             OpdType::Unknown
         } else {
-            if let Some(local_idx) = self.opds[self.opds.len() - 1].local_idx {
-                self.pop_local_opd(local_idx);
+            match self.opds.pop().unwrap() {
+                Opd::Local { local_idx, next_local_opd_idx } => {
+                    self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
+                    self.locals[local_idx].type_.into()
+                }
+                Opd::Temp { type_ } => type_,
             }
-            self.opds.pop().unwrap().type_
         }
     }
 
@@ -379,8 +372,13 @@ impl<'a> Compile<'a> {
 
     fn save_reg(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
+        let opd_type = if let Opd::Temp { type_ } = self.opds[opd_idx] {
+            type_.to_val().unwrap()
+        } else {
+            unreachable!()
+        };
         self.emit(copy_reg_to_stack(
-            self.opds[opd_idx].type_.to_val().unwrap(),
+            opd_type
         ));
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
         self.dealloc_reg(reg_idx);
@@ -783,15 +781,13 @@ impl<'a> InstrVisitor for Compile<'a> {
     // Variable instructions
     fn visit_local_get(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         let local_idx = local_idx as usize;
-        let local_type = self.local_type(local_idx);
-        self.push_opd(local_type);
         self.push_local_opd(local_idx);
         Ok(())
     }
 
     fn visit_local_set(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         let local_idx = local_idx as usize;
-        let local_type = self.local_type(local_idx);
+        let local_type = self.locals[local_idx].type_;
         self.save_local(local_idx);
         self.emit(if self.is_opd_in_reg(0) {
             copy_reg_to_stack(local_type)
@@ -805,7 +801,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_local_tee(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         let local_idx = local_idx as usize;
-        let local_type = self.local_type(local_idx);
+        let local_type = self.locals[local_idx].type_;
         self.save_local(local_idx);
         self.emit(if self.is_opd_in_reg(0) {
             copy_reg_to_stack(local_type)
@@ -1099,7 +1095,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 #[derive(Clone, Copy, Debug)]
 struct Local {
     type_: ValType,
-    first_opd_idx: Option<usize>,
+    first_local_opd_idx: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1145,10 +1141,14 @@ impl Deref for LabelTypes {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Opd {
-    type_: OpdType,
-    local_idx: Option<usize>,
-    next_opd_idx: Option<usize>,
+enum Opd {
+    Local {
+        local_idx: usize,
+        next_local_opd_idx: Option<usize>,
+    },
+    Temp {
+        type_: OpdType,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
