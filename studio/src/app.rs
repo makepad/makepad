@@ -249,6 +249,7 @@ impl MatchEvent for App{
             RunListAction::Destroy(run_view_id) => {
                 dock.close_tab(cx, run_view_id);
                 dock.close_tab(cx, run_view_id.add(1));
+                dock.close_tab(cx, run_view_id.add(2));
                 dock.redraw(cx);
                 log_list.redraw(cx);
             }
