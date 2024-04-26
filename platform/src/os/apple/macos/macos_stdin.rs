@@ -147,7 +147,6 @@ impl Cx {
         
         // lets create 2 windows
 
-
         while let Ok(msg) =  json_msg_rx.recv(){
             match msg {
                /* HostToStdin::ReloadFile {file, contents} => {
@@ -221,7 +220,7 @@ impl Cx {
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
-                    //println!("STORING SWAPCHAIN {}", new_swapchain.window_id);
+                    
                     self.redraw_all();
                     self.stdin_handle_platform_ops(metal_cx);
                 }

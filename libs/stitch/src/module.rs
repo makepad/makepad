@@ -171,9 +171,7 @@ impl Module {
 
     /// Returns the [`ExternType`] of the export with the given name in this [`Module`], if it exists.
     pub fn export<'a>(&'a self, name: &'a str) -> Option<ExternType> {
-        self.exports
-            .get(name)
-            .map(|&desc| self.extern_type(desc))
+        self.exports.get(name).map(|&desc| self.extern_type(desc))
     }
 
     /// Returns an iterator over the exports in this [`Module`].
@@ -184,7 +182,11 @@ impl Module {
         }
     }
 
-    pub(crate) fn instantiate(&self, store: &mut Store, linker: &Linker) -> Result<Instance, Error> {
+    pub(crate) fn instantiate(
+        &self,
+        store: &mut Store,
+        linker: &Linker,
+    ) -> Result<Instance, Error> {
         let instance = Instance::uninited(store.id());
         let mut initer = InstanceIniter::new(store.id());
         for type_ in self.types.iter() {
@@ -429,7 +431,9 @@ impl<'a> Iterator for ModuleImports<'a> {
                     ImportKind::Func => self.imported_func_types.next().cloned().unwrap().into(),
                     ImportKind::Table => self.imported_table_types.next().copied().unwrap().into(),
                     ImportKind::Mem => self.imported_memory_types.next().copied().unwrap().into(),
-                    ImportKind::Global => self.imported_global_types.next().copied().unwrap().into(),
+                    ImportKind::Global => {
+                        self.imported_global_types.next().copied().unwrap().into()
+                    }
                 },
             )
         })
@@ -800,7 +804,7 @@ impl ModuleBuilder {
             .iter()
             .zip(self.codes.iter())
         {
-            engine.validate(type_,&self, code)?;
+            engine.validate(type_, &self, code)?;
         }
         if let Some(data_count) = self.data_count {
             if data_count != u32::try_from(self.datas.len()).unwrap() {

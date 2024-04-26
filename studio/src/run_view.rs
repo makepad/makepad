@@ -178,7 +178,6 @@ impl RunView {
     }
     
     pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager, walk:Walk) {
-        
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
@@ -202,15 +201,20 @@ impl RunView {
 
             let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
             let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
+            
             let active_build_needs_new_swapchain = manager.active.builds
                 .get_mut(&run_view_id)
-                .filter(|v| v.aux_chan_host_endpoint.is_some())
+                .filter(|v| {
+                    v.aux_chan_host_endpoint.is_some()
+                })
                 .filter(|v| {
                     v.swapchain(self.window_id).map(|swapchain| {
                         min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
                     }).unwrap_or(true)
                 });
+                                
             if let Some(v) = active_build_needs_new_swapchain {
+                
                 // HACK(eddyb) there is no check that there were any draws on
                 // the current swapchain, but the absence of an older swapchain
                 // (i.e. `last_swapchain_with_completed_draws`) implies either
@@ -245,7 +249,6 @@ impl RunView {
                     })
                 });
                 
-
                 let shared_swapchain = swapchain.images_as_ref().images_map(|pi| {
                     cx.share_texture_for_presentable_image(&pi.image)
                 });
@@ -278,6 +281,7 @@ impl RunView {
                     // Inform the client about the new swapchain it *should* use
                     // (using older swapchains isn't an error, but the draw calls
                     // will either be noops, or write to orphaned GPU memory ranges).
+                    
                     manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(
                         shared_swapchain.images_map(|pi| pi.image.unwrap()),
                     ));
@@ -292,14 +296,14 @@ impl RunView {
 impl Widget for RunView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let run_view_id = scope.path.get(0).sub(self.window_id as u64);
+        let run_view_id = scope.path.last().sub(self.window_id as u64);
         let manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
         self.draw_run_view(cx, run_view_id, manager, walk);
         DrawStep::done()
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        let run_view_id = scope.path.get(0).sub(self.window_id as u64);
+        let run_view_id = scope.path.last().sub(self.window_id as u64);
         let manager = &scope.data.get::<AppData>().unwrap().build_manager;
         
         self.animator_handle_event(cx, event);
