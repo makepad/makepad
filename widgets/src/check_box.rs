@@ -68,8 +68,8 @@ impl CheckBox {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_check.begin(cx, walk, self.layout);
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_check.end(cx);
     }
 }

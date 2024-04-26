@@ -28,13 +28,14 @@ live_design!{
             }
         }
         margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0}
-        padding: 0.0
-        text: ""
     }
     
     AppUI =  <Window> {
+        margin: 5. 
         caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
-        window: {inner_size: vec2(1600, 900)},
+        window: { inner_size: vec2(1600, 900) },
+        show_bg: true,
+        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
         window_menu = {
             main = Main {items: [app, file, edit, selection, view, run, window, help]}
                 
@@ -83,12 +84,11 @@ live_design!{
             line = Line,
         }
         body = {dock = <Dock> {
-            height: Fill,
-            width: Fill
+            width: Fill, height: Fill,
                 
             root = Splitter {
                 axis: Horizontal,
-                align: FromA(230.0),
+                align: FromA(250.0),
                 a: file_tree_tabs,
                 b: split1
             }
@@ -126,7 +126,7 @@ live_design!{
                 
             log_tabs = Tabs {
                 tabs: [log_list, profiler],
-                selected: 0
+                selected: 1
             }
                 
             run_tabs = Tabs {
@@ -197,108 +197,44 @@ live_design!{
             EditFirst = <RectView> {
                 draw_bg: {color: #052329}
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill,
+                    align: { x: 0.5, y: 0.5 }
                     flow: Down
                     <Logo> {}
-                    <Label> {
-                        text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
+
+                    <H3> {
                         width: Fit,
-                        margin: {left: 200}
-                        draw_text: {
-                            text_style: {
-                                font_size: 20.0,
-                                height_factor: 1.0,
-                                font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
-                            },
-                        }
+                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
+                        margin: {left: 185}
                     }
                 }
             }
             DesignFirst = <RectView> {
-                draw_bg: {color: #4}
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill
                     flow: Down
-                    <Logo> {
-                        draw_icon: {
-                            fn get_color(self) -> vec4 {
-                                return #755
-                            }
-                        }
-                    }
+                    align: { x: 0.5, y: 0.5 }
+                    <Logo> {}
                 }
             }
             RunFirst = <RectView> {
-                draw_bg: {color: #4}
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill,
                     flow: Down
-                        <Logo> {
-                        draw_icon: {
-                            fn get_color(self) -> vec4 {
-                                return #7
-                            }
-                        }
-                    }
+                    align: { x: 0.5, y: 0.5 }
+                    <Logo> {}
                 }
             }
-            RunList = <RunList> {
-            }
+            RunList = <RunList> {}
             Search = <RectView> {
-                draw_bg: {color: #x28}
-                //  margin:{left: 0, top: 0}
                 <View> {
-                    margin:10
                     flow: Down
-                    <View> 
-                    {
-                        flow: Right
-                        height: Fit
-                        <TextInput>{
-                            draw_bg: {
-                                fn pixel(self) -> vec4 {
-                                    return #x00000044
-                                }
-                            }
-                            width: Fill,
-                            empty_message:"Search here"                           
-                        }
-                        //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
-                    // <Button> {
-                    //     text:"Search"
-                            
-                    //     draw_icon: {
-                    //         svg_file: (ICO_SEARCH)
-                    //         fn get_color(self) -> vec4 {
-                    //             return #8;
-                    //         }
-                    //     } 
-                    //     icon_walk:  {
-                    //         margin: {left: 10}
-                    //         width: Fit,
-                    //         // height: 12.0
-                    //     } 
-                    // }
-                }
-                    <Label>
-                    {
-                        text: "this does not work yet."
+                    margin: <THEME_MSPACE_2> {}
+                    <TextInput> {
+                        width: Fill,
+                        empty_message: "Search here",
                     }
+                    <P> { text: "this does not work yet." }
                 }
             }
             RunView = <RunView> {}
