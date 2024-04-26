@@ -7,7 +7,7 @@ use {
         exec,
         exec::ThreadedInstr,
         extern_ref::ExternRef,
-        func::{CompiledCode, Func, FuncEntity, FuncType, CodeSlot, UncompiledCode},
+        func::{CodeSlot, CompiledCode, Func, FuncEntity, FuncType, UncompiledCode},
         func_ref::FuncRef,
         instance::Instance,
         ref_::RefType,
@@ -755,8 +755,15 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_select(&mut self, type_: Option<ValType>) -> Result<(), DecodeError> {
         let type_ = type_.map_or_else(|| self.opd_type(1), |type_| OpdType::ValType(type_));
+        // If this operation has an output, and the output register is used, then we need to save
+        // the output register, unless it is also used as an input register. Otherwise, the
+        // operation will overwrite the output register while it's already used.
         if let Some(output_reg_idx) = type_.reg_idx() {
-            if self.is_reg_used(output_reg_idx) {
+            if self.is_reg_used(output_reg_idx)
+                && !self.is_reg_used_by_opd(output_reg_idx, 2)
+                && !self.is_reg_used_by_opd(output_reg_idx, 1)
+                && !self.is_reg_used_by_opd(output_reg_idx, 0)
+            {
                 self.save_reg(output_reg_idx);
             }
         }
