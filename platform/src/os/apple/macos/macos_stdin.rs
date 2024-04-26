@@ -140,8 +140,6 @@ impl Cx {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         
         let mut windows:Vec<StdinWindow> = Vec::new();
-        windows.push(StdinWindow::new());
-        windows.push(StdinWindow::new());
                 
         self.call_event_handler(&Event::Startup);
         
@@ -228,10 +226,11 @@ impl Cx {
                     }        
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
+                    
                     windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
                     
                     self.redraw_all();
-                    self.stdin_handle_platform_ops(metal_cx);
+                    self.stdin_handle_platform_ops(metal_cx, &mut windows);
                 }
                 HostToStdin::Tick=>{
                     for window in &mut windows{
@@ -280,7 +279,7 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-                    self.stdin_handle_platform_ops(metal_cx);
+                    self.stdin_handle_platform_ops(metal_cx, &mut windows);
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
@@ -391,10 +390,13 @@ impl Cx {
     }
     
     
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx) {
+    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, windows: &mut Vec<StdinWindow>) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
+                    while window_id.id() >= windows.len(){
+                        windows.push(StdinWindow::new());
+                    }
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
                     // we should call to the host to make a window with this id

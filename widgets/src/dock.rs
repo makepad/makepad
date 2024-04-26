@@ -214,7 +214,7 @@ pub enum DockItem {
         a: LiveId,
         b: LiveId
     },
-    #[live {tabs: vec![], selected: 0, closable: false}]
+    #[live {tabs: vec![], selected: 0, closable: true}]
     Tabs {
         tabs: Vec<LiveId>,
         selected: usize,
