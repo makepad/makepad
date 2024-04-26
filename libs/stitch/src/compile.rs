@@ -5,9 +5,9 @@ use {
         code::{BinOpInfo, BlockType, InstrVisitor, LoadInfo, MemArg, StoreInfo, UnOpInfo},
         decode::DecodeError,
         exec,
-        exec::Instr,
+        exec::ThreadedInstr,
         extern_ref::ExternRef,
-        func::{CompiledCode, Func, FuncEntity, FuncType, InstrSlot, UncompiledCode},
+        func::{CompiledCode, Func, FuncEntity, FuncType, CodeSlot, UncompiledCode},
         func_ref::FuncRef,
         instance::Instance,
         ref_::RefType,
@@ -83,7 +83,7 @@ impl Compiler {
             BlockKind::Block,
             FuncType::new([], type_.results().iter().copied()),
         );
-        compile.emit(exec::enter as Instr);
+        compile.emit(exec::enter as ThreadedInstr);
         compile.emit(func.to_unguarded(store.id()));
         compile.emit(
             compile
@@ -100,10 +100,10 @@ impl Compiler {
             compile.emit_stack_offset(compile.temp_stack_idx(result_idx));
             compile.emit_stack_offset(compile.param_result_stack_idx(result_idx));
         }
-        compile.emit(exec::return_ as Instr);
+        compile.emit(exec::return_ as ThreadedInstr);
         compile.opds.clear();
         let max_stack_slot_count = compile.max_stack_height;
-        let mut code: AliasableBox<[InstrSlot]> = AliasableBox::from_box(Box::from(compile.code));
+        let mut code: AliasableBox<[CodeSlot]> = AliasableBox::from_box(Box::from(compile.code));
         for fixup_idx in compile.fixup_idxs.drain(..) {
             code[fixup_idx] += code.as_ptr() as usize;
         }
@@ -112,7 +112,7 @@ impl Compiler {
         CompiledCode {
             max_stack_slot_count,
             local_count,
-            code,
+            slots: code,
         }
     }
 }
@@ -136,7 +136,7 @@ struct Compile<'a> {
     first_temp_stack_idx: usize,
     max_stack_height: usize,
     regs: [Option<usize>; 2],
-    code: Vec<InstrSlot>,
+    code: Vec<CodeSlot>,
 }
 
 impl<'a> Compile<'a> {
@@ -233,7 +233,7 @@ impl<'a> Compile<'a> {
             kind,
             type_,
             first_opd_idx: self.opds.len(),
-            first_instr_idx: self.code.len(),
+            first_code_idx: self.code.len(),
             first_hole_idx: None,
             else_hole_idx: None,
         });
@@ -430,8 +430,8 @@ impl<'a> Compile<'a> {
     where
         T: Copy,
     {
-        debug_assert!(mem::size_of::<T>() <= mem::size_of::<InstrSlot>());
-        self.code.push(InstrSlot::default());
+        debug_assert!(mem::size_of::<T>() <= mem::size_of::<CodeSlot>());
+        self.code.push(CodeSlot::default());
         unsafe { *(self.code.last_mut().unwrap() as *mut _ as *mut T) = val };
     }
 
@@ -448,7 +448,7 @@ impl<'a> Compile<'a> {
                 self.push_hole(label_idx, hole_idx);
             }
             BlockKind::Loop => {
-                self.emit_instr_offset(self.block(label_idx).first_instr_idx);
+                self.emit_code_offset(self.block(label_idx).first_code_idx);
             }
         }
     }
@@ -464,9 +464,9 @@ impl<'a> Compile<'a> {
         self.code[hole_idx] = self.code.len() * mem::size_of::<usize>();
     }
 
-    fn emit_instr_offset(&mut self, instr_idx: usize) {
+    fn emit_code_offset(&mut self, code_idx: usize) {
         self.fixup_idxs.push(self.code.len());
-        self.emit(instr_idx * mem::size_of::<InstrSlot>());
+        self.emit(code_idx * mem::size_of::<CodeSlot>());
     }
 }
 
@@ -479,7 +479,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_unreachable(&mut self) -> Result<(), Self::Error> {
-        self.emit(exec::unreachable as Instr);
+        self.emit(exec::unreachable as ThreadedInstr);
         self.set_unreachable();
         Ok(())
     }
@@ -524,7 +524,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_else(&mut self) -> Result<(), Self::Error> {
         self.save_all_locals();
         self.save_all_regs();
-        self.emit(exec::br as Instr);
+        self.emit(exec::br as ThreadedInstr);
         let hole_idx = self.emit_hole();
         self.push_hole(0, hole_idx);
         let else_hole_idx = self.block_mut(0).else_hole_idx.take().unwrap();
@@ -556,7 +556,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.save_all_locals();
         self.save_all_regs();
         self.resolve_label_vals(label_idx);
-        self.emit(exec::br as Instr);
+        self.emit(exec::br as ThreadedInstr);
         self.emit_label(label_idx);
         self.set_unreachable();
         Ok(())
@@ -575,7 +575,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.pop_opd_and_emit_stack_offset();
             let hole_idx = self.emit_hole();
             self.resolve_label_vals(label_idx);
-            self.emit(exec::br as Instr);
+            self.emit(exec::br as ThreadedInstr);
             self.emit_label(label_idx);
             self.patch_hole(hole_idx);
         }
@@ -605,7 +605,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             let label_idx = label_idx as usize;
             self.patch_hole(hole_idx);
             self.resolve_label_vals(label_idx);
-            self.emit(exec::br as Instr);
+            self.emit(exec::br as ThreadedInstr);
             self.emit_label(label_idx);
             for label_type in self.block(0).label_types().iter().copied() {
                 self.push_opd(label_type);
@@ -614,7 +614,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let default_label_idx = default_label_idx as usize;
         self.patch_hole(default_hole_idx);
         self.resolve_label_vals(default_label_idx);
-        self.emit(exec::br as Instr);
+        self.emit(exec::br as ThreadedInstr);
         self.emit_label(default_label_idx);
         self.set_unreachable();
         Ok(())
@@ -638,7 +638,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.pop_opd_and_emit_stack_offset();
             self.emit_stack_offset(self.param_result_stack_idx(result_idx));
         }
-        self.emit(exec::return_ as Instr);
+        self.emit(exec::return_ as ThreadedInstr);
         self.set_unreachable();
         Ok(())
     }
@@ -649,8 +649,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.save_all_locals();
         self.save_all_regs();
         self.emit(match func.0.as_ref(&self.store) {
-            FuncEntity::Wasm(_) => exec::compile as Instr,
-            FuncEntity::Host(_) => exec::call_host as Instr,
+            FuncEntity::Wasm(_) => exec::compile as ThreadedInstr,
+            FuncEntity::Host(_) => exec::call_host as ThreadedInstr,
         });
         for _ in 0..type_.params().len() {
             debug_assert!(!self.is_opd_in_reg(0));
@@ -680,7 +680,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.store.resolve_type(interned_type).clone();
         self.save_all_locals();
         self.save_all_regs();
-        self.emit(exec::call_indirect as Instr);
+        self.emit(exec::call_indirect as ThreadedInstr);
         self.emit_stack_offset(self.opd_stack_idx(0));
         self.pop_opd();
         for _ in 0..type_.params().len() {
@@ -722,7 +722,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_ref_func(&mut self, func_idx: u32) -> Result<(), DecodeError> {
-        self.emit(exec::copy_imm_to_stack_func_ref as Instr);
+        self.emit(exec::copy_imm_to_stack_func_ref as ThreadedInstr);
         self.emit(
             self.instance
                 .func(func_idx)
@@ -784,10 +784,16 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_local_tee(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         let local_idx = local_idx as usize;
+        let local_type = self.local_type(local_idx);
         self.save_local(local_idx);
-        self.save_all_regs();
-        self.emit(copy_stack(self.local_type(local_idx)));
-        self.emit_stack_offset(self.opd_stack_idx(0));
+        self.emit(if self.is_opd_in_reg(0) {
+            copy_reg_to_stack(local_type)
+        } else {
+            copy_stack(local_type)
+        });
+        if !self.is_opd_in_reg(0) {
+            self.emit_stack_offset(self.opd_stack_idx(0));
+        }
         self.emit_stack_offset(self.local_stack_idx(local_idx));
         Ok(())
     }
@@ -930,7 +936,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_memory_size(&mut self) -> Result<(), Self::Error> {
         let mem = self.instance.mem(0).unwrap();
-        self.emit(exec::memory_size as Instr);
+        self.emit(exec::memory_size as ThreadedInstr);
         self.emit(mem.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(ValType::I32);
         Ok(())
@@ -939,7 +945,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_memory_grow(&mut self) -> Result<(), Self::Error> {
         let mem = self.instance.mem(0).unwrap();
         self.save_all_regs();
-        self.emit(exec::memory_grow as Instr);
+        self.emit(exec::memory_grow as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.emit(mem.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(ValType::I32);
@@ -949,7 +955,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_memory_fill(&mut self) -> Result<(), Self::Error> {
         let mem = self.instance.mem(0).unwrap();
         self.save_all_regs();
-        self.emit(exec::memory_fill as Instr);
+        self.emit(exec::memory_fill as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -960,7 +966,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_memory_copy(&mut self) -> Result<(), Self::Error> {
         let mem = self.instance.mem(0).unwrap();
         self.save_all_regs();
-        self.emit(exec::memory_copy as Instr);
+        self.emit(exec::memory_copy as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -972,7 +978,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let dst_mem = self.instance.mem(0).unwrap();
         let src_data = self.instance.data(data_idx).unwrap();
         self.save_all_regs();
-        self.emit(exec::memory_init as Instr);
+        self.emit(exec::memory_init as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -983,35 +989,35 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_data_drop(&mut self, data_idx: u32) -> Result<(), Self::Error> {
         let data = self.instance.data(data_idx).unwrap();
-        self.emit(exec::data_drop as Instr);
+        self.emit(exec::data_drop as ThreadedInstr);
         self.emit(data.to_unguarded(self.store.id()));
         Ok(())
     }
 
     // Numeric instructions
     fn visit_i32_const(&mut self, val: i32) -> Result<(), DecodeError> {
-        self.emit(exec::copy_imm_to_stack_i32 as Instr);
+        self.emit(exec::copy_imm_to_stack_i32 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::I32);
         Ok(())
     }
 
     fn visit_i64_const(&mut self, val: i64) -> Result<(), DecodeError> {
-        self.emit(exec::copy_imm_to_stack_i64 as Instr);
+        self.emit(exec::copy_imm_to_stack_i64 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::I64);
         Ok(())
     }
 
     fn visit_f32_const(&mut self, val: f32) -> Result<(), DecodeError> {
-        self.emit(exec::copy_imm_to_stack_f32 as Instr);
+        self.emit(exec::copy_imm_to_stack_f32 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::F32);
         Ok(())
     }
 
     fn visit_f64_const(&mut self, val: f64) -> Result<(), DecodeError> {
-        self.emit(exec::copy_imm_to_stack_f64 as Instr);
+        self.emit(exec::copy_imm_to_stack_f64 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::F64);
         Ok(())
@@ -1028,9 +1034,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
         }
         self.emit(if self.is_opd_in_reg(0) {
-            info.instr_r as Instr
+            info.instr_r as ThreadedInstr
         } else {
-            info.instr_s as Instr
+            info.instr_s as ThreadedInstr
         });
         self.pop_opd_and_emit_stack_offset();
         if let Some(output_type) = info.output_type {
@@ -1054,14 +1060,14 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         self.emit(if self.is_opd_in_reg(1) {
             if self.is_opd_in_reg(0) {
-                info.instr_rr as Instr
+                info.instr_rr as ThreadedInstr
             } else {
-                info.instr_rs as Instr
+                info.instr_rs as ThreadedInstr
             }
         } else if self.is_opd_in_reg(0) {
-            info.instr_sr as Instr
+            info.instr_sr as ThreadedInstr
         } else {
-            info.instr_ss as Instr
+            info.instr_ss as ThreadedInstr
         });
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1083,7 +1089,7 @@ struct Block {
     kind: BlockKind,
     type_: FuncType,
     first_opd_idx: usize,
-    first_instr_idx: usize,
+    first_code_idx: usize,
     else_hole_idx: Option<usize>,
     first_hole_idx: Option<usize>,
 }
@@ -1170,7 +1176,7 @@ impl From<Unknown> for OpdType {
 #[derive(Clone, Copy, Debug)]
 struct Unknown;
 
-fn br_if_z(is_input_in_reg: bool) -> Instr {
+fn br_if_z(is_input_in_reg: bool) -> ThreadedInstr {
     if is_input_in_reg {
         exec::br_if_z_r
     } else {
@@ -1178,7 +1184,7 @@ fn br_if_z(is_input_in_reg: bool) -> Instr {
     }
 }
 
-fn br_if_nz(is_input_in_reg: bool) -> Instr {
+fn br_if_nz(is_input_in_reg: bool) -> ThreadedInstr {
     if is_input_in_reg {
         exec::br_if_nz_r
     } else {
@@ -1186,7 +1192,7 @@ fn br_if_nz(is_input_in_reg: bool) -> Instr {
     }
 }
 
-fn br_table(is_input_in_reg: bool) -> Instr {
+fn br_table(is_input_in_reg: bool) -> ThreadedInstr {
     if is_input_in_reg {
         exec::br_table_r
     } else {
@@ -1194,14 +1200,14 @@ fn br_table(is_input_in_reg: bool) -> Instr {
     }
 }
 
-fn ref_null(type_: RefType) -> Instr {
+fn ref_null(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::copy_imm_to_stack_func_ref,
         RefType::ExternRef => exec::copy_imm_to_stack_extern_ref,
     }
 }
 
-fn ref_is_null(type_: OpdType, is_input_in_reg: bool) -> Instr {
+fn ref_is_null(type_: OpdType, is_input_in_reg: bool) -> ThreadedInstr {
     match type_ {
         OpdType::ValType(ValType::FuncRef) => {
             if is_input_in_reg {
@@ -1226,7 +1232,7 @@ fn select(
     is_input_0_in_reg: bool,
     is_input_1_in_reg: bool,
     is_input_2_in_reg: bool,
-) -> Instr {
+) -> ThreadedInstr {
     match type_ {
         OpdType::ValType(ValType::I32) => {
             if is_input_2_in_reg {
@@ -1358,7 +1364,7 @@ fn select(
     }
 }
 
-fn global_get(type_: ValType) -> Instr {
+fn global_get(type_: ValType) -> ThreadedInstr {
     match type_ {
         ValType::I32 => exec::global_get_i32,
         ValType::I64 => exec::global_get_i64,
@@ -1369,7 +1375,7 @@ fn global_get(type_: ValType) -> Instr {
     }
 }
 
-fn global_set(type_: ValType, is_input_in_reg: bool) -> Instr {
+fn global_set(type_: ValType, is_input_in_reg: bool) -> ThreadedInstr {
     match type_ {
         ValType::I32 => {
             if is_input_in_reg {
@@ -1416,7 +1422,7 @@ fn global_set(type_: ValType, is_input_in_reg: bool) -> Instr {
     }
 }
 
-fn table_get(type_: RefType, is_input_in_reg: bool) -> Instr {
+fn table_get(type_: RefType, is_input_in_reg: bool) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => {
             if is_input_in_reg {
@@ -1435,7 +1441,7 @@ fn table_get(type_: RefType, is_input_in_reg: bool) -> Instr {
     }
 }
 
-fn table_set(type_: RefType, is_input_0_in_reg: bool, is_input_1_in_reg: bool) -> Instr {
+fn table_set(type_: RefType, is_input_0_in_reg: bool, is_input_1_in_reg: bool) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => {
             if is_input_1_in_reg {
@@ -1458,49 +1464,49 @@ fn table_set(type_: RefType, is_input_0_in_reg: bool, is_input_1_in_reg: bool) -
     }
 }
 
-fn table_size(type_: RefType) -> Instr {
+fn table_size(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_size_func_ref,
         RefType::ExternRef => exec::table_size_extern_ref,
     }
 }
 
-fn table_grow(type_: RefType) -> Instr {
+fn table_grow(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_grow_func_ref,
         RefType::ExternRef => exec::table_grow_extern_ref,
     }
 }
 
-fn table_fill(type_: RefType) -> Instr {
+fn table_fill(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_fill_func_ref,
         RefType::ExternRef => exec::table_fill_extern_ref,
     }
 }
 
-fn table_copy(type_: RefType) -> Instr {
+fn table_copy(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_copy_func_ref,
         RefType::ExternRef => exec::table_copy_extern_ref,
     }
 }
 
-fn table_init(type_: RefType) -> Instr {
+fn table_init(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_init_func_ref,
         RefType::ExternRef => exec::table_init_extern_ref,
     }
 }
 
-fn elem_drop(type_: RefType) -> Instr {
+fn elem_drop(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::elem_drop_func_ref,
         RefType::ExternRef => exec::elem_drop_extern_ref,
     }
 }
 
-fn copy_stack(type_: ValType) -> Instr {
+fn copy_stack(type_: ValType) -> ThreadedInstr {
     match type_.into() {
         ValType::I32 => exec::copy_stack_i32,
         ValType::I64 => exec::copy_stack_i64,
@@ -1511,7 +1517,7 @@ fn copy_stack(type_: ValType) -> Instr {
     }
 }
 
-fn copy_reg_to_stack(type_: ValType) -> Instr {
+fn copy_reg_to_stack(type_: ValType) -> ThreadedInstr {
     match type_ {
         ValType::I32 => exec::copy_reg_to_stack_i32,
         ValType::I64 => exec::copy_reg_to_stack_i64,
