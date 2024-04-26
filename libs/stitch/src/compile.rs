@@ -165,9 +165,11 @@ impl<'a> Compile<'a> {
         }
     }
 
-    fn save_all_locals(&mut self) {
-        for local_idx in 0..self.locals.len() {
-            self.save_local(local_idx);
+    fn save_locals_up_to_depth(&mut self, max_opd_depth: usize) {
+        for opd_depth in 0..max_opd_depth {
+            if let Some(local_idx) = self.opd_local_idx(opd_depth) {
+                self.save_local(local_idx);
+            }
         }
     }
 
@@ -249,6 +251,17 @@ impl<'a> Compile<'a> {
             match self.opds[self.opds.len() - 1 - opd_depth] {
                 Opd::Local { local_idx, .. } => self.locals[local_idx].type_.into(),
                 Opd::Temp { type_ } => type_
+            }
+        }
+    }
+
+    fn opd_local_idx(&self, opd_depth: usize) -> Option<usize> {
+        if opd_depth >= self.opds.len() - self.block(0).first_opd_idx {
+            None
+        } else {
+            match self.opds[self.opds.len() - 1 - opd_depth] {
+                Opd::Local { local_idx, .. } => Some(local_idx),
+                Opd::Temp { .. } => None
             }
         }
     }
@@ -484,7 +497,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_block(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
-        self.save_all_locals();
+        self.save_locals_up_to_depth(type_.params().len());
         self.save_all_regs();
         for _ in 0..type_.params().len() {
             self.pop_opd();
@@ -495,7 +508,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_loop(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
-        self.save_all_locals();
+        self.save_locals_up_to_depth(type_.params().len());
         self.save_all_regs();
         for _ in 0..type_.params().len() {
             self.pop_opd();
@@ -506,7 +519,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_if(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
-        self.save_all_locals();
+        self.save_locals_up_to_depth(type_.params().len());
         self.save_all_regs_except_top();
         self.emit(br_if_z(self.is_opd_in_reg(0)));
         self.pop_opd_and_emit_stack_offset();
@@ -520,7 +533,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_else(&mut self) -> Result<(), Self::Error> {
-        self.save_all_locals();
+        self.save_locals_up_to_depth(self.block(0).type_.results().len());
         self.save_all_regs();
         self.emit(exec::br as ThreadedInstr);
         let hole_idx = self.emit_hole();
@@ -534,7 +547,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_end(&mut self) -> Result<(), Self::Error> {
-        self.save_all_locals();
+        self.save_locals_up_to_depth(self.block(0).type_.results().len());
         self.save_all_regs();
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
@@ -551,7 +564,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_br(&mut self, label_idx: u32) -> Result<(), Self::Error> {
         let label_idx = label_idx as usize;
-        self.save_all_locals();
+        self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
         self.save_all_regs();
         self.resolve_label_vals(label_idx);
         self.emit(exec::br as ThreadedInstr);
@@ -562,7 +575,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_br_if(&mut self, label_idx: u32) -> Result<(), Self::Error> {
         let label_idx = label_idx as usize;
-        self.save_all_locals();
+        self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
         self.save_all_regs_except_top();
         if self.block(label_idx).label_types().is_empty() {
             self.emit(br_if_nz(self.is_opd_in_reg(0)));
@@ -589,7 +602,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         default_label_idx: u32,
     ) -> Result<(), Self::Error> {
         let default_label_idx = default_label_idx as usize;
-        self.save_all_locals();
+        self.save_locals_up_to_depth(self.block(default_label_idx).label_types().len());
         self.save_all_regs_except_top();
         if self.block(default_label_idx).label_types().is_empty() {
             self.emit(br_table(self.is_opd_in_reg(0)));
@@ -658,7 +671,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_call(&mut self, func_idx: u32) -> Result<(), Self::Error> {
         let func = self.instance.func(func_idx).unwrap();
         let type_ = func.type_(&self.store).clone();
-        self.save_all_locals();
+        self.save_locals_up_to_depth(type_.params().len());
         self.save_all_regs();
         self.emit(match func.0.as_ref(&self.store) {
             FuncEntity::Wasm(_) => exec::compile as ThreadedInstr,
@@ -680,7 +693,7 @@ impl<'a> InstrVisitor for Compile<'a> {
                     .map(|mem| mem.0.to_unguarded(self.store.id())),
             );
         }
-        for result_type in type_.results().iter().copied() {
+        for result_type in type_.results().iter().copied () {
             self.push_opd(result_type);
         }
         Ok(())
@@ -690,7 +703,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let table = self.instance.table(table_idx).unwrap();
         let interned_type = self.instance.type_(type_idx).unwrap();
         let type_ = self.store.resolve_type(interned_type).clone();
-        self.save_all_locals();
+        self.save_locals_up_to_depth(type_.params().len() + 1);
         self.save_all_regs();
         self.emit(exec::call_indirect as ThreadedInstr);
         self.emit_stack_offset(self.opd_stack_idx(0));
