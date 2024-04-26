@@ -249,7 +249,9 @@ macro_rules! impl_host_val_raw {
 }
 
 impl_host_val!(i32, I32);
+impl_host_val!(u32, I32);
 impl_host_val!(i64, I64);
+impl_host_val!(u64, I64);
 impl_host_val!(f32, F32);
 impl_host_val!(f64, F64);
 impl_host_val_raw!(FuncRef, UnguardedFuncRef, FuncRef);
