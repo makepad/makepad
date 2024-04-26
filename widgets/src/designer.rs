@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    multi_window::*,
     widget_match_event::*,
     outline_tree::*,
     turtle_step::*,
@@ -165,7 +166,6 @@ impl Widget for DesignerView {
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
                 let cp = (fh.abs -fh.rect.pos) * self.zoom + self.pan;
-                println!("{:?}", cp);
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
                 //let corner_outer:f64  = 10.0 * self.zoom;
@@ -452,7 +452,7 @@ impl DesignerData{
 
 #[derive(Live, Widget)]
 pub struct Designer {
-    #[deref] ui: View,
+    #[deref] ui: MultiWindow,
     #[rust] data: DesignerData,
 
 }
