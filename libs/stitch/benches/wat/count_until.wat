@@ -15,6 +15,8 @@
             )
         )
     )
-    (return (local.get $i))
+    (return
+        (local.get $i)
+    )
   )
 )
