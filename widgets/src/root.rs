@@ -3,7 +3,6 @@ use {
     crate::{
         widget::*,
         makepad_derive_widget::*,
-        window::*,
         makepad_draw::*,
     }
 };
@@ -15,7 +14,7 @@ live_design!{
 #[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct Root {
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] windows: ComponentMap<LiveId, Window>,
+    #[rust] windows: ComponentMap<LiveId, WidgetRef>,
 }
  
 impl LiveHook for Root {
@@ -28,7 +27,7 @@ impl LiveHook for Root {
                     if id == live_id!(design_window) && !cx.in_makepad_studio(){
                         return nodes.skip_node(index);
                     }
-                    return self.windows.get_or_insert(cx, id, | cx | {Window::new(cx)})
+                    return self.windows.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
                         .apply(cx, apply, index, nodes);
                 }
                 else {

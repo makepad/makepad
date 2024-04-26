@@ -20,9 +20,10 @@ live_design!{
                 let tp1 = sample2d_rt(self.tex, vec2(0.5/self.tex_size.x,0.5/self.tex_size.y))
                 let tp2 = sample2d_rt(self.tex, vec2(1.5/self.tex_size.x,0.5/self.tex_size.y));
                 let tp = vec2(tp1.r*65280.0 + tp1.b*255.0,tp2.r*65280.0 + tp2.b*255.0);
-
+                // ok so we should be having the same size in self.pos
+                let counter = tp / (self.rect_size * self.dpi_factor);
                 let tex_scale = tp / self.tex_size;
-                let fb = sample2d_rt(self.tex, self.pos * tex_scale)
+                let fb = sample2d_rt(self.tex, self.pos * tex_scale / counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }

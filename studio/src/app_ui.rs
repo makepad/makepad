@@ -104,23 +104,23 @@ live_design!{
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: edit_tabs,
-                b: split3
+                b: run_tabs
             }
-            
+            /*
             split3 = Splitter {
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: design_tabs,
                 b: run_tabs
-            }
+            }*/
             
             file_tree_tabs = Tabs {
-                tabs: [file_tree, search, run_list],
-                selected: 2
+                tabs: [file_tree, search, run_list, outline_first],
+                selected: 0
             }
                 
             edit_tabs = Tabs {
-                tabs: [edit_first],
+                tabs: [edit_first, design_first],
                 selected: 0
             }
                 
@@ -133,11 +133,11 @@ live_design!{
                 tabs: [run_first],
                 selected: 0
             }
-            
+            /*
             design_tabs = Tabs {
                 tabs: [design_first],
                 selected: 0
-            }
+            }*/
                 
             file_tree = Tab {
                 name: "Explore",
@@ -168,7 +168,13 @@ live_design!{
                 closable: false,
                 kind: EditFirst
             }
-                
+            
+            outline_first = Tab {
+                name: "Outline"
+                closable: false,
+                kind: OutlineFirst
+            }
+            
             run_list = Tab {
                 name: "Run"
                 closable: false,
@@ -204,9 +210,17 @@ live_design!{
 
                     <H3> {
                         width: Fit,
-                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
+                        text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
                         margin: {left: 185}
                     }
+                }
+            }
+            OutlineFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill,
+                    align: { x: 0.5, y: 0.5 }
+                    flow: Down
+                    <Logo> {}
                 }
             }
             DesignFirst = <RectView> {
