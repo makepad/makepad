@@ -775,8 +775,8 @@ global_get!(global_get_i32, i32);
 global_get!(global_get_i64, i64);
 global_get!(global_get_f32, f32);
 global_get!(global_get_f64, f64);
-global_get!(global_get_raw_func_ref, UnguardedFuncRef);
-global_get!(global_get_raw_extern_ref, UnguardedExternRef);
+global_get!(global_get_func_ref, UnguardedFuncRef);
+global_get!(global_get_extern_ref, UnguardedExternRef);
 
 macro_rules! global_set {
     ($global_set_t_s:ident, $global_set_t_r:ident, $T:ty) => {
@@ -931,8 +931,8 @@ macro_rules! table_set {
             cx: Cx,
         ) -> ControlFlowBits {
             // Read operands
-            let (idx, ip) = read_stack(ip, sp);
             let (val, ip) = read_stack(ip, sp);
+            let (idx, ip) = read_stack(ip, sp);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -958,8 +958,8 @@ macro_rules! table_set {
             cx: Cx,
         ) -> ControlFlowBits {
             // Read operands
-            let idx = read_reg(ix, sx, dx);
             let (val, ip) = read_stack(ip, sp);
+            let idx = read_reg(ix, sx, dx);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -985,8 +985,8 @@ macro_rules! table_set {
             cx: Cx,
         ) -> ControlFlowBits {
             // Read operands
-            let (idx, ip) = read_stack(ip, sp);
             let val = read_reg(ix, sx, dx);
+            let (idx, ip) = read_stack(ip, sp);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation

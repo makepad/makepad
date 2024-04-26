@@ -824,8 +824,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let val_type = global.type_(&self.store).val;
         self.emit(global_get(val_type));
         self.emit(global.to_unguarded(self.store.id()));
-        self.push_opd(val_type);
-        self.emit_stack_offset(self.opd_stack_idx(0));
+        self.push_opd_and_emit_stack_offset(val_type);
         Ok(())
     }
 
@@ -857,10 +856,8 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.is_opd_in_reg(1),
             self.is_opd_in_reg(0),
         ));
-        self.emit_stack_offset(self.opd_stack_idx(1));
-        self.emit_stack_offset(self.opd_stack_idx(0));
-        self.pop_opd();
-        self.pop_opd();
+        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit_stack_offset();
         self.emit(table.to_unguarded(self.store.id()));
         Ok(())
     }
@@ -1391,8 +1388,8 @@ fn global_get(type_: ValType) -> ThreadedInstr {
         ValType::I64 => exec::global_get_i64,
         ValType::F32 => exec::global_get_f32,
         ValType::F64 => exec::global_get_f64,
-        ValType::FuncRef => exec::global_get_raw_func_ref,
-        ValType::ExternRef => exec::global_get_raw_extern_ref,
+        ValType::FuncRef => exec::global_get_func_ref,
+        ValType::ExternRef => exec::global_get_extern_ref,
     }
 }
 
