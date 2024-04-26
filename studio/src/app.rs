@@ -178,7 +178,7 @@ impl MatchEvent for App{
                                 dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap()
                             }
                             else{
-                                dock.find_tab_bar_of_tab(live_id!(file_tree)).unwrap()
+                                dock.find_tab_bar_of_tab(live_id!(outline_first)).unwrap()
                             };
                             
                             
