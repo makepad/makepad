@@ -656,6 +656,7 @@ live_design! {
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
+        paragraph_spacing: 16,
 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
