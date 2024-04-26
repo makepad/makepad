@@ -189,7 +189,7 @@ live_design!{
             flow: Down
             Location = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
+                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
                 location = <LinkLabel> {margin: 0, text: ""}
                 body = <P> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
             }

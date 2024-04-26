@@ -20,17 +20,14 @@ live_design!{
 pub struct Markdown{
     #[deref] text_flow: TextFlow,
     #[live] body: Rc<String>,
+    #[live] paragraph_spacing: f64,
     #[rust] doc: MarkdownDoc
 }
 
 // alright lets parse the HTML
 impl LiveHook for Markdown{
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
-        let new_doc = parse_markdown(&*self.body);
-        if new_doc != self.doc{
-            self.doc = new_doc;
-            self.text_flow.clear_items();
-        }
+        self.parse_text();
     }
 }
  
@@ -46,11 +43,12 @@ impl Widget for Markdown {
         for node in &self.doc.nodes{
             match node{
                 MarkdownNode::BeginHead{level}=>{
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.push_size_abs_scale(4.5 / *level as f64);
                     tf.bold.push();
                 },
                 MarkdownNode::Separator=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.sep(cx);
                 }
                 MarkdownNode::EndHead=>{
@@ -59,10 +57,10 @@ impl Widget for Markdown {
                     cx.turtle_new_line();
                 },
                 MarkdownNode::NewLine=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 },
                 MarkdownNode::BeginNormal=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 },
                 MarkdownNode::EndNormal=>{
                     
@@ -98,7 +96,7 @@ impl Widget for Markdown {
                     tf.draw_text(cx, " ]");
                 },
                 MarkdownNode::BeginQuote=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.begin_quote(cx);
                 },
                 MarkdownNode::EndQuote=>{
@@ -119,12 +117,20 @@ impl Widget for Markdown {
                     tf.inline_code.pop();                 
                 },
                 MarkdownNode::BeginCode=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    tf.combine_spaces.push(false);
                     tf.fixed.push();
-                    tf.begin_code(cx);     
+
+                    // This adjustment is necesary to do not add too much spacing
+                    // between lines inside the code block.
+                    tf.top_drop.push(0.2);
+
+                    tf.begin_code(cx);
                 },
                 MarkdownNode::EndCode=>{
+                    tf.top_drop.pop();
                     tf.fixed.pop();
+                    tf.combine_spaces.pop();
                     tf.end_code(cx);
                 },
                 MarkdownNode::BeginBold=>{
@@ -154,7 +160,25 @@ impl Widget for Markdown {
     } 
     
     fn set_text(&mut self, v:&str){
-        self.body = Rc::new(v.to_string())
+        self.body = Rc::new(v.to_string());
+        self.parse_text();
     }
-} 
+}
+
+impl Markdown {
+    fn parse_text(&mut self) {
+        let new_doc = parse_markdown(&*self.body);
+        if new_doc != self.doc{
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+        }
+    }
+}
+
+impl MarkdownRef {
+    pub fn set_text(&mut self, v:&str) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.set_text(v)
+    }
+}
  

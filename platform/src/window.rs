@@ -40,7 +40,7 @@ impl CxWindowPool {
             if pos.x>= window.window_geom.position.x &&
                 pos.y>= window.window_geom.position.y && 
                 pos.x<= window.window_geom.position.x+window.window_geom.inner_size.x  &&
-                pos.y<= window.window_geom.position.x+window.window_geom.inner_size.y{
+                pos.y<= window.window_geom.position.y+window.window_geom.inner_size.y{
                 return (WindowId(index, item.generation), window.window_geom.position)
             }
         }
