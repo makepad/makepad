@@ -1052,7 +1052,7 @@ impl MatchEvent for App {
         }
         
         let chat = self.ui.text_input(id!(chat));
-        if let Some(val) = chat.return_key(&actions){
+        if let Some(val) = chat.returned(&actions){
             chat.set_text_and_redraw(cx, "");
             chat.set_cursor(0,0);
             self.llm_chat.push((LLMMsg::Human, val));
