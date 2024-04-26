@@ -719,6 +719,12 @@ live_design! {
         }
 
         draw_block: {
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -730,7 +736,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT)
+                        sdf.fill(self.quote_bg_color)
                         sdf.box(
                             THEME_SPACE_1,
                             THEME_SPACE_1,
@@ -738,7 +744,7 @@ live_design! {
                             self.rect_size.y - THEME_SPACE_2,
                             1.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.quote_fg_color)
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -749,7 +755,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_DIVIDER);
+                        sdf.fill(self.sep_color);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
@@ -760,7 +766,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -771,7 +777,7 @@ live_design! {
                             self.rect_size.y - 2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT_INLINE);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -782,7 +788,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
@@ -793,7 +799,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                 }
