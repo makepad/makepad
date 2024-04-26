@@ -332,6 +332,9 @@ impl fmt::Display for DVec2 {
 
 pub fn dvec2(x: f64, y: f64) -> DVec2 {DVec2 {x, y}}
 
+pub fn rect(x: f64, y: f64, w:f64, h:f64) -> Rect {Rect{pos:DVec2 {x, y}, size:DVec2{x:w, y:h}}}
+
+
 //------ Vec2 operators
 
 impl ops::Add<DVec2> for DVec2 {
