@@ -3056,26 +3056,10 @@ live_design! {
     Root = <RootBase>{
         design_window = <Window>{
             window:{kind_id: 1}
-            show_bg: true
             width: Fill,
             height: Fill
                             
-            draw_bg: {
-   
-                fn pixel(self) -> vec4 {
-                    let pos = self.geom_pos * self.rect_size*0.1;
-                    let mask = floor(mod(pos.x+floor(mod(pos.y, 2.0)), 2.0))
-                    return #3+mask*#04
-                    /*
-                    let grid = abs(
-                        fract(coord - 0.5) - 0.5
-                    ) / (abs(dFdx(coord)) + abs(dFdy(coord)))*0.75;
-                    let line = min(grid.x, grid.y);
-                    let grid2 = 0.05 * vec4(vec3(1.0 - min(line, 1.0)), 1.0);
-                    return #5-grid2;
-                    */
-                }
-            }
+
             designer = <Designer>{
                 
             }
