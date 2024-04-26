@@ -174,9 +174,13 @@ impl MatchEvent for App{
                             let tab_bar_id = if kind_id == 0{
                                 dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap()
                             }
-                            else{
+                            else if kind_id == 1{ 
                                 dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap()
+                            }
+                            else{
+                                dock.find_tab_bar_of_tab(live_id!(file_tree)).unwrap()
                             };
+                            
                             
                             // we might already have it
                             
