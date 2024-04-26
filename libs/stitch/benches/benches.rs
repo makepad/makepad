@@ -43,12 +43,7 @@ fn fac(c: &mut Criterion) {
         b.iter(|| {
             use makepad_stitch::Val;
 
-            fac
-                .call(
-                    &mut store,
-                    &[Val::I64(n)],
-                    &mut [Val::I64(0)],
-                )
+            fac.call(&mut store, &[Val::I64(n)], &mut [Val::I64(0)])
                 .unwrap();
         })
     });
@@ -59,12 +54,7 @@ fn fac(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fac
-                .call(
-                    &mut store,
-                    &[Value::I64(n)],
-                    &mut [Value::I64(0)],
-                )
+            fac.call(&mut store, &[Value::I64(n)], &mut [Value::I64(0)])
                 .unwrap();
         })
     });
@@ -84,12 +74,7 @@ fn fib(c: &mut Criterion) {
         let fib = instance.exported_func("fib").unwrap();
 
         b.iter(|| {
-            fib
-                .call(
-                    &mut store,
-                    &[Val::I64(n as i64)],
-                    &mut [Val::I64(0)],
-                )
+            fib.call(&mut store, &[Val::I64(n as i64)], &mut [Val::I64(0)])
                 .unwrap();
         })
     });
@@ -100,12 +85,7 @@ fn fib(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fib
-                .call(
-                    &mut store,
-                    &[Value::I64(n as i64)],
-                    &mut [Value::I64(0)],
-                )
+            fib.call(&mut store, &[Value::I64(n as i64)], &mut [Value::I64(0)])
                 .unwrap();
         })
     });
@@ -127,13 +107,16 @@ fn fill(c: &mut Criterion) {
         let fill = instance.exported_func("fill").unwrap();
 
         b.iter(|| {
-            fill
-                .call(
-                    &mut store,
-                    &[Val::I32(idx as i32), Val::I32(val as i32), Val::I32(count as i32)],
-                    &mut [],
-                )
-                .unwrap();
+            fill.call(
+                &mut store,
+                &[
+                    Val::I32(idx as i32),
+                    Val::I32(val as i32),
+                    Val::I32(count as i32),
+                ],
+                &mut [],
+            )
+            .unwrap();
         });
     });
     group.bench_function("wasmi", |b| {
@@ -143,13 +126,16 @@ fn fill(c: &mut Criterion) {
         let fill = instance.get_func(&store, "fill").unwrap();
 
         b.iter(|| {
-            fill
-                .call(
-                    &mut store,
-                    &[Value::I32(idx as i32), Value::I32(val as i32), Value::I32(count as i32)],
-                    &mut [],
-                )
-                .unwrap();
+            fill.call(
+                &mut store,
+                &[
+                    Value::I32(idx as i32),
+                    Value::I32(val as i32),
+                    Value::I32(count as i32),
+                ],
+                &mut [],
+            )
+            .unwrap();
         })
     });
 }
@@ -158,9 +144,9 @@ fn sum(c: &mut Criterion) {
     let buffer = ParseBuffer::new(include_str!("wat/sum.wat")).unwrap();
     let mut wat = parser::parse::<Wat>(&buffer).unwrap();
     let bytes = wat.encode().unwrap();
-    
+
     let idx = 0;
-    let count = 1_048_576;    
+    let count = 1_048_576;
     let mut group = c.benchmark_group("fib");
     group.bench_function("stitch", |b| {
         use makepad_stitch::Val;
@@ -174,13 +160,12 @@ fn sum(c: &mut Criterion) {
             *byte = val;
         }
         b.iter(|| {
-            sum
-                .call(
-                    &mut store,
-                    &[Val::I32(idx as i32), Val::I32(count as i32)],
-                    &mut [Val::I64(0)],
-                )
-                .unwrap();
+            sum.call(
+                &mut store,
+                &[Val::I32(idx as i32), Val::I32(count as i32)],
+                &mut [Val::I64(0)],
+            )
+            .unwrap();
         });
     });
     group.bench_function("wasmi", |b| {
@@ -195,13 +180,12 @@ fn sum(c: &mut Criterion) {
             *byte = val;
         }
         b.iter(|| {
-            sum
-                .call(
-                    &mut store,
-                    &[Value::I32(idx as i32), Value::I32(count as i32)],
-                    &mut [Value::I64(0)],
-                )
-                .unwrap();
+            sum.call(
+                &mut store,
+                &[Value::I32(idx as i32), Value::I32(count as i32)],
+                &mut [Value::I64(0)],
+            )
+            .unwrap();
         })
     });
 }
