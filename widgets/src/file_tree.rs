@@ -248,8 +248,9 @@ impl FileTree {
         while walk < height_left {
             self.count += 1;
             self.filler.is_even = Self::is_even(self.count);
-            self.filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
-            walk += self.node_height.max(1.0);
+            let height = self.node_height.min(height_left - walk);
+            self.filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(height)));
+            walk += height.max(1.0);
         }
         
         self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));

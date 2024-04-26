@@ -179,6 +179,7 @@ live_design! {
         font_size: (THEME_FONT_SIZE_CODE)
         brightness: 1.1
         top_drop: 1.3
+        line_spacing: 2.0
     }
 
     Label = <LabelBase> {
@@ -655,6 +656,7 @@ live_design! {
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
+        paragraph_spacing: 16,
 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
@@ -717,6 +719,12 @@ live_design! {
         }
 
         draw_block: {
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
@@ -728,7 +736,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT)
+                        sdf.fill(self.quote_bg_color)
                         sdf.box(
                             THEME_SPACE_1,
                             THEME_SPACE_1,
@@ -736,7 +744,7 @@ live_design! {
                             self.rect_size.y - THEME_SPACE_2,
                             1.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.quote_fg_color)
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -747,7 +755,7 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_DIVIDER);
+                        sdf.fill(self.sep_color);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
@@ -758,7 +766,7 @@ live_design! {
                             self.rect_size.y,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
@@ -769,7 +777,7 @@ live_design! {
                             self.rect_size.y - 2.,
                             2.
                         );
-                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT_INLINE);
+                        sdf.fill(self.code_color);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -780,7 +788,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
@@ -791,7 +799,7 @@ live_design! {
                             2.0,
                             0.5
                         );
-                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
+                        sdf.fill(self.line_color);
                         return sdf.result;
                     }
                 }
@@ -2464,24 +2472,37 @@ live_design! {
     }
 
     OutlineTreeNode = <OutlineTreeNodeBase> {
+        align: { y: 0.5 }
+        padding: { left: (THEME_SPACE_1) },
+        is_folder: false,
+        indent_width: 10.0
+        min_drag_distance: 10.0
+        
         draw_bg: {
             fn pixel(self) -> vec4 {
-                return mix(
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    -2.,
+                    self.rect_size.x,
+                    self.rect_size.y + 3.0,
+                    1.
+                )
+                sdf.fill_keep(
                     mix(
-                        THEME_COLOR_BG_CONTAINER,
-                        THEME_COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    mix(
-                        THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_HIGHLIGHT,
-                        self.focussed
-                    ),
-                    self.selected
-                );
+                        mix(
+                            THEME_COLOR_BG_EVEN,
+                            THEME_COLOR_BG_ODD,
+                            self.is_even
+                        ),
+                        THEME_COLOR_CTRL_SELECTED,
+                        self.selected
+                    )
+                )
+                return sdf.result
             }
         }
-
+        
         draw_icon: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -2491,49 +2512,33 @@ live_design! {
                 sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                 sdf.union();
                 return sdf.fill(mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_TEXT_SELECTED,
-                        self.selected
-                    ),
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT_SELECTED,
+                    self.selected
                 ));
             }
         }
-
+        
         draw_name: {
             fn get_color(self) -> vec4 {
                 return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_TEXT_SELECTED,
-                        self.selected
-                    ),
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT_SELECTED,
+                    self.selected
                 )
             }
-
-            text_style: <THEME_FONT_CODE> {
+            
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
                 top_drop: 1.2,
             }
         }
-
-        align: {y: 0.5}
-        padding: {left: 5.0, bottom: 0,},
-
+        
         icon_walk: {
-            width: Fixed((THEME_DATA_ICON_WIDTH - 2)),
-            height: Fixed((THEME_DATA_ICON_HEIGHT)),
-            margin: {
-                left: 0
-                top: 0
-                right: 2
-                bottom: 0
-            },
+            width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
+            margin: { right: 3.0 }
         }
-
+        
         animator: {
             hover = {
                 default: off
@@ -2546,7 +2551,7 @@ live_design! {
                         draw_icon: {hover: 0.0}
                     }
                 }
-
+                
                 on = {
                     cursor: Hand
                     from: {all: Snap}
@@ -2558,20 +2563,20 @@ live_design! {
                     },
                 }
             }
-
+            
             focus = {
                 default: on
                 on = {
                     from: {all: Snap}
                     apply: {focussed: 1.0}
                 }
-
+                
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {focussed: 0.0}
                 }
             }
-
+            
             select = {
                 default: off
                 off = {
@@ -2592,19 +2597,19 @@ live_design! {
                         draw_icon: {selected: 1.0}
                     }
                 }
-
+                
             }
-
+            
             open = {
                 default: off
                 off = {
                     //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
                     //duration: 0.2
                     redraw: true
-
+                    
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.80, d2: 0.97}
-
+                    
                     //ease: Ease::OutExp
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -2613,13 +2618,13 @@ live_design! {
                         draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
-
+                
                 on = {
                     //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-
+                    
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.82, d2: 0.95}
-
+                    
                     //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
                     redraw: true
                     apply: {
@@ -2631,45 +2636,46 @@ live_design! {
                 }
             }
         }
-        is_folder: false,
-        indent_width: 10.0
-        min_drag_distance: 10.0
     }
 
     OutlineTree = <OutlineTreeBase> {
-        scroll_bars: <ScrollBars>{}
+        flow: Down,
+        
+        scroll_bars: <ScrollBars> {}
+        scroll_bars: {}
         node_height: (THEME_DATA_ITEM_HEIGHT),
-        file_node: <OutlineTreeNode> {
+        clip_x: true,
+        clip_y: true
+        
+        file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
             draw_name: {is_folder: 0.0}
         }
-        folder_node: <OutlineTreeNode> {
+        
+        folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
             draw_name: {is_folder: 1.0}
         }
-        filler: {
+        
+        filler: { // TODO: Clarify what this is for. Appears not to do anything.
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_CONTAINER,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
-                        THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_HIGHLIGHT,
+                        THEME_COLOR_CTRL_INACTIVE,
+                        THEME_COLOR_CTRL_SELECTED,
                         self.focussed
                     ),
                     self.selected
                 );
             }
         }
-        flow: Down,
-        clip_x: true,
-        clip_y: true
-        scroll_bars: {}
     }
 
 
@@ -3792,6 +3798,7 @@ live_design! {
             varying scale: vec2
             varying shift: vec2
             fn vertex(self) -> vec4 {
+                
                 let dpi = self.dpi_factor;
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
                 let floor_pos = floor(self.rect_pos * dpi) / dpi
@@ -3809,50 +3816,31 @@ live_design! {
     }
         
     Designer = <DesignerBase>{
-        flow: Right
-        /*container: <RoundedView> {
-            draw_bg: {color: #3}
-            width: Fill, height: 400
-            flow: Down, spacing: 10, padding:10
-            <RoundedView>{
-                width: Fill, height: Fit
-                padding:5
-                draw_bg:{color:#5}
-                label = <Label> {text: "HI", draw_text:{color:#f}}
-            }
-        }*/
-        <Splitter> {
-            align: FromA(300),
-            a: <View> {
+
+        <Window>{
+            window:{kind_id: 2}
+            body = <View>{
                 designer_outline = <DesignerOutline> {
                     outline_tree = <OutlineTree>{
-                        
+                                                
                     }
                 }
-            },
-            b: <View> {
-                dpi_factor: 1.5
-                draw_bg: {color: #4}
-                width: Fill, height: Fill
-                flow: Down
+            }
+        }
+        <Window>{
+            window:{kind_id: 1}
+            body = <View>{
                 designer_view = <DesignerView> {
-                    
+                    width: Fill,
+                    height: Fill                                    
                 }
-            },
-        }   
+            }
+        }
     }
     
     Root = <RootBase>{
-        design_window = <Window>{
-            window:{kind_id: 1}
-            width: Fill,
-            height: Fill
-                            
-
-            designer = <Designer>{
-                
-            }
-        }
+        design_window = <Designer>{
+        } 
     }
     // StackView DSL end
 }

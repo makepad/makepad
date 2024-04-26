@@ -174,9 +174,13 @@ impl MatchEvent for App{
                             let tab_bar_id = if kind_id == 0{
                                 dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap()
                             }
-                            else{
+                            else if kind_id == 1{ 
                                 dock.find_tab_bar_of_tab(live_id!(design_first)).unwrap()
+                            }
+                            else{
+                                dock.find_tab_bar_of_tab(live_id!(outline_first)).unwrap()
                             };
+                            
                             
                             // we might already have it
                             
@@ -245,6 +249,7 @@ impl MatchEvent for App{
             RunListAction::Destroy(run_view_id) => {
                 dock.close_tab(cx, run_view_id);
                 dock.close_tab(cx, run_view_id.add(1));
+                dock.close_tab(cx, run_view_id.add(2));
                 dock.redraw(cx);
                 log_list.redraw(cx);
             }
