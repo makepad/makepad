@@ -40,6 +40,8 @@ live_design!{
     
     RunButton = <CheckBox> {
         width: Fill,
+        margin:{top:3,bottom:0}
+        
         draw_check: {
             uniform size: 3.5;
             instance open: 0.0
