@@ -47,6 +47,7 @@ impl Widget for Markdown {
         for node in &self.doc.nodes{
             match node{
                 MarkdownNode::BeginHead{level}=>{
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.push_size_abs_scale(4.5 / *level as f64);
                     tf.bold.push();
                 },
