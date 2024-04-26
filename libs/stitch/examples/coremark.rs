@@ -9,8 +9,8 @@ fn clock_ms() -> u64 {
 
 fn stitch(bytes: &[u8]) -> f32 {
     use {
-        std::slice,
         makepad_stitch::{Engine, Func, Linker, Module, Store, Val},
+        std::slice,
     };
 
     let engine = Engine::new();
@@ -36,11 +36,12 @@ fn wasm3(bytes: &[u8]) -> f32 {
     let runtime = environment.create_runtime(2048).unwrap();
     let module = Module::parse(&environment, bytes).unwrap();
     let mut module = runtime.load_module(module).unwrap();
-    module.link_function::<(), u64>("env", "clock_ms", clock_ms_wrap).unwrap();
+    module
+        .link_function::<(), u64>("env", "clock_ms", clock_ms_wrap)
+        .unwrap();
     let run = module.find_function::<(), f32>("run").unwrap();
     run.call().unwrap()
 }
-
 
 fn wasmi(bytes: &[u8]) -> f32 {
     use {

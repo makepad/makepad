@@ -1,6 +1,6 @@
 use crate::{
     decode::{Decode, DecodeError, Decoder},
-    exec::{self, Instr},
+    exec::{self, ThreadedInstr},
     ref_::RefType,
     val::ValType,
 };
@@ -160,8 +160,8 @@ pub(crate) struct UnOpInfo {
     pub(crate) _name: &'static str,
     pub(crate) input_type: ValType,
     pub(crate) output_type: Option<ValType>,
-    pub(crate) instr_s: Instr,
-    pub(crate) instr_r: Instr,
+    pub(crate) instr_s: ThreadedInstr,
+    pub(crate) instr_r: ThreadedInstr,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,10 +170,10 @@ pub(crate) struct BinOpInfo {
     pub(crate) input_type_0: ValType,
     pub(crate) input_type_1: ValType,
     pub(crate) output_type: Option<ValType>,
-    pub(crate) instr_ss: Instr,
-    pub(crate) instr_rs: Instr,
-    pub(crate) instr_sr: Instr,
-    pub(crate) instr_rr: Instr,
+    pub(crate) instr_ss: ThreadedInstr,
+    pub(crate) instr_rs: ThreadedInstr,
+    pub(crate) instr_sr: ThreadedInstr,
+    pub(crate) instr_rr: ThreadedInstr,
 }
 
 pub(crate) fn decode_instr<V>(
