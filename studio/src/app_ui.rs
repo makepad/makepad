@@ -204,7 +204,7 @@ live_design!{
 
                     <H3> {
                         width: Fit,
-                        text: "Welcome hello \nMakepad \n\n欢迎来到\nMakepad"
+                        text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
                         margin: {left: 185}
                     }
                 }
