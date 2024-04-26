@@ -1315,7 +1315,7 @@ macro_rules! store {
 
             // Perform operation
             let offset = dyn_offset as u64 + static_offset as u64;
-            if offset + mem::size_of::<$T>() as u64 > ms as u64 {
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
                 return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
             }
             let bytes = (x as $U).to_le_bytes();
@@ -1342,7 +1342,7 @@ macro_rules! store {
 
             // Perform operation
             let offset = dyn_offset as u64 + static_offset as u64;
-            if offset + mem::size_of::<$T>() as u64 > ms as u64 {
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
                 return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
             }
             let bytes = (x as $U).to_le_bytes();
@@ -1369,7 +1369,7 @@ macro_rules! store {
 
             // Perform operation
             let offset = dyn_offset as u64 + static_offset as u64;
-            if offset + mem::size_of::<$T>() as u64 > ms as u64 {
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
                 return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
             }
             let bytes = (x as $U).to_le_bytes();
@@ -1402,7 +1402,7 @@ macro_rules! store_float {
 
             // Perform operation
             let offset = dyn_offset as u64 + static_offset as u64;
-            if offset + mem::size_of::<$T>() as u64 > ms as u64 {
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
                 return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
             }
             let bytes = (x as $U).to_le_bytes();
