@@ -16,10 +16,9 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     
-    BuildItem = <RectView> {
-        height: Fit,
-        width: Fill
-        padding: {top: 0, bottom: 0}
+    BuildItem = <View> {
+        width: Fill, height: Fit,
+        show_bg: true,
         
         draw_bg: {
             instance is_even: 0.0
@@ -28,11 +27,11 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    THEME_COLOR_BG_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 );
             }
@@ -41,9 +40,6 @@ live_design!{
     
     RunButton = <CheckBox> {
         width: Fill,
-        height: 25,
-        margin: {left: 1},
-        label_walk: {margin: {top: 7}}
         draw_check: {
             uniform size: 3.5;
             instance open: 0.0
@@ -54,15 +50,28 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 match self.check_type {
                     CheckType::Check => {
-                        let left = 2;
+                        let left = 3;
                         let sz = self.size;
-                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        let c = vec2(left + sz, self.rect_size.y * 0.5 - 1);
                         
                         // PAUSE
-                        sdf.box(sz * 0.25, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
-                        sdf.box(sz * 1.75, sz * 1.75, sz * 0.9, sz * 3.0, 1.0); // rounding = 3rd value
+                        sdf.box(
+                            sz * 0.5,
+                            sz * 1.0,
+                            sz * 0.9,
+                            sz * 3.0,
+                            1.0
+                        );
 
-                        sdf.fill(mix(#fff0, mix(#A, #F, self.hover), self.selected));
+                        sdf.box(
+                            sz * 1.75,
+                            sz * 1.0,
+                            sz * 0.9,
+                            sz * 3.0,
+                            1.0
+                        );
+
+                        sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_HOVER, self.hover), self.selected));
 
                         // PLAY
                         sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
@@ -70,41 +79,84 @@ live_design!{
                         sdf.line_to(c.x, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.close_path();
-                        sdf.fill(mix(mix(#44, #8, self.hover), #fff0, self.selected));
+                        sdf.fill(mix(mix(THEME_COLOR_U_2, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.selected));
 
                     }
                 }
                 return sdf.result
             }
         }
-        draw_text: {text_style: <THEME_FONT_LABEL> {}}
     }
     
     
     RunList = {{RunList}}{
-        height: Fill,
-        width: Fill
+        width: Fill, height: Fill,
         list = <FlatList> {
-            grab_key_focus: true
-            drag_scrolling: false
-            height: Fill,
-            width: Fill
-            flow: Down
+            height: Fill, width: Fill,
+            flow: Down,
+            grab_key_focus: true,
+            drag_scrolling: false,
+
             Target = <BuildItem> {
-                padding: {top: 0, bottom: 0}
-                //label = <Label> {width: Fill, margin:{left:35}, padding:0, draw_text: {wrap: Word}}
-                check = <RunButton> { margin: {left: 21} }
+                padding: 0,
+                check = <RunButton> { margin: {left: 23} }
+
+                // <Image> {
+                //     width: 20., height: 20.
+                //     svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                // }
+                // platform = <Button> {
+                //     width: 10., height: Fit,
+                //     margin: { right: 5.0}
+                //     align: { x: 0.5, y: 0.5 },
+                //     padding: 0.0
+                //     draw_icon: {
+                //         svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                //         fn get_color(self) -> vec4 { return #FFF3 }
+                //     }
+                //     icon_walk: {
+                //         width: 10., height: Fit
+                //     }
+                //     draw_bg: {
+                //         fn pixel(self) -> vec4 {
+                //             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                //             return sdf.result
+                //         }
+                //     }
+                //     text: ""
+                // }
+                // mode = <Button> {
+                //     width: 10., height: Fit,
+                //     margin: { right: 15.0}
+                //     align: { x: 0.5, y: 0.5 },
+                //     padding: 0.0
+                //     draw_icon: {
+                //         svg_file: dep("crate://self/resources/icons/Icon_Search.svg"),
+                //         fn get_color(self) -> vec4 { return #FFF3 }
+                //     }
+                //     icon_walk: {
+                //         width: 10., height: Fit
+                //     }
+                //     draw_bg: {
+                //         fn pixel(self) -> vec4 {
+                //             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                //             return sdf.result
+                //         }
+                //     }
+                //     text: ""
+                // }
             }
+
             Binary = <BuildItem> {
-                padding: {top: 0, bottom: 0}
                 flow: Right
+
                 fold = <FoldButton> {
-                    animator: {open = {default: no}}, height: 25, width: 15 margin: {left: 5}
+                    height: 25, width: 15,
+                    margin: { left: (THEME_SPACE_2) }
+                    animator: { open = { default: no } },
                     draw_bg: {
                         uniform size: 3.75;
                         instance open: 0.0
-                        // uniform length: 3.0
-                        // uniform width: 1.0
                         
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -124,13 +176,13 @@ live_design!{
                         }
                     }
                 }
-                //label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
+                // label = <Label> {width: Fill, margin: {left: 20, top: 7}, padding: 0, draw_text: {wrap: Ellipsis}}
                 check = <RunButton> {}
             }
+
             Empty = <BuildItem> {
+                height: Fit, width: Fill,
                 cursor: Default
-                height: 24,
-                width: Fill
             }
         }
     }
