@@ -104,15 +104,15 @@ live_design!{
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: edit_tabs,
-                b: split3
+                b: run_tabs
             }
-            
+            /*
             split3 = Splitter {
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: design_tabs,
                 b: run_tabs
-            }
+            }*/
             
             file_tree_tabs = Tabs {
                 tabs: [file_tree, search, run_list],
@@ -120,7 +120,7 @@ live_design!{
             }
                 
             edit_tabs = Tabs {
-                tabs: [edit_first],
+                tabs: [edit_first, design_first],
                 selected: 0
             }
                 
@@ -133,11 +133,11 @@ live_design!{
                 tabs: [run_first],
                 selected: 0
             }
-            
+            /*
             design_tabs = Tabs {
                 tabs: [design_first],
                 selected: 0
-            }
+            }*/
                 
             file_tree = Tab {
                 name: "Explore",

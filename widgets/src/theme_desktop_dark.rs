@@ -3791,6 +3791,7 @@ live_design! {
             varying scale: vec2
             varying shift: vec2
             fn vertex(self) -> vec4 {
+                
                 let dpi = self.dpi_factor;
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
                 let floor_pos = floor(self.rect_pos * dpi) / dpi
@@ -3808,50 +3809,31 @@ live_design! {
     }
         
     Designer = <DesignerBase>{
-        flow: Right
-        /*container: <RoundedView> {
-            draw_bg: {color: #3}
-            width: Fill, height: 400
-            flow: Down, spacing: 10, padding:10
-            <RoundedView>{
-                width: Fill, height: Fit
-                padding:5
-                draw_bg:{color:#5}
-                label = <Label> {text: "HI", draw_text:{color:#f}}
-            }
-        }*/
-        <Splitter> {
-            align: FromA(300),
-            a: <View> {
+
+        <Window>{
+            window:{kind_id: 2}
+            body = <View>{
                 designer_outline = <DesignerOutline> {
                     outline_tree = <OutlineTree>{
-                        
+                                                
                     }
                 }
-            },
-            b: <View> {
-                dpi_factor: 1.5
-                draw_bg: {color: #4}
-                width: Fill, height: Fill
-                flow: Down
+            }
+        }
+        <Window>{
+            window:{kind_id: 1}
+            body = <View>{
                 designer_view = <DesignerView> {
-                    
+                    width: Fill,
+                    height: Fill                                    
                 }
-            },
-        }   
+            }
+        }
     }
     
     Root = <RootBase>{
-        design_window = <Window>{
-            window:{kind_id: 1}
-            width: Fill,
-            height: Fill
-                            
-
-            designer = <Designer>{
-                
-            }
-        }
+        design_window = <Designer>{
+        } 
     }
     // StackView DSL end
 }

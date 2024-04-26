@@ -28,14 +28,12 @@ pub enum UndoGroup {
     Cut(u64),
 }
 
-
 #[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 pub struct DrawLabel {
     #[deref] draw_super: DrawText,
     #[live] is_empty: f32,
 }
-
 
 #[derive(Live, LiveHook, Widget)]
 pub struct TextInput {
