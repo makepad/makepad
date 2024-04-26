@@ -115,8 +115,8 @@ live_design!{
             }*/
             
             file_tree_tabs = Tabs {
-                tabs: [file_tree, search, run_list],
-                selected: 2
+                tabs: [file_tree, search, run_list, outline_first],
+                selected: 0
             }
                 
             edit_tabs = Tabs {
@@ -168,7 +168,13 @@ live_design!{
                 closable: false,
                 kind: EditFirst
             }
-                
+            
+            outline_first = Tab {
+                name: "Outline"
+                closable: false,
+                kind: OutlineFirst
+            }
+            
             run_list = Tab {
                 name: "Run"
                 closable: false,
@@ -207,6 +213,14 @@ live_design!{
                         text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
                         margin: {left: 185}
                     }
+                }
+            }
+            OutlineFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill,
+                    align: { x: 0.5, y: 0.5 }
+                    flow: Down
+                    <Logo> {}
                 }
             }
             DesignFirst = <RectView> {
