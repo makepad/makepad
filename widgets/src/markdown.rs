@@ -20,6 +20,7 @@ live_design!{
 pub struct Markdown{
     #[deref] text_flow: TextFlow,
     #[live] body: Rc<String>,
+    #[live] paragraph_spacing: f64,
     #[rust] doc: MarkdownDoc
 }
 
@@ -50,7 +51,7 @@ impl Widget for Markdown {
                     tf.bold.push();
                 },
                 MarkdownNode::Separator=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.sep(cx);
                 }
                 MarkdownNode::EndHead=>{
@@ -59,10 +60,10 @@ impl Widget for Markdown {
                     cx.turtle_new_line();
                 },
                 MarkdownNode::NewLine=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 },
                 MarkdownNode::BeginNormal=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 },
                 MarkdownNode::EndNormal=>{
                     
@@ -98,7 +99,7 @@ impl Widget for Markdown {
                     tf.draw_text(cx, " ]");
                 },
                 MarkdownNode::BeginQuote=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.begin_quote(cx);
                 },
                 MarkdownNode::EndQuote=>{
@@ -119,12 +120,18 @@ impl Widget for Markdown {
                     tf.inline_code.pop();                 
                 },
                 MarkdownNode::BeginCode=>{
-                    cx.turtle_new_line();
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                     tf.combine_spaces.push(false);
                     tf.fixed.push();
+
+                    // This adjustment is necesary to do not add too much spacing
+                    // between lines inside the code block.
+                    tf.top_drop.push(0.2);
+
                     tf.begin_code(cx);
                 },
                 MarkdownNode::EndCode=>{
+                    tf.top_drop.pop();
                     tf.fixed.pop();
                     tf.combine_spaces.pop();
                     tf.end_code(cx);
