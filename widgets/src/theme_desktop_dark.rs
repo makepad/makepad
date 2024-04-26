@@ -4,233 +4,446 @@ live_design! {
     import makepad_draw::shader::std::*;
     import crate::base::*;
 
-    THEME_FONT_LABEL = {
-        font_size: 9.4,
-        font: {
-            path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
-        }
-    }
-    
-    THEME_FONT_BOLD = {
-        font_size: 9.4,
-        font: {
-            path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf")
-        }
-    }
-    
-    THEME_FONT_ITALIC = {
-        font_size: 9.4,
-        font: {
-            path: dep("crate://self/resources/IBMPlexSans-Italic.ttf")
-        }
-    }
-    
-    THEME_FONT_BOLD_ITALIC = {
-        font_size: 9.4,
-        font: {
-            path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
-        }
-    }
-    
-    THEME_FONT_DATA = {
-        font_size: 9.4,
-        font: {
-            path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
-        }
-    }
+    // GLOBAL PARAMETERS
+    THEME_COLOR_CONTRAST = 1.0
+    THEME_COLOR_TINT = #f00
+    THEME_COLOR_TINT_AMOUNT = 0.0
+    THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
+    THEME_CORNER_RADIUS = 2.5
+    THEME_BEVELING = 0.75
+    THEME_FONT_SIZE_BASE = 7.5
+    THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
 
-    THEME_FONT_META = {
-        font_size: 9.4,
-        top_drop: 1.2,
-        font: {
-            path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
-        }
-    }
+    // DIMENSIONS
+    THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
+    THEME_SPACE_2 = (1.0 * (THEME_SPACE_FACTOR))
+    THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
 
+    THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)} THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
+    THEME_MSPACE_V_1 = {top: (THEME_SPACE_1), right: 0., bottom: (THEME_SPACE_1), left: 0.}
+    THEME_MSPACE_2 = {top: (THEME_SPACE_2), right: (THEME_SPACE_2), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
+    THEME_MSPACE_H_2 = {top: 0., right: (THEME_SPACE_2), bottom: 0., left: (THEME_SPACE_2)}
+    THEME_MSPACE_V_2 = {top: (THEME_SPACE_2), right: 0., bottom: (THEME_SPACE_2), left: 0.}
+    THEME_MSPACE_3 = {top: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom: (THEME_SPACE_3), left: (THEME_SPACE_3)}
+    THEME_MSPACE_H_3 = {top: 0., right: (THEME_SPACE_3), bottom: 0., left: (THEME_SPACE_3)}
+    THEME_MSPACE_V_3 = {top: (THEME_SPACE_3), right: 0., bottom: (THEME_SPACE_3), left: 0.}
+
+    THEME_DATA_ITEM_HEIGHT = 23.0
+    THEME_DATA_ICON_WIDTH = 16.0
+    THEME_DATA_ICON_HEIGHT = 24.0
+
+    THEME_CONTAINER_CORNER_RADIUS = (THEME_CORNER_RADIUS * 2.)
+    THEME_TEXTSELECTION_CORNER_RADIUS = (THEME_CORNER_RADIUS * .5)
+    THEME_TAB_HEIGHT = 32.0,
+    THEME_SPLITTER_HORIZONTAL = 16.0,
+    THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
+    THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
+    THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
+    THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
+    THEME_SPLITTER_SIZE = 5.0
+    THEME_DOCK_BORDER_SIZE: 0.0
+
+    // COLOR PALETTE
+    // HIGHER VALUE = HIGHER CONTRAST, RECOMMENDED VALUES: 0.5 - 2.5
+
+    THEME_COLOR_W = #FFFFFFFF
+    THEME_COLOR_W_H = #FFFFFF00
+    THEME_COLOR_B = #000000FF
+    THEME_COLOR_B_H = #00000000
+
+    THEME_COLOR_WHITE = (mix(THEME_COLOR_W, #FFFFFF00, pow(0.1, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_5 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.35, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_4 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.6, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_3 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.75, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_2 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.9, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_1 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.95, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_U_HIDDEN = (THEME_COLOR_W_H)
+
+    THEME_COLOR_D_HIDDEN = (THEME_COLOR_B_H)
+    THEME_COLOR_D_1 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.85, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_2 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.75, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_3 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.6, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_D_4 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.4, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BLACK = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.1, THEME_COLOR_CONTRAST)))
+
+    // BASICS
+    THEME_COLOR_MAKEPAD = #FF5C39FF
+
+    THEME_COLOR_BG_APP = (mix(mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.28, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
+    THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
+    THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
+
+    THEME_COLOR_CURSOR_BG = (THEME_COLOR_BLACK)
+    THEME_COLOR_CURSOR_BORDER = (THEME_COLOR_WHITE)
+
+    THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_DEFAULT_DARK = (THEME_COLOR_D_4)
+    THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT_DEFAULT)
+
+    THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_3)
+    THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
+    THEME_COLOR_TEXT_ACTIVE = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_INACTIVE = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_WHITE)
+    THEME_COLOR_TEXT_FOCUSED = (THEME_COLOR_U_5)
+    THEME_COLOR_TEXT_PLACEHOLDER = (THEME_COLOR_U_4)
+    THEME_COLOR_TEXT_META = (THEME_COLOR_U_4)
+
+    THEME_COLOR_TEXT_CURSOR = (THEME_COLOR_WHITE)
+
+    THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_3)
+    THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.85)
+    THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.15)
+    THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1) // Code-blocks and quotes.
+    THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_3) // i.e. inline code
+
+    THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
+    THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_4)
+ 
+    // WIDGET COLORS
+    THEME_COLOR_CTRL_DEFAULT = (THEME_COLOR_U_1)
+    THEME_COLOR_CTRL_PRESSED = (THEME_COLOR_D_1)
+    THEME_COLOR_CTRL_HOVER = (THEME_COLOR_U_2)
+    THEME_COLOR_CTRL_ACTIVE = (THEME_COLOR_D_1)
+    THEME_COLOR_CTRL_SELECTED = (THEME_COLOR_U_2)
+    THEME_COLOR_CTRL_INACTIVE = (THEME_COLOR_D_HIDDEN)
+
+    THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
+
+    // Background of textinputs, radios, checkboxes etc.
+    THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_U_1)
+    THEME_COLOR_INSET_PIT_TOP = (THEME_COLOR_D_4)
+    THEME_COLOR_INSET_PIT_TOP_HOVER = (THEME_COLOR_D_4)
+    THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)
+
+    // Progress bars, slider amounts etc.
+    THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_U_3)
+    THEME_COLOR_AMOUNT_DEFAULT_BIG = #A
+    THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_U_4)
+    THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_U_5)
+    THEME_COLOR_AMOUNT_TRACK_DEFAULT = (THEME_COLOR_D_3)
+    THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_3)
+    THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_4)
+
+    // WIDGET SPECIFIC COLORS
+    THEME_COLOR_DIVIDER = (THEME_COLOR_D_4)
+
+    THEME_COLOR_SLIDER_NUB_DEFAULT = (THEME_COLOR_WHITE)
+    THEME_COLOR_SLIDER_NUB_HOVER = (THEME_COLOR_WHITE)
+    THEME_COLOR_SLIDER_NUB_ACTIVE = (THEME_COLOR_WHITE)
+
+    THEME_COLOR_SLIDES_CHAPTER = (THEME_COLOR_MAKEPAD)
+    THEME_COLOR_SLIDES_BG = (THEME_COLOR_D_4)
+
+    THEME_COLOR_SLIDER_BIG_NUB_TOP = #8
+    THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER = #A
+    THEME_COLOR_SLIDER_BIG_NUB_BOTTOM = #282828
+    THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER = #3
+
+    THEME_COLOR_CTRL_SCROLLBAR_HOVER = (THEME_COLOR_U_3)
+
+    THEME_COLOR_DOCK_CONTAINER = (THEME_COLOR_BG_CONTAINER)
+    THEME_COLOR_DOCK_TAB_SELECTED = (THEME_COLOR_BG_CONTAINER)
+    THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL = (THEME_COLOR_U_4)
+
+
+    // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
+    THEME_COLOR_HIGH = #C00
+    THEME_COLOR_MID = #FA0
+    THEME_COLOR_LOW = #8A0
+    THEME_COLOR_PANIC = #f0f
+    THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
+    THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
+    THEME_COLOR_WARNING = (THEME_COLOR_MID),
+    THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
+
+
+    // TYPOGRAPHY
+    THEME_FONT_SIZE_CODE = 9.0
+    THEME_FONT_LINE_SPACING = 1.43
+
+    THEME_FONT_SIZE_1 = (THEME_FONT_SIZE_BASE + 16 * THEME_FONT_SIZE_CONTRAST)
+    THEME_FONT_SIZE_2 = (THEME_FONT_SIZE_BASE + 8 * THEME_FONT_SIZE_CONTRAST)
+    THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
+    THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
+    THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
+
+    THEME_FONT_LABEL = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
+    THEME_FONT_REGULAR = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } }
+    THEME_FONT_BOLD = { font: { path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf") } }
+    THEME_FONT_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-Italic.ttf") } }
+    THEME_FONT_BOLD_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-BoldItalic.ttf") } }
     THEME_FONT_CODE = {
-        font: {
-            path: dep("crate://self/resources/LiberationMono-Regular.ttf")
-        }
+        font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
+        font_size: (THEME_FONT_SIZE_CODE)
         brightness: 1.1
-        font_size: 9.0
-        line_spacing: 2.0
         top_drop: 1.3
     }
 
-    const THEME_DATA_ITEM_HEIGHT = 23.0
-    const THEME_DATA_ICON_WIDTH = 16.0
-    const THEME_DATA_ICON_HEIGHT = 24.0
-    // ABSOLUTE DEFS
-
-    const THEME_BRIGHTNESS = #x40
-    const THEME_COLOR_HIGHLIGHT = #42
-    const THEME_COLOR_HIGH = #C00
-    const THEME_COLOR_MID = #FA0
-    const THEME_COLOR_LOW = #8A0
-
-    // RELATIVE =DEFS
-    //    42, =78, 117
-    const THEME_COLOR_WHITE = #FFF
-    const THEME_COLOR_UP_80 = #FFFFFFCC
-    const THEME_COLOR_UP_50 = #FFFFFF80
-    const THEME_COLOR_UP_25 = #FFFFFF40
-    const THEME_COLOR_UP_15 = #FFFFFF26
-    const THEME_COLOR_UP_10 = #FFFFFF1A
-    const THEME_COLOR_UP_4 = #FFFFFF0A
-    const THEME_COLOR_DOWN_7 = #00000013
-    const THEME_COLOR_DOWN_10 = #00000030
-    const THEME_COLOR_DOWN_20 = #00000040
-    const THEME_COLOR_DOWN_50 = #00000080
-    const THEME_COLOR_BLACK = #000
-
-    // CORE BACKGROUND COLORS
-
-    const THEME_COLOR_BG_APP = (THEME_BRIGHTNESS)
-
-    const THEME_COLOR_BG_HEADER = (blend(
-        THEME_COLOR_BG_APP,
-        THEME_COLOR_DOWN_10
-    ))
-
-    const THEME_COLOR_CLEAR = (THEME_COLOR_BG_APP)
-
-    const THEME_COLOR_BG_EDITOR = (blend(
-        THEME_COLOR_BG_HEADER,
-        THEME_COLOR_DOWN_10
-    ))
-
-    const THEME_COLOR_BG_ODD = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_DOWN_7
-    ))
-
-    const THEME_COLOR_BG_SELECTED = (THEME_COLOR_HIGHLIGHT)
-
-    const THEME_COLOR_BG_UNFOCUSSED = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_UP_10
-    ))
-
-    const THEME_COLOR_EDITOR_SELECTED = (THEME_COLOR_BG_SELECTED)
-    const THEME_COLOR_EDITOR_SELECTED_UNFOCUSSED = (THEME_COLOR_BG_SELECTED_UNFOCUSSED)
-
-    const THEME_COLOR_BG_CURSOR = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_UP_4
-    ))
-
-    const THEME_COLOR_FG_CURSOR = (blend(
-        THEME_COLOR_BG_EDITOR,
-        THEME_COLOR_UP_50
-    ))
-
-    // TEXT / ICON COLORS
-
-    const THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_UP_50)
-    const THEME_COLOR_TEXT_HOVER = (THEME_COLOR_UP_80)
-    const THEME_COLOR_TEXT_META = (THEME_COLOR_UP_25)
-    const THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_UP_80)
-
-    // SPLITTER AND SCROLLBAR
-
-    const THEME_COLOR_SCROLL_BAR_DEFAULT = (THEME_COLOR_UP_10)
-
-    const THEME_COLOR_CONTROL_HOVER = (blend(
-        THEME_COLOR_BG_HEADER,
-        THEME_COLOR_UP_50
-    ))
-
-    const THEME_COLOR_CONTROL_PRESSED = (blend(
-        THEME_COLOR_BG_HEADER,
-        THEME_COLOR_UP_25
-    ))
-
-    // ICON COLORS
-
-    const THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
-    const THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
-    const THEME_COLOR_WARNING = (THEME_COLOR_MID),
-    const THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
-    const THEME_COLOR_DRAG_QUAD = (THEME_COLOR_UP_50)
-    const THEME_COLOR_PANIC = #f0f
-
-    const THEME_TAB_HEIGHT = 26.0,
-    const THEME_SPLITTER_HORIZONTAL = 16.0,
-    const THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
-    const THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
-    const THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
-    const THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
-    const THEME_SPLITTER_SIZE = 5.0
-    
-    // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1, #x155EEF, // #0a84ff
-    const LINK_COLOR = #F00
-    const LINK_COLOR_HOVER = #FF0
-    const LINK_COLOR_PRESSED = #00F
-        
-    HtmlLink = <HtmlLinkBase> {
-        width: Fit,
-        height: Fit,
-        margin: 0
-        padding: 0
-        align: {x: 0., y: 0.}
-                        
-        label_walk: {
-            width: Fit,
-            height: Fit
+    Label = <LabelBase> {
+        width: Fit, height: Fit, 
+        draw_text: {
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            text_style: <THEME_FONT_REGULAR> {},
+            wrap: Word
         }
-                        
+    }
+
+    H1 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_1)}
+        draw_text: {
+            wrap: Word
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_1)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H1"
+    }
+
+    H1italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_1)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_1)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H1"
+    }
+
+    H2 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_2)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_2)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H2"
+    }
+
+    H2italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_2)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_2)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H2"
+    }
+
+    H3 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_3)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_3)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H3"
+    }
+
+    H3italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_3)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_3)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H3"
+    }
+
+    H4 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_4)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_4)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H4"
+    }
+
+    H4italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_4)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_4)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H4"
+    }
+
+    P = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+
+    Pbold = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+
+    Pitalic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+
+    Pbolditalic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+
+    Hr = <View> {
+        width: Fill, height: Fit,
+        flow: Down,
+        spacing: 0.,
+        margin: <THEME_MSPACE_V_2> {}
+        <View> {
+            width: Fill, height: (THEME_BEVELING * 2.0),
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+        }
+        <View> {
+            width: Fill, height: (THEME_BEVELING * 0.5),
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+        }
+    }
+
+//    TODO: enable once Makepad's layout supports Fill that knows how high adjacent elements are. For now this is not possible.
+//    Vr = <View> {
+//         width: Fit., height: Fill,
+//         flow: Right,
+//         spacing: 0.,
+//         margin: <THEME_MSPACE_V_2> {}
+//         <View> {
+//             width: (THEME_BEVELING * 2.0), height: Fill
+//             show_bg: true,
+//             draw_bg: { color: #f00 }
+//         }
+//         <View> {
+//             width: (THEME_BEVELING * 0.5), height: Fill,
+//             show_bg: true,
+//             draw_bg: { color: #f0f }
+//         }
+//     }
+
+
+    Filler = <View> {
+        width: Fill, height: Fill
+    }
+
+    HtmlLink = <HtmlLinkBase> {
+        width: Fit, height: Fit,
+        align: {x: 0., y: 0.}
+
+        label_walk: { width: Fit, height: Fit }
+
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    #9,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
         }
-                        
+
         animator: {
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                hover = {
+                    default: off,
+                    off = {
+                        from: {all: Forward {duration: 0.1}}
+                        apply: {
+                            draw_bg: {pressed: 0.0, hover: 0.0}
+                            draw_icon: {pressed: 0.0, hover: 0.0}
+                            draw_text: {pressed: 0.0, hover: 0.0}
+                        }
                     }
-                }
-                                                
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+
+                    on = {
+                        from: {
+                            all: Forward {duration: 0.1}
+                            pressed: Forward {duration: 0.01}
+                        }
+                        apply: {
+                            draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                            draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                            draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        }
                     }
-                    apply: {
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                    }
-                }
-                                                
-                pressed = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+
+                    pressed = {
+                        from: {all: Forward {duration: 0.2}}
+                        apply: {
+                            draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                            draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                            draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        }
                     }
                 }
             }
-        }
-                        
-                        
+
         draw_bg: {
             instance pressed: 0.0
             instance hover: 0.0
@@ -241,20 +454,22 @@ live_design! {
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
                     THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_META,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 ), mix(0.0, 0.8, self.hover));
             }
         }
-                        
+
         draw_text: {
             wrap: Word
-            color: (LINK_COLOR),
-            instance color_hover: (LINK_COLOR_HOVER),
-            instance color_pressed: (LINK_COLOR_PRESSED),
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            instance color_hover: (THEME_COLOR_TEXT_HOVER),
+            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -268,186 +483,260 @@ live_design! {
             }
         }
     }
-        
-    Html = <HtmlBase>{
-        font_size: 12,
+
+    Html = <HtmlBase> {
+        width: Fill, height: Fit,
         flow: RightWrap,
         width:Fill,
         height:Fit,
-        padding: 5,
-        line_spacing: 10,
+        padding: <THEME_MSPACE_1> {}
+
+        line_spacing: (THEME_FONT_LINE_SPACING),
+        font_size: (THEME_FONT_SIZE_P),
         
-        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
-        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
-        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
         
-        code_layout:{flow: RightWrap, padding:{left:10,top:10,right:10,bottom:10}},
-        code_walk:{height:Fit,width:Fill}
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        code_walk: { width: Fill, height: Fit }
+
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        quote_walk: { width: Fill, height: Fit, }
         
-        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
-        quote_walk:{height:Fit,width:Fill}
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
+        }
         
-        list_item_layout:{flow: RightWrap, padding:{left:0,top:0,right:10,bottom:0}},
-        list_item_walk:{height:Fit,width:Fill}
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
         
-        inline_code_padding:3,
-        inline_code_margin: 3,
-        
-        sep_walk:{height:4, width: Fill},
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_3> {}
+        }
                 
-        a = <HtmlLink> {
-            draw_text: {
-                text_style: {
-                    font_size: 12,
+        a = <HtmlLink> {}
+        
+        draw_block:{
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.quote_bg_color)
+                        sdf.box(
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
+                            1.5
+                        );
+                        sdf.fill(self.quote_fg_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.sep_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y * 0.45,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
                 }
+                return #f00
             }
         }
-        
-        draw_block:{
-            line_color: #9
-            sep_color: #9
-            quote_bg_color: #4
-            quote_fg_color: #7
-            code_color: #3
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                match self.block_type {
-                    FlowBlockType::Quote => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.quote_bg_color)
-                        sdf.box(
-                            4.,
-                            3.,
-                            4.,
-                            self.rect_size.y-6, 
-                            1.
-                        );
-                        sdf.fill(self.quote_fg_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.sep_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Code => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::InlineCode => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Underline => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y-2,
-                            self.rect_size.x,
-                            1.5,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Strikethrough => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y*0.5,
-                            self.rect_size.x,
-                            1.5,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
-                    }
-                }
-                return #f00
-            } 
-        }
     }
-        
-    Markdown = <MarkdownBase>{
-        font_size: 12,
+
+    Markdown = <MarkdownBase> {
+        width:Fill, height:Fit,
         flow: RightWrap,
-        width:Fill,
-        height:Fit,
-        padding: 5,
-        line_spacing: 10,
-        
-        draw_normal: {text_style:<THEME_FONT_LABEL>{}}
-        draw_italic: {text_style:<THEME_FONT_ITALIC>{}}
-        draw_bold: {text_style:<THEME_FONT_BOLD>{}}
-        draw_bold_italic: {text_style:<THEME_FONT_BOLD_ITALIC>{}}
-        draw_fixed: {text_style:<THEME_FONT_CODE>{}}
-                
-        code_layout:{flow: RightWrap,align:{x:0.0,y:0.0}, padding:{left:10,top:10,right:10,bottom:10}},
-        code_walk:{height:Fit,width:Fill}
-        
-        quote_layout:{flow: RightWrap, padding:{left:15,top:10,right:10,bottom:10}},
-        quote_walk:{height:Fit,width:Fill}
-                
-        list_item_layout:{flow: RightWrap, line_spacing: 10 padding:{left:15,top:0,right:10,bottom:0}},
-        list_item_walk:{margin:{top:0},height:Fit,width:Fill}
-                
-        sep_walk:{height:4, width: Fill},
-        
-        inline_code_padding:3,
-        inline_code_margin: 3,
-                        
-        draw_block:{
-            line_color: #9
-            sep_color: #9
-            quote_bg_color: #4
-            quote_fg_color: #7
-            code_color: #3
+        padding: <THEME_MSPACE_1> {}
+
+        line_spacing: (THEME_FONT_LINE_SPACING),
+        font_size: (THEME_FONT_SIZE_P),
+
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        code_walk: { width: Fill, height: Fit }
+
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        quote_walk: { width: Fill, height: Fit, }
+
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
+        }
+
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_3> {}
+        }
+
+        draw_block: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.block_type {
                     FlowBlockType::Quote => {
                         sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
                             2.
                         );
-                        sdf.fill(self.quote_bg_color)
+                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT)
                         sdf.box(
-                            4.,
-                            3.,
-                            4.,
-                            self.rect_size.y-6, 
-                            1.
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
+                            1.5
                         );
-                        sdf.fill(self.quote_fg_color);
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                     FlowBlockType::Sep => {
@@ -458,29 +747,29 @@ live_design! {
                             self.rect_size.y-2.,
                             2.
                         );
-                        sdf.fill(self.sep_color);
+                        sdf.fill(THEME_COLOR_DIVIDER);
                         return sdf.result;
                     }
                     FlowBlockType::Code => {
                         sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
                             2.
                         );
-                        sdf.fill(self.code_color);
+                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT);
                         return sdf.result;
                     }
                     FlowBlockType::InlineCode => {
                         sdf.box(
                             1.,
                             1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
+                            self.rect_size.x,
+                            self.rect_size.y - 2.,
                             2.
                         );
-                        sdf.fill(self.code_color);
+                        sdf.fill(THEME_COLOR_BG_HIGHLIGHT_INLINE);
                         return sdf.result;
                     }
                     FlowBlockType::Underline => {
@@ -488,29 +777,31 @@ live_design! {
                             0.,
                             self.rect_size.y-2,
                             self.rect_size.x,
-                            1.5,
+                            2.0,
                             0.5
                         );
-                        sdf.fill(self.line_color);
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                     FlowBlockType::Strikethrough => {
                         sdf.box(
                             0.,
-                            self.rect_size.y*0.5,
+                            self.rect_size.y * 0.45,
                             self.rect_size.x,
-                            1.5,
+                            2.0,
                             0.5
                         );
-                        sdf.fill(self.line_color);
+                        sdf.fill(THEME_COLOR_TEXT_DEFAULT);
                         return sdf.result;
                     }
                 }
                 return #f00
-            } 
+            }
         }
     }
-    
+
+    Spacer = <View> { width: Fill, height: Fill }
+
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
@@ -542,11 +833,11 @@ live_design! {
                         self.border_radius
                     );
                 }
-                return sdf.fill(mix(
-                    THEME_COLOR_SCROLL_BAR_DEFAULT,
+                return sdf.fill( mix(
+                    THEME_COLOR_CTRL_DEFAULT,
                     mix(
-                        THEME_COLOR_CONTROL_HOVER,
-                        THEME_COLOR_CONTROL_PRESSED,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
                         self.pressed
                     ),
                     self.hover
@@ -598,63 +889,40 @@ live_design! {
         scroll_bar_y: <ScrollBar> {}
     }
 
-
-    Label = <LabelBase> {
-        width: Fit
-        height: Fit
-        draw_text: {
-            color: #8,
-            text_style: <THEME_FONT_LABEL>{}
-            wrap: Word
-        }
-    }
-
-    // Button
-
-
-
     Button = <ButtonBase> {
-        width: Fit,
-        height: Fit,
-        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
-        align: {x: 0.5, y: 0.5}
-        padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
-
-        label_walk: {
-            width: Fit,
-            height: Fit
-        }
+        width: Fit, height: Fit,
+        spacing: 7.5,
+        align: {x: 0.5, y: 0.5},
+        padding: <THEME_MSPACE_2> {}
+        label_walk: { width: Fit, height: Fit },
 
         draw_text: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            text_style: <THEME_FONT_LABEL>{
-                font_size: 11.0
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        #9,
-                        #c,
-                        self.hover
-                    ),
-                    #9,
-                    self.pressed
-                )
+                return THEME_COLOR_TEXT_DEFAULT
             }
+        }
+
+        icon_walk: {
+            width: (THEME_DATA_ICON_WIDTH), height: Fit,
         }
 
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        self.color,
+                        mix(self.color, #f, 0.5),
                         self.hover
                     ),
-                    #9,
+                    self.color * 0.75,
                     self.pressed
                 )
             }
@@ -663,29 +931,33 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            uniform border_radius: 3.0
-            instance bodytop: #53
-            instance bodybottom: #5c
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
-                let grad_bot = 1.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), #33, self.pressed);
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+
                 let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
-                    mix(body_transp, #5c, self.pressed),
+                    mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
 
                 // the little drop shadow at the bottom
-                let shift_inward = self.border_radius + 4.0;
-                sdf.move_to(shift_inward, self.rect_size.y - self.border_radius);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - self.border_radius);
+                let shift_inward = self.border_radius * 1.75;
+                sdf.move_to(shift_inward, self.rect_size.y);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                 sdf.stroke(
-                    mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
-                    self.border_radius
+                    mix(
+                        THEME_COLOR_BEVEL_SHADOW,
+                        THEME_COLOR_U_HIDDEN,
+                        self.pressed
+                    ), THEME_BEVELING
                 )
 
                 sdf.box(
@@ -699,7 +971,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    1.0
+                    THEME_BEVELING * 1.5
                 )
 
                 return sdf.result
@@ -742,95 +1014,152 @@ live_design! {
         }
     }
 
+    ButtonIcon = <Button> {
+        icon_walk: {
+            width: 12.
+            margin: { left: 0. }
+        }
+    }
 
-    // Checkbox
-
-
-
-     CheckBox = <CheckBoxBase> {
-
-        width: Fit,
-        height: Fit
-
-        label_walk: {
-            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
-            width: Fit,
-            height: Fit,
+    ButtonFlat = <ButtonIcon> {
+        height: Fit, width: Fit,
+        margin: <THEME_MSPACE_H_1> {}
+        align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: 12. }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.fill(#f00)
+                return sdf.result
+            }
         }
 
-        label_align: {
-            y: 0.0
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                )
+            }
+        }
+
+    }
+
+    CheckBox = <CheckBoxBase> {
+        width: Fit, height: 20,
+        margin: { top: (THEME_SPACE_1), bottom: (THEME_SPACE_1) }
+        align: { x: 0.0, y: 0.5 }
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { left: 20., right: (THEME_SPACE_2) }
         }
 
         draw_check: {
-            uniform size: 7.0;
+            uniform size: 7.5;
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 match self.check_type {
                     CheckType::Check => {
-                        let left = 3;
-                        let sz = self.size;
+                        let left = 1;
+                        let sz = self.size - 0.5;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 3.0); // rounding = 3rd value
-                        sdf.fill_keep(mix(mix(#x00000077, #x00000044, pow(self.pos.y, 1.)), mix(#x000000AA, #x00000066, pow(self.pos.y, 1.0)), self.hover))
-                        sdf.stroke(#x888, 1.0) // outline
+                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
+                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix(#fff0, #f, self.selected), 1.25);
+                        sdf.stroke(mix(
+                            mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_CTRL_HOVER, self.hover),
+                            THEME_COLOR_TEXT_ACTIVE,
+                            self.selected), 1.25
+                        );
                     }
                     CheckType::Radio => {
                         let sz = self.size;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill(#2);
+                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
-                        sdf.fill(mix(#fff0, #f, self.selected));
+                        sdf.fill(
+                            mix(
+                                mix(
+                                    THEME_COLOR_U_HIDDEN,
+                                    THEME_COLOR_CTRL_HOVER,
+                                    self.hover
+                                ),
+                                THEME_COLOR_TEXT_ACTIVE,
+                                self.selected
+                            )
+                        );
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                        sdf.fill(#2);
-                        let isz = sz * 0.5;
-                        sdf.circle(left + sz + self.selected * sz, c.y, isz);
-                        sdf.circle(left + sz + self.selected * sz, c.y, 0.5 * isz);
+
+                        sdf.stroke_keep(
+                            mix(
+                                THEME_COLOR_BEVEL_SHADOW,
+                                THEME_COLOR_BEVEL_LIGHT,
+                                clamp(self.pos.y - 0.2, 0, 1)),
+                            THEME_BEVELING
+                        )
+
+                        sdf.fill(
+                            mix(
+                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
+                                mix(THEME_COLOR_INSET_PIT_TOP_HOVER * 1.75, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
+                                self.hover
+                            )
+                        )
+                        let isz = sz * 0.65;
+                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
                         sdf.subtract();
-                        sdf.circle(left + sz + self.selected * sz, c.y, isz);
+                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
                         sdf.blend(self.selected)
-                        sdf.fill(#f);
+                        sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
                     }
                     CheckType::None => {
-                        return #0000
+                        sdf.fill(THEME_COLOR_D_HIDDEN);
                     }
                 }
                 return sdf.result
             }
         }
+
         draw_text: {
-            color: #9,
             instance focus: 0.0
             instance selected: 0.0
             instance hover: 0.0
-            text_style: {
-                font: {
-                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
-                }
-                font_size: 11.0
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #fff6,
-                        #fff6,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_DEFAULT,
                         self.hover
                     ),
-                    #fff6,
+                    THEME_COLOR_TEXT_DEFAULT,
                     self.selected
                 )
             }
@@ -840,18 +1169,26 @@ live_design! {
             instance focus: 0.0
             instance hover: 0.0
             instance selected: 0.0
+            uniform color: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        self.color,
+                        mix(self.color, #f, 0.4),
                         self.hover
                     ),
-                    #f,
+                    mix(
+                        self.color_active,
+                        mix(self.color_active, #f, 0.75),
+                        self.hover
+                    ),
                     self.selected
                 )
             }
         }
+
+        icon_walk: { width: 13.0, height: Fit }
 
         animator: {
             hover = {
@@ -912,6 +1249,79 @@ live_design! {
                 }
             }
         }
+    }
+
+    CheckBoxToggle = <CheckBox> {
+        margin: { left: -8. }
+        draw_check: { check_type: Toggle }
+        label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.25}}
+                    apply: {
+                        draw_check: {hover: 0.0}
+                        draw_text: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_check: {hover: 1.0}
+                        draw_text: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_check: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_check: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                    }
+                }
+            }
+            selected = {
+                default: off
+                off = {
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_check: {selected: 0.0},
+                        draw_text: {selected: 0.0},
+                        draw_icon: {selected: 0.0},
+                    }
+                }
+                on = {
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_check: {selected: 1.0}
+                        draw_text: {selected: 1.0}
+                        draw_icon: {selected: 1.0},
+                    }
+                }
+            }
+        }
+    }
+
+    CheckBoxCustom = <CheckBox> {
+        draw_check: { check_type: None }
+        label_walk: { margin: <THEME_MSPACE_H_1> {} }
     }
 
 
@@ -1038,17 +1448,14 @@ live_design! {
             text_style: {
                 font_size: 6
             },
-            color: #a
+            color: (THEME_COLOR_TEXT_DEFAULT)
         }
     }
 
-    WindowMenu = <WindowMenuBase>{
-        height: 0,
-        width: 0
-    }
+    WindowMenu = <WindowMenuBase> { height: 0, width: 0, }
 
     Window = <WindowBase> {
-        pass: {clear_color: (THEME_COLOR_CLEAR)}
+        pass: { clear_color: (THEME_COLOR_BG_APP) }
         flow: Down
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
@@ -1056,58 +1463,53 @@ live_design! {
 
             flow: Right
 
-            draw_bg: {color: (THEME_COLOR_BG_APP)}
-            height: 27
+            draw_bg: {color: (THEME_COLOR_APP_CAPTION_BAR)}
+            height: 27,
             caption_label = <View> {
-                width: Fill,
-                height: Fill
+                width: Fill, height: Fill,
                 align: {x: 0.5, y: 0.5},
                 label = <Label> {text: "Makepad", margin: {left: 100}}
             }
             windows_buttons = <View> {
                 visible: false,
-                width: Fit,
-                height: Fit
+                width: Fit, height: Fit,
                 min = <DesktopButton> {draw_bg: {button_type: WindowsMin}}
                 max = <DesktopButton> {draw_bg: {button_type: WindowsMax}}
                 close = <DesktopButton> {draw_bg: {button_type: WindowsClose}}
             }
             web_fullscreen = <View> {
                 visible: false,
-                width: Fit,
-                height: Fit
+                width: Fit, height: Fit,
                 fullscreen = <DesktopButton> {draw_bg: {button_type: Fullscreen}}
             }
             web_xr = <View> {
                 visible: false,
-                width: Fit,
-                height: Fit
+                width: Fit, height: Fit,
                 xr_on = <DesktopButton> {draw_bg: {button_type: XRMode}}
             }
         }
-        
-        window_menu = <WindowMenu>{
+
+        window_menu = <WindowMenu> {
             main = Main{items:[app]}
-            app = Sub{name:"Makepad",items:[quit]}
-            quit = Item{
+            app = Sub { name:"Makepad", items:[quit] }
+            quit = Item {
                 name:"Quit",
                 shift: false,
                 key: KeyQ,
                 enabled: true
             }
         }
-        body = <KeyboardView>{
+        body = <KeyboardView> {
+            width: Fill, height: Fill,
             keyboard_min_shift: 30,
-            width: Fill,
-            height: Fill
         }
 
         cursor: Default
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
             instance border_width: 1.5
-            instance color: #000
-            instance border_color: #fff
+            instance color: (THEME_COLOR_CURSOR_BG)
+            instance border_color: (THEME_COLOR_CURSOR_BORDER)
 
             fn get_color(self) -> vec4 {
                 return self.color
@@ -1135,10 +1537,6 @@ live_design! {
         }
     }
 
-
-    // Dock
-
-
     Splitter = <SplitterBase> {
         draw_splitter: {
             uniform border_radius: 1.0
@@ -1150,7 +1548,7 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(THEME_COLOR_BG_APP);
+                sdf.clear(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead.
 
                 if self.is_vertical > 0.5 {
                     sdf.box(
@@ -1171,10 +1569,10 @@ live_design! {
                     );
                 }
                 return sdf.fill_keep(mix(
-                    THEME_COLOR_BG_APP,
+                    THEME_COLOR_D_HIDDEN,
                     mix(
-                        THEME_COLOR_CONTROL_HOVER,
-                        THEME_COLOR_CONTROL_PRESSED,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
                         self.pressed
                     ),
                     self.hover
@@ -1211,7 +1609,7 @@ live_design! {
                 }
 
                 pressed = {
-                    from: {all: Forward {duration: 0.1}}
+                    from: { all: Forward { duration: 0.1 }}
                     apply: {
                         draw_splitter: {
                             pressed: [{time: 0.0, value: 1.0}],
@@ -1223,11 +1621,9 @@ live_design! {
         }
     }
 
-
     TabCloseButton = <TabCloseButtonBase> {
-        height: 10.0,
-        width: 10.0,
-        margin: {right: 5},
+        height: 10.0, width: 10.0,
+        margin: { right: (THEME_SPACE_2), left: -3.5 },
         draw_button: {
 
             instance hover: float;
@@ -1244,7 +1640,7 @@ live_design! {
                 sdf.move_to(min.x, max.y);
                 sdf.line_to(max.x, min.y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_INACTIVE,
                     THEME_COLOR_TEXT_HOVER,
                     self.hover
                 ), 1.0);
@@ -1255,7 +1651,7 @@ live_design! {
             hover = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_button: {hover: 0.0}
                     }
@@ -1273,26 +1669,20 @@ live_design! {
     }
 
     Tab = <TabBase> {
-        width: Fit,
-        height: Fill, //Fixed((THEME_TAB_HEIGHT)),
+        width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
 
         align: {x: 0.0, y: 0.5}
-        padding: {
-            left: 10.0,
-            top: 2.0,
-            right: 15.0,
-            bottom: 0.0,
-        },
+        padding: <THEME_MSPACE_3> { }
 
         close_button: <TabCloseButton> {}
         draw_name: {
-            text_style: <THEME_FONT_LABEL> {}
+            text_style: <THEME_FONT_REGULAR> {}
             instance hover: 0.0
             instance selected: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_INACTIVE,
                         THEME_COLOR_TEXT_SELECTED,
                         self.selected
                     ),
@@ -1307,22 +1697,22 @@ live_design! {
             instance selected: float
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                return mix(
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    -1.,
+                    -1.,
+                    self.rect_size.x + 2,
+                    self.rect_size.y + 2,
+                    1.
+                )
+                sdf.fill_keep(
                     mix(
-                        THEME_COLOR_BG_HEADER,
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_D_2 * 0.75,
+                        THEME_COLOR_DOCK_TAB_SELECTED,
                         self.selected
-                    ),
-                    #f,
-                    0.0 //mix(self.hover * 0.05, self.hover * -0.025, self.selected)
-                );
-                /*sdf.clear(color)
-                sdf.move_to(0.0, 0.0)
-                sdf.line_to(0.0, self.rect_size.y)
-                sdf.move_to(self.rect_size.x, 0.0)
-                sdf.line_to(self.rect_size.x, self.rect_size.y)
-                return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
+                    )
+                )
+                return sdf.result
             }
         }
 
@@ -1374,14 +1764,13 @@ live_design! {
         tab: <Tab> {}
         draw_drag: {
             draw_depth: 10
-            color: #c
+            color: (THEME_COLOR_BG_CONTAINER)
         }
         draw_fill: {
-            color: (THEME_COLOR_BG_HEADER)
+            color: (THEME_COLOR_D_1)
         }
 
-        width: Fill
-        height: Fixed((THEME_TAB_HEIGHT))
+        width: Fill, height: (THEME_TAB_HEIGHT)
 
         scroll_bars: <ScrollBars> {
             show_scroll_x: true
@@ -1394,14 +1783,13 @@ live_design! {
         }
     }
 
-
-    const BORDER_SIZE: 6.0
     Dock = <DockBase> {
-        round_corner: {
-            draw_depth: 6.0
-            border_radius: 10.0
-            fn pixel(self) -> vec4 {
+        flow: Down,
 
+        round_corner: {
+            draw_depth: 20.0
+            border_radius: 20.
+            fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
                     mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
@@ -1418,14 +1806,13 @@ live_design! {
                 );
 
                 sdf.subtract()
-                return sdf.fill(THEME_COLOR_BG_APP);
+                return sdf.fill(THEME_COLOR_BG_APP)
             }
         }
-        border_size: (BORDER_SIZE)
+        border_size: (THEME_DOCK_BORDER_SIZE)
 
-        flow: Down
-        padding: {left: (BORDER_SIZE), top: (0), right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
-        padding_fill: {color: (THEME_COLOR_BG_APP)}
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
         drag_quad: {
             draw_depth: 10.0
             color: (THEME_COLOR_DRAG_QUAD)
@@ -1434,20 +1821,166 @@ live_design! {
         splitter: <Splitter> {}
     }
 
+    TabMinimal = <TabBase> {
+        width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
 
+        align: {x: 0.0, y: 0.5}
+        padding: <THEME_MSPACE_3> { }
+
+        close_button: <TabCloseButton> {}
+        draw_name: {
+            text_style: <THEME_FONT_REGULAR> {}
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_INACTIVE,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+            }
+        }
+
+        draw_bg: {
+            instance hover: float
+            instance selected: float
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let marker_height = 2.5
+
+                sdf.rect(0, self.rect_size.y - marker_height, self.rect_size.x, marker_height)
+                sdf.fill(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL), self.selected));
+                return sdf.result
+            }
+        }
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                    }
+                }
+
+                on = {
+                    cursor: Hand,
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {hover: [{time: 0.0, value: 1.0}]}
+                        draw_name: {hover: [{time: 0.0, value: 1.0}]}
+                    }
+                }
+            }
+
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.3}}
+                    apply: {
+                        close_button: {draw_button: {selected: 0.0}}
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                    }
+                }
+
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        close_button: {draw_button: {selected: 1.0}}
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                    }
+                }
+            }
+        }
+    }
+
+    TabBarMinimal = <TabBarBase> {
+        tab: <TabMinimal> {}
+        draw_drag: {
+            draw_depth: 10
+            color: (THEME_COLOR_BG_CONTAINER)
+        }
+        draw_fill: {
+            color: (THEME_COLOR_U_HIDDEN)
+        }
+
+        width: Fill, height: (THEME_TAB_HEIGHT)
+
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true
+            show_scroll_y: false
+            scroll_bar_x: {
+                draw_bar: {bar_width: 3.0}
+                bar_size: 4
+                use_vertical_finger_scroll: true
+            }
+        }
+    }
+
+    DockMinimal = <DockBase> {
+        flow: Down,
+
+        round_corner: {
+            draw_depth: 20.0
+            border_radius: 20.
+            fn pixel(self) -> vec4 {
+                let pos = vec2(
+                    mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
+                    mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
+                )
+
+                let sdf = Sdf2d::viewport(pos * self.rect_size);
+                sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
+                sdf.box(
+                    0.25,
+                    0.25,
+                    self.rect_size.x * 2.0,
+                    self.rect_size.y * 2.0,
+                    4.0
+                );
+
+                sdf.subtract()
+                return sdf.fill(THEME_COLOR_BG_APP)
+            }
+        }
+        border_size: (THEME_DOCK_BORDER_SIZE)
+
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
+        drag_quad: {
+            draw_depth: 10.0
+            color: (THEME_COLOR_DRAG_QUAD)
+        }
+        tab_bar: <TabBarMinimal> {}
+        splitter: <Splitter> {}
+    }
+
+    RectView = <View> {
+        show_bg: true,
+        draw_bg: { color: (THEME_COLOR_DOCK_CONTAINER) }
+    }
 
 
     PopupMenuItem = <PopupMenuItemBase> {
-
-        align: {y: 0.5}
-        padding: {left: 15, top: 5, bottom: 5},
-        width: Fill,
-        height: Fit
+        width: Fill, height: Fit,
+        align: { y: 0.5 }
+        padding: <THEME_MSPACE_1> { left: 15. }
 
         draw_name: {
-            text_style: <THEME_FONT_LABEL> {}
             instance selected: 0.0
             instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P),
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -1464,8 +1997,8 @@ live_design! {
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
-            instance color: #0
-            instance color_selected: #4
+            instance color: (THEME_COLOR_FLOATING_BG)
+            instance color_selected: (THEME_COLOR_CTRL_HOVER)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1473,8 +2006,6 @@ live_design! {
                 sdf.clear(mix(
                     self.color,
                     self.color_selected,
-                    // THEME_COLOR_BG_EDITOR,
-                    // THEME_COLOR_BG_SELECTED,
                     self.hover
                 ))
 
@@ -1486,7 +2017,7 @@ live_design! {
                 sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
                 sdf.line_to(c.x, c.y + sz);
                 sdf.line_to(c.x + sz, c.y - sz);
-                sdf.stroke(mix(#fff0, #f, self.selected), 1.0);
+                sdf.stroke(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_DEFAULT, self.selected), 1.0);
 
                 return sdf.result;
             }
@@ -1534,33 +2065,28 @@ live_design! {
     }
 
     PopupMenu = <PopupMenuBase> {
+        width: 150., height: Fit,
+        flow: Down,
+        padding: <THEME_MSPACE_1> {}
+
         menu_item: <PopupMenuItem> {}
 
-        flow: Down,
-        padding: 5
-
-
-        width: 100,
-        height: Fit
-
         draw_bg: {
-            instance color: #0
-            instance border_width: 0.0,
-            instance border_color: #0000,
+            instance color: (THEME_COLOR_FLOATING_BG)
+            instance border_width: 1.0,
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
-            instance radius: 4.0
-            instance blur: 20.0
+            instance radius: 2.0
+            instance blur: 0.0
 
             fn get_color(self) -> vec4 {
                 return self.color
             }
 
             fn get_border_color(self) -> vec4 {
-                return self.border_color
+                return mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, pow(self.pos.y, 0.35))
             }
 
             fn pixel(self) -> vec4 {
-
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.blur = self.blur
                 sdf.box(
@@ -1572,34 +2098,27 @@ live_design! {
                 )
                 sdf.fill_keep(self.get_color())
                 if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                    sdf.stroke(self.get_border_color(), THEME_BEVELING)
                 }
                 return sdf.result;
             }
         }
     }
 
-
-
     DropDown = <DropDownBase> {
-
-       
+        width: Fit, height: Fit,
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2), right: 22.5 }
+        align: {x: 0., y: 0.}
 
         draw_text: {
-            text_style: <THEME_FONT_DATA> {}
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
 
             fn get_color(self) -> vec4 {
                 return mix(
-                    mix(
-                        mix(
-                            #9,
-                            #b,
-                            self.focus
-                        ),
-                        #c,
-                        self.hover
-                    ),
-                    #9,
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -1607,45 +2126,82 @@ live_design! {
 
         draw_bg: {
             instance hover: 0.0
+            instance focus: 0.0
             instance pressed: 0.0
-            instance focus: 0.0,
-            instance open: 0.0,
-            uniform border_radius: 0.5
-
-            fn get_bg(self, inout sdf: Sdf2d) {
-                sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-                sdf.fill(mix(#2, #3, self.hover));
-            }
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                self.get_bg(sdf);
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), self.bodybottom, self.focus);
+                let body_transp = vec4(body.xyz, 0.0);
+
+                let top_gradient = mix(
+                    body_transp,
+                    mix(
+                        mix(
+                            THEME_COLOR_U_HIDDEN,
+                            THEME_COLOR_BEVEL_LIGHT,
+                            self.hover
+                        ),
+                        THEME_COLOR_BEVEL_LIGHT,
+                        self.focus
+                    ),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top);
+
+                let bot_gradient = mix(
+                    mix(body_transp, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                // the little drop shadow at the bottom
+                let shift_inward = self.border_radius * 1.75;
+                sdf.move_to(shift_inward, self.rect_size.y);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+                sdf.stroke(mix(
+                    mix(
+                        THEME_COLOR_D_HIDDEN,
+                        THEME_COLOR_BEVEL_SHADOW,
+                        self.hover
+                    ),
+                    THEME_COLOR_BEVEL_SHADOW,
+                    self.focus
+                    ), THEME_BEVELING
+                )
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING * 1.5
+                )
+
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 2.5;
+                let sz = 3.;
+                let offset = 1.;
 
-                sdf.move_to(c.x - sz, c.y - sz);
-                sdf.line_to(c.x + sz, c.y - sz);
-                sdf.line_to(c.x, c.y + sz * 0.75);
+                sdf.move_to(c.x - sz, c.y - sz + offset);
+                sdf.line_to(c.x + sz, c.y - sz + offset);
+                sdf.line_to(c.x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
 
-                sdf.fill(mix(#8, #c, self.hover));
+                sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
 
                 return sdf.result
             }
         }
-
-        width: Fill,
-        height: Fit,
-        margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0}
-        align: {x: 0., y: 0.}
-        padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
 
         popup_menu: <PopupMenu> {}
 
@@ -1683,7 +2239,7 @@ live_design! {
             focus = {
                 default: off
                 off = {
-                    from: {all: Snap}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {focus: 0.0},
                         draw_text: {focus: 0.0}
@@ -1701,21 +2257,34 @@ live_design! {
     }
 
     FileTreeNode = <FileTreeNodeBase> {
+        align: { y: 0.5 }
+        padding: { left: (THEME_SPACE_1) },
+        is_folder: false,
+        indent_width: 10.0
+        min_drag_distance: 10.0
+
         draw_bg: {
             fn pixel(self) -> vec4 {
-                return mix(
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    -2.,
+                    self.rect_size.x,
+                    self.rect_size.y + 3.0,
+                    1.
+                )
+                sdf.fill_keep(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
-                        THEME_COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    mix(
-                        THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
-                        self.focussed
-                    ),
-                    self.selected
-                );
+                        mix(
+                            THEME_COLOR_BG_EVEN,
+                            THEME_COLOR_BG_ODD,
+                            self.is_even
+                        ),
+                        THEME_COLOR_CTRL_SELECTED,
+                        self.selected
+                    )
+                )
+                return sdf.result
             }
         }
 
@@ -1728,13 +2297,9 @@ live_design! {
                 sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                 sdf.union();
                 return sdf.fill(mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_TEXT_SELECTED,
-                        self.selected
-                    ),
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT_SELECTED,
+                    self.selected
                 ));
             }
         }
@@ -1742,33 +2307,21 @@ live_design! {
         draw_name: {
             fn get_color(self) -> vec4 {
                 return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT * self.scale,
-                        THEME_COLOR_TEXT_SELECTED,
-                        self.selected
-                    ),
-                    THEME_COLOR_TEXT_HOVER,
-                    self.hover
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT_SELECTED,
+                    self.selected
                 )
             }
 
-            text_style: <THEME_FONT_DATA> {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
                 top_drop: 1.2,
             }
         }
 
-        align: {y: 0.5}
-        padding: {left: 5.0, bottom: 0,},
-
         icon_walk: {
-            width: Fixed((THEME_DATA_ICON_WIDTH - 2)),
-            height: Fixed((THEME_DATA_ICON_HEIGHT)),
-            margin: {
-                left: 0
-                top: 0
-                right: 2
-                bottom: 0
-            },
+            width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
+            margin: { right: 3.0 }
         }
 
         animator: {
@@ -1868,45 +2421,46 @@ live_design! {
                 }
             }
         }
-        is_folder: false,
-        indent_width: 10.0
-        min_drag_distance: 10.0
     }
 
     FileTree = <FileTreeBase> {
-        scroll_bars: <ScrollBars>{}
+        flow: Down,
+
+        scroll_bars: <ScrollBars> {}
+        scroll_bars: {}
         node_height: (THEME_DATA_ITEM_HEIGHT),
+        clip_x: true,
+        clip_y: true
+
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
             draw_name: {is_folder: 0.0}
         }
+
         folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
             draw_name: {is_folder: 1.0}
         }
-        filler: {
+
+        filler: { // TODO: Clarify what this is for. Appears not to do anything.
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
-                        THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
+                        THEME_COLOR_CTRL_INACTIVE,
+                        THEME_COLOR_CTRL_SELECTED,
                         self.focussed
                     ),
                     self.selected
                 );
             }
         }
-        flow: Down,
-        clip_x: true,
-        clip_y: true
-        scroll_bars: {}
     }
 
     OutlineTreeNode = <OutlineTreeNodeBase> {
@@ -1914,13 +2468,13 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_CONTAINER,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
                         THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
+                        THEME_COLOR_BG_HIGHLIGHT,
                         self.focussed
                     ),
                     self.selected
@@ -1961,7 +2515,7 @@ live_design! {
                 )
             }
 
-            text_style: <THEME_FONT_DATA> {
+            text_style: <THEME_FONT_CODE> {
                 top_drop: 1.2,
             }
         }
@@ -2099,13 +2653,13 @@ live_design! {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_CONTAINER,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
                     mix(
                         THEME_COLOR_BG_UNFOCUSSED,
-                        THEME_COLOR_BG_SELECTED,
+                        THEME_COLOR_BG_HIGHLIGHT,
                         self.focussed
                     ),
                     self.selected
@@ -2120,36 +2674,36 @@ live_design! {
 
 
     FoldButton = <FoldButtonBase> {
+        width: 12., height: 12.,
+
         draw_bg: {
             instance open: 0.0
             instance hover: 0.0
-
             uniform fade: 1.0
 
             fn pixel(self) -> vec4 {
-
-                let sz = 3.;
-                let c = vec2(5.0, 0.5 * self.rect_size.y);
+                let sz = 2.5;
+                let c = vec2(5.0, 0.6 * self.rect_size.y);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.clear(vec4(0.));
+
                 // we have 3 points, and need to rotate around its center
                 sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
                 sdf.move_to(c.x - sz, c.y + sz);
                 sdf.line_to(c.x, c.y - sz);
                 sdf.line_to(c.x + sz, c.y + sz);
                 sdf.close_path();
-                sdf.fill(mix(#a, #f, self.hover));
+                sdf.fill(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+                );
                 return sdf.result * self.fade;
             }
         }
 
-        abs_size: vec2(32, 12)
-        abs_offset: vec2(4., 0.)
-        width: 12,
-        height: 12,
-
         animator: {
-
             hover = {
                 default: off
                 off = {
@@ -2186,12 +2740,8 @@ live_design! {
     }
 
     FoldHeader = <FoldHeaderBase> {
-        width: Fill,
-        height: Fit
-        body_walk: {
-            width: Fill,
-            height: Fit
-        }
+        width: Fill, height: Fit,
+        body_walk: { width: Fill, height: Fit}
 
         flow: Down,
 
@@ -2218,30 +2768,48 @@ live_design! {
         }
     }
 
-
     LinkLabel = <LinkLabelBase> {
-        width: Fit,
-        height: Fit,
-        margin: 0
-        padding: 0
+        instance hover: 0.0
+        instance pressed: 0.0
+
+        width: Fit, height: Fit,
+        padding: { top: (THEME_SPACE_2), bottom: 2. }
+        spacing: 7.5,
         align: {x: 0., y: 0.}
 
-        label_walk: {
-            width: Fit,
-            height: Fit
+        label_walk: { width: Fit, height: Fit, },
+
+        draw_bg: {
+            instance pressed: 0.0
+            instance hover: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                ), mix(.7, 1., self.hover));
+            }
         }
 
-        draw_icon: {
-            instance hover: 0.0
+        draw_text: {
+            wrap: Word
             instance pressed: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    #9,
+                    THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
             }
@@ -2282,51 +2850,51 @@ live_design! {
             }
         }
 
+    }
 
-        draw_bg: {
-            instance pressed: 0.0
+    LinkLabelIcon = <LinkLabel> {
+        padding: { bottom: 2. }
+        label_walk: { margin: { left: -5. }},
+        draw_icon: {
+            instance focus: 0.0
             instance hover: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_META,
-                    self.pressed
-                ), mix(0.0, 0.8, self.hover));
-            }
-        }
-
-        draw_text: {
-            wrap: Word
             instance pressed: 0.0
-            instance hover: 0.0
-            text_style: <THEME_FONT_LABEL>{}
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_META,
-                        THEME_COLOR_TEXT_DEFAULT,
+                        self.color,
+                        mix(self.color, #f, 0.5),
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_META,
+                    self.color * 0.75,
                     self.pressed
                 )
             }
         }
-
     }
 
-
     RadioButton = <RadioButtonBase> {
+        width: Fit, height: 16.,
+        align: { x: 0.0, y: 0.5 }
+
+        icon_walk: { margin: { left: 20. } }
+
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { left: 20. }
+        }
+        label_align: { y: 0.0 }
 
         draw_radio: {
-
             uniform size: 7.0;
-            uniform color_active: #00000000
-            uniform color_inactive: #x99EEFF
+            // uniform color_active: (THEME_COLOR_U_2)
+            // uniform color_inactive: (THEME_COLOR_D_4)
+
+            // instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -2336,84 +2904,111 @@ live_design! {
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill(#2);
+                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), (THEME_BEVELING))
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
-                        sdf.fill(mix(#fff0, #f, self.selected));
+                        sdf.fill(
+                            mix(
+                                mix(
+                                    THEME_COLOR_U_HIDDEN,
+                                    THEME_COLOR_CTRL_HOVER,
+                                    self.hover
+                                ),
+                                THEME_COLOR_TEXT_ACTIVE,
+                                self.selected
+                            )
+                        );
                     }
                     RadioType::Tab => {
-                        let sz = self.size;
-                        let left = 0.;
-                        let c = vec2(left, self.rect_size.y);
-                        sdf.rect(
-                            -1.,
-                            0.,
-                            self.rect_size.x + 2.0,
-                            self.rect_size.y
+                        let grad_top = 5.0;
+                        let grad_bot = 1.0;
+                        let body = mix(
+                            mix(self.bodytop, (THEME_COLOR_CTRL_HOVER), self.hover),
+                            self.bodybottom,
+                            self.selected
                         );
-                        sdf.fill(mix(self.color_inactive, self.color_active, self.selected));
+                        let body_transp = vec4(body.xyz, 0.0);
+                        let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.selected), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                        let bot_gradient = mix(
+                            mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.selected),
+                            top_gradient,
+                            clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                        );
+
+                        // the little drop shadow at the bottom
+                        let shift_inward = 0. * 1.75;
+                        sdf.move_to(shift_inward, self.rect_size.y);
+                        sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+                        sdf.stroke(
+                            mix(
+                                THEME_COLOR_BEVEL_SHADOW,
+                                THEME_COLOR_U_HIDDEN,
+                                self.selected
+                            ), THEME_BEVELING * 2.)
+
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x - 2.0,
+                            self.rect_size.y - 2.0,
+                            1.
+                        )
+                        sdf.fill_keep(body)
+
+                        sdf.stroke(bot_gradient, THEME_BEVELING * 1.5)
                     }
                 }
                 return sdf.result
             }
         }
+
         draw_text: {
             instance hover: 0.0
-            instance focus: 0.0
             instance selected: 0.0
 
-            uniform color_unselected: #x00000088
-            uniform color_unselected_hover: #x000000CC
-            uniform color_selected: #xFFFFFF66
+            uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
 
-            color: #9
-            text_style: {
-                font: {
-                    //path: d"resources/ibmplexsans-semibold.ttf"
-                }
-                font_size: 9.5
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         self.color_unselected,
-                        self.color_unselected_hover,
+                        self.color_unselected,
+                        // self.color_unselected_hover,
                         self.hover
                     ),
-                    self.color_selected,
+                    self.color_unselected,
+                    // self.color_selected,
                     self.selected
                 )
             }
         }
 
         draw_icon: {
-            instance focus: 0.0
             instance hover: 0.0
             instance selected: 0.0
+            uniform color: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #9,
-                        #c,
+                        self.color,
+                        mix(self.color, #f, 0.4),
                         self.hover
                     ),
-                    #9,
+                    mix(
+                        self.color_active,
+                        mix(self.color_active, #f, 0.75),
+                        self.hover
+                    ),
                     self.selected
                 )
             }
-        }
-
-        width: Fit,
-        height: Fit
-
-        label_walk: {
-            margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
-            width: Fit,
-            height: Fit,
-        }
-
-        label_align: {
-            y: 0.0
         }
 
         animator: {
@@ -2436,29 +3031,10 @@ live_design! {
                     }
                 }
             }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_radio: {focus: 0.0}
-                        draw_text: {focus: 0.0}
-                        draw_icon: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_radio: {focus: 1.0}
-                        draw_text: {focus: 1.0}
-                        draw_icon: {focus: 1.0}
-                    }
-                }
-            }
             selected = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.0}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_radio: {selected: 0.0}
                         draw_icon: {selected: 0.0}
@@ -2479,20 +3055,110 @@ live_design! {
             }
         }
     }
-    
-    
+
+    RadioButtonCustom = <RadioButton> {
+        height: Fit,
+        draw_radio: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                return sdf.result
+            }
+        }
+        margin: { left: -17.5 }
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { left: (THEME_SPACE_1) }
+        }
+    }
+
+    RadioButtonTextual = <RadioButton> {
+        height: Fit,
+        draw_radio: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                return sdf.result
+            }
+        }
+        label_walk: {
+            margin: 0.,
+            width: Fit, height: Fit,
+        }
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+
+            uniform color_unselected: (THEME_COLOR_U_3)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
+
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
+        }
+    }
+
+    RadioButtonImage = <RadioButton> {
+        
+    }
+
+    RadioButtonTab = <RadioButton> {
+        height: Fit,
+        draw_radio: { radio_type: Tab }
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
+
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+
+            uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
+
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected,
+                        // self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
+        }
+    }
+
+    ButtonGroup = <CachedRoundedView> {
+        height: Fit, width: Fit,
+        spacing: 0.0,
+        flow: Right
+        align: { x: 0.0, y: 0.5 }
+        draw_bg: {
+            radius: 4.
+        }
+    }
 
     PortalList = <PortalListBase> {
-        width: Fill
-        height: Fill
+        width: Fill, height: Fill,
         capture_overload: true
         scroll_bar: <ScrollBar> {}
         flow: Down
     }
 
     FlatList = <FlatListBase> {
-        width: Fill
-        height: Fill
+        width: Fill, height: Fill,
         capture_overload: true
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         flow: Down
@@ -2515,24 +3181,36 @@ live_design! {
     ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 
     TextInput = <TextInputBase> {
+        width: 200, height: Fit,
+        padding: <THEME_MSPACE_2> {}
+
+        label_align: {y: 0.}
+        cursor_margin_bottom: (THEME_SPACE_1),
+        cursor_margin_top: (THEME_SPACE_1),
+        select_pad_edges: 3.0
+        cursor_size: 2.0,
+        numeric_only: false,
+        on_focus_select_all: false,
+        empty_message: "0",
+        clip_x: false, clip_y: false,
+
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
-            text_style: <THEME_FONT_LABEL> {}
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
             fn get_color(self) -> vec4 {
                 return
                 mix(
                     mix(
-                        mix(
-                            #xFFFFFF55,
-                            #xFFFFFF88,
-                            self.hover
-                        ),
-                        #xFFFFFFCC,
+                        mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover),
+                        THEME_COLOR_TEXT_FOCUSED,
                         self.focus
                     ),
-                    #3,
+                    mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_DEFAULT, self.hover),
                     self.is_empty
                 )
             }
@@ -2550,7 +3228,7 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix(#ccc0, #f, self.focus));
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
                 return sdf.result
             }
         }
@@ -2558,7 +3236,7 @@ live_design! {
         draw_select: {
             instance hover: 0.0
             instance focus: 0.0
-            uniform border_radius: 2.0
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
             fn pixel(self) -> vec4 {
                 //return mix(#f00,#0f0,self.pos.y)
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -2569,61 +3247,70 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix(#5550, #xFFFFFF40, self.focus)); // Pad color
+                sdf.fill(
+                    mix(THEME_COLOR_U_HIDDEN,
+                    THEME_COLOR_BG_HIGHLIGHT_INLINE,
+                    self.focus)
+                ); // Pad color
                 return sdf.result
             }
         }
 
-        cursor_margin_bottom: 3.0,
-        cursor_margin_top: 4.0,
-        select_pad_edges: 3.0
-        cursor_size: 2.0,
-        numeric_only: false,
-        on_focus_select_all: false,
-        empty_message: "0",
         draw_bg: {
-            instance radius: 2.0
-            instance border_width: 0.0
-            instance border_color: #3
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
-
-            fn get_border_color(self) -> vec4 {
-                return self.border_color
-            }
+            instance radius: (THEME_CORNER_RADIUS)
+            instance hover: 0.0
+            instance focus: 0.0
+            instance bodytop: (THEME_COLOR_INSET_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    max(1.0, self.radius)
-                )
-                sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
-                }
-                return sdf.result;
-            }
-        },
-        clip_x: false,
-        clip_y: false,
-        padding: {left: 10, top: 11, right: 10, bottom: 10}
-        label_align: {y: 0.}
-        //margin: {top: 5, right: 5}
-        width: Fit,
-        height: Fit,
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 1.5;
 
-        /*label_walk: {
-            width: Fit,
-            height: Fit,
-            //margin: 0//{left: 5.0, right: 5.0, top: 0.0, bottom: 2.0},
-        }*/
+                let body = mix(
+                    self.bodytop,
+                    self.bodybottom,
+                    self.focus
+                );
+
+                let body_transp = (THEME_COLOR_D_HIDDEN)
+
+                let top_gradient = mix(
+                    body_transp,
+                    THEME_COLOR_BEVEL_SHADOW,
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+
+                let bot_gradient = mix(
+                    (THEME_COLOR_BEVEL_LIGHT),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                // some rim-light at the bottom
+                let shift_inward = self.radius * 1.75;
+                sdf.move_to(shift_inward, self.rect_size.y);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.radius
+                )
+
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING * 0.9
+                )
+
+                return sdf.result
+            }
+        }
 
         animator: {
             hover = {
@@ -2646,9 +3333,10 @@ live_design! {
             focus = {
                 default: off
                 off = {
-                    from: {all: Snap}
+                    from: {all: Forward {duration: .25}}
                     apply: {
                         draw_cursor: {focus: 0.0},
+                        draw_bg: {focus: 0.0},
                         draw_select: {focus: 0.0}
                         draw_text: {focus: 0.0}
                     }
@@ -2657,6 +3345,7 @@ live_design! {
                     from: {all: Snap}
                     apply: {
                         draw_cursor: {focus: 1.0},
+                        draw_bg: {focus: 1.0},
                         draw_select: {focus: 1.0}
                         draw_text: {focus: 1.0}
                     }
@@ -2666,9 +3355,12 @@ live_design! {
     }
 
     Slider = <SliderBase> {
-        min: 0.0,
-        max: 1.0,
+        min: 0.0, max: 1.0,
         step: 0.0,
+        label_align: { y: 0.0 }
+        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+        precision: 2,
+        height: Fit
 
         draw_slider: {
             instance hover: float
@@ -2677,31 +3369,53 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
-                let nub_size = mix(3, 4, self.hover);
-                let nubbg_size = 18
+                let nub_size = mix(3, 5, self.hover);
+                let nubbg_size = mix(0, 13, self.hover)
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let slider_bg_color = mix(#38, #30, self.focus);
-                let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
-                let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
-                let nubbg_color = mix(#eee0, #8, self.drag);
+                let slider_bg_color = mix(mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_HOVER, self.hover), THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.focus);
+                let slider_color = mix(
+                    mix(THEME_COLOR_AMOUNT_DEFAULT, THEME_COLOR_AMOUNT_HOVER, self.hover),
+                    THEME_COLOR_AMOUNT_ACTIVE,
+                    self.focus);
+
+                let nub_color = (THEME_COLOR_SLIDER_NUB_DEFAULT);
+                let nubbg_color = mix(THEME_COLOR_SLIDER_NUB_HOVER, THEME_COLOR_SLIDER_NUB_ACTIVE, self.drag);
 
                 match self.slider_type {
                     SliderType::Horizontal => {
-                        sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
+                        sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
 
-                        sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
+                        sdf.rect(0, self.rect_size.y - slider_height * 0.5, self.rect_size.x, slider_height)
+                        sdf.fill(THEME_COLOR_BEVEL_LIGHT);
+
+                        sdf.rect(
+                            0,
+                            self.rect_size.y - slider_height * 1.25,
+                            self.slide_pos * (self.rect_size.x - nub_size) + nub_size,
+                            slider_height
+                        )
                         sdf.fill(slider_color);
 
                         let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
-                        sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
+                        sdf.rect(
+                            nubbg_x,
+                            self.rect_size.y - slider_height * 1.25,
+                            nubbg_size,
+                            slider_height
+                        )
                         sdf.fill(nubbg_color);
 
                         // the nub
                         let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
-                        sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
+                        sdf.rect(
+                            nub_x,
+                            self.rect_size.y - slider_height * 1.25,
+                            nub_size,
+                            slider_height
+                        )
                         sdf.fill(nub_color);
                     }
                     SliderType::Vertical => {
@@ -2716,37 +3430,58 @@ live_design! {
         }
 
         draw_text: {
-            color: #9
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
         }
 
-        label_walk: {
-            margin: {left: 4.0, top: 3.0}
-            width: Fill,
-            height: Fill
-        }
-
-        label_align: {
-            y: 0.0
-        }
-
-        precision: 2,
+        label_walk: { width: Fill, height: Fill }
 
         text_input: <TextInput> {
-            cursor_margin_bottom: 3.0,
-            cursor_margin_top: 4.0,
+            width: Fit, padding: 0.,
+            cursor_margin_bottom: (THEME_SPACE_1),
+            cursor_margin_top: (THEME_SPACE_1),
             select_pad_edges: 3.0
             cursor_size: 2.0,
             empty_message: "0",
             numeric_only: true,
-            draw_bg: {
-                shape: None
-                color: #5
-                radius: 2.0
-            },
 
-            padding: 0,
             label_align: {y: 0.},
-            margin: {top: 3, right: 3}
+            margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
+            draw_bg: {
+                instance radius: 1.0
+                instance border_width: 0.0
+                instance border_color: (#f00) // TODO: This appears not to do anything.
+                instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+                instance focus: 0.0,
+                color: (THEME_COLOR_D_HIDDEN)
+                instance color_selected: (THEME_COLOR_D_HIDDEN)
+
+                fn get_color(self) -> vec4 {
+                    return mix(self.color, self.color_selected, self.focus)
+                }
+
+                fn get_border_color(self) -> vec4 {
+                    return self.border_color
+                }
+
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    sdf.box(
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        max(1.0, self.radius)
+                    )
+                    sdf.fill_keep(self.get_color())
+                    if self.border_width > 0.0 {
+                        sdf.stroke(self.get_border_color(), self.border_width)
+                    }
+                    return sdf.result;
+                }
+            },
         }
 
         animator: {
@@ -2754,9 +3489,10 @@ live_design! {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.2}}
+                    ease: OutQuad
                     apply: {
                         draw_slider: {hover: 0.0}
-                        //text_input: {animator: {hover = off}}
+                        // text_input: { draw_bg: { hover: 0.0}}
                     }
                 }
                 on = {
@@ -2764,7 +3500,7 @@ live_design! {
                     from: {all: Snap}
                     apply: {
                         draw_slider: {hover: 1.0}
-                        //text_input: {animator: {hover = on}}
+                        // text_input: { draw_bg: { hover: 1.0}}
                     }
                 }
             }
@@ -2798,68 +3534,129 @@ live_design! {
         }
     }
 
+    SliderBig = <Slider> {
+        height: 36
+        text: "CutOff1"
+        // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
+        text_input: {
+            cursor_margin_bottom: (THEME_SPACE_1),
+            cursor_margin_top: (THEME_SPACE_1),
+            select_pad_edges: (THEME_SPACE_1),
+            cursor_size: (THEME_SPACE_1),
+            empty_message: "0",
+            numeric_only: true,
+            draw_bg: {
+                color: (THEME_COLOR_D_HIDDEN)
+            },
+        }
+        draw_slider: {
+            instance line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG)
+            instance bipolar: 0.0
+            fn pixel(self) -> vec4 {
+                let nub_size = 3
 
-    SlideBody = <Label> {
-        margin:{top:20}
-        draw_text: {
-            color: #D
-            text_style: {
-                line_spacing:1.5
-                font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
-                font_size: 35
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let top = 20.0;
+
+                sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
+                sdf.fill_keep(
+                    mix(
+                        mix((THEME_COLOR_INSET_PIT_TOP), (THEME_COLOR_INSET_PIT_BOTTOM) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((THEME_COLOR_INSET_PIT_TOP_HOVER) * 1.75, (THEME_COLOR_BEVEL_LIGHT) * 0.1, pow(self.pos.y, 1.0)),
+                        self.drag
+                    )
+                ) // Control backdrop gradient
+
+                sdf.stroke(mix(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_SHADOW * 1.25, self.drag), THEME_COLOR_BEVEL_LIGHT, pow(self.pos.y, 10.0)), 1.0) // Control outline
+                let in_side = 5.0;
+                let in_top = 5.0; // Ridge: vertical position
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.drag)); // Ridge color
+                let in_top = 7.0;
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 1.5);
+                sdf.fill(THEME_COLOR_BEVEL_LIGHT); // Ridge: Rim light catcher
+
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
+                sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
+
+                sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
+                sdf.stroke_keep(mix((THEME_COLOR_U_HIDDEN), self.line_color, self.drag), 1.5)
+                sdf.stroke(
+                    mix(mix(self.line_color * 0.85, self.line_color, self.hover), THEME_COLOR_AMOUNT_ACTIVE, self.drag),
+                    1.5
+                )
+
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 3) - 3;
+                sdf.box(nub_x + in_side, top + 1.0, 11, 11, 1.)
+
+                sdf.fill_keep(mix(
+                    mix(
+                        mix(THEME_COLOR_SLIDER_BIG_NUB_TOP, THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER, self.hover),
+                        mix(THEME_COLOR_SLIDER_BIG_NUB_BOTTOM, THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER, self.hover),
+                        self.pos.y
+                    ),
+                    mix(THEME_COLOR_SLIDER_BIG_NUB_BOTTOM, THEME_COLOR_SLIDER_BIG_NUB_TOP, pow(self.pos.y, 1.5)),
+                    self.drag
+                    ) // Nub background gradient
+                )
+                sdf.stroke(
+                    mix(
+                        mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_LIGHT * 1.2, self.hover),
+                        THEME_COLOR_BLACK,
+                        pow(self.pos.y, 1.)
+                    ),
+                    1.
+                ); // Nub outline gradient
+
+
+                return sdf.result
             }
         }
-        text: ""
+    }
+
+
+    SlidesView = <SlidesViewBase> {
+        anim_speed: 0.9
     }
 
     Slide = <RoundedView> {
-        draw_bg: {color: #x1A, radius: 5.0}
-        width: Fill,
-        height: Fill
-        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
-        title = <Label> {
-            draw_text: {
-                color: #f
-                text_style: {
-                    line_spacing:1.0
-                    font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
-                    font_size: 84
-                }
-            }
-            text: "SlideTitle"
+        width: Fill, height: Fill,
+        flow: Down, spacing: 10,
+        align: { x: 0.0, y: 0.5 }
+        padding: 50.
+        draw_bg: { color: (THEME_COLOR_SLIDES_BG), radius: (THEME_CONTAINER_CORNER_RADIUS) }
+        title = <H1> {
+            text: "SlideTitle",
+            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
         }
     }
 
     SlideChapter = <Slide> {
-        draw_bg: {color: #xFF5C39, radius: 5.0}
-        width: Fill,
-        height: Fill
-        align: {x: 0.0, y: 0.5} flow: Down, spacing: 10, padding: 50
-        title = <Label> {
-            draw_text: {
-                color: #x181818
-                text_style: {
-                    line_spacing:1.0
-                    font:{path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
-                    font_size: 90
-                }
-            }
-            text: "SlideTitle"
+        width: Fill, height: Fill,
+        flow: Down,
+        align: {x: 0.0, y: 0.5}
+        spacing: 10,
+        padding: 50,
+        draw_bg: {color: (THEME_COLOR_SLIDES_CHAPTER), radius: (THEME_CONTAINER_CORNER_RADIUS)}
+        title = <H1> {
+            text: "SlideTitle",
+            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
         }
     }
 
-    SlidesView = <SlidesViewBase> {
-        anim_speed: 0.9
+    SlideBody = <H2> {
+        text: "Body of the slide"
+        draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
     }
 
     DrawScrollShadow = <DrawScrollShadowBase> {
 
         shadow_size: 4.0,
 
-        fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+        fn pixel(self) -> vec4 { // TODO: make the corner overlap properly with a distance field eq.
             let is_viz = clamp(self.scroll * 0.1, 0., 1.);
             let pos = self.pos;
-            let base = THEME_COLOR_BG_EDITOR.xyz;
+            let base = THEME_COLOR_BG_CONTAINER.xyz;
             let alpha = 0.0;
             if self.shadow_is_top > 0.5 {
                 alpha = pow(pos.y, 0.5);
@@ -2881,30 +3678,23 @@ live_design! {
         padding: {bottom: 10., top: 50.}
         show_bg: true
         draw_bg: {
-            color: #EDEDED
+            color: (THEME_COLOR_APP_CAPTION_BAR)
         }
 
         content = <View> {
-            width: Fill, height: Fit
+            width: Fill, height: Fit,
             flow: Overlay,
-        
+
             title_container = <View> {
-                width: Fill, height: Fit
+                width: Fill, height: Fit,
                 align: {x: 0.5, y: 0.5}
-    
-                title = <Label> {
-                    width: Fit, height: Fit
-                    draw_text: {
-                        text_style: { font_size: 12. },
-                        color: #000,
-                    },
-                    text: "Stack View Title"
-                }
+
+                title = <H4> { text: "Stack View Title" }
             }
 
             button_container = <View> {
                 left_button = <Button> {
-                    width: Fit, height: 68
+                    width: Fit, height: 68,
                     icon_walk: {width: 10, height: 68}
                     draw_bg: {
                         fn pixel(self) -> vec4 {
@@ -2914,7 +3704,7 @@ live_design! {
                     }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/back.svg"),
-                        color: #000;
+                        color: (THEME_COLOR_TEXT_DEFAULT);
                         brightness: 0.8;
                     }
                 }
@@ -2924,26 +3714,25 @@ live_design! {
 
     StackNavigationView = <StackNavigationViewBase> {
         visible: false
-        width: Fill, height: Fill
+        width: Fill, height: Fill,
         flow: Overlay
 
         show_bg: true
         draw_bg: {
-            color: #fff
+            color: (THEME_COLOR_WHITE)
         }
 
         // Empty slot to place a generic full-screen background
         background = <View> {
-            width: Fill, height: Fill
+            width: Fill, height: Fill,
             visible: false
         }
 
         body = <View> {
-            width: Fill,
-            height: Fill,
+            width: Fill, height: Fill,
             flow: Down,
 
-            // Space between body and header can be adjusted overriding this margin
+            // THEME_SPACE between body and header can be adjusted overriding this margin
             margin: {top: (HEADER_HEIGHT)},
         }
 
@@ -3056,26 +3845,10 @@ live_design! {
     Root = <RootBase>{
         design_window = <Window>{
             window:{kind_id: 1}
-            show_bg: true
             width: Fill,
             height: Fill
                             
-            draw_bg: {
-   
-                fn pixel(self) -> vec4 {
-                    let pos = self.geom_pos * self.rect_size*0.1;
-                    let mask = floor(mod(pos.x+floor(mod(pos.y, 2.0)), 2.0))
-                    return #3+mask*#04
-                    /*
-                    let grid = abs(
-                        fract(coord - 0.5) - 0.5
-                    ) / (abs(dFdx(coord)) + abs(dFdy(coord)))*0.75;
-                    let line = min(grid.x, grid.y);
-                    let grid2 = 0.05 * vec4(vec3(1.0 - min(line, 1.0)), 1.0);
-                    return #5-grid2;
-                    */
-                }
-            }
+
             designer = <Designer>{
                 
             }
