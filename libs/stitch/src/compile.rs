@@ -590,32 +590,46 @@ impl<'a> InstrVisitor for Compile<'a> {
         label_idxs: &[u32],
         default_label_idx: u32,
     ) -> Result<(), Self::Error> {
+        let default_label_idx = default_label_idx as usize;
         self.save_all_locals();
         self.save_all_regs_except_top();
-        self.emit(br_table(self.is_opd_in_reg(0)));
-        self.pop_opd_and_emit_stack_offset();
-        self.emit(label_idxs.len() as u32);
-        let mut hole_idxs = Vec::new();
-        for _ in 0..label_idxs.len() {
-            let hole_idx = self.emit_hole();
-            hole_idxs.push(hole_idx);
-        }
-        let default_hole_idx = self.emit_hole();
-        for (label_idx, hole_idx) in label_idxs.iter().copied().zip(hole_idxs) {
-            let label_idx = label_idx as usize;
-            self.patch_hole(hole_idx);
-            self.resolve_label_vals(label_idx);
-            self.emit(exec::br as ThreadedInstr);
-            self.emit_label(label_idx);
-            for label_type in self.block(0).label_types().iter().copied() {
-                self.push_opd(label_type);
+        if self.block(default_label_idx).label_types().is_empty() {
+            self.emit(br_table(self.is_opd_in_reg(0)));
+            self.pop_opd_and_emit_stack_offset();
+            self.emit(label_idxs.len() as u32);
+            for label_idx in label_idxs.iter().copied() {
+                let label_idx = label_idx as usize;
+                self.emit_label(label_idx);
+                for label_type in self.block(0).label_types().iter().copied() {
+                    self.push_opd(label_type);
+                }
             }
+            self.emit_label(default_label_idx);
+        } else {
+            self.emit(br_table(self.is_opd_in_reg(0)));
+            self.pop_opd_and_emit_stack_offset();
+            self.emit(label_idxs.len() as u32);
+            let mut hole_idxs = Vec::new();
+            for _ in 0..label_idxs.len() {
+                let hole_idx = self.emit_hole();
+                hole_idxs.push(hole_idx);
+            }
+            let default_hole_idx = self.emit_hole();
+            for (label_idx, hole_idx) in label_idxs.iter().copied().zip(hole_idxs) {
+                let label_idx = label_idx as usize;
+                self.patch_hole(hole_idx);
+                self.resolve_label_vals(label_idx);
+                self.emit(exec::br as ThreadedInstr);
+                self.emit_label(label_idx);
+                for label_type in self.block(0).label_types().iter().copied() {
+                    self.push_opd(label_type);
+                }
+            }
+            self.patch_hole(default_hole_idx);
+            self.resolve_label_vals(default_label_idx);
+            self.emit(exec::br as ThreadedInstr);
+            self.emit_label(default_label_idx);
         }
-        let default_label_idx = default_label_idx as usize;
-        self.patch_hole(default_hole_idx);
-        self.resolve_label_vals(default_label_idx);
-        self.emit(exec::br as ThreadedInstr);
-        self.emit_label(default_label_idx);
         self.set_unreachable();
         Ok(())
     }
