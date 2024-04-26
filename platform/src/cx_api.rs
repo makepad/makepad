@@ -69,6 +69,7 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMacosMenu(MacosMenu),
     ShowClipboardActions(String),
+    CopyToClipboard(String),
 
     HttpRequest {
         request_id: LiveId,
@@ -178,6 +179,13 @@ impl Cx {
     pub fn show_clipboard_actions(&mut self, selected: String) {
         self.platform_ops
             .push(CxOsOp::ShowClipboardActions(selected));
+    }
+
+    /// Copies the given string to the clipboard.
+    /// 
+    /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
+    pub fn copy_to_clipboard(&mut self, content: &str) {
+        self.platform_ops.push(CxOsOp::CopyToClipboard(content.to_owned()));
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
