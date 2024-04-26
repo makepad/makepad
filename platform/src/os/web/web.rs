@@ -437,6 +437,9 @@ impl Cx {
                 },
                 CxOsOp::ShowClipboardActions(_) =>{
                 }
+                CxOsOp::CopyToClipboard(_) =>{
+                    crate::error!("Clipboard actions not supported in web")
+                }
                 CxOsOp::SetCursor(cursor) => {
                     self.os.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 },
