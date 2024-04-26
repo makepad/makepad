@@ -51,18 +51,18 @@ impl BuildTarget {
     pub fn len() -> u64 {Self::CHECK_ALL+1}
     pub fn name(&self) -> &'static str {
         match self {
-            Self::ReleaseStudio=>"Release Studio",
-            Self::DebugStudio=>"Debug Studio",
+            Self::ReleaseStudio=>"Studio Release",
+            Self::DebugStudio=>"Studio Debug",
             Self::Release=>"Release",
             Self::Debug=>"Debug",
             Self::Profiler=>"Profiler",
             Self::IosSim=>"iOS Simulator",
             Self::IosDevice=>"iOS Device",
-            Self::TvosSim=>"TVOs Simulator",
-            Self::TvosDevice=>"TVOs Device",
+            Self::TvosSim=>"tvOS Simulator",
+            Self::TvosDevice=>"tvOS Device",
             Self::Android=>"Android",
             Self::WebAssembly=>"WebAssembly",
-            Self::CheckMacos=>"Check Macos",
+            Self::CheckMacos=>"Check macOS",
             Self::CheckWindows=>"Check Windows",
             Self::CheckLinux=>"Check Linux",
             Self::CheckAll=>"Check All",

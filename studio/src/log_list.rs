@@ -20,18 +20,16 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     Icon = <View> {
+        width: 10, height: 10
         show_bg: true,
-        width: 10,
-        height: 10
     }
     
     LogIcon = <PageFlip> {
+        width: Fit, height: Fit,
         active_page: log
         lazy_init: true,
-        width: Fit,
-        height: Fit,
-        margin: {top: 1, left: 5, right: 5}
         wait = <Icon> {
+            margin: { top: 2. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -49,6 +47,7 @@ live_design!{
             }
         },
         log = <Icon> {
+            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -63,6 +62,7 @@ live_design!{
             }
         }
         error = <Icon> {
+            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -79,6 +79,7 @@ live_design!{
             }
         },
         warning = <Icon> {
+            margin: { top: 7. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -119,11 +120,12 @@ live_design!{
         }
     }
     
-    LogItem = <RectView> {
-        height: Fit,
-        width: Fill
-        padding: {top: 6, bottom: 6}
-        
+    LogItem = <View> {
+        height: Fit, width: Fill
+        padding: <THEME_MSPACE_2> {} // TODO: Fix. Changing this value to i.e. '0.' causes Makepad Studio to freeze when switching to the log tab.
+        spacing: (THEME_SPACE_2)
+        align: { x: 0.0, y: 0.5 }
+        show_bg: true,
         draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
@@ -131,11 +133,11 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    THEME_COLOR_BG_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 );
             }
@@ -178,30 +180,28 @@ live_design!{
     }
     
     LogList = {{LogList}}{
-        height: Fill,
-        width: Fill
+        height: Fill, width: Fill,
         list = <PortalList> {
             grab_key_focus: true
             auto_tail: true
             drag_scrolling: false
-            height: Fill,
-            width: Fill
+            height: Fill, width: Fill,
             flow: Down
             Location = <LogItem> {
                 icon = <LogIcon> {},
                 binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
                 location = <LinkLabel> {margin: 0, text: ""}
-                body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
+                body = <P> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
             }
             Bare = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
-                body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
+                binary = <P> { draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
+                body = <P> { }
             }
             Empty = <LogItem> {
                 cursor: Default
-                height: 24,
                 width: Fill
+                body = <P> { text: "" }
             }
         }
     }
