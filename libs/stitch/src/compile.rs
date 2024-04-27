@@ -154,11 +154,16 @@ impl<'a> Compile<'a> {
 
     fn save_local(&mut self, local_idx: usize) {
         while let Some(opd_idx) = self.locals[local_idx].first_local_opd_idx {
-            let Opd::Local { next_local_opd_idx, .. } = self.opds[opd_idx] else {
+            let Opd::Local {
+                next_local_opd_idx, ..
+            } = self.opds[opd_idx]
+            else {
                 unreachable!()
             };
             self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
-            self.opds[opd_idx] = Opd::Temp { type_: self.locals[local_idx].type_.into() };
+            self.opds[opd_idx] = Opd::Temp {
+                type_: self.locals[local_idx].type_.into(),
+            };
             self.emit(copy_stack(self.locals[local_idx].type_));
             self.emit_stack_offset(self.local_stack_idx(local_idx));
             self.emit_stack_offset(self.temp_stack_idx(opd_idx));
@@ -250,7 +255,7 @@ impl<'a> Compile<'a> {
         } else {
             match self.opds[self.opds.len() - 1 - opd_depth] {
                 Opd::Local { local_idx, .. } => self.locals[local_idx].type_.into(),
-                Opd::Temp { type_ } => type_
+                Opd::Temp { type_ } => type_,
             }
         }
     }
@@ -261,7 +266,7 @@ impl<'a> Compile<'a> {
         } else {
             match self.opds[self.opds.len() - 1 - opd_depth] {
                 Opd::Local { local_idx, .. } => Some(local_idx),
-                Opd::Temp { .. } => None
+                Opd::Temp { .. } => None,
             }
         }
     }
@@ -320,7 +325,10 @@ impl<'a> Compile<'a> {
             OpdType::Unknown
         } else {
             match self.opds.pop().unwrap() {
-                Opd::Local { local_idx, next_local_opd_idx } => {
+                Opd::Local {
+                    local_idx,
+                    next_local_opd_idx,
+                } => {
                     self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
                     self.locals[local_idx].type_.into()
                 }
@@ -390,9 +398,7 @@ impl<'a> Compile<'a> {
         } else {
             unreachable!()
         };
-        self.emit(copy_reg_to_stack(
-            opd_type
-        ));
+        self.emit(copy_reg_to_stack(opd_type));
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
         self.dealloc_reg(reg_idx);
     }
@@ -693,7 +699,7 @@ impl<'a> InstrVisitor for Compile<'a> {
                     .map(|mem| mem.0.to_unguarded(self.store.id())),
             );
         }
-        for result_type in type_.results().iter().copied () {
+        for result_type in type_.results().iter().copied() {
             self.push_opd(result_type);
         }
         Ok(())
@@ -1161,7 +1167,7 @@ enum Opd {
     },
     Temp {
         type_: OpdType,
-    }
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
