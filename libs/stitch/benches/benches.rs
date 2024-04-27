@@ -1,5 +1,5 @@
 use {
-    criterion::{criterion_group, criterion_main, Criterion},
+    criterion::{black_box, criterion_group, criterion_main, Criterion},
     wast::{parser, parser::ParseBuffer, Wat},
 };
 
@@ -13,6 +13,15 @@ fn new_stitch_store_and_instance(
     let module = Module::new(store.engine(), &bytes).unwrap();
     let instance = Linker::new().instantiate(&mut store, &module).unwrap();
     (store, instance)
+}
+
+fn new_wasm3_module(bytes: &[u8], f: impl FnOnce(wasm3::Module)) {
+    use wasm3::Environment;
+
+    let environment = Environment::new().unwrap();
+    let runtime = environment.create_runtime(1024 * 1024).unwrap();
+    let module = runtime.parse_and_load_module(bytes).unwrap();
+    f(module)
 }
 
 fn new_wasmi_store_and_instance(bytes: &[u8]) -> (wasmi::Store<()>, wasmi::Instance) {
@@ -43,9 +52,21 @@ fn fac(c: &mut Criterion) {
         b.iter(|| {
             use makepad_stitch::Val;
 
-            fac.call(&mut store, &[Val::I64(n)], &mut [Val::I64(0)])
-                .unwrap();
+            fac.call(
+                black_box(&mut store),
+                black_box(&[Val::I64(n)]),
+                black_box(&mut [Val::I64(0)]),
+            )
+            .unwrap();
         })
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fac = module.find_function::<i64, i64>("fac").unwrap();
+            b.iter(|| {
+                fac.call(black_box(n as i64)).unwrap();
+            })
+        });
     });
     group.bench_function("wasmi", |b| {
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
@@ -54,8 +75,12 @@ fn fac(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fac.call(&mut store, &[Value::I64(n)], &mut [Value::I64(0)])
-                .unwrap();
+            fac.call(
+                black_box(&mut store),
+                black_box(&[Value::I64(n)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
         })
     });
 }
@@ -74,9 +99,23 @@ fn fib(c: &mut Criterion) {
         let fib = instance.exported_func("fib").unwrap();
 
         b.iter(|| {
-            fib.call(&mut store, &[Val::I64(n as i64)], &mut [Val::I64(0)])
-                .unwrap();
+            let mut results = [Val::I64(0)];
+            fib.call(
+                black_box(&mut store),
+                black_box(&[Val::I64(n as i64)]),
+                black_box(&mut results),
+            )
+            .unwrap();
+            assert_eq!(results[0].to_i64().unwrap(), 2178309);
         })
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fib = module.find_function::<i64, i64>("fib").unwrap();
+            b.iter(|| {
+                fib.call(black_box(n as i64)).unwrap();
+            })
+        });
     });
     group.bench_function("wasmi", |b| {
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
@@ -85,8 +124,12 @@ fn fib(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fib.call(&mut store, &[Value::I64(n as i64)], &mut [Value::I64(0)])
-                .unwrap();
+            fib.call(
+                black_box(&mut store),
+                black_box(&[Value::I64(n as i64)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
         })
     });
 }
@@ -99,7 +142,7 @@ fn fill(c: &mut Criterion) {
     let idx = 0;
     let val = 42;
     let count = 1_048_576;
-    let mut group = c.benchmark_group("fib");
+    let mut group = c.benchmark_group("fill");
     group.bench_function("stitch", |b| {
         use makepad_stitch::Val;
 
@@ -108,15 +151,27 @@ fn fill(c: &mut Criterion) {
 
         b.iter(|| {
             fill.call(
-                &mut store,
-                &[
+                black_box(&mut store),
+                black_box(&[
                     Val::I32(idx as i32),
                     Val::I32(val as i32),
                     Val::I32(count as i32),
-                ],
-                &mut [],
+                ]),
+                black_box(&mut []),
             )
             .unwrap();
+        });
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fill = module.find_function::<(i32, i32, i32), ()>("fill").unwrap();
+            b.iter(|| {
+                fill.call(
+                    black_box(idx as i32),
+                    black_box(val as i32),
+                    black_box(count as i32),
+                )
+            })
         });
     });
     group.bench_function("wasmi", |b| {
@@ -127,13 +182,13 @@ fn fill(c: &mut Criterion) {
 
         b.iter(|| {
             fill.call(
-                &mut store,
-                &[
+                black_box(&mut store),
+                black_box(&[
                     Value::I32(idx as i32),
                     Value::I32(val as i32),
                     Value::I32(count as i32),
-                ],
-                &mut [],
+                ]),
+                black_box(&mut []),
             )
             .unwrap();
         })
@@ -147,7 +202,7 @@ fn sum(c: &mut Criterion) {
 
     let idx = 0;
     let count = 1_048_576;
-    let mut group = c.benchmark_group("fib");
+    let mut group = c.benchmark_group("sum");
     group.bench_function("stitch", |b| {
         use makepad_stitch::Val;
 
@@ -161,11 +216,17 @@ fn sum(c: &mut Criterion) {
         }
         b.iter(|| {
             sum.call(
-                &mut store,
-                &[Val::I32(idx as i32), Val::I32(count as i32)],
-                &mut [Val::I64(0)],
+                black_box(&mut store),
+                black_box(&[Val::I32(idx as i32), Val::I32(count as i32)]),
+                black_box(&mut [Val::I64(0)]),
             )
             .unwrap();
+        });
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let sum = module.find_function::<(i32, i32), i64>("sum").unwrap();
+            b.iter(|| sum.call(black_box(idx as i32), black_box(count as i32)))
         });
     });
     group.bench_function("wasmi", |b| {
@@ -181,9 +242,9 @@ fn sum(c: &mut Criterion) {
         }
         b.iter(|| {
             sum.call(
-                &mut store,
-                &[Value::I32(idx as i32), Value::I32(count as i32)],
-                &mut [Value::I64(0)],
+                black_box(&mut store),
+                black_box(&[Value::I32(idx as i32), Value::I32(count as i32)]),
+                black_box(&mut [Value::I64(0)]),
             )
             .unwrap();
         })
