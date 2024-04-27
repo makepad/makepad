@@ -1,7 +1,7 @@
 (module
     (memory (export "memory") 16)
     (func (export "sum") (param $idx i32) (param $count i32) (result i64)
-        (local $sum i64)
+        (local $acc i64)
         (block $exit
             (loop $loop
                 (br_if
@@ -10,9 +10,9 @@
                         (local.get $count)
                     )
                 )
-                (local.set $sum
+                (local.set $acc
                     (i64.add
-                        (local.get $sum)
+                        (local.get $acc)
                         (i64.load8_u offset=0
                             (local.get $idx)
                         )
@@ -34,7 +34,7 @@
             )
         )
         (return
-            (local.get $sum)
+            (local.get $acc)
         )
     )
 )
