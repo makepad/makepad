@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Url {
     /**
      * The scheme part of the URL
@@ -91,6 +91,19 @@ impl Url {
     }
 }
 
+impl From<&str> for Url {
+    fn from(str: &str) -> Self {
+        Url::parse(str).unwrap()
+    }
+}
+
+impl From<String> for Url {
+    fn from(str: String) -> Self {
+        Url::parse(str.as_str()).unwrap()
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use crate::Url;
@@ -123,5 +136,11 @@ mod tests {
         assert_eq!(url.hostname, "example.org".to_string());
         assert_eq!(url.pathname, "/a/long/path".to_string());
         assert_eq!(url.secure, true);
+    }
+
+    #[test]
+    fn if_converts_from_str() {
+        let url: Url = "https://example.org/".into();
+        assert_eq!(url.hostname, "example.org".to_string());
     }
 }
