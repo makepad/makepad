@@ -28,14 +28,13 @@ fn stitch(bytes: &[u8]) -> f32 {
 }
 
 fn wasm3(bytes: &[u8]) -> f32 {
-    use wasm3::{Environment, Module};
+    use wasm3::Environment;
 
     wasm3::make_func_wrapper!(clock_ms_wrap: clock_ms() -> u64);
 
     let environment = Environment::new().unwrap();
-    let runtime = environment.create_runtime(2048).unwrap();
-    let module = Module::parse(&environment, bytes).unwrap();
-    let mut module = runtime.load_module(module).unwrap();
+    let runtime = environment.create_runtime(1024).unwrap();
+    let mut module = runtime.parse_and_load_module(bytes).unwrap();
     module
         .link_function::<(), u64>("env", "clock_ms", clock_ms_wrap)
         .unwrap();
