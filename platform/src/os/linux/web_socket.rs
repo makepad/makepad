@@ -86,7 +86,7 @@ impl WebSocketClient {
                         let mut buf2 = [0u8; 2];
                         input_stream.read_exact(&mut buf2).unwrap();
                         buffer.append(&mut buf2.to_vec());
-                        let len2 = u16::from_be_bytes(buffer[2..2].try_into().unwrap());
+                        let len2 = u16::from_be_bytes(buffer[2..2+2].try_into().unwrap());
                         (len1 as u16 + len2) as usize
                     }
                     127 => {
