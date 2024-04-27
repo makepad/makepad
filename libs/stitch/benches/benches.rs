@@ -38,21 +38,21 @@ fn new_wasmi_store_and_instance(bytes: &[u8]) -> (wasmi::Store<()>, wasmi::Insta
     (store, instance)
 }
 
-fn fac(c: &mut Criterion) {
-    let buffer = ParseBuffer::new(include_str!("wat/fac.wat")).unwrap();
+fn fac_iter(c: &mut Criterion) {
+    let buffer = ParseBuffer::new(include_str!("wat/fac_iter.wat")).unwrap();
     let mut wat = parser::parse::<Wat>(&buffer).unwrap();
     let bytes = wat.encode().unwrap();
 
     let n = 32;
-    let mut group = c.benchmark_group("fac");
+    let mut group = c.benchmark_group("fac_iter");
     group.bench_function("stitch", |b| {
         let (mut store, instance) = new_stitch_store_and_instance(&bytes);
-        let fac = instance.exported_func("fac").unwrap();
+        let fac_iter = instance.exported_func("fac_iter").unwrap();
 
         b.iter(|| {
             use makepad_stitch::Val;
 
-            fac.call(
+            fac_iter.call(
                 black_box(&mut store),
                 black_box(&[Val::I64(n)]),
                 black_box(&mut [Val::I64(0)]),
@@ -62,20 +62,67 @@ fn fac(c: &mut Criterion) {
     });
     group.bench_function("wasm3", |b| {
         new_wasm3_module(&bytes, |module| {
-            let fac = module.find_function::<i64, i64>("fac").unwrap();
+            let fac_iter = module.find_function::<i64, i64>("fac_iter").unwrap();
             b.iter(|| {
-                fac.call(black_box(n as i64)).unwrap();
+                fac_iter.call(black_box(n as i64)).unwrap();
             })
         });
     });
     group.bench_function("wasmi", |b| {
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
-        let fac = instance.get_func(&store, "fac").unwrap();
+        let fac_iter = instance.get_func(&store, "fac_iter").unwrap();
 
         b.iter(|| {
             use wasmi::Value;
 
-            fac.call(
+            fac_iter.call(
+                black_box(&mut store),
+                black_box(&[Value::I64(n)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
+        })
+    });
+}
+
+fn fac_rec(c: &mut Criterion) {
+    let buffer = ParseBuffer::new(include_str!("wat/fac_rec.wat")).unwrap();
+    let mut wat = parser::parse::<Wat>(&buffer).unwrap();
+    let bytes = wat.encode().unwrap();
+
+    let n = 32;
+    let mut group = c.benchmark_group("fac_rec");
+    group.bench_function("stitch", |b| {
+        let (mut store, instance) = new_stitch_store_and_instance(&bytes);
+        let fac_rec = instance.exported_func("fac_rec").unwrap();
+
+        b.iter(|| {
+            use makepad_stitch::Val;
+
+            fac_rec.call(
+                black_box(&mut store),
+                black_box(&[Val::I64(n)]),
+                black_box(&mut [Val::I64(0)]),
+            )
+            .unwrap();
+        })
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fac_rec = module.find_function::<i64, i64>("fac_rec").unwrap();
+            b.iter(|| {
+                fac_rec.call(black_box(n as i64)).unwrap();
+            })
+        });
+    });
+    group.bench_function("wasmi", |b| {
+        let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
+        let fac_rec = instance.get_func(&store, "fac_rec").unwrap();
+
+        b.iter(|| {
+            use wasmi::Value;
+
+            fac_rec.call(
                 black_box(&mut store),
                 black_box(&[Value::I64(n)]),
                 black_box(&mut [Value::I64(0)]),
@@ -251,5 +298,5 @@ fn sum(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, fac, fib, fill, sum);
+criterion_group!(benches, fac_iter); // fac_ref, fib, fill, sum);
 criterion_main!(benches);
