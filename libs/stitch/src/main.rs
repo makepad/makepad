@@ -14,4 +14,5 @@ fn main() {
     let mut results = [Val::I32(0)];
     func.call(&mut store, &[Val::I32(42)], &mut results)
         .unwrap();
+    println!("Result: {}", results[0].to_i32().unwrap());
 }
