@@ -12,6 +12,8 @@ pub mod opengl;
 
 #[cfg(target_os="linux")]
 pub mod url_session;
+#[cfg(target_os="linux")]
+pub mod messaging;
 
 #[cfg(not(target_os="android"))]
 pub mod dma_buf;
@@ -58,7 +60,7 @@ pub(crate) use self::alsa_midi::{OsMidiInput, OsMidiOutput};
 pub(crate) use self::android::android_midi::{OsMidiInput, OsMidiOutput};
 
 #[cfg(not(target_os="android"))]
-pub (crate) use web_socket::OsWebSocket;
+pub (crate) use messaging::OsWebSocket;
 
 #[cfg(target_os="android")]
 pub (crate) use self::android::android_web_socket::OsWebSocket;
