@@ -3,6 +3,7 @@ use crate::makepad_live_id::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::BTreeMap;
 use std::str;
+use makepad_http::utils::parse_headers;
 
 #[derive(Clone, Debug)]
 pub struct NetworkResponseItem{
@@ -125,7 +126,7 @@ impl HttpResponse {
         HttpResponse {
             metadata_id,
             status_code,
-            headers: HttpResponse::parse_headers(string_headers),
+            headers: parse_headers(string_headers),
             body
         }
     }
@@ -160,20 +161,6 @@ impl HttpResponse {
                 col:0
             })
         }
-    }
-
-    fn parse_headers(headers_string: String) -> BTreeMap<String, Vec<String>> {
-        let mut headers = BTreeMap::new();
-        for line in headers_string.lines() {
-            let mut split = line.split(":");
-            let key = split.next().unwrap();
-            let values = split.next().unwrap().to_string();
-            for val in values.split(",") {
-                let entry = headers.entry(key.to_string()).or_insert(Vec::new());
-                entry.push(val.to_string());
-            }
-        }
-        headers
     }
 }
 

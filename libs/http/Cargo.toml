@@ -9,6 +9,8 @@ metadata.makepad-auto-version = "kWH3whvtKxZm5SPPZmvzKa4dNe0="
 
 [dependencies]
 makepad-url = { path = "../url" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 makepad-net = { path = "../net" }
 
 [dev-dependencies]
