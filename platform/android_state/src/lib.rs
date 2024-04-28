@@ -18,11 +18,9 @@ use std::sync::Mutex;
 static mut ACTIVITY: jni_sys::jobject = std::ptr::null_mut();
 static mut VM: *mut jni_sys::JavaVM = std::ptr::null_mut();
 
-static SET_ACTIVITY_FN: Mutex<Option<fn(jni_sys::jobject)>> = {
-    fn set_activity(activity: jni_sys::jobject) {
-        unsafe {
-            ACTIVITY = activity;
-        }
+static SET_ACTIVITY_FN: Mutex<Option<unsafe fn(jni_sys::jobject)>> = {
+    unsafe fn set_activity(activity: jni_sys::jobject) {
+        ACTIVITY = activity;
     }
 
     std::sync::Mutex::new(Some(set_activity))
@@ -33,7 +31,7 @@ static SET_ACTIVITY_FN: Mutex<Option<fn(jni_sys::jobject)>> = {
 /// This will return `Some` only once, which guarantees that only the
 /// internal Makepad framework can obtain the function to set the activity instance.
 #[doc(hidden)]
-pub fn get_activity_setter_fn() -> Option<fn(jni_sys::jobject)> {
+pub fn get_activity_setter_fn() -> Option<unsafe fn(jni_sys::jobject)> {
     SET_ACTIVITY_FN.lock().unwrap().take()
 }
 
@@ -60,6 +58,7 @@ extern "C" fn jni_on_load(vm: *mut std::ffi::c_void) {
 /// If the JavaVM instance has not been initialized, this returns a null pointer.
 #[inline(always)]
 pub fn get_java_vm() -> *mut jni_sys::JavaVM {
+    // SAFETY: just returning a raw pointer.
     unsafe { VM }
 }
 
@@ -74,5 +73,6 @@ pub fn get_java_vm() -> *mut jni_sys::JavaVM {
 /// If the Activity instance has not been initialized, this returns a null pointer.
 #[inline(always)]
 pub fn get_activity() -> jni_sys::jobject {
+    // SAFETY: just returning a raw pointer.
     unsafe { ACTIVITY }
 }
