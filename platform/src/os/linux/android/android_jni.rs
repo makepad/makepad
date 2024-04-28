@@ -126,7 +126,7 @@ pub const ANDROID_META_SHIFT_MASK: u32 = 193;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
 pub const ANDROID_META_ALT_MASK: u32 = 50;
 
-static mut SET_ACTIVITY_FN: fn(jni_sys::jobject) = |_| {}; 
+static mut SET_ACTIVITY_FN: unsafe fn(jni_sys::jobject) = |_| {};
 
 pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: mpsc::Sender<FromJavaMessage>){
     if let Some(func) = makepad_android_state::get_activity_setter_fn() {
