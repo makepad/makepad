@@ -21,6 +21,7 @@ live_design!{
     
     Icon = <View> {
         width: 10, height: 10
+        margin:{top:2},
         show_bg: true,
     }
     
@@ -29,7 +30,6 @@ live_design!{
         active_page: log
         lazy_init: true,
         wait = <Icon> {
-            margin: { top: 2. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -47,7 +47,6 @@ live_design!{
             }
         },
         log = <Icon> {
-            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -62,7 +61,6 @@ live_design!{
             }
         }
         error = <Icon> {
-            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -79,7 +77,6 @@ live_design!{
             }
         },
         warning = <Icon> {
-            margin: { top: 7. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -124,7 +121,7 @@ live_design!{
         height: Fit, width: Fill
         padding: <THEME_MSPACE_2> {} // TODO: Fix. Changing this value to i.e. '0.' causes Makepad Studio to freeze when switching to the log tab.
         spacing: (THEME_SPACE_2)
-        align: { x: 0.0, y: 0.5 }
+        align: { x: 0.0, y: 0.0 }
         show_bg: true,
         draw_bg: {
             instance is_even: 0.0
@@ -190,7 +187,7 @@ live_design!{
             Location = <LogItem> {
                 icon = <LogIcon> {},
                 binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
-                location = <LinkLabel> {margin: 0, text: ""}
+                location = <LinkLabel> {padding:0, margin: 0, text: ""}
                 body = <P> {width: Fill, margin: {left: 5, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
             }
             Bare = <LogItem> {
