@@ -84,7 +84,7 @@ impl Widget for DesignerContainer {
 enum FingerMove{
     Pan{start_pan: DVec2},
     DragBody{ptr: LivePtr},
-    DragEdge{edge: Edge, ptr: LivePtr}
+    DragEdge{edge: Edge, rect:Rect, ptr: LivePtr}
 }
 
 struct ContainerData{
@@ -103,8 +103,8 @@ enum Edge{
 impl ContainerData{
     fn get_edge(&self, rel:DVec2, zoom:f64, pan: DVec2)->Option<Edge>{
         let cp = rel * zoom + pan;
-        let edge_outer:f64 = 3.0 * zoom ;
-        let edge_inner:f64  = 3.0 * zoom ;
+        let edge_outer:f64 = 5.0 * zoom ;
+        let edge_inner:f64  = 5.0 * zoom ;
         
         if cp.x >= self.rect.pos.x - edge_outer && 
         cp.x <= self.rect.pos.x + edge_inner && 
@@ -197,6 +197,7 @@ impl Widget for DesignerView {
                     match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
                         Some(edge)=>{
                             self.finger_move = Some(FingerMove::DragEdge{
+                                rect: cd.rect,
                                 ptr: *ptr,
                                 edge
                             });
@@ -236,8 +237,30 @@ impl Widget for DesignerView {
                         self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
                         self.redraw(cx);
                     }
-                    FingerMove::DragEdge{edge:_, ptr:_}=>{
-                        
+                    FingerMove::DragEdge{edge, rect, ptr}=>{
+                        let delta = (fe.abs - fe.abs_start)* self.zoom;
+                        let r = match edge{
+                             Edge::Left=>Rect{
+                                pos:dvec2(rect.pos.x + delta.x, rect.pos.y),
+                                size:dvec2(rect.size.x - delta.x, rect.size.y)
+                             },
+                             Edge::Right=>Rect{
+                                 pos: rect.pos,
+                                 size: dvec2(rect.size.x + delta.x, rect.size.y)
+                             },
+                             Edge::Top=>Rect{
+                                 pos:dvec2(rect.pos.x, rect.pos.y + delta.y),
+                                 size:dvec2(rect.size.x, rect.size.y - delta.y)
+                             },
+                             Edge::Bottom=>Rect{
+                                 pos: rect.pos,
+                                 size: dvec2(rect.size.x, rect.size.y + delta.y)
+                             }
+                        };
+                        if let Some(container) = self.containers.get_mut(ptr){
+                            container.container.redraw(cx);
+                            container.rect = r;
+                        }
                     }
                     FingerMove::DragBody{ptr:_}=>{
                                                 
