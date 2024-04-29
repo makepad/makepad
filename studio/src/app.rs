@@ -7,8 +7,9 @@ use crate::{
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
-    log_list::*,
+    makepad_platform::studio::JumpToFile,
     run_list::*,
+    makepad_code_editor::text::{Position},
     build_manager::{
         build_manager::{
             BuildManager,
@@ -74,7 +75,7 @@ pub struct AppData{
 
 #[derive(DefaultNone, Debug, Clone)]
 pub enum AppAction{
-    JumpTo(JumpTo),
+    JumpTo(JumpToFile),
     RedrawLog,
     RedrawProfiler,
     RedrawFile(LiveId),
@@ -110,13 +111,14 @@ impl MatchEvent for App{
         let profiler = self.ui.view(id!(profiler));
         match action.cast(){
             AppAction::JumpTo(jt)=>{
+                let pos = Position{line_index: jt.line as usize, byte_index:jt.column as usize};
                 if let Some(file_id) = self.data.file_system.path_to_file_node_id(&jt.file_name) {
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
                             if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
-                                editor.editor.set_cursor_and_scroll(cx, jt.start, session);
+                                editor.editor.set_cursor_and_scroll(cx, pos, session);
                                 editor.editor.set_key_focus(cx);
                             }
                         }

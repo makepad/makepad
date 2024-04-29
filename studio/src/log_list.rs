@@ -5,6 +5,7 @@ use {
             build_manager::*,
             build_protocol::*,
         },
+        makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
         makepad_code_editor::text::{Position},
@@ -207,14 +208,8 @@ live_design!{
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum LogListAction {
-    JumpTo(JumpTo),
+    JumpTo(JumpToFile),
     None
-}
-
-#[derive(Clone, Debug)]
-pub struct JumpTo{
-    pub file_name:String, 
-    pub start:Position
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -298,13 +293,11 @@ impl Widget for LogList {
                     if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
                         match log_item {
                             LogItem::Location(msg) => {
-                                cx.action(AppAction::JumpTo(JumpTo{
+                                cx.action(AppAction::JumpTo(JumpToFile{
                                     file_name:msg.file_name.clone(), 
-                                    start:Position{
-                                        line_index: msg.start.line_index,
-                                        byte_index: msg.start.byte_index,
-                                    },
-                                }));
+                                    line: msg.start.line_index as u32,
+                                    column: msg.start.byte_index as u32
+                                })); 
                             }
                             _ => ()
                         }
