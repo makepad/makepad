@@ -520,7 +520,7 @@ macro_rules! ref_is_null {
         ) -> ControlFlowBits {
             // Read operands
             let (x, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = x.is_none() as u32;
 
@@ -628,13 +628,13 @@ macro_rules! select {
             let (cond, ip): (u32, _) = read_stack(ip, sp);
             let (x1, ip): ($T, _) = read_stack(ip, sp);
             let (x0, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
-    
+
             // Write result
             let (ix, sx, dx) = write_reg(ix, sx, dx, y);
-    
+
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
@@ -678,7 +678,7 @@ macro_rules! select {
             let (cond, ip): (u32, _) = read_stack(ip, sp);
             let x1: $T = read_reg(ix, sx, dx);
             let (x0, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -728,7 +728,7 @@ macro_rules! select {
             let (cond, ip): (u32, _) = read_stack(ip, sp);
             let (x1, ip): ($T, _) = read_imm(ip);
             let x0: $T = read_reg(ix, sx, dx);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -753,7 +753,7 @@ macro_rules! select {
             let (cond, ip): (u32, _) = read_stack(ip, sp);
             let (x1, ip): ($T, _) = read_imm(ip);
             let (x0, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -803,7 +803,7 @@ macro_rules! select {
             let cond: u32 = read_reg(ix, sx, dx);
             let (x1, ip): ($T, _) = read_stack(ip, sp);
             let (x0, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -828,7 +828,7 @@ macro_rules! select {
             let cond: u32 = read_reg(ix, sx, dx);
             let (x1, ip): ($T, _) = read_imm(ip);
             let (x0, ip): ($T, _) = read_stack(ip, sp);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -853,7 +853,7 @@ macro_rules! select {
             let cond: u32 = read_reg(ix, sx, dx);
             let (x1, ip): ($T, _) = read_imm(ip);
             let (x0, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -966,7 +966,7 @@ macro_rules! select_float {
             let cond: u32 = read_reg(ix, sx, dx);
             let x1 = read_reg(ix, sx, dx);
             let (x0, ip): ($T, _) = read_imm(ip);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -991,7 +991,7 @@ macro_rules! select_float {
             let cond: u32 = read_reg(ix, sx, dx);
             let (x1, ip): ($T, _) = read_imm(ip);
             let x0 = read_reg(ix, sx, dx);
-            
+
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -1332,7 +1332,12 @@ macro_rules! table_get {
     };
 }
 
-table_get!(table_get_func_ref_s, table_get_func_ref_r, table_get_func_ref_i, UnguardedFuncRef);
+table_get!(
+    table_get_func_ref_s,
+    table_get_func_ref_r,
+    table_get_func_ref_i,
+    UnguardedFuncRef
+);
 table_get!(
     table_get_extern_ref_s,
     table_get_extern_ref_r,
@@ -3012,11 +3017,7 @@ bin_op_noncommutative!(
 
 un_op!(i32_clz_s, i32_clz_r, <u32 as IntOps>::clz);
 un_op!(i32_ctz_s, i32_ctz_r, <u32 as IntOps>::ctz);
-un_op!(
-    i32_popcnt_s,
-    i32_popcnt_r,
-    <u32 as IntOps>::popcnt
-);
+un_op!(i32_popcnt_s, i32_popcnt_r, <u32 as IntOps>::popcnt);
 bin_op!(
     i32_add_ss,
     i32_add_rs,
@@ -3155,11 +3156,7 @@ bin_op_noncommutative!(
 
 un_op!(i64_clz_s, i64_clz_r, <u64 as IntOps>::clz);
 un_op!(i64_ctz_s, i64_ctz_r, <u64 as IntOps>::ctz);
-un_op!(
-    i64_popcnt_s,
-    i64_popcnt_r,
-    <u64 as IntOps>::popcnt
-);
+un_op!(i64_popcnt_s, i64_popcnt_r, <u64 as IntOps>::popcnt);
 bin_op!(
     i64_add_ss,
     i64_add_rs,
@@ -3299,21 +3296,9 @@ bin_op_noncommutative!(
 un_op!(f32_abs_s, f32_abs_r, <f32 as FloatOps>::abs);
 un_op!(f32_neg_s, f32_neg_r, <f32 as FloatOps>::neg);
 un_op!(f32_ceil_s, f32_ceil_r, <f32 as FloatOps>::ceil);
-un_op!(
-    f32_floor_s,
-    f32_floor_r,
-    <f32 as FloatOps>::floor
-);
-un_op!(
-    f32_trunc_s,
-    f32_trunc_r,
-    <f32 as FloatOps>::trunc
-);
-un_op!(
-    f32_nearest_s,
-    f32_nearest_r,
-    <f32 as FloatOps>::nearest
-);
+un_op!(f32_floor_s, f32_floor_r, <f32 as FloatOps>::floor);
+un_op!(f32_trunc_s, f32_trunc_r, <f32 as FloatOps>::trunc);
+un_op!(f32_nearest_s, f32_nearest_r, <f32 as FloatOps>::nearest);
 un_op!(f32_sqrt_s, f32_sqrt_r, <f32 as FloatOps>::sqrt);
 bin_op!(
     f32_add_ss,
@@ -3377,21 +3362,9 @@ bin_op_noncommutative!(
 un_op!(f64_abs_s, f64_abs_r, <f64 as FloatOps>::abs);
 un_op!(f64_neg_s, f64_neg_r, <f64 as FloatOps>::neg);
 un_op!(f64_ceil_s, f64_ceil_r, <f64 as FloatOps>::ceil);
-un_op!(
-    f64_floor_s,
-    f64_floor_r,
-    <f64 as FloatOps>::floor
-);
-un_op!(
-    f64_trunc_s,
-    f64_trunc_r,
-    <f64 as FloatOps>::trunc
-);
-un_op!(
-    f64_nearest_s,
-    f64_nearest_r,
-    <f64 as FloatOps>::nearest
-);
+un_op!(f64_floor_s, f64_floor_r, <f64 as FloatOps>::floor);
+un_op!(f64_trunc_s, f64_trunc_r, <f64 as FloatOps>::trunc);
+un_op!(f64_nearest_s, f64_nearest_r, <f64 as FloatOps>::nearest);
 un_op!(f64_sqrt_s, f64_sqrt_r, <f64 as FloatOps>::sqrt);
 bin_op!(
     f64_add_ss,
@@ -3452,11 +3425,7 @@ bin_op_noncommutative!(
     <f64 as FloatOps>::copysign
 );
 
-un_op!(
-    i32_wrap_i64_s,
-    i32_wrap_i64_r,
-    <u32 as Wrap<u64>>::wrap
-);
+un_op!(i32_wrap_i64_s, i32_wrap_i64_r, <u32 as Wrap<u64>>::wrap);
 un_op!(
     i32_trunc_f32_s_s,
     i32_trunc_f32_s_r,
