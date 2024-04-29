@@ -193,9 +193,10 @@ impl<'a> Compile<'a> {
 
     /// Marks the current block as unreachable.
     fn set_unreachable(&mut self) {
-        while self.opds.len() > self.block(0).first_opd_idx {
+        while self.opds.len() > self.block(0).height {
             self.pop_opd();
         }
+        self.block_mut(0).is_unreachable = true;
     }
 
     fn push_hole(&mut self, block_idx: usize, hole_idx: usize) {
@@ -221,7 +222,8 @@ impl<'a> Compile<'a> {
         self.blocks.push(Block {
             kind,
             type_,
-            first_opd_idx: self.opds.len(),
+            is_unreachable: false,
+            height: self.opds.len(),
             first_code_idx: self.code.len(),
             first_hole_idx: None,
             else_hole_idx: None,
@@ -233,8 +235,7 @@ impl<'a> Compile<'a> {
 
     /// Pops a block from the stack.
     fn pop_block(&mut self) -> Block {
-        for _ in 0..self.block(0).type_.results().len() {
-            debug_assert!(!self.is_opd_in_reg(0));
+        while self.opds.len() > self.block(0).height {
             self.pop_opd();
         }
         self.blocks.pop().unwrap()
@@ -250,7 +251,7 @@ impl<'a> Compile<'a> {
 
     /// Returns the type of the operand at the given depth.
     fn opd_type(&self, opd_depth: usize) -> OpdType {
-        if opd_depth >= self.opds.len() - self.block(0).first_opd_idx {
+        if opd_depth >= self.opds.len() - self.block(0).height {
             OpdType::Unknown
         } else {
             match self.opds[self.opds.len() - 1 - opd_depth] {
@@ -269,7 +270,7 @@ impl<'a> Compile<'a> {
     }
 
     fn opd_local_idx(&self, opd_depth: usize) -> Option<usize> {
-        if opd_depth >= self.opds.len() - self.block(0).first_opd_idx {
+        if opd_depth >= self.opds.len() - self.block(0).height {
             None
         } else {
             match self.opds[self.opds.len() - 1 - opd_depth] {
@@ -281,7 +282,7 @@ impl<'a> Compile<'a> {
 
     /// Returns the stack index of the operand at the given depth.
     fn opd_stack_idx(&self, opd_depth: usize) -> Option<isize> {
-        if opd_depth >= self.opds.len() - self.block(0).first_opd_idx {
+        if opd_depth >= self.opds.len() - self.block(0).height {
             None
         } else {
             let opd_idx = self.opds.len() - 1 - opd_depth;
@@ -329,7 +330,7 @@ impl<'a> Compile<'a> {
         if self.is_opd_in_reg(0) {
             self.dealloc_reg(self.opd_reg_idx(0).unwrap());
         }
-        if self.opds.len() == self.block(0).first_opd_idx {
+        if self.opds.len() == self.block(0).height {
             OpdType::Unknown
         } else {
             match self.opds.pop().unwrap() {
@@ -444,7 +445,7 @@ impl<'a> Compile<'a> {
             debug_assert!(!self.is_opd_in_reg(0));
             self.pop_opd();
             self.emit_stack_offset(
-                self.temp_stack_idx(self.block(label_idx).first_opd_idx + label_val_idx),
+                self.temp_stack_idx(self.block(label_idx).height + label_val_idx),
             );
         }
     }
@@ -511,10 +512,12 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_block(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
-        self.save_locals_up_to_depth(type_.params().len());
-        self.save_all_regs();
-        for _ in 0..type_.params().len() {
-            self.pop_opd();
+        if !self.block(0).is_unreachable {
+            self.save_locals_up_to_depth(type_.params().len());
+            self.save_all_regs();
+            for _ in 0..type_.params().len() {
+                self.pop_opd();
+            }
         }
         self.push_block(BlockKind::Block, type_);
         Ok(())
@@ -522,10 +525,12 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_loop(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
-        self.save_locals_up_to_depth(type_.params().len());
-        self.save_all_regs();
-        for _ in 0..type_.params().len() {
-            self.pop_opd();
+        if !self.block(0).is_unreachable {
+            self.save_locals_up_to_depth(type_.params().len());
+            self.save_all_regs();
+            for _ in 0..type_.params().len() {
+                self.pop_opd();
+            }
         }
         self.push_block(BlockKind::Loop, type_);
         Ok(())
@@ -533,27 +538,35 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_if(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
-        self.save_locals_up_to_depth(type_.params().len());
-        self.save_all_regs_except_top();
-        self.emit(br_if_z(self.opd_kind(0)));
-        self.pop_opd_and_emit_stack_offset();
-        let else_hole_idx = self.emit_hole();
-        for _ in 0..type_.params().len() {
-            self.pop_opd();
-        }
+        let else_hole_idx = if !self.block(0).is_unreachable {
+            self.save_locals_up_to_depth(type_.params().len());
+            self.save_all_regs_except_top();
+            self.emit(br_if_z(self.opd_kind(0)));
+            self.pop_opd_and_emit_stack_offset();
+            let else_hole_idx = self.emit_hole();
+            for _ in 0..type_.params().len() {
+                self.pop_opd();
+            }
+            Some(else_hole_idx)
+        } else {
+            None
+        };
         self.push_block(BlockKind::Block, type_);
-        self.block_mut(0).else_hole_idx = Some(else_hole_idx);
+        self.block_mut(0).else_hole_idx = else_hole_idx;
         Ok(())
     }
 
     fn visit_else(&mut self) -> Result<(), Self::Error> {
-        self.save_locals_up_to_depth(self.block(0).type_.results().len());
-        self.save_all_regs();
-        self.emit(exec::br as ThreadedInstr);
-        let hole_idx = self.emit_hole();
-        self.push_hole(0, hole_idx);
-        let else_hole_idx = self.block_mut(0).else_hole_idx.take().unwrap();
-        self.patch_hole(else_hole_idx);
+        if !self.block(0).is_unreachable {
+            self.save_locals_up_to_depth(self.block(0).type_.results().len());
+            self.save_all_regs();
+            self.emit(exec::br as ThreadedInstr);
+            let hole_idx = self.emit_hole();
+            self.push_hole(0, hole_idx);
+        }
+        if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
+            self.patch_hole(else_hole_idx);
+        }
         let block = self.pop_block();
         self.push_block(BlockKind::Block, block.type_);
         self.block_mut(0).first_hole_idx = block.first_hole_idx;
@@ -561,8 +574,10 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_end(&mut self) -> Result<(), Self::Error> {
-        self.save_locals_up_to_depth(self.block(0).type_.results().len());
-        self.save_all_regs();
+        if !self.block(0).is_unreachable {
+            self.save_locals_up_to_depth(self.block(0).type_.results().len());
+            self.save_all_regs();
+        }
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
         }
@@ -577,6 +592,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_br(&mut self, label_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let label_idx = label_idx as usize;
         self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
         self.save_all_regs();
@@ -588,6 +606,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_br_if(&mut self, label_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let label_idx = label_idx as usize;
         self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
         self.save_all_regs_except_top();
@@ -615,6 +636,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         label_idxs: &[u32],
         default_label_idx: u32,
     ) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let default_label_idx = default_label_idx as usize;
         self.save_locals_up_to_depth(self.block(default_label_idx).label_types().len());
         self.save_all_regs_except_top();
@@ -660,6 +684,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_return(&mut self) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         for (result_idx, result_type) in self
             .type_
             .clone()
@@ -683,6 +710,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_call(&mut self, func_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let func = self.instance.func(func_idx).unwrap();
         let type_ = func.type_(&self.store).clone();
         self.save_locals_up_to_depth(type_.params().len());
@@ -714,6 +744,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_call_indirect(&mut self, table_idx: u32, type_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let table = self.instance.table(table_idx).unwrap();
         let interned_type = self.instance.type_(type_idx).unwrap();
         let type_ = self.store.resolve_type(interned_type).clone();
@@ -744,6 +777,9 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Reference instructions
     fn visit_ref_null(&mut self, type_: RefType) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.emit(ref_null(type_));
         match type_ {
             RefType::FuncRef => self.emit(FuncRef::null().to_unguarded(self.store.id())),
@@ -754,6 +790,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_ref_is_null(&mut self) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         if let OpdType::ValType(type_) = self.opd_type(0) {
             self.emit(ref_is_null(type_.to_ref().unwrap(), self.opd_kind(0)));
             self.pop_opd_and_emit_stack_offset();
@@ -763,6 +802,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_ref_func(&mut self, func_idx: u32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.emit(exec::copy_imm_to_stack_func_ref as ThreadedInstr);
         self.emit(
             self.instance
@@ -776,11 +818,17 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Parametric instructions
     fn visit_drop(&mut self) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.pop_opd();
         Ok(())
     }
 
     fn visit_select(&mut self, type_: Option<ValType>) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         if let OpdType::ValType(type_) =
             type_.map_or_else(|| self.opd_type(1), |type_| OpdType::ValType(type_))
         {
@@ -811,12 +859,18 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Variable instructions
     fn visit_local_get(&mut self, local_idx: u32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let local_idx = local_idx as usize;
         self.push_local_opd(local_idx);
         Ok(())
     }
 
     fn visit_local_set(&mut self, local_idx: u32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
         self.save_local(local_idx);
@@ -831,6 +885,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_local_tee(&mut self, local_idx: u32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
         self.save_local(local_idx);
@@ -847,6 +904,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_global_get(&mut self, global_idx: u32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let global = self.instance.global(global_idx).unwrap();
         let val_type = global.type_(&self.store).val;
         self.emit(global_get(val_type));
@@ -866,6 +926,9 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Table instructions
     fn visit_table_get(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         self.emit(table_get(elem_type, self.opd_kind(0)));
@@ -876,6 +939,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_table_set(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         self.emit(table_set(elem_type, self.opd_kind(1), self.opd_kind(0)));
@@ -886,6 +952,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_table_size(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         self.emit(table_size(elem_type));
@@ -895,6 +964,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_table_grow(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         self.save_all_regs();
@@ -907,6 +979,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_table_fill(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         self.save_all_regs();
@@ -923,6 +998,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         dst_table_idx: u32,
         src_table_idx: u32,
     ) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_table = self.instance.table(src_table_idx).unwrap();
         let elem_type = dst_table.type_(&self.store).elem;
@@ -941,6 +1019,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         dst_table_idx: u32,
         src_elem_idx: u32,
     ) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_elem = self.instance.elem(src_elem_idx).unwrap();
         let elem_type = dst_table.type_(&self.store).elem;
@@ -955,6 +1036,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_elem_drop(&mut self, elem_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let elem = self.instance.elem(elem_idx).unwrap();
         let elem_type = elem.type_(&self.store);
         self.emit(elem_drop(elem_type));
@@ -964,18 +1048,27 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Memory instructions
     fn visit_load(&mut self, arg: MemArg, info: LoadInfo) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.visit_un_op(info.op)?;
         self.emit(arg.offset);
         Ok(())
     }
 
     fn visit_store(&mut self, arg: MemArg, info: StoreInfo) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.visit_bin_op(info.op)?;
         self.emit(arg.offset);
         Ok(())
     }
 
     fn visit_memory_size(&mut self) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let mem = self.instance.mem(0).unwrap();
         self.emit(exec::memory_size as ThreadedInstr);
         self.emit(mem.to_unguarded(self.store.id()));
@@ -984,6 +1077,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_memory_grow(&mut self) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let mem = self.instance.mem(0).unwrap();
         self.save_all_regs();
         self.emit(exec::memory_grow as ThreadedInstr);
@@ -994,6 +1090,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_memory_fill(&mut self) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let mem = self.instance.mem(0).unwrap();
         self.save_all_regs();
         self.emit(exec::memory_fill as ThreadedInstr);
@@ -1005,6 +1104,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_memory_copy(&mut self) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let mem = self.instance.mem(0).unwrap();
         self.save_all_regs();
         self.emit(exec::memory_copy as ThreadedInstr);
@@ -1016,6 +1118,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_memory_init(&mut self, data_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let dst_mem = self.instance.mem(0).unwrap();
         let src_data = self.instance.data(data_idx).unwrap();
         self.save_all_regs();
@@ -1029,6 +1134,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_data_drop(&mut self, data_idx: u32) -> Result<(), Self::Error> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let data = self.instance.data(data_idx).unwrap();
         self.emit(exec::data_drop as ThreadedInstr);
         self.emit(data.to_unguarded(self.store.id()));
@@ -1037,6 +1145,9 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Numeric instructions
     fn visit_i32_const(&mut self, val: i32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.emit(exec::copy_imm_to_stack_i32 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::I32);
@@ -1044,6 +1155,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_i64_const(&mut self, val: i64) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.emit(exec::copy_imm_to_stack_i64 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::I64);
@@ -1051,6 +1165,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_f32_const(&mut self, val: f32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.emit(exec::copy_imm_to_stack_f32 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::F32);
@@ -1058,6 +1175,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_f64_const(&mut self, val: f64) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         self.emit(exec::copy_imm_to_stack_f64 as ThreadedInstr);
         self.emit(val);
         self.push_opd_and_emit_stack_offset(ValType::F64);
@@ -1065,6 +1185,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_un_op(&mut self, info: UnOpInfo) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         // If this operation has an output, and the output register is used, then we need to save
         // the output register, unless it is also used as an input register. Otherwise, the
         // operation will overwrite the output register while it's already used.
@@ -1087,6 +1210,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_bin_op(&mut self, info: BinOpInfo) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         // If this operation has an output, and the output register is used, then we need to save
         // the output register, unless it is also used as an input register. Otherwise, the
         // operation will overwrite the output register while it's already used.
@@ -1129,7 +1255,8 @@ struct Local {
 struct Block {
     kind: BlockKind,
     type_: FuncType,
-    first_opd_idx: usize,
+    is_unreachable: bool,
+    height: usize,
     first_code_idx: usize,
     else_hole_idx: Option<usize>,
     first_hole_idx: Option<usize>,
