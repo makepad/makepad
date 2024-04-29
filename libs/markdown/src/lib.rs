@@ -345,7 +345,6 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                     match kind{
                         Kind::Head => {
                             nodes.push(MarkdownNode::EndHead);
-                            state = State::Root{spaces:0};
                         }
                         Kind::Quote(blocks) => {
                             for _ in 0..*blocks{
