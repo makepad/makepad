@@ -9,6 +9,10 @@ import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.pm.ApplicationInfo;
+
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.io.OutputStream;
@@ -378,6 +382,20 @@ MidiManager.OnDeviceOpenedListener{
                 }
             }
         });
+    }
+
+    public void copyToClipboard(String content) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        // User-facing description of the clipboard content
+        String clipLabel = getApplicationName() + " clip";
+        ClipData clip = ClipData.newPlainText(clipLabel, content);
+        clipboard.setPrimaryClip(clip);
+    }
+
+    private String getApplicationName() {
+        ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
+        CharSequence appName = applicationInfo.loadLabel(getPackageManager());
+        return appName.toString();
     }
 
     public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {

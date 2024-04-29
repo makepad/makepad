@@ -745,6 +745,15 @@ impl MacosApp {
         };
     }*/
 
+    pub fn copy_to_clipboard(&mut self, content: &str) {
+        unsafe {
+            let pasteboard: ObjcId = self.pasteboard;
+            let nsstring = str_to_nsstring(content);
+            let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
+            let () = msg_send![pasteboard, declareTypes: array owner: nil];
+            let () = msg_send![pasteboard, setString: nsstring forType: NSStringPboardType];
+        }
+    }
 
     pub fn open_save_file_dialog(&mut self, _settings: FileDialog)
     {

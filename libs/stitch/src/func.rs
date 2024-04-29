@@ -293,10 +293,10 @@ impl Decode for UncompiledCode {
 pub(crate) struct CompiledCode {
     pub(crate) max_stack_slot_count: usize,
     pub(crate) local_count: usize,
-    pub(crate) code: AliasableBox<[InstrSlot]>,
+    pub(crate) slots: AliasableBox<[CodeSlot]>,
 }
 
-pub(crate) type InstrSlot = usize;
+pub(crate) type CodeSlot = usize;
 
 #[derive(Debug)]
 pub struct HostFuncEntity {
