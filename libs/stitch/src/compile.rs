@@ -245,19 +245,15 @@ impl<'a> Compile<'a> {
 
     /// Returns `true` if the operand at the given depth is stored in a register.
     fn is_opd_in_reg(&self, opt_depth: usize) -> bool {
-        self.opd_reg_idx(opt_depth)
-            .map_or(false, |reg_idx| self.is_reg_used_by_opd(reg_idx, opt_depth))
+       let reg_idx = self.opd_reg_idx(opt_depth);
+       self.is_reg_used_by_opd(reg_idx, opt_depth)
     }
 
     /// Returns the type of the operand at the given depth.
-    fn opd_type(&self, opd_depth: usize) -> OpdType {
-        if opd_depth >= self.opds.len() - self.block(0).height {
-            OpdType::Unknown
-        } else {
-            match self.opds[self.opds.len() - 1 - opd_depth] {
-                Opd::Local { local_idx, .. } => self.locals[local_idx].type_.into(),
-                Opd::Temp { type_ } => type_,
-            }
+    fn opd_type(&self, opd_depth: usize) -> ValType {
+        match self.opds[self.opds.len() - 1 - opd_depth] {
+            Opd::Local { local_idx, .. } => self.locals[local_idx].type_.into(),
+            Opd::Temp { type_ } => type_,
         }
     }
 
@@ -270,31 +266,23 @@ impl<'a> Compile<'a> {
     }
 
     fn opd_local_idx(&self, opd_depth: usize) -> Option<usize> {
-        if opd_depth >= self.opds.len() - self.block(0).height {
-            None
-        } else {
-            match self.opds[self.opds.len() - 1 - opd_depth] {
-                Opd::Local { local_idx, .. } => Some(local_idx),
-                Opd::Temp { .. } => None,
-            }
+        match self.opds[self.opds.len() - 1 - opd_depth] {
+            Opd::Local { local_idx, .. } => Some(local_idx),
+            Opd::Temp { .. } => None,
         }
     }
 
     /// Returns the stack index of the operand at the given depth.
-    fn opd_stack_idx(&self, opd_depth: usize) -> Option<isize> {
-        if opd_depth >= self.opds.len() - self.block(0).height {
-            None
-        } else {
-            let opd_idx = self.opds.len() - 1 - opd_depth;
-            match self.opds[opd_idx] {
-                Opd::Local { local_idx, .. } => self.local_stack_idx(local_idx),
-                Opd::Temp { .. } => self.temp_stack_idx(opd_idx),
-            }
+    fn opd_stack_idx(&self, opd_depth: usize) -> isize {
+        let opd_idx = self.opds.len() - 1 - opd_depth;
+        match self.opds[opd_idx] {
+            Opd::Local { local_idx, .. } => self.local_stack_idx(local_idx),
+            Opd::Temp { .. } => self.temp_stack_idx(opd_idx),
         }
     }
 
     /// Returns the register index of the operand at the given depth.
-    fn opd_reg_idx(&self, opd_idx: usize) -> Option<usize> {
+    fn opd_reg_idx(&self, opd_idx: usize) -> usize {
         self.opd_type(opd_idx).reg_idx()
     }
 
@@ -307,7 +295,7 @@ impl<'a> Compile<'a> {
         self.locals[local_idx].first_local_opd_idx = Some(self.opds.len() - 1);
     }
 
-    fn push_opd(&mut self, type_: impl Into<OpdType>) {
+    fn push_opd(&mut self, type_: impl Into<ValType>) {
         self.opds.push(Opd::Temp {
             type_: type_.into(),
         });
@@ -315,34 +303,30 @@ impl<'a> Compile<'a> {
         self.max_stack_height = self.max_stack_height.max(stack_slot_count);
     }
 
-    fn push_opd_and_emit_stack_offset(&mut self, type_: impl Into<OpdType>) {
+    fn push_opd_and_emit_stack_offset(&mut self, type_: impl Into<ValType>) {
         self.push_opd(type_);
         self.emit_stack_offset(self.opd_stack_idx(0));
     }
 
-    fn push_opd_and_alloc_reg(&mut self, type_: impl Into<OpdType>) {
+    fn push_opd_and_alloc_reg(&mut self, type_: impl Into<ValType>) {
         self.push_opd(type_);
         self.alloc_reg();
     }
 
     /// Pops an operand from the stack.
-    fn pop_opd(&mut self) -> OpdType {
+    fn pop_opd(&mut self) -> ValType {
         if self.is_opd_in_reg(0) {
-            self.dealloc_reg(self.opd_reg_idx(0).unwrap());
+            self.dealloc_reg(self.opd_reg_idx(0));
         }
-        if self.opds.len() == self.block(0).height {
-            OpdType::Unknown
-        } else {
-            match self.opds.pop().unwrap() {
-                Opd::Local {
-                    local_idx,
-                    next_local_opd_idx,
-                } => {
-                    self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
-                    self.locals[local_idx].type_.into()
-                }
-                Opd::Temp { type_ } => type_,
+        match self.opds.pop().unwrap() {
+            Opd::Local {
+                local_idx,
+                next_local_opd_idx,
+            } => {
+                self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
+                self.locals[local_idx].type_.into()
             }
+            Opd::Temp { type_ } => type_,
         }
     }
 
@@ -356,21 +340,21 @@ impl<'a> Compile<'a> {
     /// Stack
 
     /// Returns the stack index of the parameter/result with the given index.
-    fn param_result_stack_idx(&self, param_result_idx: usize) -> Option<isize> {
-        Some(self.first_param_result_stack_idx + param_result_idx as isize)
+    fn param_result_stack_idx(&self, param_result_idx: usize) -> isize {
+        self.first_param_result_stack_idx + param_result_idx as isize
     }
 
     /// Returns the stack index of the local with the given index.
-    fn local_stack_idx(&self, local_idx: usize) -> Option<isize> {
+    fn local_stack_idx(&self, local_idx: usize) -> isize {
         if local_idx < self.type_.params().len() {
             self.param_result_stack_idx(local_idx)
         } else {
-            Some((local_idx - self.type_.params().len()) as isize)
+            (local_idx - self.type_.params().len()) as isize
         }
     }
 
-    fn temp_stack_idx(&self, temp_idx: usize) -> Option<isize> {
-        Some((self.first_temp_stack_idx + temp_idx) as isize)
+    fn temp_stack_idx(&self, temp_idx: usize) -> isize {
+        (self.first_temp_stack_idx + temp_idx) as isize
     }
 
     /// Registers
@@ -388,10 +372,9 @@ impl<'a> Compile<'a> {
 
     /// Allocates a register for the top operand.
     fn alloc_reg(&mut self) {
-        if let Some(reg_idx) = self.opd_reg_idx(0) {
-            debug_assert!(!self.is_reg_used(reg_idx));
-            self.regs[reg_idx] = Some(self.opds.len() - 1);
-        }
+        let reg_idx = self.opd_reg_idx(0);
+        debug_assert!(!self.is_reg_used(reg_idx));
+        self.regs[reg_idx] = Some(self.opds.len() - 1);
     }
 
     /// Deallocates the register with the given index.
@@ -403,7 +386,7 @@ impl<'a> Compile<'a> {
     fn save_reg(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
         let opd_type = if let Opd::Temp { type_ } = self.opds[opd_idx] {
-            type_.to_val().unwrap()
+            type_
         } else {
             unreachable!()
         };
@@ -442,7 +425,6 @@ impl<'a> Compile<'a> {
         {
             self.emit(copy_stack(label_type));
             self.emit_stack_offset(self.opd_stack_idx(0));
-            debug_assert!(!self.is_opd_in_reg(0));
             self.pop_opd();
             self.emit_stack_offset(
                 self.temp_stack_idx(self.block(label_idx).height + label_val_idx),
@@ -461,10 +443,8 @@ impl<'a> Compile<'a> {
         unsafe { *(self.code.last_mut().unwrap() as *mut _ as *mut T) = val };
     }
 
-    fn emit_stack_offset(&mut self, stack_idx: Option<isize>) {
-        self.emit(stack_idx.map_or(isize::MIN, |stack_idx| {
-            stack_idx * mem::size_of::<StackSlot>() as isize
-        }));
+    fn emit_stack_offset(&mut self, stack_idx: isize) {
+        self.emit(stack_idx * mem::size_of::<StackSlot>() as isize);
     }
 
     fn emit_label(&mut self, label_idx: usize) {
@@ -670,7 +650,7 @@ impl<'a> InstrVisitor for Compile<'a> {
                 self.resolve_label_vals(label_idx);
                 self.emit(exec::br as ThreadedInstr);
                 self.emit_label(label_idx);
-                for label_type in self.block(0).label_types().iter().copied() {
+                for label_type in self.block(label_idx).label_types().iter().copied() {
                     self.push_opd(label_type);
                 }
             }
@@ -729,7 +709,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let first_callee_stack_idx = self.first_temp_stack_idx + self.opds.len();
         let last_callee_stack_idx = first_callee_stack_idx + type_.callee_stack_slot_count();
         self.max_stack_height = self.max_stack_height.max(last_callee_stack_idx);
-        self.emit_stack_offset(Some(last_callee_stack_idx as isize));
+        self.emit_stack_offset(last_callee_stack_idx as isize);
         if let FuncEntity::Host(_) = func.0.as_ref(&self.store) {
             self.emit(
                 self.instance
@@ -763,7 +743,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let first_callee_stack_idx = self.first_temp_stack_idx + self.opds.len();
         let last_callee_stack_idx = first_callee_stack_idx + type_.callee_stack_slot_count();
         self.max_stack_height = self.max_stack_height.max(last_callee_stack_idx as usize);
-        self.emit_stack_offset(Some(last_callee_stack_idx as isize));
+        self.emit_stack_offset(last_callee_stack_idx as isize);
         self.emit(
             self.instance
                 .mem(0)
@@ -793,11 +773,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        if let OpdType::ValType(type_) = self.opd_type(0) {
-            self.emit(ref_is_null(type_.to_ref().unwrap(), self.opd_kind(0)));
-            self.pop_opd_and_emit_stack_offset();
-            self.push_opd_and_alloc_reg(ValType::I32);
-        }
+        self.emit(ref_is_null(self.opd_type(0).to_ref().unwrap(), self.opd_kind(0)));
+        self.pop_opd_and_emit_stack_offset();
+        self.push_opd_and_alloc_reg(ValType::I32);
         Ok(())
     }
 
@@ -829,31 +807,28 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        if let OpdType::ValType(type_) =
-            type_.map_or_else(|| self.opd_type(1), |type_| OpdType::ValType(type_))
+        let type_ = type_.unwrap_or_else(|| self.opd_type(1));
+        // If this operation has an output, and the output register is used, then we need to save
+        // the output register, unless it is also used as an input register. Otherwise, the
+        // operation will overwrite the output register while it's already used.
+        let output_reg_idx = type_.reg_idx();
+        if self.is_reg_used(output_reg_idx)
+            && !self.is_reg_used_by_opd(output_reg_idx, 2)
+            && !self.is_reg_used_by_opd(output_reg_idx, 1)
+            && !self.is_reg_used_by_opd(output_reg_idx, 0)
         {
-            // If this operation has an output, and the output register is used, then we need to save
-            // the output register, unless it is also used as an input register. Otherwise, the
-            // operation will overwrite the output register while it's already used.
-            let output_reg_idx = type_.reg_idx();
-            if self.is_reg_used(output_reg_idx)
-                && !self.is_reg_used_by_opd(output_reg_idx, 2)
-                && !self.is_reg_used_by_opd(output_reg_idx, 1)
-                && !self.is_reg_used_by_opd(output_reg_idx, 0)
-            {
-                self.save_reg(output_reg_idx);
-            }
-            self.emit(select(
-                type_,
-                self.opd_kind(2),
-                self.opd_kind(1),
-                self.opd_kind(0),
-            ));
-            self.pop_opd_and_emit_stack_offset();
-            self.pop_opd_and_emit_stack_offset();
-            self.pop_opd_and_emit_stack_offset();
-            self.push_opd_and_alloc_reg(type_);
+            self.save_reg(output_reg_idx);
         }
+        self.emit(select(
+            type_,
+            self.opd_kind(2),
+            self.opd_kind(1),
+            self.opd_kind(0),
+        ));
+        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit_stack_offset();
+        self.push_opd_and_alloc_reg(type_);
         Ok(())
     }
 
@@ -916,6 +891,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_global_set(&mut self, global_idx: u32) -> Result<(), DecodeError> {
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
         let global = self.instance.global(global_idx).unwrap();
         let val_type = global.type_(&self.store).val;
         self.emit(global_set(val_type, self.opd_kind(0)));
@@ -1301,52 +1279,9 @@ enum Opd {
         next_local_opd_idx: Option<usize>,
     },
     Temp {
-        type_: OpdType,
+        type_: ValType,
     },
 }
-
-#[derive(Clone, Copy, Debug)]
-enum OpdType {
-    ValType(ValType),
-    Unknown,
-}
-
-impl OpdType {
-    fn reg_idx(self) -> Option<usize> {
-        match self {
-            OpdType::ValType(val) => Some(val.reg_idx()),
-            OpdType::Unknown => None,
-        }
-    }
-
-    fn to_val(self) -> Option<ValType> {
-        match self {
-            OpdType::ValType(type_) => Some(type_),
-            OpdType::Unknown => None,
-        }
-    }
-}
-
-impl From<RefType> for OpdType {
-    fn from(type_: RefType) -> Self {
-        OpdType::ValType(type_.into())
-    }
-}
-
-impl From<ValType> for OpdType {
-    fn from(type_: ValType) -> Self {
-        OpdType::ValType(type_)
-    }
-}
-
-impl From<Unknown> for OpdType {
-    fn from(_: Unknown) -> Self {
-        OpdType::Unknown
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Unknown;
 
 #[derive(Clone, Copy, Debug)]
 enum OpdKind {
