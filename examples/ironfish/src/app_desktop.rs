@@ -2062,13 +2062,13 @@ live_design! {
                         }
                         text: "Preset"
                     }
-
+                    
                     <Label> {
                         draw_text: {
                             text_style: <H2_TEXT_REGULAR> {font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        text: "Ironfish"
+                        text: "Ironfish "
                     }
                 }
                 <View> {
