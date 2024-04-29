@@ -1242,7 +1242,7 @@ elem_drop!(elem_drop_extern_ref, UnguardedExternRef);
 // Memory instructions
 
 macro_rules! load {
-    ($load_s:ident, $load_r:ident, $T:ty, $U:ty) => {
+    ($load_s:ident, $load_r:ident, $load_i:ident, $T:ty, $U:ty) => {
         pub(crate) unsafe extern "C" fn $load_s(
             ip: Ip,
             sp: Sp,
@@ -1302,11 +1302,52 @@ macro_rules! load {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $load_i(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$T>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let mut bytes = [0u8; mem::size_of::<$T>()];
+            ptr::copy_nonoverlapping(md.add(offset as usize), bytes.as_mut_ptr(), bytes.len());
+            let y = <$T>::from_le_bytes(bytes) as $U;
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 macro_rules! store {
-    ($store_ss:ident, $store_rs:ident, $store_sr:ident, $T:ty, $U:ty) => {
+    (
+        $store_ss:ident,
+        $store_rs:ident,
+        $store_is:ident,
+        $store_ir:ident,
+        $store_ii:ident,
+        $store_sr:ident,
+        $store_si:ident,
+        $store_ri:ident,
+        $T:ty,
+        $U:ty
+    ) => {
         pub(crate) unsafe extern "C" fn $store_ss(
             ip: Ip,
             sp: Sp,
@@ -1361,6 +1402,87 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
+        pub(crate) unsafe extern "C" fn $store_is(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_stack(ip, sp);
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $store_ir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let x: $T = read_reg(ix, sx, dx);
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $store_ii(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
         pub(crate) unsafe extern "C" fn $store_sr(
             ip: Ip,
             sp: Sp,
@@ -1387,12 +1509,81 @@ macro_rules! store {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $store_si(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+            let (dyn_offset, ip): (u32, _) = read_stack(ip, sp);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $store_ri(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+            let dyn_offset: u32 = read_reg(ix, sx, dx);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 macro_rules! store_float {
-    ($store_ss:ident, $store_rs:ident, $store_sr:ident, $store_rr:ident, $T:ty, $U:ty) => {
-        store!($store_ss, $store_rs, $store_sr, $T, $U);
+    (
+        $store_ss:ident,
+        $store_rs:ident,
+        $store_is:ident,
+        $store_ir:ident,
+        $store_ii:ident,
+        $store_sr:ident,
+        $store_si:ident,
+        $store_ri:ident,
+        $store_rr:ident,
+        $T:ty,
+        $U:ty
+    ) => {
+        store!(
+            $store_ss, $store_rs, $store_is, $store_ir, $store_ii, $store_sr, $store_si, $store_ri,
+            $T, $U
+        );
 
         pub(crate) unsafe extern "C" fn $store_rr(
             ip: Ip,
@@ -1423,26 +1614,53 @@ macro_rules! store_float {
     };
 }
 
-load!(i32_load_s, i32_load_r, i32, i32);
-load!(i64_load_s, i64_load_r, i64, i64);
-load!(f32_load_s, f32_load_r, f32, f32);
-load!(f64_load_s, f64_load_r, f64, f64);
-load!(i32_load8_s_s, i32_load8_s_r, i8, i32);
-load!(i32_load8_u_s, i32_load8_u_r, u8, u32);
-load!(i32_load16_s_s, i32_load16_s_r, i16, i32);
-load!(i32_load16_u_s, i32_load16_u_r, u16, u32);
-load!(i64_load8_s_s, i64_load8_s_r, i8, i64);
-load!(i64_load8_u_s, i64_load8_u_r, u8, u64);
-load!(i64_load16_s_s, i64_load16_s_r, i16, i64);
-load!(i64_load16_u_s, i64_load16_u_r, u16, u64);
-load!(i64_load32_s_s, i64_load32_s_r, i32, i64);
-load!(i64_load32_u_s, i64_load32_u_r, u32, u64);
-store!(i32_store_ss, i32_store_rs, i32_store_sr, i32, i32);
-store!(i64_store_ss, i64_store_rs, i64_store_sr, i64, i64);
+load!(i32_load_s, i32_load_r, i32_load_i, i32, i32);
+load!(i64_load_s, i64_load_r, i64_load_i, i64, i64);
+load!(f32_load_s, f32_load_r, f32_load_i, f32, f32);
+load!(f64_load_s, f64_load_r, f64_load_i, f64, f64);
+load!(i32_load8_s_s, i32_load8_s_r, i32_load8_s_i, i8, i32);
+load!(i32_load8_u_s, i32_load8_u_r, i32_load8_u_i, u8, u32);
+load!(i32_load16_s_s, i32_load16_s_r, i32_load16_s_i, i16, i32);
+load!(i32_load16_u_s, i32_load16_u_r, i32_load16_u_i, u16, u32);
+load!(i64_load8_s_s, i64_load8_s_r, i64_load8_s_i, i8, i64);
+load!(i64_load8_u_s, i64_load8_u_r, i64_load8_u_i, u8, u64);
+load!(i64_load16_s_s, i64_load16_s_r, i64_load16_s_i, i16, i64);
+load!(i64_load16_u_s, i64_load16_u_r, i64_load16_u_i, u16, u64);
+load!(i64_load32_s_s, i64_load32_s_r, i64_load32_s_i, i32, i64);
+load!(i64_load32_u_s, i64_load32_u_r, i64_load32_u_i, u32, u64);
+store!(
+    i32_store_ss,
+    i32_store_rs,
+    i32_store_is,
+    i32_store_ir,
+    i32_store_ii,
+    i32_store_sr,
+    i32_store_si,
+    i32_store_ri,
+    i32,
+    i32
+);
+store!(
+    i64_store_ss,
+    i64_store_rs,
+    i64_store_is,
+    i64_store_ir,
+    i64_store_ii,
+    i64_store_sr,
+    i64_store_si,
+    i64_store_ri,
+    i64,
+    i64
+);
 store_float!(
     f32_store_ss,
     f32_store_rs,
+    f32_store_is,
+    f32_store_ir,
+    f32_store_ii,
     f32_store_sr,
+    f32_store_si,
+    f32_store_ri,
     f32_store_rr,
     f32,
     f32
@@ -1450,16 +1668,76 @@ store_float!(
 store_float!(
     f64_store_ss,
     f64_store_rs,
+    f64_store_is,
+    f64_store_ir,
+    f64_store_ii,
     f64_store_sr,
+    f64_store_si,
+    f64_store_ri,
     f64_store_rr,
     f64,
     f64
 );
-store!(i32_store8_ss, i32_store8_rs, i32_store8_sr, u32, u8);
-store!(i32_store16_ss, i32_store16_rs, i32_store16_sr, u32, u16);
-store!(i64_store8_ss, i64_store8_rs, i64_store8_sr, u64, u8);
-store!(i64_store16_ss, i64_store16_rs, i64_store16_sr, u64, u16);
-store!(i64_store32_ss, i64_store32_rs, i64_store32_sr, u64, u32);
+store!(
+    i32_store8_ss,
+    i32_store8_rs,
+    i32_store8_is,
+    i32_store8_ir,
+    i32_store8_ii,
+    i32_store8_sr,
+    i32_store8_si,
+    i32_store8_ri,
+    u32,
+    u8
+);
+store!(
+    i32_store16_ss,
+    i32_store16_rs,
+    i32_store16_is,
+    i32_store16_ir,
+    i32_store16_ii,
+    i32_store16_sr,
+    i32_store16_si,
+    i32_store16_ri,
+    u32,
+    u16
+);
+store!(
+    i64_store8_ss,
+    i64_store8_rs,
+    i64_store8_is,
+    i64_store8_ir,
+    i64_store8_ii,
+    i64_store8_sr,
+    i64_store8_si,
+    i64_store8_ri,
+    u64,
+    u8
+);
+store!(
+    i64_store16_ss,
+    i64_store16_rs,
+    i64_store16_is,
+    i64_store16_ir,
+    i64_store16_ii,
+    i64_store16_sr,
+    i64_store16_si,
+    i64_store16_ri,
+    u64,
+    u16
+);
+store!(
+    i64_store32_ss,
+    i64_store32_rs,
+    i64_store32_is,
+    i64_store32_ir,
+    i64_store32_ii,
+    i64_store32_sr,
+    i64_store32_si,
+    i64_store32_ri,
+    u64,
+    u32
+);
 
 pub(crate) unsafe extern "C" fn memory_size(
     ip: Ip,
