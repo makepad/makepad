@@ -732,6 +732,9 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_selected) => {
                     //to_java.show_clipboard_actions(selected.as_str());
                 },
+                CxOsOp::CopyToClipboard(content) => {
+                    unsafe {android_jni::to_java_copy_to_clipboard(content);}
+                },
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
