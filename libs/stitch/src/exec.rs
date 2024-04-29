@@ -524,7 +524,29 @@ ref_is_null!(
 // Parametric instructions
 
 macro_rules! select {
-    ($select_sss:ident, $select_rss:ident, $select_srs:ident, $select_ssr:ident, $T:ty) => {
+    (
+        $select_sss:ident,
+        $select_rss:ident,
+        $select_iss:ident,
+        $select_srs:ident,
+        $select_irs:ident,
+        $select_sis:ident,
+        $select_ris:ident,
+        $select_iis:ident,
+        $select_ssr:ident,
+        $select_isr:ident,
+        $select_sir:ident,
+        $select_iir:ident,
+        $select_ssi:ident,
+        $select_rsi:ident,
+        $select_isi:ident,
+        $select_sri:ident,
+        $select_iri:ident,
+        $select_sii:ident,
+        $select_rii:ident,
+        $select_iii:ident,
+        $T:ty
+    ) => {
         pub(crate) unsafe extern "C" fn $select_sss(
             ip: Ip,
             sp: Sp,
@@ -575,6 +597,31 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
+        pub(crate) unsafe extern "C" fn $select_iss(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+    
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+    
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
         pub(crate) unsafe extern "C" fn $select_srs(
             ip: Ip,
             sp: Sp,
@@ -590,6 +637,106 @@ macro_rules! select {
             let x1: $T = read_reg(ix, sx, dx);
             let (x0, ip): ($T, _) = read_stack(ip, sp);
 
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_irs(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let x1: $T = read_reg(ix, sx, dx);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_sis(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_ris(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let x0: $T = read_reg(ix, sx, dx);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_iis(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
 
@@ -624,6 +771,281 @@ macro_rules! select {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $select_isr(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_sir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_iir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_ssi(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_rsi(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let x0: $T = read_reg(ix, sx, dx);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_isi(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_sri(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let x1: $T = read_reg(ix, sx, dx);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_iri(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let x1: $T = read_reg(ix, sx, dx);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_sii(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_rii(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let x0: $T = read_reg(ix, sx, dx);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_iii(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_imm(ip);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
@@ -631,13 +1053,53 @@ macro_rules! select_float {
     (
         $select_sss:ident,
         $select_rss:ident,
+        $select_iss:ident,
         $select_srs:ident,
+        $select_irs:ident,
+        $select_sis:ident,
+        $select_ris:ident,
+        $select_iis:ident,
         $select_ssr:ident,
+        $select_isr:ident,
+        $select_sir:ident,
+        $select_iir:ident,
+        $select_ssi:ident,
+        $select_rsi:ident,
+        $select_isi:ident,
+        $select_sri:ident,
+        $select_iri:ident,
+        $select_sii:ident,
+        $select_rii:ident,
+        $select_iii:ident,
         $select_rsr:ident,
         $select_srr:ident,
+        $select_irr:ident,
+        $select_rir:ident,
         $T:ty
     ) => {
-        select!($select_sss, $select_rss, $select_srs, $select_ssr, $T);
+        select!(
+            $select_sss,
+            $select_rss,
+            $select_iss,
+            $select_srs,
+            $select_irs,
+            $select_sis,
+            $select_ris,
+            $select_iis,
+            $select_ssr,
+            $select_isr,
+            $select_sir,
+            $select_iir,
+            $select_ssi,
+            $select_rsi,
+            $select_isi,
+            $select_sri,
+            $select_iri,
+            $select_sii,
+            $select_rii,
+            $select_iii,
+            $T
+        );
 
         pub(crate) unsafe extern "C" fn $select_rsr(
             ip: Ip,
@@ -688,53 +1150,203 @@ macro_rules! select_float {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $select_irr(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let x1 = read_reg(ix, sx, dx);
+            let (x0, ip): ($T, _) = read_imm(ip);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_rir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let x0 = read_reg(ix, sx, dx);
+            
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 select!(
     select_i32_sss,
     select_i32_rss,
+    select_i32_iss,
     select_i32_srs,
+    select_i32_irs,
+    select_i32_sis,
+    select_i32_ris,
+    select_i32_iis,
     select_i32_ssr,
+    select_i32_isr,
+    select_i32_sir,
+    select_i32_iir,
+    select_i32_ssi,
+    select_i32_rsi,
+    select_i32_isi,
+    select_i32_sri,
+    select_i32_iri,
+    select_i32_sii,
+    select_i32_rii,
+    select_i32_iii,
     i32
 );
 select!(
     select_i64_sss,
     select_i64_rss,
+    select_i64_iss,
     select_i64_srs,
+    select_i64_irs,
+    select_i64_sis,
+    select_i64_ris,
+    select_i64_iis,
     select_i64_ssr,
+    select_i64_isr,
+    select_i64_sir,
+    select_i64_iir,
+    select_i64_ssi,
+    select_i64_rsi,
+    select_i64_isi,
+    select_i64_sri,
+    select_i64_iri,
+    select_i64_sii,
+    select_i64_rii,
+    select_i64_iii,
     i64
 );
 select_float!(
     select_f32_sss,
     select_f32_rss,
+    select_f32_iss,
     select_f32_srs,
+    select_f32_irs,
+    select_f32_sis,
+    select_f32_ris,
+    select_f32_iis,
     select_f32_ssr,
+    select_f32_isr,
+    select_f32_sir,
+    select_f32_iir,
+    select_f32_ssi,
+    select_f32_rsi,
+    select_f32_isi,
+    select_f32_sri,
+    select_f32_iri,
+    select_f32_sii,
+    select_f32_rii,
+    select_f32_iii,
     select_f32_rsr,
     select_f32_srr,
+    select_f32_irr,
+    select_f32_rir,
     f32
 );
 select_float!(
     select_f64_sss,
     select_f64_rss,
+    select_f64_iss,
     select_f64_srs,
+    select_f64_irs,
+    select_f64_sis,
+    select_f64_ris,
+    select_f64_iis,
     select_f64_ssr,
+    select_f64_isr,
+    select_f64_sir,
+    select_f64_iir,
+    select_f64_ssi,
+    select_f64_rsi,
+    select_f64_isi,
+    select_f64_sri,
+    select_f64_iri,
+    select_f64_sii,
+    select_f64_rii,
+    select_f64_iii,
     select_f64_rsr,
     select_f64_srr,
+    select_f64_irr,
+    select_f64_rir,
     f64
 );
 select!(
     select_func_ref_sss,
     select_func_ref_rss,
+    select_func_ref_iss,
     select_func_ref_srs,
+    select_func_ref_irs,
+    select_func_ref_sis,
+    select_func_ref_ris,
+    select_func_ref_iis,
     select_func_ref_ssr,
+    select_func_ref_isr,
+    select_func_ref_sir,
+    select_func_ref_iir,
+    select_func_ref_ssi,
+    select_func_ref_rsi,
+    select_func_ref_isi,
+    select_func_ref_sri,
+    select_func_ref_iri,
+    select_func_ref_sii,
+    select_func_ref_rii,
+    select_func_ref_iii,
     UnguardedFuncRef
 );
 select!(
     select_extern_ref_sss,
     select_extern_ref_rss,
+    select_extern_ref_iss,
     select_extern_ref_srs,
+    select_extern_ref_irs,
+    select_extern_ref_sis,
+    select_extern_ref_ris,
+    select_extern_ref_iis,
     select_extern_ref_ssr,
+    select_extern_ref_isr,
+    select_extern_ref_sir,
+    select_extern_ref_iir,
+    select_extern_ref_ssi,
+    select_extern_ref_rsi,
+    select_extern_ref_isi,
+    select_extern_ref_sri,
+    select_extern_ref_iri,
+    select_extern_ref_sii,
+    select_extern_ref_rii,
+    select_extern_ref_iii,
     UnguardedExternRef
 );
 
