@@ -174,7 +174,7 @@ live_design!{
                     apply: {
                         draw_bg: {selected: 1.0}
                     }
-                }
+                }  
             }
         }
     }
@@ -191,17 +191,18 @@ live_design!{
                 icon = <LogIcon> {},
                 binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
                 location = <LinkLabel> {margin: 0, text: ""}
-                body = <P> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
+                body = <P> {width: Fill, margin: {left: 5, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
             }
             Bare = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <P> { draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
-                body = <P> { }
+                binary = <P> { margin: 0, draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
+                body = <P> {  margin: 0 }
             }
             Empty = <LogItem> {
                 cursor: Default
                 width: Fill
-                body = <P> { text: "" }
+                height: 25,
+                body = <P> {  margin: 0, text: "" }
             }
         }
     }
