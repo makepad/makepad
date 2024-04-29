@@ -732,7 +732,7 @@ impl WidgetMatchEvent for Designer{
             // lets get a file/line number out of it so we can open it in the code editor.
             if let Some(node) = self.data.node_map.get(&file_id){
                 match node{
-                    OutlineNode::File{file_id,..}=>{
+                    OutlineNode::File{file_id:_,..}=>{
                         //let live_registry = cx.live_registry.borrow();
                         //let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
                     }
