@@ -130,7 +130,8 @@ live_design!{
     
     ElementBox = <View> {
         width: Fill, height: Fit
-        flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS) spacing: (SPACING_CONTROLS)}
+        flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}
+        spacing: (SPACING_CONTROLS)
     }
     
     FishPanelContainer = <View> {
@@ -573,7 +574,9 @@ live_design!{
         
         <View> {
             width: Fill, height: Fit, margin: 0.0
-            align: {x: 0.0, y: 0.5 spacing: (SPACING_CONTROLS), padding: 0.0}
+            align: {x: 0.0, y: 0.5}
+            spacing: (SPACING_CONTROLS), 
+            padding: 0.0
 
             playpause = <PlayPause> {}
             
@@ -592,7 +595,6 @@ live_design!{
             <Image> {
                 source: dep("crate://self/resources/tinrs_mobile.png"),
                 width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0  }
-                padding: 0
             }
             
             share = <IconButton> {
@@ -613,7 +615,9 @@ live_design!{
         
         <View> {
             width: Fill, height: Fit, margin: 0.0
-            align: {x: 0.0, y: 0.5 spacing: 0.0, padding: 0.0}
+            align: {x: 0.0, y: 0.5}
+            spacing: 0.0,
+            padding: 0.0
             
             arp = <FishToggle> {
                 margin: 0.0
@@ -751,7 +755,8 @@ live_design!{
     
     ChordButtonA = <Button> {
         width: Fill, height: Fill, margin: 2.5
-        align: {x: 0.5, y: 0.5 padding: 0.0}
+        align: {x: 0.5, y: 0.5}
+        padding: 0.0
         
         draw_text: {
             text_style: <H2_TEXT_BOLD> {}
@@ -794,8 +799,8 @@ live_design!{
     
     ChordButtonB = <Button> {
         width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}
-        align: {x: 0.5, y: 0.5 padding: 0.0}
-        
+        align: {x: 0.5, y: 0.5 }
+        padding: 0.0
         draw_text: {
             text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
@@ -837,7 +842,8 @@ live_design!{
     
     ChordStrip = <RoundedView> {
         width: Fill, height: Fill
-        flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5 align: {x: 0.5, y: 0.5}}
+        flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5}
+        align: {x: 0.5, y: 0.5}
         draw_bg: {
             color: (COLOR_UP_2),
             radius: 2.5
@@ -887,7 +893,8 @@ live_design!{
         <ChordPiano> {}
         
         <View> {
-            flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS) spacing: 10}
+            flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}
+            spacing: 10
             width: Fill, height: Fit
             
             <RoundedView> {
@@ -1168,7 +1175,9 @@ live_design!{
     AppMobile = <View> {
         design_mode: false,
         width: Fill, height: Fill
-        padding: 0, align: {x: 0.0, y: 0.0 spacing: 0., flow: Down}
+        padding: 0, align: {x: 0.0, y: 0.0}
+        spacing: 0., 
+        flow: Down
         
         <GradientYView> {
             draw_bg: {color: (GRADIENT_A), color2: (GRADIENT_B)}

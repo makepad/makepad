@@ -1,6 +1,8 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_live_compiler::LiveTokenId,
+    makepad_platform::studio::*,
     multi_window::*,
     widget_match_event::*,
     outline_tree::*,
@@ -46,6 +48,7 @@ enum OutlineNode{
         name: LiveId,
         class: LiveId,
         prop_type: LivePropType,
+        token_id: LiveTokenId,
         ptr: LivePtr,
         children: SmallVec<[LiveId;4]>
     }
@@ -422,7 +425,7 @@ pub struct DesignerData{
 }
 
 impl DesignerData{
-    fn remove_child(&mut self, find_node:LiveId){
+    fn _remove_child(&mut self, find_node:LiveId){
         for node in &mut self.node_map.values_mut(){
             match node{
                 OutlineNode::Component{children,..} | OutlineNode::Virtual{children,..} | OutlineNode::File{children,..} | OutlineNode::Folder{children, ..} =>{
@@ -435,7 +438,7 @@ impl DesignerData{
         }
     }
     
-    fn find_component_by_path(&self, path:&[LiveId])->Option<LiveId>{
+    fn _find_component_by_path(&self, path:&[LiveId])->Option<LiveId>{
         fn get_node(node:LiveId, path:&[LiveId],  map:&HashMap<LiveId, OutlineNode>)->Option<LiveId>{
             match map.get(&node).as_ref(){
                 Some(OutlineNode::Virtual{children,..}) |
@@ -528,6 +531,7 @@ impl LiveHook for Designer {
                             let class = live_registry.ptr_to_node(class_parent.unwrap()).id;
                             let ptr = base_ptr.with_index(index);
                             let prop_type =  nodes[index].origin.prop_type();
+                            let token_id = nodes[index].origin.token_id();
                             let uid = hash_id.bytes_append(&name.0.to_be_bytes());
                             let mut children = SmallVec::new();
                             
@@ -546,6 +550,7 @@ impl LiveHook for Designer {
                             parent_children.push(uid);
                             map.insert(uid, OutlineNode::Component {
                                 name,
+                                token_id: token_id.unwrap(), 
                                 prop_type,
                                 class,
                                 ptr,
@@ -639,6 +644,7 @@ impl LiveHook for Designer {
             }
           
         }
+        /*
         // alright lets move some nodes
         // we should move theme_desktop_dark to the root
         // and we should move main_window / body to the root
@@ -654,7 +660,7 @@ impl LiveHook for Designer {
             if let Some(OutlineNode::Virtual{children, ..})= self.data.node_map.get_mut(&self.data.root){
                 children.insert(0, app_uid)
             }
-        }
+        }*/
     }
     
     // ok now we can iterate our top level components
@@ -722,6 +728,30 @@ impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.outline_tree(id!(outline_tree));
         if let Some(file_id) = outline_tree.folder_clicked(&actions) {
+            // alright we have a folder clicked
+            // lets get a file/line number out of it so we can open it in the code editor.
+            if let Some(node) = self.data.node_map.get(&file_id){
+                match node{
+                    OutlineNode::File{file_id,..}=>{
+                        //let live_registry = cx.live_registry.borrow();
+                        //let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+                    }
+                    OutlineNode::Component{token_id,..}=>{
+                        let file_id = token_id.file_id().unwrap();
+                        let live_registry = cx.live_registry.borrow();
+                        let tid = live_registry.token_id_to_token(*token_id).clone();
+                        let span = tid.span.start;
+                        let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+                            
+                        Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
+                            file_name,
+                            line: span.line,
+                            column: span.column
+                        }));
+                    }
+                    _=>()
+                }
+            }
             self.data.selected = Some(file_id);
             self.ui.widget(id!(designer_view)).redraw(cx);
         }

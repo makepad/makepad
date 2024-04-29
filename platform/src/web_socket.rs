@@ -173,7 +173,7 @@ impl Cx{
         let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
         self.studio_web_socket = Some(WebSocket::open(request));
     }
-    
+     
     pub fn init_websockets(&mut self, studio_http: &str) {
         self.run_websocket_thread();
         self.start_studio_websocket(studio_http);

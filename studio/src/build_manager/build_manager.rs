@@ -21,6 +21,7 @@ use {
         run_view::*,
         app::AppAction,
         makepad_shell::*,
+        makepad_code_editor::text::{Position},
     },
     makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
@@ -381,6 +382,9 @@ impl BuildManager {
                             let values = self.profile.entry(build_id).or_default();
                             values.gpu.push(sample);
                             cx.action(AppAction::RedrawProfiler)
+                        }
+                        AppToStudio::JumpToFile(jt)=>{
+                            cx.action(AppAction::JumpTo(jt));
                         }
                     }
                 }

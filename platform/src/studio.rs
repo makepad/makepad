@@ -27,11 +27,19 @@ pub struct StudioLogItem{
     pub level: LogLevel
 }
 
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct JumpToFile{
+    pub file_name: String,
+    pub line: u32,
+    pub column: u32    
+}
+
 #[derive(SerBin, DeBin, Debug)]
 pub enum AppToStudio{
     LogItem(StudioLogItem),
     EventSample(EventSample),
-    GPUSample(GPUSample)
+    GPUSample(GPUSample),
+    JumpToFile(JumpToFile)
 }
 
 #[derive(SerBin, DeBin)]
