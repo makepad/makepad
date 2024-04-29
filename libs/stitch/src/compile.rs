@@ -260,6 +260,14 @@ impl<'a> Compile<'a> {
         }
     }
 
+    fn opd_kind(&self, opd_depth: usize) -> OpdKind {
+        if self.is_opd_in_reg(opd_depth) {
+            OpdKind::Reg
+        } else {
+            OpdKind::Stack
+        }
+    }
+
     fn opd_local_idx(&self, opd_depth: usize) -> Option<usize> {
         if opd_depth >= self.opds.len() - self.block(0).first_opd_idx {
             None
@@ -527,7 +535,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.resolve_block_type(type_);
         self.save_locals_up_to_depth(type_.params().len());
         self.save_all_regs_except_top();
-        self.emit(br_if_z(self.is_opd_in_reg(0)));
+        self.emit(br_if_z(self.opd_kind(0)));
         self.pop_opd_and_emit_stack_offset();
         let else_hole_idx = self.emit_hole();
         for _ in 0..type_.params().len() {
@@ -584,11 +592,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
         self.save_all_regs_except_top();
         if self.block(label_idx).label_types().is_empty() {
-            self.emit(br_if_nz(self.is_opd_in_reg(0)));
+            self.emit(br_if_nz(self.opd_kind(0)));
             self.pop_opd_and_emit_stack_offset();
             self.emit_label(label_idx);
         } else {
-            self.emit(br_if_z(self.is_opd_in_reg(0)));
+            self.emit(br_if_z(self.opd_kind(0)));
             self.pop_opd_and_emit_stack_offset();
             let hole_idx = self.emit_hole();
             self.resolve_label_vals(label_idx);
@@ -611,7 +619,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.save_locals_up_to_depth(self.block(default_label_idx).label_types().len());
         self.save_all_regs_except_top();
         if self.block(default_label_idx).label_types().is_empty() {
-            self.emit(br_table(self.is_opd_in_reg(0)));
+            self.emit(br_table(self.opd_kind(0)));
             self.pop_opd_and_emit_stack_offset();
             self.emit(label_idxs.len() as u32);
             for label_idx in label_idxs.iter().copied() {
@@ -623,7 +631,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
             self.emit_label(default_label_idx);
         } else {
-            self.emit(br_table(self.is_opd_in_reg(0)));
+            self.emit(br_table(self.opd_kind(0)));
             self.pop_opd_and_emit_stack_offset();
             self.emit(label_idxs.len() as u32);
             let mut hole_idxs = Vec::new();
@@ -746,9 +754,11 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_ref_is_null(&mut self) -> Result<(), DecodeError> {
-        self.emit(ref_is_null(self.opd_type(0), self.is_opd_in_reg(0)));
-        self.pop_opd_and_emit_stack_offset();
-        self.push_opd_and_alloc_reg(ValType::I32);
+        if let OpdType::ValType(type_) = self.opd_type(0) {
+            self.emit(ref_is_null(type_.to_ref().unwrap(), self.opd_kind(0)));
+            self.pop_opd_and_emit_stack_offset();
+            self.push_opd_and_alloc_reg(ValType::I32);
+        }
         Ok(())
     }
 
@@ -771,11 +781,13 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     fn visit_select(&mut self, type_: Option<ValType>) -> Result<(), DecodeError> {
-        let type_ = type_.map_or_else(|| self.opd_type(1), |type_| OpdType::ValType(type_));
-        // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless it is also used as an input register. Otherwise, the
-        // operation will overwrite the output register while it's already used.
-        if let Some(output_reg_idx) = type_.reg_idx() {
+        if let OpdType::ValType(type_) =
+            type_.map_or_else(|| self.opd_type(1), |type_| OpdType::ValType(type_))
+        {
+            // If this operation has an output, and the output register is used, then we need to save
+            // the output register, unless it is also used as an input register. Otherwise, the
+            // operation will overwrite the output register while it's already used.
+            let output_reg_idx = type_.reg_idx();
             if self.is_reg_used(output_reg_idx)
                 && !self.is_reg_used_by_opd(output_reg_idx, 2)
                 && !self.is_reg_used_by_opd(output_reg_idx, 1)
@@ -783,17 +795,17 @@ impl<'a> InstrVisitor for Compile<'a> {
             {
                 self.save_reg(output_reg_idx);
             }
+            self.emit(select(
+                type_,
+                self.opd_kind(2),
+                self.opd_kind(1),
+                self.opd_kind(0),
+            ));
+            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit_stack_offset();
+            self.push_opd_and_alloc_reg(type_);
         }
-        self.emit(select(
-            type_,
-            self.is_opd_in_reg(2),
-            self.is_opd_in_reg(1),
-            self.is_opd_in_reg(0),
-        ));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.push_opd_and_alloc_reg(type_);
         Ok(())
     }
 
@@ -846,7 +858,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_global_set(&mut self, global_idx: u32) -> Result<(), DecodeError> {
         let global = self.instance.global(global_idx).unwrap();
         let val_type = global.type_(&self.store).val;
-        self.emit(global_set(val_type, self.is_opd_in_reg(0)));
+        self.emit(global_set(val_type, self.opd_kind(0)));
         self.pop_opd_and_emit_stack_offset();
         self.emit(global.to_unguarded(self.store.id()));
         Ok(())
@@ -856,7 +868,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_table_get(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
-        self.emit(table_get(elem_type, self.is_opd_in_reg(0)));
+        self.emit(table_get(elem_type, self.opd_kind(0)));
         self.pop_opd_and_emit_stack_offset();
         self.emit(table.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(elem_type);
@@ -866,11 +878,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_table_set(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
-        self.emit(table_set(
-            elem_type,
-            self.is_opd_in_reg(1),
-            self.is_opd_in_reg(0),
-        ));
+        self.emit(table_set(elem_type, self.opd_kind(1), self.opd_kind(0)));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
         self.emit(table.to_unguarded(self.store.id()));
@@ -1213,27 +1221,34 @@ impl From<Unknown> for OpdType {
 #[derive(Clone, Copy, Debug)]
 struct Unknown;
 
-fn br_if_z(is_input_in_reg: bool) -> ThreadedInstr {
-    if is_input_in_reg {
-        exec::br_if_z_r
-    } else {
-        exec::br_if_z_s
+#[derive(Clone, Copy, Debug)]
+enum OpdKind {
+    Stack,
+    Reg,
+    Imm,
+}
+
+fn br_if_z(kind: OpdKind) -> ThreadedInstr {
+    match kind {
+        OpdKind::Stack => exec::br_if_z_s,
+        OpdKind::Reg => exec::br_if_z_r,
+        OpdKind::Imm => exec::unreachable,
     }
 }
 
-fn br_if_nz(is_input_in_reg: bool) -> ThreadedInstr {
-    if is_input_in_reg {
-        exec::br_if_nz_r
-    } else {
-        exec::br_if_nz_s
+fn br_if_nz(kind: OpdKind) -> ThreadedInstr {
+    match kind {
+        OpdKind::Stack => exec::br_if_nz_s,
+        OpdKind::Reg => exec::br_if_nz_r,
+        OpdKind::Imm => exec::unreachable,
     }
 }
 
-fn br_table(is_input_in_reg: bool) -> ThreadedInstr {
-    if is_input_in_reg {
-        exec::br_table_r
-    } else {
-        exec::br_table_s
+fn br_table(kind: OpdKind) -> ThreadedInstr {
+    match kind {
+        OpdKind::Stack => exec::br_table_s,
+        OpdKind::Reg => exec::br_table_r,
+        OpdKind::Imm => exec::unreachable,
     }
 }
 
@@ -1244,160 +1259,152 @@ fn ref_null(type_: RefType) -> ThreadedInstr {
     }
 }
 
-fn ref_is_null(type_: OpdType, is_input_in_reg: bool) -> ThreadedInstr {
-    match type_ {
-        OpdType::ValType(ValType::FuncRef) => {
-            if is_input_in_reg {
-                exec::ref_is_null_func_ref_r
-            } else {
-                exec::ref_is_null_func_ref_s
-            }
-        }
-        OpdType::ValType(ValType::ExternRef) => {
-            if is_input_in_reg {
-                exec::ref_is_null_extern_ref_r
-            } else {
-                exec::ref_is_null_extern_ref_s
-            }
-        }
-        _ => exec::unreachable,
+fn ref_is_null(type_: RefType, kind: OpdKind) -> ThreadedInstr {
+    match (type_, kind) {
+        (RefType::FuncRef, OpdKind::Stack) => exec::ref_is_null_func_ref_s,
+        (RefType::FuncRef, OpdKind::Reg) => exec::ref_is_null_func_ref_r,
+
+        (RefType::ExternRef, OpdKind::Stack) => exec::ref_is_null_extern_ref_s,
+        (RefType::ExternRef, OpdKind::Reg) => exec::ref_is_null_extern_ref_r,
+
+        (_, OpdKind::Imm) => exec::unreachable,
     }
 }
 
-fn select(
-    type_: OpdType,
-    is_input_0_in_reg: bool,
-    is_input_1_in_reg: bool,
-    is_input_2_in_reg: bool,
-) -> ThreadedInstr {
-    match type_ {
-        OpdType::ValType(ValType::I32) => {
-            if is_input_2_in_reg {
-                if is_input_1_in_reg || is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_i32_ssr
-                }
-            } else if is_input_1_in_reg {
-                if is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_i32_srs
-                }
-            } else if is_input_0_in_reg {
-                exec::select_i32_rss
-            } else {
-                exec::select_i32_sss
-            }
+fn select(type_: ValType, kind_0: OpdKind, kind_1: OpdKind, kind_2: OpdKind) -> ThreadedInstr {
+    match (type_, kind_0, kind_1, kind_2) {
+        (ValType::I32, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_sss,
+        (ValType::I32, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_rss,
+        (ValType::I32, OpdKind::Imm, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_iss,
+        (ValType::I32, OpdKind::Stack, OpdKind::Reg, OpdKind::Stack) => exec::select_i32_srs,
+        (ValType::I32, OpdKind::Imm, OpdKind::Reg, OpdKind::Stack) => exec::select_i32_irs,
+        (ValType::I32, OpdKind::Stack, OpdKind::Imm, OpdKind::Stack) => exec::select_i32_sis,
+        (ValType::I32, OpdKind::Reg, OpdKind::Imm, OpdKind::Stack) => exec::select_i32_ris,
+        (ValType::I32, OpdKind::Imm, OpdKind::Imm, OpdKind::Stack) => exec::select_i32_iis,
+        (ValType::I32, OpdKind::Stack, OpdKind::Stack, OpdKind::Reg) => exec::select_i32_ssr,
+        (ValType::I32, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_i32_isr,
+        (ValType::I32, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_i32_sir,
+        (ValType::I32, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_i32_iir,
+        (ValType::I32, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
+        (ValType::I32, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
+
+        (ValType::I64, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_i64_sss,
+        (ValType::I64, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_i64_rss,
+        (ValType::I64, OpdKind::Imm, OpdKind::Stack, OpdKind::Stack) => exec::select_i64_iss,
+        (ValType::I64, OpdKind::Stack, OpdKind::Reg, OpdKind::Stack) => exec::select_i64_srs,
+        (ValType::I64, OpdKind::Imm, OpdKind::Reg, OpdKind::Stack) => exec::select_i64_irs,
+        (ValType::I64, OpdKind::Stack, OpdKind::Imm, OpdKind::Stack) => exec::select_i64_sis,
+        (ValType::I64, OpdKind::Reg, OpdKind::Imm, OpdKind::Stack) => exec::select_i64_ris,
+        (ValType::I64, OpdKind::Imm, OpdKind::Imm, OpdKind::Stack) => exec::select_i64_iis,
+        (ValType::I64, OpdKind::Stack, OpdKind::Stack, OpdKind::Reg) => exec::select_i64_ssr,
+        (ValType::I64, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_i64_isr,
+        (ValType::I64, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_i64_sir,
+        (ValType::I64, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_i64_iir,
+        (ValType::I64, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
+        (ValType::I64, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
+
+        (ValType::F32, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_f32_sss,
+        (ValType::F32, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_f32_rss,
+        (ValType::F32, OpdKind::Imm, OpdKind::Stack, OpdKind::Stack) => exec::select_f32_iss,
+        (ValType::F32, OpdKind::Stack, OpdKind::Reg, OpdKind::Stack) => exec::select_f32_srs,
+        (ValType::F32, OpdKind::Imm, OpdKind::Reg, OpdKind::Stack) => exec::select_f32_irs,
+        (ValType::F32, OpdKind::Stack, OpdKind::Imm, OpdKind::Stack) => exec::select_f32_sis,
+        (ValType::F32, OpdKind::Reg, OpdKind::Imm, OpdKind::Stack) => exec::select_f32_ris,
+        (ValType::F32, OpdKind::Imm, OpdKind::Imm, OpdKind::Stack) => exec::select_f32_iis,
+        (ValType::F32, OpdKind::Stack, OpdKind::Stack, OpdKind::Reg) => exec::select_f32_ssr,
+        (ValType::F32, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_f32_isr,
+        (ValType::F32, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_f32_sir,
+        (ValType::F32, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_f32_iir,
+        (ValType::F32, OpdKind::Reg, OpdKind::Stack, OpdKind::Reg) => exec::select_f32_rsr,
+        (ValType::F32, OpdKind::Stack, OpdKind::Reg, OpdKind::Reg) => exec::select_f32_srr,
+        (ValType::F32, OpdKind::Imm, OpdKind::Reg, OpdKind::Reg) => exec::select_f32_irr,
+        (ValType::F32, OpdKind::Reg, OpdKind::Imm, OpdKind::Reg) => exec::select_f32_rir,
+
+        (ValType::F64, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_f64_sss,
+        (ValType::F64, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_f64_rss,
+        (ValType::F64, OpdKind::Imm, OpdKind::Stack, OpdKind::Stack) => exec::select_f64_iss,
+        (ValType::F64, OpdKind::Stack, OpdKind::Reg, OpdKind::Stack) => exec::select_f64_srs,
+        (ValType::F64, OpdKind::Imm, OpdKind::Reg, OpdKind::Stack) => exec::select_f64_irs,
+        (ValType::F64, OpdKind::Stack, OpdKind::Imm, OpdKind::Stack) => exec::select_f64_sis,
+        (ValType::F64, OpdKind::Reg, OpdKind::Imm, OpdKind::Stack) => exec::select_f64_ris,
+        (ValType::F64, OpdKind::Imm, OpdKind::Imm, OpdKind::Stack) => exec::select_f64_iis,
+        (ValType::F64, OpdKind::Stack, OpdKind::Stack, OpdKind::Reg) => exec::select_f64_ssr,
+        (ValType::F64, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_f64_isr,
+        (ValType::F64, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_f64_sir,
+        (ValType::F64, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_f64_iir,
+        (ValType::F64, OpdKind::Reg, OpdKind::Stack, OpdKind::Reg) => exec::select_f64_rsr,
+        (ValType::F64, OpdKind::Stack, OpdKind::Reg, OpdKind::Reg) => exec::select_f64_srr,
+        (ValType::F64, OpdKind::Imm, OpdKind::Reg, OpdKind::Reg) => exec::select_f64_irr,
+        (ValType::F64, OpdKind::Reg, OpdKind::Imm, OpdKind::Reg) => exec::select_f64_rir,
+
+        (ValType::FuncRef, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => {
+            exec::select_func_ref_sss
         }
-        OpdType::ValType(ValType::I64) => {
-            if is_input_2_in_reg {
-                if is_input_1_in_reg || is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_i64_ssr
-                }
-            } else if is_input_1_in_reg {
-                if is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_i64_srs
-                }
-            } else if is_input_0_in_reg {
-                exec::select_i64_rss
-            } else {
-                exec::select_i64_sss
-            }
+        (ValType::FuncRef, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => {
+            exec::select_func_ref_rss
         }
-        OpdType::ValType(ValType::F32) => {
-            if is_input_2_in_reg {
-                if is_input_1_in_reg {
-                    if is_input_0_in_reg {
-                        exec::unreachable
-                    } else {
-                        exec::select_f32_srr
-                    }
-                } else if is_input_0_in_reg {
-                    exec::select_f32_rsr
-                } else {
-                    exec::select_f32_ssr
-                }
-            } else if is_input_1_in_reg {
-                if is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_f32_srs
-                }
-            } else if is_input_0_in_reg {
-                exec::select_f32_rss
-            } else {
-                exec::select_f32_sss
-            }
+        (ValType::FuncRef, OpdKind::Imm, OpdKind::Stack, OpdKind::Stack) => {
+            exec::select_func_ref_iss
         }
-        OpdType::ValType(ValType::F64) => {
-            if is_input_2_in_reg {
-                if is_input_1_in_reg {
-                    if is_input_0_in_reg {
-                        exec::unreachable
-                    } else {
-                        exec::select_f64_srr
-                    }
-                } else if is_input_0_in_reg {
-                    exec::select_f64_rsr
-                } else {
-                    exec::select_f64_ssr
-                }
-            } else if is_input_1_in_reg {
-                if is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_f64_srs
-                }
-            } else if is_input_0_in_reg {
-                exec::select_f64_rss
-            } else {
-                exec::select_f64_sss
-            }
+        (ValType::FuncRef, OpdKind::Stack, OpdKind::Reg, OpdKind::Stack) => {
+            exec::select_func_ref_srs
         }
-        OpdType::ValType(ValType::FuncRef) => {
-            if is_input_2_in_reg {
-                if is_input_1_in_reg || is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_func_ref_ssr
-                }
-            } else if is_input_1_in_reg {
-                if is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_func_ref_srs
-                }
-            } else if is_input_0_in_reg {
-                exec::select_func_ref_rss
-            } else {
-                exec::select_func_ref_sss
-            }
+        (ValType::FuncRef, OpdKind::Imm, OpdKind::Reg, OpdKind::Stack) => exec::select_func_ref_irs,
+        (ValType::FuncRef, OpdKind::Stack, OpdKind::Imm, OpdKind::Stack) => {
+            exec::select_func_ref_sis
         }
-        OpdType::ValType(ValType::ExternRef) => {
-            if is_input_2_in_reg {
-                if is_input_1_in_reg || is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_extern_ref_ssr
-                }
-            } else if is_input_1_in_reg {
-                if is_input_0_in_reg {
-                    exec::unreachable
-                } else {
-                    exec::select_extern_ref_srs
-                }
-            } else if is_input_0_in_reg {
-                exec::select_extern_ref_rss
-            } else {
-                exec::select_extern_ref_sss
-            }
+        (ValType::FuncRef, OpdKind::Reg, OpdKind::Imm, OpdKind::Stack) => exec::select_func_ref_ris,
+        (ValType::FuncRef, OpdKind::Imm, OpdKind::Imm, OpdKind::Stack) => exec::select_func_ref_iis,
+        (ValType::FuncRef, OpdKind::Stack, OpdKind::Stack, OpdKind::Reg) => {
+            exec::select_func_ref_ssr
         }
-        OpdType::Unknown => exec::unreachable,
+        (ValType::FuncRef, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_func_ref_isr,
+        (ValType::FuncRef, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_func_ref_sir,
+        (ValType::FuncRef, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_func_ref_iir,
+        (ValType::FuncRef, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
+        (ValType::FuncRef, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
+
+        (ValType::ExternRef, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => {
+            exec::select_extern_ref_sss
+        }
+        (ValType::ExternRef, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => {
+            exec::select_extern_ref_rss
+        }
+        (ValType::ExternRef, OpdKind::Imm, OpdKind::Stack, OpdKind::Stack) => {
+            exec::select_extern_ref_iss
+        }
+        (ValType::ExternRef, OpdKind::Stack, OpdKind::Reg, OpdKind::Stack) => {
+            exec::select_extern_ref_srs
+        }
+        (ValType::ExternRef, OpdKind::Imm, OpdKind::Reg, OpdKind::Stack) => {
+            exec::select_extern_ref_irs
+        }
+        (ValType::ExternRef, OpdKind::Stack, OpdKind::Imm, OpdKind::Stack) => {
+            exec::select_extern_ref_sis
+        }
+        (ValType::ExternRef, OpdKind::Reg, OpdKind::Imm, OpdKind::Stack) => {
+            exec::select_extern_ref_ris
+        }
+        (ValType::ExternRef, OpdKind::Imm, OpdKind::Imm, OpdKind::Stack) => {
+            exec::select_extern_ref_iis
+        }
+        (ValType::ExternRef, OpdKind::Stack, OpdKind::Stack, OpdKind::Reg) => {
+            exec::select_extern_ref_ssr
+        }
+        (ValType::ExternRef, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => {
+            exec::select_extern_ref_isr
+        }
+        (ValType::ExternRef, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => {
+            exec::select_extern_ref_sir
+        }
+        (ValType::ExternRef, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => {
+            exec::select_extern_ref_iir
+        }
+        (ValType::ExternRef, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
+        (ValType::ExternRef, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
+
+        (_, OpdKind::Reg, OpdKind::Reg, _) => exec::unreachable,
+        (_, _, _, OpdKind::Imm) => exec::unreachable,
     }
 }
 
@@ -1412,92 +1419,62 @@ fn global_get(type_: ValType) -> ThreadedInstr {
     }
 }
 
-fn global_set(type_: ValType, is_input_in_reg: bool) -> ThreadedInstr {
-    match type_ {
-        ValType::I32 => {
-            if is_input_in_reg {
-                exec::global_set_i32_r
-            } else {
-                exec::global_set_i32_s
-            }
-        }
-        ValType::I64 => {
-            if is_input_in_reg {
-                exec::global_set_i64_r
-            } else {
-                exec::global_set_i64_s
-            }
-        }
-        ValType::F32 => {
-            if is_input_in_reg {
-                exec::global_set_f32_r
-            } else {
-                exec::global_set_f32_s
-            }
-        }
-        ValType::F64 => {
-            if is_input_in_reg {
-                exec::global_set_f64_r
-            } else {
-                exec::global_set_f64_s
-            }
-        }
-        ValType::FuncRef => {
-            if is_input_in_reg {
-                exec::global_set_func_ref_r
-            } else {
-                exec::global_set_func_ref_s
-            }
-        }
-        ValType::ExternRef => {
-            if is_input_in_reg {
-                exec::global_set_extern_ref_r
-            } else {
-                exec::global_set_extern_ref_s
-            }
-        }
+fn global_set(type_: ValType, kind: OpdKind) -> ThreadedInstr {
+    match (type_, kind) {
+        (ValType::I32, OpdKind::Stack) => exec::global_set_i32_s,
+        (ValType::I32, OpdKind::Reg) => exec::global_set_i32_r,
+        (ValType::I32, OpdKind::Imm) => exec::global_set_i32_i,
+        (ValType::I64, OpdKind::Stack) => exec::global_set_i64_s,
+        (ValType::I64, OpdKind::Reg) => exec::global_set_i64_r,
+        (ValType::I64, OpdKind::Imm) => exec::global_set_i64_i,
+        (ValType::F32, OpdKind::Stack) => exec::global_set_f32_s,
+        (ValType::F32, OpdKind::Reg) => exec::global_set_f32_r,
+        (ValType::F32, OpdKind::Imm) => exec::global_set_f32_i,
+        (ValType::F64, OpdKind::Stack) => exec::global_set_f64_s,
+        (ValType::F64, OpdKind::Reg) => exec::global_set_f64_r,
+        (ValType::F64, OpdKind::Imm) => exec::global_set_f64_i,
+        (ValType::FuncRef, OpdKind::Stack) => exec::global_set_func_ref_s,
+        (ValType::FuncRef, OpdKind::Reg) => exec::global_set_func_ref_r,
+        (ValType::FuncRef, OpdKind::Imm) => exec::global_set_func_ref_i,
+        (ValType::ExternRef, OpdKind::Stack) => exec::global_set_extern_ref_s,
+        (ValType::ExternRef, OpdKind::Reg) => exec::global_set_extern_ref_r,
+        (ValType::ExternRef, OpdKind::Imm) => exec::global_set_extern_ref_i,
     }
 }
 
-fn table_get(type_: RefType, is_input_in_reg: bool) -> ThreadedInstr {
-    match type_ {
-        RefType::FuncRef => {
-            if is_input_in_reg {
-                exec::table_get_func_ref_r
-            } else {
-                exec::table_get_func_ref_s
-            }
-        }
-        RefType::ExternRef => {
-            if is_input_in_reg {
-                exec::table_get_extern_ref_r
-            } else {
-                exec::table_get_extern_ref_s
-            }
-        }
+fn table_get(type_: RefType, kind: OpdKind) -> ThreadedInstr {
+    match (type_, kind) {
+        (RefType::FuncRef, OpdKind::Stack) => exec::table_get_func_ref_s,
+        (RefType::FuncRef, OpdKind::Reg) => exec::table_get_func_ref_r,
+        (RefType::FuncRef, OpdKind::Imm) => exec::table_get_func_ref_i,
+
+        (RefType::ExternRef, OpdKind::Stack) => exec::table_get_extern_ref_s,
+        (RefType::ExternRef, OpdKind::Reg) => exec::table_get_extern_ref_r,
+        (RefType::ExternRef, OpdKind::Imm) => exec::table_get_extern_ref_i,
     }
 }
 
-fn table_set(type_: RefType, is_input_0_in_reg: bool, is_input_1_in_reg: bool) -> ThreadedInstr {
-    match type_ {
-        RefType::FuncRef => {
-            if is_input_1_in_reg {
-                exec::table_set_func_ref_sr
-            } else if is_input_0_in_reg {
-                exec::table_set_func_ref_rs
-            } else {
-                exec::table_set_func_ref_ss
-            }
-        }
-        RefType::ExternRef => {
-            if is_input_1_in_reg {
-                exec::table_set_extern_ref_sr
-            } else if is_input_0_in_reg {
-                exec::table_set_extern_ref_rs
-            } else {
-                exec::table_set_extern_ref_ss
-            }
-        }
+fn table_set(type_: RefType, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr {
+    match (type_, kind_0, kind_1) {
+        (RefType::FuncRef, OpdKind::Stack, OpdKind::Stack) => exec::table_set_func_ref_ss,
+        (RefType::FuncRef, OpdKind::Reg, OpdKind::Stack) => exec::table_set_func_ref_rs,
+        (RefType::FuncRef, OpdKind::Imm, OpdKind::Stack) => exec::table_set_func_ref_is,
+        (RefType::FuncRef, OpdKind::Imm, OpdKind::Reg) => exec::table_set_func_ref_ir,
+        (RefType::FuncRef, OpdKind::Imm, OpdKind::Imm) => exec::table_set_func_ref_ii,
+        (RefType::FuncRef, OpdKind::Stack, OpdKind::Reg) => exec::table_set_func_ref_sr,
+        (RefType::FuncRef, OpdKind::Stack, OpdKind::Imm) => exec::table_set_func_ref_si,
+        (RefType::FuncRef, OpdKind::Reg, OpdKind::Imm) => exec::table_set_func_ref_ri,
+        (RefType::FuncRef, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
+
+        (RefType::ExternRef, OpdKind::Stack, OpdKind::Stack) => exec::table_set_extern_ref_ss,
+        (RefType::ExternRef, OpdKind::Reg, OpdKind::Stack) => exec::table_set_extern_ref_rs,
+        (RefType::ExternRef, OpdKind::Imm, OpdKind::Stack) => exec::table_set_extern_ref_is,
+        (RefType::ExternRef, OpdKind::Imm, OpdKind::Reg) => exec::table_set_extern_ref_ir,
+        (RefType::ExternRef, OpdKind::Imm, OpdKind::Imm) => exec::table_set_extern_ref_ii,
+        (RefType::ExternRef, OpdKind::Stack, OpdKind::Reg) => exec::table_set_extern_ref_sr,
+        (RefType::ExternRef, OpdKind::Stack, OpdKind::Imm) => exec::table_set_extern_ref_si,
+        (RefType::ExternRef, OpdKind::Reg, OpdKind::Imm) => exec::table_set_extern_ref_ri,
+        (RefType::ExternRef, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
     }
 }
 
