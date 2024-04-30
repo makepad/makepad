@@ -3577,7 +3577,8 @@ live_design! {
         indent_width: 10.0
         min_drag_distance: 10.0
         button_open_width: 24.0,
-        
+        draw_eye: false,
+                
         draw_bg: {
             instance selected: 0.0
             
@@ -3711,6 +3712,7 @@ live_design! {
         clip_y: true
         
         File =  <DesignerOutlineTreeNode> {
+            draw_eye: true,
             icon:{draw_icon: {
                 color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_file.svg"),

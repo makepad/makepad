@@ -10,6 +10,7 @@ use {
         window::{WindowId},
         area::Area,
         event::{
+            KeyModifiers,
             Event,
             TextInputEvent,
             TimerEvent,
@@ -305,12 +306,42 @@ pub mod aux_chan {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct StdinKeyModifiers{
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub logo: bool
+}
+
+impl StdinKeyModifiers{
+    pub fn into_key_modifiers(&self)->KeyModifiers{
+        KeyModifiers{
+            shift: self.shift,
+            control: self.control,
+            alt: self.alt,
+            logo: self.logo,
+        }
+    }
+    pub fn from_key_modifiers(km:&KeyModifiers)->Self{
+        Self{
+            shift: km.shift,
+            control: km.control,
+            alt: km.alt,
+            logo: km.logo,
+        }
+    }
+}
+
+
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinMouseDown{
    pub button: usize,
    pub x: f64,
    pub y: f64,
    pub time: f64,
+   pub modifiers: StdinKeyModifiers
 }
 
 impl StdinMouseDown {
@@ -319,7 +350,7 @@ impl StdinMouseDown {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             button: self.button,
             window_id: window_id,
-            modifiers: Default::default(),
+            modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
             handled: Cell::new(Area::Empty),
         }
@@ -331,6 +362,7 @@ pub struct StdinMouseMove{
    pub time: f64,
    pub x: f64,
    pub y: f64,
+   pub modifiers: StdinKeyModifiers
 }
 
 impl StdinMouseMove {
@@ -338,7 +370,7 @@ impl StdinMouseMove {
         MouseMoveEvent{
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             window_id: window_id,
-            modifiers: Default::default(),
+            modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
             handled: Cell::new(Area::Empty),
         }
@@ -350,7 +382,8 @@ pub struct StdinMouseUp{
    pub time: f64,
    pub button: usize,
    pub x: f64,
-   pub y: f64
+   pub y: f64,
+   pub modifiers: StdinKeyModifiers
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
@@ -368,7 +401,7 @@ impl StdinMouseUp {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             button: self.button,
             window_id: window_id,
-            modifiers: Default::default(),
+            modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
         }
     }
@@ -383,6 +416,7 @@ pub struct StdinScroll{
    pub x: f64,
    pub y: f64,
    pub is_mouse: bool,
+   pub modifiers: StdinKeyModifiers
 }
 
 impl StdinScroll {
@@ -391,7 +425,7 @@ impl StdinScroll {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             scroll: dvec2(self.sx, self.sy),
             window_id,
-            modifiers: Default::default(),
+            modifiers: self.modifiers.into_key_modifiers(),
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
             is_mouse: self.is_mouse,
