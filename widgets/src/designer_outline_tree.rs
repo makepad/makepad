@@ -37,7 +37,7 @@ pub struct DesignerOutlineTreeNode {
     #[live] check_eye: CheckBox,
     
     #[live] button_open_width: f64,
-    
+    #[live] draw_eye: bool,
     #[layout] layout: Layout,
     
     #[animator] animator: Animator,
@@ -107,13 +107,13 @@ impl LiveHook for DesignerOutlineTree {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum OutlineTreeAction {
     None,
-    LinkClicked(LiveId),
+    NameClicked(LiveId, KeyModifiers),
     EyeClicked(LiveId, bool),
     ShouldStartDrag(LiveId),
 }
 
 pub enum OutlineTreeNodeAction {
-    LinkClicked,
+    NameClicked(KeyModifiers),
     EyeClicked(bool),
     Opening,
     Closing,
@@ -140,8 +140,9 @@ impl DesignerOutlineTreeNode {
         
         // fill.
         cx.defer_walk(Walk::size(Size::Fill, Size::Fixed(0.0)));
-        
-        self.check_eye.draw_all(cx, &mut Scope::empty());
+        if self.draw_eye{
+            self.check_eye.draw_all(cx, &mut Scope::empty());
+        }
         // lets draw the label
         
         //self.draw_icon.draw_walk(cx, self.icon_walk);
@@ -157,11 +158,11 @@ impl DesignerOutlineTreeNode {
             margin: Margin::default()
         }
     }
-    
+    /*
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
     }
-    
+    */
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
@@ -182,23 +183,27 @@ impl DesignerOutlineTreeNode {
         event: &Event,
         node_id: LiveId,
         scope: &mut Scope,
-        actions: &mut Vec<(LiveId, OutlineTreeNodeAction)>,
+        actions_out: &mut Vec<(LiveId, OutlineTreeNodeAction)>,
     ) {
-        let btns = cx.capture_actions(|cx|{
+        let actions = cx.capture_actions(|cx|{
             self.button_open.handle_event(cx, event, scope);
             self.button_name.handle_event(cx, event, scope);
             self.check_eye.handle_event(cx, event, scope);
         });
         
-        if let Some(anim) = self.button_open.animating(&btns){
+        if let Some(km) = self.button_name.clicked_modifiers(&actions){
+            actions_out.push((node_id, OutlineTreeNodeAction::NameClicked(km)));
+        }
+        
+        if let Some(anim) = self.button_open.animating(&actions){
             self.opened = anim;
             self.draw_bg.redraw(cx);
         }
-        if self.button_open.opening(&btns){
-            actions.push((node_id, OutlineTreeNodeAction::Opening));
+        if self.button_open.opening(&actions){
+            actions_out.push((node_id, OutlineTreeNodeAction::Opening));
         }
-        if self.button_open.closing(&btns){
-            actions.push((node_id, OutlineTreeNodeAction::Closing));
+        if self.button_open.closing(&actions){
+            actions_out.push((node_id, OutlineTreeNodeAction::Closing));
         }
                 
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -214,7 +219,7 @@ impl DesignerOutlineTreeNode {
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    actions.push((node_id, OutlineTreeNodeAction::ShouldStartDrag));
+                    actions_out.push((node_id, OutlineTreeNodeAction::ShouldStartDrag));
                 }
             }
             Hit::FingerDown(_) => {
@@ -403,15 +408,16 @@ impl Widget for DesignerOutlineTree {
                 OutlineTreeNodeAction::EyeClicked(_checked) => {
                     
                 }
-                OutlineTreeNodeAction::LinkClicked => {
-                    cx.set_key_focus(self.scroll_bars.area());
+                OutlineTreeNodeAction::NameClicked(km) => {
+                    cx.widget_action(uid, &scope.path, OutlineTreeAction::NameClicked(node_id, km));
+                    /*cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
                             self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
                         }
                     }
-                    self.selected_node_id = Some(node_id);
-                    cx.widget_action(uid, &scope.path, OutlineTreeAction::LinkClicked(node_id));
+                    self.selected_node_id = Some(node_id);*/
+                    //cx.widget_action(uid, &scope.path, OutlineTreeAction::LinkClicked(node_id));
                 }
                 OutlineTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
@@ -468,10 +474,10 @@ impl DesignerOutlineTreeRef{
         None
     }*/
     
-    pub fn link_clicked(&self, actions: &Actions) -> Option<LiveId> {
+    pub fn name_clicked(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let OutlineTreeAction::LinkClicked(file_id) = item.cast() {
-                return Some(file_id)
+            if let OutlineTreeAction::NameClicked(file_id, km) = item.cast() {
+                return Some((file_id,km))
             }
         }
         None
