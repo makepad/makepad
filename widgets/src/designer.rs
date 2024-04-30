@@ -33,7 +33,7 @@ impl LiveHook for Designer {
 impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
-        if let Some((file_id,km)) = outline_tree.name_clicked(&actions) {
+        if let Some((file_id,km)) = outline_tree.name_pressed(&actions) {
             // alright we have a folder clicked
             // lets get a file/line number out of it so we can open it in the code editor.
             if km.shift{
