@@ -205,7 +205,7 @@ struct RunList{
 impl RunList{
     fn draw_run_list(&mut self, cx: &mut Cx2d, list:&mut FlatList, build_manager:&mut BuildManager){
         let mut counter = 0u32;
-        for binary in &build_manager.binaries {
+        for binary in &build_manager.binaries { 
             let is_even = counter & 1 == 0;
                             
             let item_id = LiveId::from_str(&binary.name);

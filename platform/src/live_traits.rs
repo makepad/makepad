@@ -68,7 +68,7 @@ pub trait LiveNew: LiveApply {
 
     fn new_from_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
-        if let Some(live_ptr) = live_ptr{
+        if let Some(live_ptr) = live_ptr{ 
             cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{
                 ret.apply(cx, &mut ApplyFrom::NewFromDoc {file_id}.into(), index, nodes)
             });
@@ -255,6 +255,16 @@ impl ApplyFrom {
             _ => None
         }
     }
+    
+    pub fn to_live_ptr(&self, cx:&Cx, index:usize) -> Option<LivePtr> {
+        if let Some(file_id) = self.file_id(){
+            let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+            return Some(live_ptr)
+        }
+        None
+    }
+        
+        
 }
 
 

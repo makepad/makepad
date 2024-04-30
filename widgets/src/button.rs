@@ -98,6 +98,16 @@ impl Widget for Button {
 }
 
 impl Button {
+        
+    pub fn draw_button(&mut self, cx: &mut Cx2d, label:&str) {
+        self.draw_bg.begin(cx, self.walk, self.layout);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_text
+        .draw_walk(cx, self.label_walk, Align::default(), label);
+        self.draw_bg.end(cx);
+    }
+    
+    
     pub fn clicked(&self, actions: &Actions) -> bool {
         if let ButtonAction::Clicked = actions.find_widget_action(self.widget_uid()).cast() {
             true
