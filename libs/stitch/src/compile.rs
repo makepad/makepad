@@ -13,7 +13,7 @@ use {
         ref_::RefType,
         stack::StackSlot,
         store::Store,
-        val::ValType,
+        val::{UnguardedVal, ValType},
     },
     std::{mem, ops::Deref},
 };
@@ -150,6 +150,16 @@ impl<'a> Compile<'a> {
         }
     }
 
+    /// Constants
+    
+    fn copy_const_to_opd(&mut self, opd_depth: usize) {
+        let opd_idx = self.opds.len() - 1 - opd_depth;
+        self.emit(copy_imm_to_stack(self.opds[opd_idx].type_));
+        self.emit_val(self.opds[opd_idx].val.unwrap());
+        self.emit_stack_offset(self.temp_stack_idx(opd_idx));
+        self.opd_mut(opd_depth).val = None;
+    }
+
     /// Locals
 
     fn push_opd_onto_local(&mut self, local_idx: usize) {
@@ -264,11 +274,21 @@ impl<'a> Compile<'a> {
     fn opd(&self, depth: usize) -> &Opd {
         &self.opds[self.opds.len() - 1 - depth]
     }
+
+    fn opd_mut(&mut self, depth: usize) -> &mut Opd {
+        let len = self.opds.len();
+        &mut self.opds[len - 1 - depth]
+    }
+
+    fn ensure_opd_not_const(&mut self, opd_depth: usize) {
+        if self.opd(opd_depth).is_const() {
+            self.copy_const_to_opd(opd_depth);
+        }
+    }
     
     fn ensure_opd_not_in_local(&mut self, opd_depth: usize) {
         if self.opd(opd_depth).is_in_local() {
-            let opd_idx = self.opds.len() - 1 - opd_depth;
-            self.copy_local_to_opd(opd_idx);
+            self.copy_local_to_opd(self.opds.len() - 1 - opd_depth);
         }
     }
 
@@ -282,6 +302,7 @@ impl<'a> Compile<'a> {
     fn push_opd(&mut self, type_: impl Into<ValType>) {
         self.opds.push(Opd {
             type_: type_.into(),
+            val: None,
             local_idx: None,
             prev_opd_idx: None,
             next_opd_idx: None,
@@ -313,10 +334,8 @@ impl<'a> Compile<'a> {
         self.opds.pop().unwrap().type_
     }
 
-    fn pop_opd_and_emit_stack_offset(&mut self) {
-        if !self.opd(0).is_in_reg {
-            self.emit_stack_offset(self.opd_stack_idx(0));
-        }
+    fn pop_opd_and_emit(&mut self) {
+        self.emit_opd(0);
         self.pop_opd();
     }
 
@@ -420,6 +439,29 @@ impl<'a> Compile<'a> {
         unsafe { *(self.code.last_mut().unwrap() as *mut _ as *mut T) = val };
     }
 
+    fn emit_opd(&mut self, opd_depth: usize) {
+        match self.opd(opd_depth).kind() {
+            OpdKind::Stack => {
+                self.emit_stack_offset(self.opd_stack_idx(opd_depth))
+            }
+            OpdKind::Reg => {},
+            OpdKind::Imm => {
+                self.emit_val(self.opd(opd_depth).val.unwrap());
+            }
+        }
+    }
+
+    fn emit_val(&mut self, val: UnguardedVal) {
+        match val {
+            UnguardedVal::I32(val) => self.emit(val),
+            UnguardedVal::I64(val) => self.emit(val),
+            UnguardedVal::F32(val) => self.emit(val),
+            UnguardedVal::F64(val) => self.emit(val),
+            UnguardedVal::FuncRef(val) => self.emit(val),
+            UnguardedVal::ExternRef(val) => self.emit(val),
+        }
+    }
+
     fn emit_stack_offset(&mut self, stack_idx: isize) {
         self.emit(stack_idx * mem::size_of::<StackSlot>() as isize);
     }
@@ -471,6 +513,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.resolve_block_type(type_);
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
+                self.ensure_opd_not_const(opd_depth);
                 self.ensure_opd_not_in_local(opd_depth);
                 self.ensure_opd_not_in_reg(opd_depth);
             }
@@ -486,6 +529,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.resolve_block_type(type_);
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
+                self.ensure_opd_not_const(opd_depth);
                 self.ensure_opd_not_in_local(opd_depth);
                 self.ensure_opd_not_in_reg(opd_depth);
             }
@@ -500,12 +544,14 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_if(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
         let else_hole_idx = if !self.block(0).is_unreachable {
-            for opd_depth in 0..type_.params().len() {
+            self.ensure_opd_not_const(0);
+            for opd_depth in 1..type_.params().len() + 1 {
+                self.ensure_opd_not_const(opd_depth);
                 self.ensure_opd_not_in_local(opd_depth);
                 self.ensure_opd_not_in_reg(opd_depth);
             }
             self.emit(br_if_z(self.opd(0).kind()));
-            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit();
             let else_hole_idx = self.emit_hole();
             for _ in 0..type_.params().len() {
                 self.pop_opd();
@@ -522,6 +568,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_else(&mut self) -> Result<(), Self::Error> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..self.block(0).type_.results().len() {
+                self.ensure_opd_not_const(opd_depth);
                 self.ensure_opd_not_in_local(opd_depth);
                 self.ensure_opd_not_in_reg(opd_depth);
             }
@@ -541,6 +588,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_end(&mut self) -> Result<(), Self::Error> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..self.block(0).type_.results().len() {
+                self.ensure_opd_not_const(opd_depth);
                 self.ensure_opd_not_in_local(opd_depth);
                 self.ensure_opd_not_in_reg(opd_depth);
             }
@@ -564,6 +612,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let label_idx = label_idx as usize;
         for opd_depth in 0..self.block(label_idx).label_types().len() {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_local(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
@@ -579,17 +628,19 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let label_idx = label_idx as usize;
+        self.ensure_opd_not_const(0);
         for opd_depth in 1..self.block(label_idx).label_types().len() + 1 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_local(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         if self.block(label_idx).label_types().is_empty() {
             self.emit(br_if_nz(self.opd(0).kind()));
-            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit();
             self.emit_label(label_idx);
         } else {
             self.emit(br_if_z(self.opd(0).kind()));
-            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit();
             let hole_idx = self.emit_hole();
             self.resolve_label_vals(label_idx);
             self.emit(exec::br as ThreadedInstr);
@@ -611,13 +662,15 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let default_label_idx = default_label_idx as usize;
+        self.ensure_opd_not_const(0);
         for opd_depth in 1..self.block(default_label_idx).label_types().len() + 1 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_local(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         if self.block(default_label_idx).label_types().is_empty() {
             self.emit(br_table(self.opd(0).kind()));
-            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit();
             self.emit(label_idxs.len() as u32);
             for label_idx in label_idxs.iter().copied() {
                 let label_idx = label_idx as usize;
@@ -629,7 +682,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.emit_label(default_label_idx);
         } else {
             self.emit(br_table(self.opd(0).kind()));
-            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit();
             self.emit(label_idxs.len() as u32);
             let mut hole_idxs = Vec::new();
             for _ in 0..label_idxs.len() {
@@ -669,12 +722,13 @@ impl<'a> InstrVisitor for Compile<'a> {
             .enumerate()
             .rev()
         {
+            self.ensure_opd_not_const(0);
             self.emit(if self.opd(0).is_in_reg {
                 copy_reg_to_stack(result_type)
             } else {
                 copy_stack(result_type)
             });
-            self.pop_opd_and_emit_stack_offset();
+            self.pop_opd_and_emit();
             self.emit_stack_offset(self.param_result_stack_idx(result_idx));
         }
         self.emit(exec::return_ as ThreadedInstr);
@@ -689,6 +743,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let func = self.instance.func(func_idx).unwrap();
         let type_ = func.type_(&self.store).clone();
         for opd_depth in 0..type_.params().len() {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_local(opd_depth);
         }
         self.copy_all_regs_to_opd();
@@ -724,7 +779,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let table = self.instance.table(table_idx).unwrap();
         let interned_type = self.instance.type_(type_idx).unwrap();
         let type_ = self.store.resolve_type(interned_type).clone();
+        self.ensure_opd_not_const(0);
         for opd_depth in 1..type_.params().len() + 1 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_local(opd_depth);
         }
         self.copy_all_regs_to_opd();
@@ -769,8 +826,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
+        self.ensure_opd_not_const(0);
         self.emit(ref_is_null(self.opd(0).type_.to_ref().unwrap(), self.opd(0).kind()));
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
         self.push_opd_and_alloc_reg(ValType::I32);
         Ok(())
     }
@@ -804,6 +862,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let type_ = type_.unwrap_or_else(|| self.opd(1).type_);
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
+        }
         // If this operation has an output, and the output register is used, then we need to save
         // the output register, unless one of its inputs is in the output register. Otherwise, the
         // operation will overwrite the output register while it's already used.
@@ -821,9 +882,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.opd(1).kind(),
             self.opd(0).kind(),
         ));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.push_opd_and_alloc_reg(type_);
         Ok(())
     }
@@ -846,12 +907,12 @@ impl<'a> InstrVisitor for Compile<'a> {
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
         self.copy_local_to_all_opds(local_idx);
-        self.emit(if self.opd(0).is_in_reg {
-            copy_reg_to_stack(local_type)
-        } else {
-            copy_stack(local_type)
+        self.emit(match self.opd(0).kind() {
+            OpdKind::Stack => copy_stack(local_type),
+            OpdKind::Reg => copy_reg_to_stack(local_type),
+            OpdKind::Imm => copy_imm_to_stack(local_type),
         });
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
         self.emit_stack_offset(self.local_stack_idx(local_idx));
         Ok(())
     }
@@ -862,6 +923,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
+        self.ensure_opd_not_const(0);
         self.copy_local_to_all_opds(local_idx);
         self.emit(if self.opd(0).is_in_reg {
             copy_reg_to_stack(local_type)
@@ -893,8 +955,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let global = self.instance.global(global_idx).unwrap();
         let val_type = global.type_(&self.store).val;
+        self.ensure_opd_not_const(0);
         self.emit(global_set(val_type, self.opd(0).kind()));
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
         self.emit(global.to_unguarded(self.store.id()));
         Ok(())
     }
@@ -906,8 +969,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
+        self.ensure_opd_not_const(0);
         self.emit(table_get(elem_type, self.opd(0).kind()));
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
         self.emit(table.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(elem_type);
         Ok(())
@@ -919,9 +983,12 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
+        for opd_depth in 0..2 {
+            self.ensure_opd_not_const(opd_depth);
+        }
         self.emit(table_set(elem_type, self.opd(1).kind(), self.opd(0).kind()));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(table.to_unguarded(self.store.id()));
         Ok(())
     }
@@ -945,11 +1012,12 @@ impl<'a> InstrVisitor for Compile<'a> {
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         for opd_depth in 0..2 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(table_grow(elem_type));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(table.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(ValType::I32);
         Ok(())
@@ -962,12 +1030,13 @@ impl<'a> InstrVisitor for Compile<'a> {
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
         for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(table_fill(elem_type));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(table.to_unguarded(self.store.id()));
         Ok(())
     }
@@ -984,12 +1053,13 @@ impl<'a> InstrVisitor for Compile<'a> {
         let src_table = self.instance.table(src_table_idx).unwrap();
         let elem_type = dst_table.type_(&self.store).elem;
         for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(table_copy(elem_type));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(dst_table.to_unguarded(self.store.id()));
         self.emit(src_table.to_unguarded(self.store.id()));
         Ok(())
@@ -1007,12 +1077,13 @@ impl<'a> InstrVisitor for Compile<'a> {
         let src_elem = self.instance.elem(src_elem_idx).unwrap();
         let elem_type = dst_table.type_(&self.store).elem;
         for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(table_init(elem_type));
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(dst_table.0.to_unguarded(self.store.id()));
         self.emit(src_elem.0.to_unguarded(self.store.id()));
         Ok(())
@@ -1064,9 +1135,10 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let mem = self.instance.mem(0).unwrap();
+        self.ensure_opd_not_const(0);
         self.ensure_opd_not_in_reg(0);
         self.emit(exec::memory_grow as ThreadedInstr);
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
         self.emit(mem.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(ValType::I32);
         Ok(())
@@ -1078,12 +1150,13 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let mem = self.instance.mem(0).unwrap();
         for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(exec::memory_fill as ThreadedInstr);
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(mem.to_unguarded(self.store.id()));
         Ok(())
     }
@@ -1094,12 +1167,13 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let mem = self.instance.mem(0).unwrap();
         for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(exec::memory_copy as ThreadedInstr);
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(mem.to_unguarded(self.store.id()));
         Ok(())
     }
@@ -1111,12 +1185,13 @@ impl<'a> InstrVisitor for Compile<'a> {
         let dst_mem = self.instance.mem(0).unwrap();
         let src_data = self.instance.data(data_idx).unwrap();
         for opd_depth in 0..3 {
+            self.ensure_opd_not_const(opd_depth);
             self.ensure_opd_not_in_reg(opd_depth);
         }
         self.emit(exec::memory_init as ThreadedInstr);
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
+        self.pop_opd_and_emit();
         self.emit(dst_mem.to_unguarded(self.store.id()));
         self.emit(src_data.to_unguarded(self.store.id()));
         Ok(())
@@ -1137,9 +1212,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.emit(exec::copy_imm_to_stack_i32 as ThreadedInstr);
-        self.emit(val);
-        self.push_opd_and_emit_stack_offset(ValType::I32);
+        self.push_opd(ValType::I32);
+        self.opd_mut(0).val = Some(UnguardedVal::I32(val));
         Ok(())
     }
 
@@ -1147,9 +1221,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.emit(exec::copy_imm_to_stack_i64 as ThreadedInstr);
-        self.emit(val);
-        self.push_opd_and_emit_stack_offset(ValType::I64);
+        self.push_opd(ValType::I64);
+        self.opd_mut(0).val = Some(UnguardedVal::I64(val));
         Ok(())
     }
 
@@ -1157,9 +1230,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.emit(exec::copy_imm_to_stack_f32 as ThreadedInstr);
-        self.emit(val);
-        self.push_opd_and_emit_stack_offset(ValType::F32);
+        self.push_opd(ValType::F32);
+        self.opd_mut(0).val = Some(UnguardedVal::F32(val));
         Ok(())
     }
 
@@ -1167,15 +1239,17 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.emit(exec::copy_imm_to_stack_f64 as ThreadedInstr);
-        self.emit(val);
-        self.push_opd_and_emit_stack_offset(ValType::F64);
+        self.push_opd(ValType::F64);
+        self.opd_mut(0).val = Some(UnguardedVal::F64(val));
         Ok(())
     }
 
     fn visit_un_op(&mut self, info: UnOpInfo) -> Result<(), DecodeError> {
         if self.block(0).is_unreachable {
             return Ok(());
+        }
+        if self.opd(0).is_const() && info.instr_i == exec::unreachable {
+            self.ensure_opd_not_const(0);
         }
         // If this operation has an output, and the output register is used, then we need to save
         // the output register, unless one of its inputs is in the output register. Otherwise, the
@@ -1186,12 +1260,12 @@ impl<'a> InstrVisitor for Compile<'a> {
                 self.copy_reg_to_opd(output_reg_idx);
             }
         }
-        self.emit(if self.opd(0).is_in_reg {
-            info.instr_r as ThreadedInstr
-        } else {
-            info.instr_s as ThreadedInstr
+        self.emit(match self.opd(0).kind() {
+            OpdKind::Stack => info.instr_s,
+            OpdKind::Reg => info.instr_r,
+            OpdKind::Imm => info.instr_i,
         });
-        self.pop_opd_and_emit_stack_offset();
+        self.pop_opd_and_emit();
         if let Some(output_type) = info.output_type {
             self.push_opd_and_alloc_reg(output_type);
         }
@@ -1201,6 +1275,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_bin_op(&mut self, info: BinOpInfo) -> Result<(), DecodeError> {
         if self.block(0).is_unreachable {
             return Ok(());
+        }
+        if self.opd(0).is_const() && self.opd(1).is_const() && info.instr_ii == exec::unreachable {
+            self.ensure_opd_not_const(0);
         }
         // If this operation has an output, and the output register is used, then we need to save
         // the output register, unless one of its inputs is in the output register. Otherwise, the
@@ -1214,19 +1291,29 @@ impl<'a> InstrVisitor for Compile<'a> {
                 self.copy_reg_to_opd(output_reg_idx);
             }
         }
-        self.emit(if  self.opd(1).is_in_reg {
-            if self.opd(0).is_in_reg {
-                info.instr_rr as ThreadedInstr
-            } else {
-                info.instr_rs as ThreadedInstr
-            }
-        } else if self.opd(0).is_in_reg {
-            info.instr_sr as ThreadedInstr
-        } else {
-            info.instr_ss as ThreadedInstr
+        self.emit(match (self.opd(1).kind(), self.opd(0).kind()) {
+            (OpdKind::Stack, OpdKind::Stack) => info.instr_ss,
+            (OpdKind::Reg, OpdKind::Stack) => info.instr_rs,
+            (OpdKind::Imm, OpdKind::Stack) => info.instr_is,
+            (OpdKind::Stack, OpdKind::Reg) => info.instr_sr,
+            (OpdKind::Reg, OpdKind::Reg) => info.instr_rr,
+            (OpdKind::Imm, OpdKind::Reg) => info.instr_ir,
+            (OpdKind::Stack, OpdKind::Imm) => info.instr_si,
+            (OpdKind::Reg, OpdKind::Imm) => info.instr_ri,
+            (OpdKind::Imm, OpdKind::Imm) => info.instr_ii,
         });
-        self.pop_opd_and_emit_stack_offset();
-        self.pop_opd_and_emit_stack_offset();
+        match (self.opd(1).kind(), self.opd(0).kind()) {
+            (OpdKind::Stack, OpdKind::Imm) if info.instr_is == info.instr_si => {
+                self.emit_opd(1);
+                self.emit_opd(0);
+                self.pop_opd();
+                self.pop_opd();
+            }
+            _ => {
+                self.pop_opd_and_emit();
+                self.pop_opd_and_emit();
+            }
+        }
         if let Some(output_type) = info.output_type {
             self.push_opd_and_alloc_reg(output_type);
         }
@@ -1286,6 +1373,7 @@ impl Deref for LabelTypes {
 #[derive(Clone, Copy, Debug)]
 struct Opd {
     type_: ValType,
+    val: Option<UnguardedVal>,
     local_idx: Option<usize>,
     prev_opd_idx: Option<usize>,
     next_opd_idx: Option<usize>,
@@ -1293,6 +1381,10 @@ struct Opd {
 }
 
 impl Opd {
+    fn is_const(&self) -> bool {
+        self.val.is_some()
+    }
+
     fn is_in_local(&self) -> bool {
         self.local_idx.is_some()
     }
@@ -1302,7 +1394,9 @@ impl Opd {
     }
 
     fn kind(&self) -> OpdKind {
-        if self.is_in_reg {
+        if self.is_const() {
+            OpdKind::Imm
+        } else if self.is_in_reg {
             OpdKind::Reg
         } else {
             OpdKind::Stack
@@ -1606,6 +1700,17 @@ fn elem_drop(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::elem_drop_func_ref,
         RefType::ExternRef => exec::elem_drop_extern_ref,
+    }
+}
+
+fn copy_imm_to_stack(type_: ValType) -> ThreadedInstr {
+    match type_ {
+        ValType::I32 => exec::copy_imm_to_stack_i32,
+        ValType::I64 => exec::copy_imm_to_stack_i64,
+        ValType::F32 => exec::copy_imm_to_stack_f32,
+        ValType::F64 => exec::copy_imm_to_stack_f64,
+        ValType::FuncRef => exec::copy_imm_to_stack_func_ref,
+        ValType::ExternRef => exec::copy_imm_to_stack_extern_ref,
     }
 }
 
