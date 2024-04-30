@@ -40,21 +40,21 @@ impl Widget for DesignerOutline {
             for child in children{
                 match map.get(&child).unwrap(){
                     OutlineNode::Folder{name, children}=>{
-                        if outline_tree.begin_folder(cx, *child, &name).is_ok(){
+                        if outline_tree.begin_node(cx, *child, &name, live_id!(Folder)).is_ok(){
                             recur_nodes(buf, cx, outline_tree, map, children);
-                            outline_tree.end_folder();
+                            outline_tree.end_node();
                         }            
                     }
                     OutlineNode::File{name,  file_id:_, children}=>{
-                        if outline_tree.begin_folder(cx, *child, &name).is_ok(){
+                        if outline_tree.begin_node(cx, *child, &name, live_id!(File)).is_ok(){
                             recur_nodes(buf, cx, outline_tree, map, children);
-                            outline_tree.end_folder();
+                            outline_tree.end_node();
                         }            
                     }
                     OutlineNode::Virtual{name, children}=>{
-                        if outline_tree.begin_folder(cx, *child, &name).is_ok(){
+                        if outline_tree.begin_node(cx, *child, &name, live_id!(Folder)).is_ok(){
                             recur_nodes(buf, cx, outline_tree, map, children);
-                            outline_tree.end_folder();
+                            outline_tree.end_node();
                         }            
                     }
                     OutlineNode::Component{children, name, prop_type, class, ..}=>{
@@ -71,9 +71,9 @@ impl Widget for DesignerOutline {
                             write!(buf, "<{}>", class).unwrap();
                         }
                         
-                        if outline_tree.begin_folder(cx, *child, &buf).is_ok() {
+                        if outline_tree.begin_node(cx, *child, &buf, live_id!(Component)).is_ok() {
                             recur_nodes(buf, cx, outline_tree, map, children);
-                            outline_tree.end_folder();
+                            outline_tree.end_node();
                         }
                     }
                 }
