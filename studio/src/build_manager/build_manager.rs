@@ -11,7 +11,8 @@ use {
             StdinMouseDown,
             StdinMouseUp,
             StdinMouseMove,
-            StdinScroll
+            StdinScroll,
+            StdinKeyModifiers
         },
         makepad_platform::studio::{AppToStudio,AppToStudioVec,EventSample, GPUSample, StudioToAppVec, StudioToApp},
         build_manager::{
@@ -285,6 +286,7 @@ impl BuildManager {
                     x: e.abs.x,
                     y: e.abs.y,
                     button: e.button,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             Event::MouseMove(e) => {
@@ -293,6 +295,7 @@ impl BuildManager {
                     time: e.time,
                     x: e.abs.x,
                     y: e.abs.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             Event::MouseUp(e) => {
@@ -301,6 +304,7 @@ impl BuildManager {
                     button: e.button,
                     x: e.abs.x,
                     y: e.abs.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             Event::Scroll(e) => {
@@ -310,7 +314,8 @@ impl BuildManager {
                     x: e.abs.x,
                     y: e.abs.y,
                     sx: e.scroll.x,
-                    sy: e.scroll.y
+                    sy: e.scroll.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             _ => ()

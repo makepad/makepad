@@ -40,6 +40,12 @@ pub struct KeyModifiers {
     pub logo: bool
 }
 
+impl KeyModifiers{
+    fn any(&self)->bool{
+        self.shift || self.control || self.alt || self.logo
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MouseDownEvent {
     pub abs: DVec2,
