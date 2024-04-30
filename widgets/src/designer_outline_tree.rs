@@ -107,13 +107,13 @@ impl LiveHook for DesignerOutlineTree {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum OutlineTreeAction {
     None,
-    NameClicked(LiveId, KeyModifiers),
+    NamePressed(LiveId, KeyModifiers),
     EyeClicked(LiveId, bool),
     ShouldStartDrag(LiveId),
 }
 
 pub enum OutlineTreeNodeAction {
-    NameClicked(KeyModifiers),
+    NamePressed(KeyModifiers),
     EyeClicked(bool),
     Opening,
     Closing,
@@ -191,8 +191,8 @@ impl DesignerOutlineTreeNode {
             self.check_eye.handle_event(cx, event, scope);
         });
         
-        if let Some(km) = self.button_name.clicked_modifiers(&actions){
-            actions_out.push((node_id, OutlineTreeNodeAction::NameClicked(km)));
+        if let Some(km) = self.button_name.pressed_modifiers(&actions){
+            actions_out.push((node_id, OutlineTreeNodeAction::NamePressed(km)));
         }
         
         if let Some(anim) = self.button_open.animating(&actions){
@@ -408,8 +408,8 @@ impl Widget for DesignerOutlineTree {
                 OutlineTreeNodeAction::EyeClicked(_checked) => {
                     
                 }
-                OutlineTreeNodeAction::NameClicked(km) => {
-                    cx.widget_action(uid, &scope.path, OutlineTreeAction::NameClicked(node_id, km));
+                OutlineTreeNodeAction::NamePressed(km) => {
+                    cx.widget_action(uid, &scope.path, OutlineTreeAction::NamePressed(node_id, km));
                     /*cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
@@ -474,9 +474,9 @@ impl DesignerOutlineTreeRef{
         None
     }*/
     
-    pub fn name_clicked(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
+    pub fn name_pressed(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let OutlineTreeAction::NameClicked(file_id, km) = item.cast() {
+            if let OutlineTreeAction::NamePressed(file_id, km) = item.cast() {
                 return Some((file_id,km))
             }
         }
