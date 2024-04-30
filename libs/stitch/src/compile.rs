@@ -152,7 +152,8 @@ impl<'a> Compile<'a> {
 
     /// Locals
 
-    fn push_local_opd(&mut self, local_idx: usize, opd_idx: usize) {
+    fn push_opd_onto_local(&mut self, local_idx: usize) {
+        let opd_idx = self.opds.len() - 1;
         debug_assert!(self.opds[opd_idx].local_idx.is_none());
         self.opds[opd_idx].local_idx = Some(local_idx);
         self.opds[opd_idx].next_opd_idx = self.locals[local_idx].first_opd_idx;
@@ -162,7 +163,7 @@ impl<'a> Compile<'a> {
         self.locals[local_idx].first_opd_idx = Some(opd_idx);
     }
 
-    fn remove_local_opd(&mut self, opd_idx: usize) {
+    fn pop_opd_from_local(&mut self, opd_idx: usize) {
         let local_idx = self.opds[opd_idx].local_idx.unwrap();
         if let Some(prev_opd_idx) = self.opds[opd_idx].prev_opd_idx {
             self.opds[prev_opd_idx].next_opd_idx = self.opds[opd_idx].next_opd_idx;
@@ -182,6 +183,7 @@ impl<'a> Compile<'a> {
         self.emit(copy_stack(self.locals[local_idx].type_));
         self.emit_stack_offset(self.local_stack_idx(local_idx));
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
+        self.pop_opd_from_local(opd_idx);
     }
 
     fn copy_local_to_all_opds(&mut self, local_idx: usize) {
@@ -259,45 +261,20 @@ impl<'a> Compile<'a> {
 
     // Operands
 
-    /// Returns `true` if the operand at the given depth is stored in a register.
-    fn is_opd_in_reg(&self, opt_depth: usize) -> bool {
-       let reg_idx = self.opd_reg_idx(opt_depth);
-       self.is_reg_used_by_opd(reg_idx, opt_depth)
+    fn opd(&self, depth: usize) -> &Opd {
+        &self.opds[self.opds.len() - 1 - depth]
     }
-
-    /// Returns the type of the operand at the given depth.
-    fn opd_type(&self, opd_depth: usize) -> ValType {
-        self.opds[self.opds.len() - 1 - opd_depth].type_
-    }
-
-    fn opd_kind(&self, opd_depth: usize) -> OpdKind {
-        if self.is_opd_in_reg(opd_depth) {
-            OpdKind::Reg
-        } else {
-            OpdKind::Stack
-        }
-    }
-
-    /// Returns the stack index of the operand at the given depth.
-    fn opd_stack_idx(&self, opd_depth: usize) -> isize {
-        let opd_idx = self.opds.len() - 1 - opd_depth;
-        if let Some(local_idx) = self.opds[opd_idx].local_idx {
-            self.local_stack_idx(local_idx)
-        } else {
-            self.temp_stack_idx(opd_idx)
-        }
-    }
-
-    /// Returns the register index of the operand at the given depth.
-    fn opd_reg_idx(&self, opd_idx: usize) -> usize {
-        self.opd_type(opd_idx).reg_idx()
-    }
-
-    fn ensure_opd_is_not_in_local(&mut self, opd_depth: usize) {
-        let opd_idx = self.opds.len() - 1 - opd_depth;
-        if self.opds[opd_idx].is_in_local() {
+    
+    fn ensure_opd_not_in_local(&mut self, opd_depth: usize) {
+        if self.opd(opd_depth).is_in_local() {
+            let opd_idx = self.opds.len() - 1 - opd_depth;
             self.copy_local_to_opd(opd_idx);
-            self.remove_local_opd(opd_idx);
+        }
+    }
+
+    fn ensure_opd_not_in_reg(&mut self, opd_depth: usize) {
+        if self.opd(opd_depth).is_in_reg {
+            self.copy_reg_to_opd(self.opd(opd_depth).type_.reg_idx());
         }
     }
 
@@ -308,6 +285,7 @@ impl<'a> Compile<'a> {
             local_idx: None,
             prev_opd_idx: None,
             next_opd_idx: None,
+            is_in_reg: false,
         });
         let stack_height = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
         self.max_stack_height = self.max_stack_height.max(stack_height);
@@ -325,8 +303,8 @@ impl<'a> Compile<'a> {
 
     /// Pops an operand from the stack.
     fn pop_opd(&mut self) -> ValType {
-        if self.is_opd_in_reg(0) {
-            self.dealloc_reg(self.opd_reg_idx(0));
+        if self.opd(0).is_in_reg {
+            self.dealloc_reg(self.opd(0).type_.reg_idx());
         }
         let opd_idx = self.opds.len() - 1;
         if let Some(local_idx) = self.opds[opd_idx].local_idx {
@@ -336,7 +314,7 @@ impl<'a> Compile<'a> {
     }
 
     fn pop_opd_and_emit_stack_offset(&mut self) {
-        if !self.is_opd_in_reg(0) {
+        if !self.opd(0).is_in_reg {
             self.emit_stack_offset(self.opd_stack_idx(0));
         }
         self.pop_opd();
@@ -358,8 +336,19 @@ impl<'a> Compile<'a> {
         }
     }
 
+    /// Returns the stack index of the temporary with the given index.
     fn temp_stack_idx(&self, temp_idx: usize) -> isize {
         (self.first_temp_stack_idx + temp_idx) as isize
+    }
+
+    /// Returns the stack index of the operand at the given depth.
+    fn opd_stack_idx(&self, opd_depth: usize) -> isize {
+        let opd_idx = self.opds.len() - 1 - opd_depth;
+        if let Some(local_idx) = self.opds[opd_idx].local_idx {
+            self.local_stack_idx(local_idx)
+        } else {
+            self.temp_stack_idx(opd_idx)
+        }
     }
 
     /// Registers
@@ -369,26 +358,24 @@ impl<'a> Compile<'a> {
         self.regs[reg_idx].is_some()
     }
 
-    /// Returns `true` if the register with the given index is used by the operand at the given
-    /// depth.
-    fn is_reg_used_by_opd(&self, reg_idx: usize, opd_depth: usize) -> bool {
-        self.regs[reg_idx] == Some(self.opds.len() - 1 - opd_depth)
-    }
-
-    /// Allocates a register for the top operand.
+    /// Allocates a register to the top operand.
     fn alloc_reg(&mut self) {
-        let reg_idx = self.opd_reg_idx(0);
+        debug_assert!(!self.opd(0).is_in_reg);
+        let reg_idx = self.opd(0).type_.reg_idx();
         debug_assert!(!self.is_reg_used(reg_idx));
-        self.regs[reg_idx] = Some(self.opds.len() - 1);
+        let opd_idx = self.opds.len() - 1;
+        self.opds[opd_idx].is_in_reg = true;
+        self.regs[reg_idx] = Some(opd_idx);
     }
 
     /// Deallocates the register with the given index.
     fn dealloc_reg(&mut self, reg_idx: usize) {
-        debug_assert!(self.regs[reg_idx].is_some());
+        let opd_idx = self.regs[reg_idx].unwrap();
+        self.opds[opd_idx].is_in_reg = false;
         self.regs[reg_idx] = None;
     }
 
-    fn save_reg(&mut self, reg_idx: usize) {
+    fn copy_reg_to_opd(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
         let opd_type = self.opds[opd_idx].type_;
         self.emit(copy_reg_to_stack(opd_type));
@@ -396,21 +383,10 @@ impl<'a> Compile<'a> {
         self.dealloc_reg(reg_idx);
     }
 
-    fn save_all_regs(&mut self) {
+    fn copy_all_regs_to_opd(&mut self) {
         for reg_idx in 0..self.regs.len() {
             if self.is_reg_used(reg_idx) {
-                self.save_reg(reg_idx);
-            }
-        }
-    }
-
-    fn save_all_regs_except_top(&mut self) {
-        for reg_idx in 0..self.regs.len() {
-            if let Some(opd_idx) = self.regs[reg_idx] {
-                if opd_idx == self.opds.len() - 1 {
-                    continue;
-                }
-                self.save_reg(reg_idx);
+                self.copy_reg_to_opd(reg_idx);
             }
         }
     }
@@ -495,9 +471,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.resolve_block_type(type_);
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
-                self.ensure_opd_is_not_in_local(opd_depth);
+                self.ensure_opd_not_in_local(opd_depth);
+                self.ensure_opd_not_in_reg(opd_depth);
             }
-            self.save_all_regs();
             for _ in 0..type_.params().len() {
                 self.pop_opd();
             }
@@ -510,9 +486,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.resolve_block_type(type_);
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
-                self.ensure_opd_is_not_in_local(opd_depth);
+                self.ensure_opd_not_in_local(opd_depth);
+                self.ensure_opd_not_in_reg(opd_depth);
             }
-            self.save_all_regs();
             for _ in 0..type_.params().len() {
                 self.pop_opd();
             }
@@ -525,10 +501,10 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = self.resolve_block_type(type_);
         let else_hole_idx = if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
-                self.ensure_opd_is_not_in_local(opd_depth);
+                self.ensure_opd_not_in_local(opd_depth);
+                self.ensure_opd_not_in_reg(opd_depth);
             }
-            self.save_all_regs_except_top();
-            self.emit(br_if_z(self.opd_kind(0)));
+            self.emit(br_if_z(self.opd(0).kind()));
             self.pop_opd_and_emit_stack_offset();
             let else_hole_idx = self.emit_hole();
             for _ in 0..type_.params().len() {
@@ -546,9 +522,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_else(&mut self) -> Result<(), Self::Error> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..self.block(0).type_.results().len() {
-                self.ensure_opd_is_not_in_local(opd_depth);
+                self.ensure_opd_not_in_local(opd_depth);
+                self.ensure_opd_not_in_reg(opd_depth);
             }
-            self.save_all_regs();
             self.emit(exec::br as ThreadedInstr);
             let hole_idx = self.emit_hole();
             self.push_hole_onto_block(0, hole_idx);
@@ -565,9 +541,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_end(&mut self) -> Result<(), Self::Error> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..self.block(0).type_.results().len() {
-                self.ensure_opd_is_not_in_local(opd_depth);
+                self.ensure_opd_not_in_local(opd_depth);
+                self.ensure_opd_not_in_reg(opd_depth);
             }
-            self.save_all_regs();
         }
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
@@ -588,9 +564,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let label_idx = label_idx as usize;
         for opd_depth in 0..self.block(label_idx).label_types().len() {
-            self.ensure_opd_is_not_in_local(opd_depth);
+            self.ensure_opd_not_in_local(opd_depth);
+            self.ensure_opd_not_in_reg(opd_depth);
         }
-        self.save_all_regs();
         self.resolve_label_vals(label_idx);
         self.emit(exec::br as ThreadedInstr);
         self.emit_label(label_idx);
@@ -604,15 +580,15 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let label_idx = label_idx as usize;
         for opd_depth in 1..self.block(label_idx).label_types().len() + 1 {
-            self.ensure_opd_is_not_in_local(opd_depth);
+            self.ensure_opd_not_in_local(opd_depth);
+            self.ensure_opd_not_in_reg(opd_depth);
         }
-        self.save_all_regs_except_top();
         if self.block(label_idx).label_types().is_empty() {
-            self.emit(br_if_nz(self.opd_kind(0)));
+            self.emit(br_if_nz(self.opd(0).kind()));
             self.pop_opd_and_emit_stack_offset();
             self.emit_label(label_idx);
         } else {
-            self.emit(br_if_z(self.opd_kind(0)));
+            self.emit(br_if_z(self.opd(0).kind()));
             self.pop_opd_and_emit_stack_offset();
             let hole_idx = self.emit_hole();
             self.resolve_label_vals(label_idx);
@@ -636,11 +612,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let default_label_idx = default_label_idx as usize;
         for opd_depth in 1..self.block(default_label_idx).label_types().len() + 1 {
-            self.ensure_opd_is_not_in_local(opd_depth);
+            self.ensure_opd_not_in_local(opd_depth);
+            self.ensure_opd_not_in_reg(opd_depth);
         }
-        self.save_all_regs_except_top();
         if self.block(default_label_idx).label_types().is_empty() {
-            self.emit(br_table(self.opd_kind(0)));
+            self.emit(br_table(self.opd(0).kind()));
             self.pop_opd_and_emit_stack_offset();
             self.emit(label_idxs.len() as u32);
             for label_idx in label_idxs.iter().copied() {
@@ -652,7 +628,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
             self.emit_label(default_label_idx);
         } else {
-            self.emit(br_table(self.opd_kind(0)));
+            self.emit(br_table(self.opd(0).kind()));
             self.pop_opd_and_emit_stack_offset();
             self.emit(label_idxs.len() as u32);
             let mut hole_idxs = Vec::new();
@@ -693,7 +669,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             .enumerate()
             .rev()
         {
-            self.emit(if self.is_opd_in_reg(0) {
+            self.emit(if self.opd(0).is_in_reg {
                 copy_reg_to_stack(result_type)
             } else {
                 copy_stack(result_type)
@@ -713,15 +689,14 @@ impl<'a> InstrVisitor for Compile<'a> {
         let func = self.instance.func(func_idx).unwrap();
         let type_ = func.type_(&self.store).clone();
         for opd_depth in 0..type_.params().len() {
-            self.ensure_opd_is_not_in_local(opd_depth);
+            self.ensure_opd_not_in_local(opd_depth);
         }
-        self.save_all_regs();
+        self.copy_all_regs_to_opd();
         self.emit(match func.0.as_ref(&self.store) {
             FuncEntity::Wasm(_) => exec::compile as ThreadedInstr,
             FuncEntity::Host(_) => exec::call_host as ThreadedInstr,
         });
         for _ in 0..type_.params().len() {
-            debug_assert!(!self.is_opd_in_reg(0));
             self.pop_opd();
         }
         self.emit(func.0.to_unguarded(self.store.id()));
@@ -750,9 +725,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let interned_type = self.instance.type_(type_idx).unwrap();
         let type_ = self.store.resolve_type(interned_type).clone();
         for opd_depth in 1..type_.params().len() + 1 {
-            self.ensure_opd_is_not_in_local(opd_depth);
+            self.ensure_opd_not_in_local(opd_depth);
         }
-        self.save_all_regs();
+        self.copy_all_regs_to_opd();
         self.emit(exec::call_indirect as ThreadedInstr);
         self.emit_stack_offset(self.opd_stack_idx(0));
         self.pop_opd();
@@ -794,7 +769,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.emit(ref_is_null(self.opd_type(0).to_ref().unwrap(), self.opd_kind(0)));
+        self.emit(ref_is_null(self.opd(0).type_.to_ref().unwrap(), self.opd(0).kind()));
         self.pop_opd_and_emit_stack_offset();
         self.push_opd_and_alloc_reg(ValType::I32);
         Ok(())
@@ -828,23 +803,23 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        let type_ = type_.unwrap_or_else(|| self.opd_type(1));
+        let type_ = type_.unwrap_or_else(|| self.opd(1).type_);
         // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless it is also used as an input register. Otherwise, the
+        // the output register, unless one of its inputs is in the output register. Otherwise, the
         // operation will overwrite the output register while it's already used.
         let output_reg_idx = type_.reg_idx();
         if self.is_reg_used(output_reg_idx)
-            && !self.is_reg_used_by_opd(output_reg_idx, 2)
-            && !self.is_reg_used_by_opd(output_reg_idx, 1)
-            && !self.is_reg_used_by_opd(output_reg_idx, 0)
+            && !self.opd(2).is_in_given_reg(output_reg_idx)
+            && !self.opd(1).is_in_given_reg(output_reg_idx)
+            && !self.opd(0).is_in_given_reg(output_reg_idx)
         {
-            self.save_reg(output_reg_idx);
+            self.copy_reg_to_opd(output_reg_idx);
         }
         self.emit(select(
             type_,
-            self.opd_kind(2),
-            self.opd_kind(1),
-            self.opd_kind(0),
+            self.opd(2).kind(),
+            self.opd(1).kind(),
+            self.opd(0).kind(),
         ));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -860,7 +835,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let local_idx = local_idx as usize;
         self.push_opd(self.locals[local_idx].type_);
-        self.push_local_opd(local_idx, self.opds.len() - 1);
+        self.push_opd_onto_local(local_idx);
         Ok(())
     }
 
@@ -871,7 +846,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
         self.copy_local_to_all_opds(local_idx);
-        self.emit(if self.is_opd_in_reg(0) {
+        self.emit(if self.opd(0).is_in_reg {
             copy_reg_to_stack(local_type)
         } else {
             copy_stack(local_type)
@@ -888,12 +863,12 @@ impl<'a> InstrVisitor for Compile<'a> {
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
         self.copy_local_to_all_opds(local_idx);
-        self.emit(if self.is_opd_in_reg(0) {
+        self.emit(if self.opd(0).is_in_reg {
             copy_reg_to_stack(local_type)
         } else {
             copy_stack(local_type)
         });
-        if !self.is_opd_in_reg(0) {
+        if !self.opd(0).is_in_reg {
             self.emit_stack_offset(self.opd_stack_idx(0));
         }
         self.emit_stack_offset(self.local_stack_idx(local_idx));
@@ -918,7 +893,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let global = self.instance.global(global_idx).unwrap();
         let val_type = global.type_(&self.store).val;
-        self.emit(global_set(val_type, self.opd_kind(0)));
+        self.emit(global_set(val_type, self.opd(0).kind()));
         self.pop_opd_and_emit_stack_offset();
         self.emit(global.to_unguarded(self.store.id()));
         Ok(())
@@ -931,7 +906,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
-        self.emit(table_get(elem_type, self.opd_kind(0)));
+        self.emit(table_get(elem_type, self.opd(0).kind()));
         self.pop_opd_and_emit_stack_offset();
         self.emit(table.to_unguarded(self.store.id()));
         self.push_opd_and_emit_stack_offset(elem_type);
@@ -944,7 +919,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
-        self.emit(table_set(elem_type, self.opd_kind(1), self.opd_kind(0)));
+        self.emit(table_set(elem_type, self.opd(1).kind(), self.opd(0).kind()));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
         self.emit(table.to_unguarded(self.store.id()));
@@ -969,7 +944,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
-        self.save_all_regs();
+        for opd_depth in 0..2 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(table_grow(elem_type));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -984,7 +961,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let table = self.instance.table(table_idx).unwrap();
         let elem_type = table.type_(&self.store).elem;
-        self.save_all_regs();
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(table_fill(elem_type));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1004,7 +983,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_table = self.instance.table(src_table_idx).unwrap();
         let elem_type = dst_table.type_(&self.store).elem;
-        self.save_all_regs();
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(table_copy(elem_type));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1025,7 +1006,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_elem = self.instance.elem(src_elem_idx).unwrap();
         let elem_type = dst_table.type_(&self.store).elem;
-        self.save_all_regs();
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(table_init(elem_type));
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1081,7 +1064,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let mem = self.instance.mem(0).unwrap();
-        self.save_all_regs();
+        self.ensure_opd_not_in_reg(0);
         self.emit(exec::memory_grow as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.emit(mem.to_unguarded(self.store.id()));
@@ -1094,7 +1077,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let mem = self.instance.mem(0).unwrap();
-        self.save_all_regs();
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(exec::memory_fill as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1108,7 +1093,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let mem = self.instance.mem(0).unwrap();
-        self.save_all_regs();
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(exec::memory_copy as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1123,7 +1110,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let dst_mem = self.instance.mem(0).unwrap();
         let src_data = self.instance.data(data_idx).unwrap();
-        self.save_all_regs();
+        for opd_depth in 0..3 {
+            self.ensure_opd_not_in_reg(opd_depth);
+        }
         self.emit(exec::memory_init as ThreadedInstr);
         self.pop_opd_and_emit_stack_offset();
         self.pop_opd_and_emit_stack_offset();
@@ -1189,15 +1178,15 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless it is also used as an input register. Otherwise, the
+        // the output register, unless one of its inputs is in the output register. Otherwise, the
         // operation will overwrite the output register while it's already used.
         if let Some(output_type) = info.output_type {
             let output_reg_idx = output_type.reg_idx();
-            if self.is_reg_used(output_reg_idx) && !self.is_reg_used_by_opd(output_reg_idx, 0) {
-                self.save_reg(output_reg_idx);
+            if self.is_reg_used(output_reg_idx) && !self.opd(0).is_in_given_reg(output_reg_idx) {
+                self.copy_reg_to_opd(output_reg_idx);
             }
         }
-        self.emit(if self.is_opd_in_reg(0) {
+        self.emit(if self.opd(0).is_in_reg {
             info.instr_r as ThreadedInstr
         } else {
             info.instr_s as ThreadedInstr
@@ -1214,24 +1203,24 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless it is also used as an input register. Otherwise, the
+        // the output register, unless one of its inputs is in the output register. Otherwise, the
         // operation will overwrite the output register while it's already used.
         if let Some(output_type) = info.output_type {
             let output_reg_idx = output_type.reg_idx();
             if self.is_reg_used(output_reg_idx)
-                && !self.is_reg_used_by_opd(output_reg_idx, 1)
-                && !self.is_reg_used_by_opd(output_reg_idx, 0)
+                && !self.opd(1).is_in_given_reg(output_reg_idx)
+                && !self.opd(0).is_in_given_reg(output_reg_idx)
             {
-                self.save_reg(output_reg_idx);
+                self.copy_reg_to_opd(output_reg_idx);
             }
         }
-        self.emit(if self.is_opd_in_reg(1) {
-            if self.is_opd_in_reg(0) {
+        self.emit(if  self.opd(1).is_in_reg {
+            if self.opd(0).is_in_reg {
                 info.instr_rr as ThreadedInstr
             } else {
                 info.instr_rs as ThreadedInstr
             }
-        } else if self.is_opd_in_reg(0) {
+        } else if self.opd(0).is_in_reg {
             info.instr_sr as ThreadedInstr
         } else {
             info.instr_ss as ThreadedInstr
@@ -1300,11 +1289,24 @@ struct Opd {
     local_idx: Option<usize>,
     prev_opd_idx: Option<usize>,
     next_opd_idx: Option<usize>,
+    is_in_reg: bool,
 }
 
 impl Opd {
     fn is_in_local(&self) -> bool {
         self.local_idx.is_some()
+    }
+
+    fn is_in_given_reg(&self, reg_idx: usize) -> bool {
+        self.is_in_reg && self.type_.reg_idx() == reg_idx
+    }
+
+    fn kind(&self) -> OpdKind {
+        if self.is_in_reg {
+            OpdKind::Reg
+        } else {
+            OpdKind::Stack
+        }
     }
 }
 
