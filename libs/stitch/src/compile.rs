@@ -61,7 +61,7 @@ impl Compiler {
         {
             locals.push(Local {
                 type_,
-                first_local_opd_idx: None,
+                first_opd_idx: None,
             });
         }
         let local_count = locals.len() - type_.params().len();
@@ -153,17 +153,9 @@ impl<'a> Compile<'a> {
     /// Locals
 
     fn save_local(&mut self, local_idx: usize) {
-        while let Some(opd_idx) = self.locals[local_idx].first_local_opd_idx {
-            let Opd::Local {
-                next_local_opd_idx, ..
-            } = self.opds[opd_idx]
-            else {
-                unreachable!()
-            };
-            self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
-            self.opds[opd_idx] = Opd::Temp {
-                type_: self.locals[local_idx].type_.into(),
-            };
+        while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
+            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
+            self.opds[opd_idx].local_idx = None;
             self.emit(copy_stack(self.locals[local_idx].type_));
             self.emit_stack_offset(self.local_stack_idx(local_idx));
             self.emit_stack_offset(self.temp_stack_idx(opd_idx));
@@ -251,10 +243,7 @@ impl<'a> Compile<'a> {
 
     /// Returns the type of the operand at the given depth.
     fn opd_type(&self, opd_depth: usize) -> ValType {
-        match self.opds[self.opds.len() - 1 - opd_depth] {
-            Opd::Local { local_idx, .. } => self.locals[local_idx].type_.into(),
-            Opd::Temp { type_ } => type_,
-        }
+        self.opds[self.opds.len() - 1 - opd_depth].type_
     }
 
     fn opd_kind(&self, opd_depth: usize) -> OpdKind {
@@ -266,18 +255,16 @@ impl<'a> Compile<'a> {
     }
 
     fn opd_local_idx(&self, opd_depth: usize) -> Option<usize> {
-        match self.opds[self.opds.len() - 1 - opd_depth] {
-            Opd::Local { local_idx, .. } => Some(local_idx),
-            Opd::Temp { .. } => None,
-        }
+        self.opds[self.opds.len() - 1 - opd_depth].local_idx
     }
 
     /// Returns the stack index of the operand at the given depth.
     fn opd_stack_idx(&self, opd_depth: usize) -> isize {
         let opd_idx = self.opds.len() - 1 - opd_depth;
-        match self.opds[opd_idx] {
-            Opd::Local { local_idx, .. } => self.local_stack_idx(local_idx),
-            Opd::Temp { .. } => self.temp_stack_idx(opd_idx),
+        if let Some(local_idx) = self.opds[opd_idx].local_idx {
+            self.local_stack_idx(local_idx)
+        } else {
+            self.temp_stack_idx(opd_idx)
         }
     }
 
@@ -288,16 +275,19 @@ impl<'a> Compile<'a> {
 
     /// Pushes an operand of the given type on the stack.
     fn push_local_opd(&mut self, local_idx: usize) {
-        self.opds.push(Opd::Local {
-            local_idx,
-            next_local_opd_idx: self.locals[local_idx].first_local_opd_idx,
+        self.opds.push(Opd {
+            type_: self.locals[local_idx].type_,
+            local_idx: Some(local_idx),
+            next_opd_idx: self.locals[local_idx].first_opd_idx,
         });
-        self.locals[local_idx].first_local_opd_idx = Some(self.opds.len() - 1);
+        self.locals[local_idx].first_opd_idx = Some(self.opds.len() - 1);
     }
 
     fn push_opd(&mut self, type_: impl Into<ValType>) {
-        self.opds.push(Opd::Temp {
+        self.opds.push(Opd {
             type_: type_.into(),
+            local_idx: None,
+            next_opd_idx: None,
         });
         let stack_slot_count = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
         self.max_stack_height = self.max_stack_height.max(stack_slot_count);
@@ -318,16 +308,11 @@ impl<'a> Compile<'a> {
         if self.is_opd_in_reg(0) {
             self.dealloc_reg(self.opd_reg_idx(0));
         }
-        match self.opds.pop().unwrap() {
-            Opd::Local {
-                local_idx,
-                next_local_opd_idx,
-            } => {
-                self.locals[local_idx].first_local_opd_idx = next_local_opd_idx;
-                self.locals[local_idx].type_.into()
-            }
-            Opd::Temp { type_ } => type_,
+        let opd_idx = self.opds.len() - 1;
+        if let Some(local_idx) = self.opds[opd_idx].local_idx {
+            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
         }
+        self.opds.pop().unwrap().type_
     }
 
     fn pop_opd_and_emit_stack_offset(&mut self) {
@@ -385,11 +370,7 @@ impl<'a> Compile<'a> {
 
     fn save_reg(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
-        let opd_type = if let Opd::Temp { type_ } = self.opds[opd_idx] {
-            type_
-        } else {
-            unreachable!()
-        };
+        let opd_type = self.opds[opd_idx].type_;
         self.emit(copy_reg_to_stack(opd_type));
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
         self.dealloc_reg(reg_idx);
@@ -1226,7 +1207,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 #[derive(Clone, Copy, Debug)]
 struct Local {
     type_: ValType,
-    first_local_opd_idx: Option<usize>,
+    first_opd_idx: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1273,14 +1254,10 @@ impl Deref for LabelTypes {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Opd {
-    Local {
-        local_idx: usize,
-        next_local_opd_idx: Option<usize>,
-    },
-    Temp {
-        type_: ValType,
-    },
+struct Opd {
+    type_: ValType,
+    local_idx: Option<usize>,
+    next_opd_idx: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
