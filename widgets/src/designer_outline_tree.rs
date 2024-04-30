@@ -7,6 +7,9 @@ use {
         check_box::*,
         makepad_draw::*,
         widget::*,
+        icon::*,
+        button::*,
+        fold_button::*,
         scroll_shadow::DrawScrollShadow,
         scroll_bars::ScrollBars
     }
@@ -14,8 +17,6 @@ use {
 
 live_design!{
     DrawBgQuad = {{DrawBgQuad}} {}
-    DrawNameText = {{DrawNameText}} {}
-    DrawIconQuad = {{DrawIconQuad}} {}
     DesignerOutlineTreeNodeBase = {{DesignerOutlineTreeNode}} {}
     DesignerOutlineTreeBase = {{DesignerOutlineTree}} {}
 }
@@ -25,67 +26,34 @@ live_design!{
 struct DrawBgQuad {
     #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
-    #[live] scale: f32,
-    #[live] is_folder: f32,
-    #[live] focussed: f32,
-    #[live] selected: f32,
-    #[live] hover: f32,
-    #[live] opened: f32,
-}
-
-#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
-struct DrawNameText {
-    #[deref] draw_super: DrawText,
-    #[live] is_even: f32,
-    #[live] scale: f32,
-    #[live] is_folder: f32,
-    #[live] focussed: f32,
-    #[live] selected: f32,
-    #[live] hover: f32,
-    #[live] opened: f32,
-}
-
-#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
-struct DrawIconQuad {
-    #[deref] draw_super: DrawQuad,
-    #[live] is_even: f32,
-    #[live] scale: f32,
-    #[live] is_folder: f32,
-    #[live] focussed: f32,
-    #[live] selected: f32,
-    #[live] hover: f32,
-    #[live] opened: f32,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct DesignerOutlineTreeNode {
     #[live] draw_bg: DrawBgQuad,
-    #[live] draw_icon: DrawIconQuad,
-    #[live] draw_name: DrawNameText,
-    #[live] check_box: CheckBox,
+    #[live] button_open: FoldButton,
+    #[live] icon: Icon,
+    #[live] button_name: Button,
+    #[live] check_eye: CheckBox,
+    
     #[layout] layout: Layout,
     
     #[animator] animator: Animator,
     
+    #[live] min_drag_distance: f64,
     #[live] indent_width: f64,
     #[live] indent_shift: f64,
     
-    #[live] icon_walk: Walk,
-    
-    #[live] is_folder: bool,
-    #[live] min_drag_distance: f64,
-    
-    #[live] opened: f32,
-    #[live] focussed: f32,
-    #[live] hover: f32,
-    #[live] selected: f32,
+    #[live] selected: f64,
+    #[live] opened: f64
 }
 
 #[derive(Live, Widget)]
 pub struct DesignerOutlineTree {
     #[redraw] #[live] scroll_bars: ScrollBars,
-    #[live] file_node: Option<LivePtr>,
-    #[live] folder_node: Option<LivePtr>,
+    
+    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+        
     #[walk] walk: Walk,
     #[layout] layout: Layout,
     #[live] filler: DrawBgQuad,
@@ -107,63 +75,71 @@ pub struct DesignerOutlineTree {
 }
 
 impl LiveHook for DesignerOutlineTree {
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
-            if let Some(index) = nodes.child_by_name(index, id.as_field()) {
-                tree_node.apply(cx, apply, index, nodes);
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = apply.from {
+            self.templates.clear();
+        }
+    }
+        
+    // hook the apply flow to collect our templates and apply to instanced childnodes
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        if nodes[index].is_instance_prop() {
+            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
+                let id = nodes[index].id;
+                self.templates.insert(id, live_ptr);
+                for (_, (node, templ_id)) in self.tree_nodes.iter_mut() {
+                    if *templ_id == id {
+                        node.apply(cx, apply, index, nodes);
+                    }
+                }
             }
         }
-        self.scroll_bars.redraw(cx);
+        else {
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+        }
+        nodes.skip_node(index)
     }
+    
 }
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum OutlineTreeAction {
     None,
-    FileClicked(LiveId),
-    FolderClicked(LiveId),
-    ShouldFileStartDrag(LiveId),
+    LinkClicked(LiveId),
+    EyeClicked(LiveId, bool),
+    ShouldStartDrag(LiveId),
 }
 
 pub enum OutlineTreeNodeAction {
-    WasClicked,
+    LinkClicked,
+    EyeClicked(bool),
     Opening,
     Closing,
     ShouldStartDrag
 }
 
 impl DesignerOutlineTreeNode {
-    pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
-        self.draw_bg.scale = scale as f32;
+    pub fn draw(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
         self.draw_bg.is_even = is_even;
-        self.draw_name.scale = scale as f32;
-        self.draw_name.is_even = is_even;
-        self.draw_icon.scale = scale as f32;
-        self.draw_icon.is_even = is_even;
-        self.draw_name.font_scale = scale;
-    }
-    
-    pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
-        self.set_draw_state(is_even, scale);
         
         self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.button_open.draw_all(cx, &mut Scope::empty());
+        self.button_name.draw_button(cx, name);
+        // we should fill.
+        cx.defer_walk(Walk {
+            abs_pos: None,
+            width: Size::Fill,
+            height: Size::Fixed(0.0),
+            margin: Default::default()
+        });
+        self.check_eye.draw_all(cx, &mut Scope::empty());
+        // lets draw the label
         
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
-        self.draw_bg.end(cx);
-    }
-    
-    pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
-        self.set_draw_state(is_even, scale);
-        
-        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
-        
-        cx.walk_turtle(self.indent_walk(depth));
-        
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        //self.draw_icon.draw_walk(cx, self.icon_walk);
+        //self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     
@@ -189,8 +165,14 @@ impl DesignerOutlineTreeNode {
         self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
-    pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
+    pub fn set_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
+        if is{
+            self.opened = 1.0
+        }
+        else{
+            self.opened = 0.0
+        }
+        self.button_open.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
     }
     
     pub fn handle_event(
@@ -198,17 +180,36 @@ impl DesignerOutlineTreeNode {
         cx: &mut Cx,
         event: &Event,
         node_id: LiveId,
+        scope: &mut Scope,
         actions: &mut Vec<(LiveId, OutlineTreeNodeAction)>,
     ) {
+        let btns = cx.capture_actions(|cx|{
+            self.button_open.handle_event(cx, event, scope);
+            self.button_name.handle_event(cx, event, scope);
+            self.check_eye.handle_event(cx, event, scope);
+        });
+        
+        if let Some(anim) = self.button_open.animating(&btns){
+            self.opened = anim;
+            self.draw_bg.redraw(cx);
+        }
+        if self.button_open.opening(&btns){
+            actions.push((node_id, OutlineTreeNodeAction::Opening));
+        }
+        if self.button_open.closing(&btns){
+            actions.push((node_id, OutlineTreeNodeAction::Closing));
+        }
+                
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
+        
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+               // self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+               // self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -216,7 +217,8 @@ impl DesignerOutlineTreeNode {
                 }
             }
             Hit::FingerDown(_) => {
-                self.animator_play(cx, id!(select.on));
+                //self.animator_play(cx, id!(select.on));
+                /*
                 if self.is_folder {
                     if self.animator_in_state(cx, id!(open.on)) {
                         self.animator_play(cx, id!(open.off));
@@ -227,7 +229,7 @@ impl DesignerOutlineTreeNode {
                         actions.push((node_id, OutlineTreeNodeAction::Opening));
                     }
                 }
-                actions.push((node_id, OutlineTreeNodeAction::WasClicked));
+                actions.push((node_id, OutlineTreeNodeAction::WasClicked));*/
             }
             _ => {}
         }
@@ -247,7 +249,7 @@ impl DesignerOutlineTree {
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
-            self.filler.is_even = Self::is_even(self.count);
+            self.filler.is_even = Self::is_even_as_f32(self.count);
             self.filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
@@ -259,7 +261,7 @@ impl DesignerOutlineTree {
         self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
     }
     
-    pub fn is_even(count: usize) -> f32 {
+    pub fn is_even_as_f32(count: usize) -> f32 {
         if count % 2 == 1 {0.0}else {1.0}
     }
     
@@ -276,11 +278,12 @@ impl DesignerOutlineTree {
         }
     }
     
-    pub fn begin_folder(
+    pub fn begin_node(
         &mut self,
         cx: &mut Cx2d,
         node_id: LiveId,
         name: &str,
+        template: LiveId,
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
@@ -291,18 +294,24 @@ impl DesignerOutlineTree {
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
-            let folder_node = self.folder_node;
-            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                let mut tree_node = DesignerOutlineTreeNode::new_from_ptr(cx, folder_node);
-                if is_open {
-                    tree_node.set_folder_is_open(cx, true, Animate::No)
+            // lets create the node
+            if let Some(ptr) = self.templates.get(&template){
+                let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
+                    let mut tree_node = DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr));
+                    if is_open {
+                        log!("SET IT OPEN");
+                        tree_node.set_is_open(cx, true, Animate::No)
+                    }
+                    (tree_node, template)
+                });
+                tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale);
+                self.stack.push(tree_node.opened as f64 * scale);
+                if tree_node.opened <= 0.001 {
+                    self.end_node();
+                    return Err(());
                 }
-                (tree_node, live_id!(folder_node))
-            });
-            tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
-            self.stack.push(tree_node.opened as f64 * scale);
-            if tree_node.opened <= 0.001 {
-                self.end_folder();
+            }
+            else{
                 return Err(());
             }
         }
@@ -317,22 +326,23 @@ impl DesignerOutlineTree {
         Ok(())
     }
     
-    pub fn end_folder(&mut self) {
+    pub fn end_node(&mut self) {
         self.stack.pop();
     }
     
-    pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {
+    pub fn node(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str, template: LiveId) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
         if scale > 0.2 {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            let file_node = self.file_node;
-            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                (DesignerOutlineTreeNode::new_from_ptr(cx, file_node), live_id!(file_node))
-            });
-            tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
+            if let Some(ptr) = self.templates.get(&template){
+                let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
+                    (DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr)), template)
+                });
+                tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale);
+            }
         }
     }
     
@@ -344,6 +354,7 @@ impl DesignerOutlineTree {
         self.tree_nodes.remove(&file_node_id);
     }
     
+    /*
     pub fn is_folder(&mut self, file_node_id: LiveId)->bool {
         if let Some((node,_)) = self.tree_nodes.get(&file_node_id){
             node.is_folder
@@ -369,7 +380,7 @@ impl DesignerOutlineTree {
         if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
             tree_node.set_folder_is_open(cx, is_open, animate);
         }
-    }
+    }*/
     
     pub fn start_dragging_file_node(
         &mut self,
@@ -404,7 +415,7 @@ impl Widget for DesignerOutlineTree {
         let mut node_actions = Vec::new();
                 
         for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
-            node.handle_event(cx, event, *node_id, &mut node_actions);
+            node.handle_event(cx, event, *node_id, scope, &mut node_actions);
         }
                 
         for (node_id, node_action) in node_actions {
@@ -415,7 +426,10 @@ impl Widget for DesignerOutlineTree {
                 OutlineTreeNodeAction::Closing => {
                     self.open_nodes.remove(&node_id);
                 }
-                OutlineTreeNodeAction::WasClicked => {
+                OutlineTreeNodeAction::EyeClicked(_checked) => {
+                    
+                }
+                OutlineTreeNodeAction::LinkClicked => {
                     cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
@@ -423,16 +437,11 @@ impl Widget for DesignerOutlineTree {
                         }
                     }
                     self.selected_node_id = Some(node_id);
-                    if self.is_folder(node_id){
-                        cx.widget_action(uid, &scope.path, OutlineTreeAction::FolderClicked(node_id));
-                    }
-                    else{
-                        cx.widget_action(uid, &scope.path, OutlineTreeAction::FileClicked(node_id));
-                    }
+                    cx.widget_action(uid, &scope.path, OutlineTreeAction::LinkClicked(node_id));
                 }
                 OutlineTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
-                        cx.widget_action(uid, &scope.path, OutlineTreeAction::ShouldFileStartDrag(node_id));
+                        cx.widget_action(uid, &scope.path, OutlineTreeAction::ShouldStartDrag(node_id));
                     }
                 }
             }
@@ -469,25 +478,25 @@ impl Widget for DesignerOutlineTree {
 impl DesignerOutlineTreeRef{
     pub fn should_file_start_drag(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let OutlineTreeAction::ShouldFileStartDrag(file_id) = item.cast() {
+            if let OutlineTreeAction::ShouldStartDrag(file_id) = item.cast() {
                 return Some(file_id)
             }
         }
         None
     }
-    
-    pub fn file_clicked(&self, actions: &Actions) -> Option<LiveId> {
+    /*
+    pub fn file_c/licked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let OutlineTreeAction::FileClicked(file_id) = item.cast() {
                 return Some(file_id)
             }
         }
         None
-    }
+    }*/
     
-    pub fn folder_clicked(&self, actions: &Actions) -> Option<LiveId> {
+    pub fn link_clicked(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let OutlineTreeAction::FolderClicked(file_id) = item.cast() {
+            if let OutlineTreeAction::LinkClicked(file_id) = item.cast() {
                 return Some(file_id)
             }
         }
@@ -495,7 +504,7 @@ impl DesignerOutlineTreeRef{
     }
     
     
-    pub fn file_start_drag(&self, cx: &mut Cx, _file_id: LiveId, item: DragItem) {
+    pub fn start_drag(&self, cx: &mut Cx, _file_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
 }

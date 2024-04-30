@@ -2518,8 +2518,8 @@ live_design! {
             }
 
             open = {
-                default: yes
-                no = {
+                default: on
+                off = {
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
@@ -2527,7 +2527,7 @@ live_design! {
                         draw_bg: {open: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
-                yes = {
+                on = {
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
@@ -3573,11 +3573,13 @@ live_design! {
     DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
         align: { y: 0.5 }
         padding: { left: (THEME_SPACE_1) },
-        is_folder: false,
+        
         indent_width: 10.0
         min_drag_distance: 10.0
                 
         draw_bg: {
+            instance selected: 0.0
+            
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -3602,80 +3604,40 @@ live_design! {
             }
         }
                 
-        draw_icon: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let w = self.rect_size.x;
-                let h = self.rect_size.y;
-                sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
-                sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
-                sdf.union();
-                return sdf.fill(mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
-                    self.selected
-                ));
-            }
-        }
-                
-        draw_name: {
-            fn get_color(self) -> vec4 {
-                return mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
-                    self.selected
-                )
-            }
+        button_open: <FoldButton> {
+            height: 25, width: 15,
+            margin: { left: (THEME_SPACE_2) }
+            animator: { open = { default: off } },
+            draw_bg: {
+                uniform size: 3.75;
+                instance open: 0.0
+                                        
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    let left = 2;
+                    let sz = self.size;
+                    let c = vec2(left + sz, self.rect_size.y * 0.5);
+                                                
+                    // PLUS
+                    sdf.box(0.5, sz * 3.0, sz * 2.5, sz * 0.7, 1.0); // rounding = 3rd value
+                    // vertical
+                    sdf.fill_keep(mix(#8F, #FF, self.hover));
+                    sdf.box(sz * 1.0, sz * 2.125, sz * 0.7, sz * 2.5, 1.0); // rounding = 3rd value
                         
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-                top_drop: 1.2,
+                    sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
+                        
+                    return sdf.result
+                }
             }
         }
-                
-        icon_walk: {
-            width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
-            margin: { right: 3.0 }
+        icon: <Icon>{}
+        button_name: <Button>{
         }
-                
+        check_eye: <CheckBox>{
+            text:"o"
+        }
+
         animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        hover: 0.0
-                        draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
-                        draw_icon: {hover: 0.0}
-                    }
-                }
-                                
-                on = {
-                    cursor: Hand
-                    from: {all: Snap}
-                    apply: {
-                        hover: 1.0
-                        draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
-                        draw_icon: {hover: 1.0}
-                    },
-                }
-            }
-                        
-            focus = {
-                default: on
-                on = {
-                    from: {all: Snap}
-                    apply: {focussed: 1.0}
-                }
-                                
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {focussed: 0.0}
-                }
-            }
-                        
             select = {
                 default: off
                 off = {
@@ -3683,8 +3645,6 @@ live_design! {
                     apply: {
                         selected: 0.0
                         draw_bg: {selected: 0.0}
-                        draw_name: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
                     }
                 }
                 on = {
@@ -3692,8 +3652,6 @@ live_design! {
                     apply: {
                         selected: 1.0
                         draw_bg: {selected: 1.0}
-                        draw_name: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
                     }
                 }
                                 
@@ -3713,8 +3671,6 @@ live_design! {
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                         draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_name: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
                                 
@@ -3729,8 +3685,6 @@ live_design! {
                     apply: {
                         opened: 1.0
                         draw_bg: {opened: 1.0}
-                        draw_name: {opened: 1.0}
-                        draw_icon: {opened: 1.0}
                     }
                 }
             }
@@ -3745,33 +3699,22 @@ live_design! {
         node_height: (THEME_DATA_ITEM_HEIGHT),
         clip_x: true,
         clip_y: true
-                
-        file_node: <DesignerOutlineTreeNode> {
-            is_folder: false,
-            draw_bg: {is_folder: 0.0}
-            draw_name: {is_folder: 0.0}
+        
+        File =  <DesignerOutlineTreeNode> {
+        }
+        
+        Folder =  <DesignerOutlineTreeNode> {
+        }
+        
+        Component =  <DesignerOutlineTreeNode> {
         }
                 
-        folder_node: <DesignerOutlineTreeNode> {
-            is_folder: true,
-            draw_bg: {is_folder: 1.0}
-            draw_name: {is_folder: 1.0}
-        }
-                
-        filler: { // TODO: Clarify what this is for. Appears not to do anything.
+        filler: {
             fn pixel(self) -> vec4 {
                 return mix(
-                    mix(
-                        THEME_COLOR_BG_EVEN,
-                        THEME_COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    mix(
-                        THEME_COLOR_CTRL_INACTIVE,
-                        THEME_COLOR_CTRL_SELECTED,
-                        self.focussed
-                    ),
-                    self.selected
+                    THEME_COLOR_BG_EVEN,
+                    THEME_COLOR_BG_ODD,
+                    self.is_even
                 );
             }
         }
