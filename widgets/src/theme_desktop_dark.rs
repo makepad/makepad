@@ -100,7 +100,7 @@ live_design! {
 
     THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
     THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_4)
- 
+
     // WIDGET COLORS
     THEME_COLOR_CTRL_DEFAULT = (THEME_COLOR_U_1)
     THEME_COLOR_CTRL_PRESSED = (THEME_COLOR_D_1)
@@ -183,7 +183,7 @@ live_design! {
     }
 
     Label = <LabelBase> {
-        width: Fit, height: Fit, 
+        width: Fit, height: Fit,
         draw_text: {
             color: (THEME_COLOR_TEXT_DEFAULT),
             text_style: <THEME_FONT_REGULAR> {},
@@ -386,6 +386,23 @@ live_design! {
     // Spacer = <View> { width: Fill, height: Fill }
     Filler = <View> { width: Fill, height: Fill }
 
+    CachedScrollXY = <CachedView> {
+        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
+    }
+
+    CachedScrollX = <CachedView> {
+        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
+    }
+
+    CachedScrollY = <CachedView> {
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+    }
+
+    ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
+    ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
+    ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
+
+
     HtmlLink = <HtmlLinkBase> {
         width: Fit, height: Fit,
         align: {x: 0., y: 0.}
@@ -492,7 +509,7 @@ live_design! {
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
-        
+
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -527,7 +544,7 @@ live_design! {
             }
             color: (THEME_COLOR_TEXT_DEFAULT)
         }
-        
+
         code_layout: {
             flow: RightWrap,
             padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
@@ -539,7 +556,7 @@ live_design! {
             padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         quote_walk: { width: Fill, height: Fit, }
-        
+
         list_item_layout: {
             flow: RightWrap,
             padding: <THEME_MSPACE_1> {}
@@ -547,17 +564,17 @@ live_design! {
         list_item_walk: {
             height: Fit, width: Fill,
         }
-        
+
         inline_code_padding: <THEME_MSPACE_1> {},
         inline_code_margin: <THEME_MSPACE_1> {},
-        
+
         sep_walk: {
             width: Fill, height: 4.
             margin: <THEME_MSPACE_V_3> {}
         }
-                
+
         a = <HtmlLink> {}
-        
+
         draw_block:{
             line_color: (THEME_COLOR_TEXT_DEFAULT)
             sep_color: (THEME_COLOR_DIVIDER)
@@ -887,6 +904,8 @@ live_design! {
     }
 
     Button = <ButtonBase> {
+        // TODO: NEEDS FOCUS STATE
+
         width: Fit, height: Fit,
         spacing: 7.5,
         align: {x: 0.5, y: 0.5},
@@ -1619,6 +1638,7 @@ live_design! {
     }
 
     TabCloseButton = <TabCloseButtonBase> {
+        // TODO: NEEDS FOCUS STATE
         height: 10.0, width: 10.0,
         margin: { right: (THEME_SPACE_2), left: -3.5 },
         draw_button: {
@@ -1820,7 +1840,6 @@ live_design! {
 
     TabMinimal = <TabBase> {
         width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
-
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { }
 
@@ -1961,11 +1980,11 @@ live_design! {
         splitter: <Splitter> {}
     }
 
+    // TODO: remove?
     RectView = <View> {
         show_bg: true,
         draw_bg: { color: (THEME_COLOR_DOCK_CONTAINER) }
     }
-
 
     PopupMenuItem = <PopupMenuItemBase> {
         width: Fill, height: Fit,
@@ -2103,6 +2122,7 @@ live_design! {
     }
 
     DropDown = <DropDownBase> {
+        // TODO: utilize the existing focus state
         width: Fit, height: Fit,
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2), right: 22.5 }
         align: {x: 0., y: 0.}
@@ -2466,7 +2486,7 @@ live_design! {
         is_folder: false,
         indent_width: 10.0
         min_drag_distance: 10.0
-        
+
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -2491,7 +2511,7 @@ live_design! {
                 return sdf.result
             }
         }
-        
+
         draw_icon: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -2507,7 +2527,7 @@ live_design! {
                 ));
             }
         }
-        
+
         draw_name: {
             fn get_color(self) -> vec4 {
                 return mix(
@@ -2516,18 +2536,18 @@ live_design! {
                     self.selected
                 )
             }
-            
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
                 top_drop: 1.2,
             }
         }
-        
+
         icon_walk: {
             width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
             margin: { right: 3.0 }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -2540,7 +2560,7 @@ live_design! {
                         draw_icon: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand
                     from: {all: Snap}
@@ -2552,20 +2572,20 @@ live_design! {
                     },
                 }
             }
-            
+
             focus = {
                 default: on
                 on = {
                     from: {all: Snap}
                     apply: {focussed: 1.0}
                 }
-                
+
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {focussed: 0.0}
                 }
             }
-            
+
             select = {
                 default: off
                 off = {
@@ -2586,19 +2606,19 @@ live_design! {
                         draw_icon: {selected: 1.0}
                     }
                 }
-                
+
             }
-            
+
             open = {
                 default: off
                 off = {
                     //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
                     //duration: 0.2
                     redraw: true
-                    
+
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    
+
                     //ease: Ease::OutExp
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -2607,13 +2627,13 @@ live_design! {
                         draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
-                
+
                 on = {
                     //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-                    
+
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.82, d2: 0.95}
-                    
+
                     //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
                     redraw: true
                     apply: {
@@ -2629,25 +2649,25 @@ live_design! {
 
     OutlineTree = <OutlineTreeBase> {
         flow: Down,
-        
+
         scroll_bars: <ScrollBars> {}
         scroll_bars: {}
         node_height: (THEME_DATA_ITEM_HEIGHT),
         clip_x: true,
         clip_y: true
-        
+
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
             draw_name: {is_folder: 0.0}
         }
-        
+
         folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
             draw_name: {is_folder: 1.0}
         }
-        
+
         filler: { // TODO: Clarify what this is for. Appears not to do anything.
             fn pixel(self) -> vec4 {
                 return mix(
@@ -2669,6 +2689,7 @@ live_design! {
 
 
     FoldButton = <FoldButtonBase> {
+        // TODO: adda  focus states
         width: 12., height: 12.,
 
         draw_bg: {
@@ -2764,6 +2785,7 @@ live_design! {
     }
 
     LinkLabel = <LinkLabelBase> {
+        // TODO: adda  focus states
         instance hover: 0.0
         instance pressed: 0.0
 
@@ -2870,6 +2892,7 @@ live_design! {
     }
 
     RadioButton = <RadioButtonBase> {
+        // TODO: adda  focus states
         width: Fit, height: 16.,
         align: { x: 0.0, y: 0.5 }
 
@@ -3103,9 +3126,7 @@ live_design! {
         }
     }
 
-    RadioButtonImage = <RadioButton> {
-        
-    }
+    RadioButtonImage = <RadioButton> { }
 
     RadioButtonTab = <RadioButton> {
         height: Fit,
@@ -3158,22 +3179,6 @@ live_design! {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         flow: Down
     }
-
-    CachedScrollXY = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
-    }
-
-    CachedScrollX = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
-    }
-
-    CachedScrollY = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
-    }
-
-    ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
-    ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
-    ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 
     TextInput = <TextInputBase> {
         width: 200, height: Fit,
@@ -3763,10 +3768,9 @@ live_design! {
 
         root_view = <View> {}
     }
-    
-    DesignerOutline = <DesignerOutlineBase>{
-    }
-    
+
+    DesignerOutline = <DesignerOutlineBase>{ }
+
     DesignerContainer = <DesignerContainerBase>{
         width: 1200,
         height: 1200,
@@ -3780,14 +3784,14 @@ live_design! {
             inner = <BareStep>{}
         }
     }
-    
+
     DesignerView = <DesignerViewBase>{
         draw_bg: {
             texture image: texture2d
             varying scale: vec2
             varying shift: vec2
             fn vertex(self) -> vec4 {
-                
+
                 let dpi = self.dpi_factor;
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
                 let floor_pos = floor(self.rect_pos * dpi) / dpi
@@ -3800,36 +3804,28 @@ live_design! {
             }
         }
         container: <DesignerContainer>{
-            
+
         }
     }
-        
-    Designer = <DesignerBase>{
 
-        <Window>{
-            window:{kind_id: 2}
-            body = <View>{
+    Designer = <DesignerBase>{
+        <Window> {
+            window: { kind_id: 2 }
+            body = <View> {
                 designer_outline = <DesignerOutline> {
-                    outline_tree = <OutlineTree>{
-                                                
-                    }
+                    outline_tree = <OutlineTree> { }
                 }
             }
         }
         <Window>{
-            window:{kind_id: 1}
+            window:{ kind_id: 1 }
             body = <View>{
                 designer_view = <DesignerView> {
-                    width: Fill,
-                    height: Fill                                    
-                }
+                    width: Fill, height: Fill }
             }
         }
     }
-    
-    Root = <RootBase>{
-        design_window = <Designer>{
-        } 
-    }
-    // StackView DSL end
+
+    Root = <RootBase> { design_window = <Designer> {} }
+
 }
