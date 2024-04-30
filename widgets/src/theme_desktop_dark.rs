@@ -383,10 +383,8 @@ live_design! {
 //         }
 //     }
 
-
-    Filler = <View> {
-        width: Fill, height: Fill
-    }
+    // Spacer = <View> { width: Fill, height: Fill }
+    Filler = <View> { width: Fill, height: Fill }
 
     HtmlLink = <HtmlLinkBase> {
         width: Fit, height: Fit,
@@ -411,39 +409,39 @@ live_design! {
         }
 
         animator: {
-                hover = {
-                    default: off,
-                    off = {
-                        from: {all: Forward {duration: 0.1}}
-                        apply: {
-                            draw_bg: {pressed: 0.0, hover: 0.0}
-                            draw_icon: {pressed: 0.0, hover: 0.0}
-                            draw_text: {pressed: 0.0, hover: 0.0}
-                        }
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
                     }
+                }
 
-                    on = {
-                        from: {
-                            all: Forward {duration: 0.1}
-                            pressed: Forward {duration: 0.01}
-                        }
-                        apply: {
-                            draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                            draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                            draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        }
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
                     }
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
 
-                    pressed = {
-                        from: {all: Forward {duration: 0.2}}
-                        apply: {
-                            draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                            draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                            draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        }
+                pressed = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
+        }
 
         draw_bg: {
             instance pressed: 0.0
@@ -801,8 +799,6 @@ live_design! {
         }
     }
 
-    Spacer = <View> { width: Fill, height: Fill }
-
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
@@ -950,7 +946,7 @@ live_design! {
                 );
 
                 // the little drop shadow at the bottom
-                let shift_inward = self.border_radius * 1.75;
+                let shift_inward = self.border_radius * 2.5;
                 sdf.move_to(shift_inward, self.rect_size.y);
                 sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
                 sdf.stroke(
@@ -2879,8 +2875,8 @@ live_design! {
 
         icon_walk: { margin: { left: 20. } }
 
-        label_walk: {
-            width: Fit, height: Fit,
+           label_walk: {
+                width: Fit, height: Fit,
             margin: { left: 20. }
         }
         label_align: { y: 0.0 }
