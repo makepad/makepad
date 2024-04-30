@@ -302,5 +302,5 @@ fn sum(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, fac_iter); // fac_ref, fib, fill, sum);
+criterion_group!(benches, fac_rec); // fac_iter, fib, fill, sum);
 criterion_main!(benches);
