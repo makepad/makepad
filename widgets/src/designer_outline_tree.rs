@@ -36,6 +36,8 @@ pub struct DesignerOutlineTreeNode {
     #[live] button_name: Button,
     #[live] check_eye: CheckBox,
     
+    #[live] button_open_width: f64,
+    
     #[layout] layout: Layout,
     
     #[animator] animator: Animator,
@@ -119,22 +121,26 @@ pub enum OutlineTreeNodeAction {
 }
 
 impl DesignerOutlineTreeNode {
-    pub fn draw(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
+    pub fn draw(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64, draw_open_button:bool) {
         self.draw_bg.is_even = is_even;
         
         self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
-        
+                
         cx.walk_turtle(self.indent_walk(depth));
+        if draw_open_button{
+            self.button_open.draw_all(cx, &mut Scope::empty());
+        }
+        else{
+            cx.walk_turtle(Walk::fixed(self.button_open_width,0.0));
+        }
         
-        self.button_open.draw_all(cx, &mut Scope::empty());
+        self.icon.draw_all(cx, &mut Scope::empty());
+        
         self.button_name.draw_button(cx, name);
-        // we should fill.
-        cx.defer_walk(Walk {
-            abs_pos: None,
-            width: Size::Fill,
-            height: Size::Fixed(0.0),
-            margin: Default::default()
-        });
+        
+        // fill.
+        cx.defer_walk(Walk::size(Size::Fill, Size::Fixed(0.0)));
+        
         self.check_eye.draw_all(cx, &mut Scope::empty());
         // lets draw the label
         
@@ -148,12 +154,7 @@ impl DesignerOutlineTreeNode {
             abs_pos: None,
             width: Size::Fixed(depth as f64 * self.indent_width + self.indent_shift),
             height: Size::Fixed(0.0),
-            margin: Margin {
-                left: depth as f64 * 1.0,
-                top: 0.0,
-                right: depth as f64 * 4.0,
-                bottom: 0.0,
-            },
+            margin: Margin::default()
         }
     }
     
@@ -304,7 +305,7 @@ impl DesignerOutlineTree {
                     }
                     (tree_node, template)
                 });
-                tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale);
+                tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale, true);
                 self.stack.push(tree_node.opened as f64 * scale);
                 if tree_node.opened <= 0.001 {
                     self.end_node();
@@ -341,7 +342,7 @@ impl DesignerOutlineTree {
                 let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
                     (DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr)), template)
                 });
-                tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale);
+                tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale, false);
             }
         }
     }
@@ -354,33 +355,6 @@ impl DesignerOutlineTree {
         self.tree_nodes.remove(&file_node_id);
     }
     
-    /*
-    pub fn is_folder(&mut self, file_node_id: LiveId)->bool {
-        if let Some((node,_)) = self.tree_nodes.get(&file_node_id){
-            node.is_folder
-        }
-        else{
-            false
-        }
-    }
-    
-    pub fn set_folder_is_open(
-        &mut self,
-        cx: &mut Cx,
-        node_id: LiveId,
-        is_open: bool,
-        animate: Animate,
-    ) {
-        if is_open {
-            self.open_nodes.insert(node_id);
-        }
-        else {
-            self.open_nodes.remove(&node_id);
-        }
-        if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
-            tree_node.set_folder_is_open(cx, is_open, animate);
-        }
-    }*/
     
     pub fn start_dragging_file_node(
         &mut self,

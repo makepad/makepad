@@ -49,7 +49,7 @@ impl Widget for DesignerOutline {
                         if outline_tree.begin_node(cx, *child, &name, live_id!(File)).is_ok(){
                             recur_nodes(buf, cx, outline_tree, map, children);
                             outline_tree.end_node();
-                        }            
+                        }
                     }
                     OutlineNode::Virtual{name, children}=>{
                         if outline_tree.begin_node(cx, *child, &name, live_id!(Folder)).is_ok(){
@@ -70,10 +70,14 @@ impl Widget for DesignerOutline {
                         else {
                             write!(buf, "<{}>", class).unwrap();
                         }
-                        
-                        if outline_tree.begin_node(cx, *child, &buf, live_id!(Component)).is_ok() {
-                            recur_nodes(buf, cx, outline_tree, map, children);
-                            outline_tree.end_node();
+                        if children.len() > 0{
+                            if outline_tree.begin_node(cx, *child, &buf, live_id!(Layout)).is_ok() {
+                                recur_nodes(buf, cx, outline_tree, map, children);
+                                outline_tree.end_node();
+                            }
+                        }
+                        else{
+                            outline_tree.node(cx, *child, &buf, live_id!(Widget))
                         }
                     }
                 }
