@@ -3576,7 +3576,8 @@ live_design! {
         
         indent_width: 10.0
         min_drag_distance: 10.0
-                
+        button_open_width: 24.0,
+        
         draw_bg: {
             instance selected: 0.0
             
@@ -3630,7 +3631,16 @@ live_design! {
                 }
             }
         }
-        icon: <Icon>{}
+        icon: <Icon>{
+            icon_walk:{
+                width: 10,
+                height: 10
+            }
+            draw_icon: {
+                color: #f,
+                svg_file: dep("crate://self/resources/icons/back.svg"),
+            }
+        }
         button_name: <Button>{
         }
         check_eye: <CheckBox>{
@@ -3701,12 +3711,31 @@ live_design! {
         clip_y: true
         
         File =  <DesignerOutlineTreeNode> {
+            icon:{draw_icon: {
+                color: #f,
+                svg_file: dep("crate://self/resources/icons/icon_file.svg"),
+            }}
         }
         
         Folder =  <DesignerOutlineTreeNode> {
+            icon:{draw_icon: {
+                color: #f,
+                svg_file: dep("crate://self/resources/icons/icon_folder.svg"),
+            }}
         }
         
-        Component =  <DesignerOutlineTreeNode> {
+        Layout =  <DesignerOutlineTreeNode> {
+            icon:{draw_icon: {
+                color: #f,
+                svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
+            }}
+        }
+        
+        Widget =  <DesignerOutlineTreeNode> {
+            icon:{draw_icon: {
+                color: #f,
+                svg_file: dep("crate://self/resources/icons/icon_vector.svg"),
+            }}
         }
                 
         filler: {
