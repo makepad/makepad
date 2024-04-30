@@ -152,35 +152,57 @@ impl<'a> Compile<'a> {
 
     /// Locals
 
-    fn save_local(&mut self, local_idx: usize) {
-        while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
-            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
-            self.opds[opd_idx].local_idx = None;
-            self.emit(copy_stack(self.locals[local_idx].type_));
-            self.emit_stack_offset(self.local_stack_idx(local_idx));
-            self.emit_stack_offset(self.temp_stack_idx(opd_idx));
+    fn push_local_opd(&mut self, local_idx: usize, opd_idx: usize) {
+        debug_assert!(self.opds[opd_idx].local_idx.is_none());
+        self.opds[opd_idx].local_idx = Some(local_idx);
+        self.opds[opd_idx].next_opd_idx = self.locals[local_idx].first_opd_idx;
+        if let Some(first_opd_idx) = self.locals[local_idx].first_opd_idx {
+            self.opds[first_opd_idx].prev_opd_idx = Some(opd_idx);
         }
+        self.locals[local_idx].first_opd_idx = Some(opd_idx);
     }
 
-    fn save_locals_up_to_depth(&mut self, max_opd_depth: usize) {
-        for opd_depth in 0..max_opd_depth {
-            if let Some(local_idx) = self.opd_local_idx(opd_depth) {
-                self.save_local(local_idx);
-            }
+    fn remove_local_opd(&mut self, opd_idx: usize) {
+        let local_idx = self.opds[opd_idx].local_idx.unwrap();
+        if let Some(prev_opd_idx) = self.opds[opd_idx].prev_opd_idx {
+            self.opds[prev_opd_idx].next_opd_idx = self.opds[opd_idx].next_opd_idx;
+        } else {
+            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
+        }
+        if let Some(next_opd_idx) = self.opds[opd_idx].next_opd_idx {
+            self.opds[next_opd_idx].prev_opd_idx = self.opds[opd_idx].prev_opd_idx;
+        }
+        self.opds[opd_idx].local_idx = None;
+        self.opds[opd_idx].prev_opd_idx = None;
+        self.opds[opd_idx].next_opd_idx = None;
+    }
+
+    fn copy_local_to_opd(&mut self, opd_idx: usize) {
+        let local_idx = self.opds[opd_idx].local_idx.unwrap();
+        self.emit(copy_stack(self.locals[local_idx].type_));
+        self.emit_stack_offset(self.local_stack_idx(local_idx));
+        self.emit_stack_offset(self.temp_stack_idx(opd_idx));
+    }
+
+    fn copy_local_to_all_opds(&mut self, local_idx: usize) {
+        while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
+            self.copy_local_to_opd(opd_idx);
+            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
+            self.opds[opd_idx].local_idx = None;
         }
     }
 
     /// Blocks
 
-    /// Returns a reference to the block at the given depth.
-    fn block(&self, depth: usize) -> &Block {
-        &self.blocks[self.blocks.len() - 1 - depth]
+    /// Returns a reference to the block with the given index.
+    fn block(&self, idx: usize) -> &Block {
+        &self.blocks[self.blocks.len() - 1 - idx]
     }
 
-    /// Returns a mutable reference to the block at the given depth.
-    fn block_mut(&mut self, depth: usize) -> &mut Block {
+    /// Returns a mutable reference to the block with the given index
+    fn block_mut(&mut self, idx: usize) -> &mut Block {
         let len = self.blocks.len();
-        &mut self.blocks[len - 1 - depth]
+        &mut self.blocks[len - 1 - idx]
     }
 
     /// Marks the current block as unreachable.
@@ -191,12 +213,14 @@ impl<'a> Compile<'a> {
         self.block_mut(0).is_unreachable = true;
     }
 
-    fn push_hole(&mut self, block_idx: usize, hole_idx: usize) {
+    /// Pushes the hole with the given index onto the block with the given index.
+    fn push_hole_onto_block(&mut self, block_idx: usize, hole_idx: usize) {
         self.code[hole_idx] = self.block(block_idx).first_hole_idx.unwrap_or(usize::MAX);
         self.block_mut(block_idx).first_hole_idx = Some(hole_idx);
     }
 
-    fn pop_hole(&mut self, block_idx: usize) -> Option<usize> {
+    /// Pops a hole from the block with the given index.
+    fn pop_hole_from_block(&mut self, block_idx: usize) -> Option<usize> {
         if let Some(hole_idx) = self.block(block_idx).first_hole_idx {
             self.block_mut(block_idx).first_hole_idx = if self.code[hole_idx] == usize::MAX {
                 None
@@ -254,10 +278,6 @@ impl<'a> Compile<'a> {
         }
     }
 
-    fn opd_local_idx(&self, opd_depth: usize) -> Option<usize> {
-        self.opds[self.opds.len() - 1 - opd_depth].local_idx
-    }
-
     /// Returns the stack index of the operand at the given depth.
     fn opd_stack_idx(&self, opd_depth: usize) -> isize {
         let opd_idx = self.opds.len() - 1 - opd_depth;
@@ -273,24 +293,24 @@ impl<'a> Compile<'a> {
         self.opd_type(opd_idx).reg_idx()
     }
 
-    /// Pushes an operand of the given type on the stack.
-    fn push_local_opd(&mut self, local_idx: usize) {
-        self.opds.push(Opd {
-            type_: self.locals[local_idx].type_,
-            local_idx: Some(local_idx),
-            next_opd_idx: self.locals[local_idx].first_opd_idx,
-        });
-        self.locals[local_idx].first_opd_idx = Some(self.opds.len() - 1);
+    fn ensure_opd_is_not_in_local(&mut self, opd_depth: usize) {
+        let opd_idx = self.opds.len() - 1 - opd_depth;
+        if self.opds[opd_idx].is_in_local() {
+            self.copy_local_to_opd(opd_idx);
+            self.remove_local_opd(opd_idx);
+        }
     }
 
+    /// Pushes an operand of the given type on the stack.
     fn push_opd(&mut self, type_: impl Into<ValType>) {
         self.opds.push(Opd {
             type_: type_.into(),
             local_idx: None,
+            prev_opd_idx: None,
             next_opd_idx: None,
         });
-        let stack_slot_count = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
-        self.max_stack_height = self.max_stack_height.max(stack_slot_count);
+        let stack_height = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
+        self.max_stack_height = self.max_stack_height.max(stack_height);
     }
 
     fn push_opd_and_emit_stack_offset(&mut self, type_: impl Into<ValType>) {
@@ -428,14 +448,14 @@ impl<'a> Compile<'a> {
         self.emit(stack_idx * mem::size_of::<StackSlot>() as isize);
     }
 
-    fn emit_label(&mut self, label_idx: usize) {
-        match self.block(label_idx).kind {
+    fn emit_label(&mut self, block_idx: usize) {
+        match self.block(block_idx).kind {
             BlockKind::Block => {
                 let hole_idx = self.emit_hole();
-                self.push_hole(label_idx, hole_idx);
+                self.push_hole_onto_block(block_idx, hole_idx);
             }
             BlockKind::Loop => {
-                self.emit_code_offset(self.block(label_idx).first_code_idx);
+                self.emit_code_offset(self.block(block_idx).first_code_idx);
             }
         }
     }
@@ -474,7 +494,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_block(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
         if !self.block(0).is_unreachable {
-            self.save_locals_up_to_depth(type_.params().len());
+            for opd_depth in 0..type_.params().len() {
+                self.ensure_opd_is_not_in_local(opd_depth);
+            }
             self.save_all_regs();
             for _ in 0..type_.params().len() {
                 self.pop_opd();
@@ -487,7 +509,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_loop(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
         if !self.block(0).is_unreachable {
-            self.save_locals_up_to_depth(type_.params().len());
+            for opd_depth in 0..type_.params().len() {
+                self.ensure_opd_is_not_in_local(opd_depth);
+            }
             self.save_all_regs();
             for _ in 0..type_.params().len() {
                 self.pop_opd();
@@ -500,7 +524,9 @@ impl<'a> InstrVisitor for Compile<'a> {
     fn visit_if(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
         let else_hole_idx = if !self.block(0).is_unreachable {
-            self.save_locals_up_to_depth(type_.params().len());
+            for opd_depth in 0..type_.params().len() {
+                self.ensure_opd_is_not_in_local(opd_depth);
+            }
             self.save_all_regs_except_top();
             self.emit(br_if_z(self.opd_kind(0)));
             self.pop_opd_and_emit_stack_offset();
@@ -519,11 +545,13 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_else(&mut self) -> Result<(), Self::Error> {
         if !self.block(0).is_unreachable {
-            self.save_locals_up_to_depth(self.block(0).type_.results().len());
+            for opd_depth in 0..self.block(0).type_.results().len() {
+                self.ensure_opd_is_not_in_local(opd_depth);
+            }
             self.save_all_regs();
             self.emit(exec::br as ThreadedInstr);
             let hole_idx = self.emit_hole();
-            self.push_hole(0, hole_idx);
+            self.push_hole_onto_block(0, hole_idx);
         }
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
@@ -536,13 +564,15 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     fn visit_end(&mut self) -> Result<(), Self::Error> {
         if !self.block(0).is_unreachable {
-            self.save_locals_up_to_depth(self.block(0).type_.results().len());
+            for opd_depth in 0..self.block(0).type_.results().len() {
+                self.ensure_opd_is_not_in_local(opd_depth);
+            }
             self.save_all_regs();
         }
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
         }
-        while let Some(hole_idx) = self.pop_hole(0) {
+        while let Some(hole_idx) = self.pop_hole_from_block(0) {
             self.patch_hole(hole_idx);
         }
         let block = self.pop_block();
@@ -557,7 +587,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let label_idx = label_idx as usize;
-        self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
+        for opd_depth in 0..self.block(label_idx).label_types().len() {
+            self.ensure_opd_is_not_in_local(opd_depth);
+        }
         self.save_all_regs();
         self.resolve_label_vals(label_idx);
         self.emit(exec::br as ThreadedInstr);
@@ -571,7 +603,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let label_idx = label_idx as usize;
-        self.save_locals_up_to_depth(self.block(label_idx).label_types().len());
+        for opd_depth in 1..self.block(label_idx).label_types().len() + 1 {
+            self.ensure_opd_is_not_in_local(opd_depth);
+        }
         self.save_all_regs_except_top();
         if self.block(label_idx).label_types().is_empty() {
             self.emit(br_if_nz(self.opd_kind(0)));
@@ -601,7 +635,9 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let default_label_idx = default_label_idx as usize;
-        self.save_locals_up_to_depth(self.block(default_label_idx).label_types().len());
+        for opd_depth in 1..self.block(default_label_idx).label_types().len() + 1 {
+            self.ensure_opd_is_not_in_local(opd_depth);
+        }
         self.save_all_regs_except_top();
         if self.block(default_label_idx).label_types().is_empty() {
             self.emit(br_table(self.opd_kind(0)));
@@ -676,7 +712,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let func = self.instance.func(func_idx).unwrap();
         let type_ = func.type_(&self.store).clone();
-        self.save_locals_up_to_depth(type_.params().len());
+        for opd_depth in 0..type_.params().len() {
+            self.ensure_opd_is_not_in_local(opd_depth);
+        }
         self.save_all_regs();
         self.emit(match func.0.as_ref(&self.store) {
             FuncEntity::Wasm(_) => exec::compile as ThreadedInstr,
@@ -711,7 +749,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let table = self.instance.table(table_idx).unwrap();
         let interned_type = self.instance.type_(type_idx).unwrap();
         let type_ = self.store.resolve_type(interned_type).clone();
-        self.save_locals_up_to_depth(type_.params().len() + 1);
+        for opd_depth in 1..type_.params().len() + 1 {
+            self.ensure_opd_is_not_in_local(opd_depth);
+        }
         self.save_all_regs();
         self.emit(exec::call_indirect as ThreadedInstr);
         self.emit_stack_offset(self.opd_stack_idx(0));
@@ -819,7 +859,8 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         let local_idx = local_idx as usize;
-        self.push_local_opd(local_idx);
+        self.push_opd(self.locals[local_idx].type_);
+        self.push_local_opd(local_idx, self.opds.len() - 1);
         Ok(())
     }
 
@@ -829,7 +870,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
-        self.save_local(local_idx);
+        self.copy_local_to_all_opds(local_idx);
         self.emit(if self.is_opd_in_reg(0) {
             copy_reg_to_stack(local_type)
         } else {
@@ -846,7 +887,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         let local_idx = local_idx as usize;
         let local_type = self.locals[local_idx].type_;
-        self.save_local(local_idx);
+        self.copy_local_to_all_opds(local_idx);
         self.emit(if self.is_opd_in_reg(0) {
             copy_reg_to_stack(local_type)
         } else {
@@ -1257,7 +1298,14 @@ impl Deref for LabelTypes {
 struct Opd {
     type_: ValType,
     local_idx: Option<usize>,
+    prev_opd_idx: Option<usize>,
     next_opd_idx: Option<usize>,
+}
+
+impl Opd {
+    fn is_in_local(&self) -> bool {
+        self.local_idx.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
