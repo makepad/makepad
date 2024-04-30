@@ -16,8 +16,8 @@ live_design!{
     DrawBgQuad = {{DrawBgQuad}} {}
     DrawNameText = {{DrawNameText}} {}
     DrawIconQuad = {{DrawIconQuad}} {}
-    OutlineTreeNodeBase = {{OutlineTreeNode}} {}
-    OutlineTreeBase = {{OutlineTree}} {}
+    DesignerOutlineTreeNodeBase = {{DesignerOutlineTreeNode}} {}
+    DesignerOutlineTreeBase = {{DesignerOutlineTree}} {}
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
@@ -58,7 +58,7 @@ struct DrawIconQuad {
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
-pub struct OutlineTreeNode {
+pub struct DesignerOutlineTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
     #[live] draw_name: DrawNameText,
@@ -82,7 +82,7 @@ pub struct OutlineTreeNode {
 }
 
 #[derive(Live, Widget)]
-pub struct OutlineTree {
+pub struct DesignerOutlineTree {
     #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] file_node: Option<LivePtr>,
     #[live] folder_node: Option<LivePtr>,
@@ -100,13 +100,13 @@ pub struct OutlineTree {
     #[rust] selected_node_id: Option<LiveId>,
     #[rust] open_nodes: HashSet<LiveId>,
     
-    #[rust] tree_nodes: ComponentMap<LiveId, (OutlineTreeNode, LiveId)>,
+    #[rust] tree_nodes: ComponentMap<LiveId, (DesignerOutlineTreeNode, LiveId)>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f64>,
 }
 
-impl LiveHook for OutlineTree {
+impl LiveHook for DesignerOutlineTree {
     fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
             if let Some(index) = nodes.child_by_name(index, id.as_field()) {
@@ -132,7 +132,7 @@ pub enum OutlineTreeNodeAction {
     ShouldStartDrag
 }
 
-impl OutlineTreeNode {
+impl DesignerOutlineTreeNode {
     pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
         self.draw_bg.scale = scale as f32;
         self.draw_bg.is_even = is_even;
@@ -234,7 +234,7 @@ impl OutlineTreeNode {
     }
 }
 
-impl OutlineTree {
+impl DesignerOutlineTree {
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, self.layout);
@@ -293,7 +293,7 @@ impl OutlineTree {
         if self.should_node_draw(cx) {
             let folder_node = self.folder_node;
             let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                let mut tree_node = OutlineTreeNode::new_from_ptr(cx, folder_node);
+                let mut tree_node = DesignerOutlineTreeNode::new_from_ptr(cx, folder_node);
                 if is_open {
                     tree_node.set_folder_is_open(cx, true, Animate::No)
                 }
@@ -330,7 +330,7 @@ impl OutlineTree {
         if self.should_node_draw(cx) {
             let file_node = self.file_node;
             let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                (OutlineTreeNode::new_from_ptr(cx, file_node), live_id!(file_node))
+                (DesignerOutlineTreeNode::new_from_ptr(cx, file_node), live_id!(file_node))
             });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }
@@ -389,7 +389,7 @@ impl OutlineTree {
 //#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 //pub struct LiveId(pub LiveId);
 
-impl Widget for OutlineTree {
+impl Widget for DesignerOutlineTree {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
@@ -466,7 +466,7 @@ impl Widget for OutlineTree {
     }
 }
 
-impl OutlineTreeRef{
+impl DesignerOutlineTreeRef{
     pub fn should_file_start_drag(&self, actions: &Actions) -> Option<LiveId> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let OutlineTreeAction::ShouldFileStartDrag(file_id) = item.cast() {

@@ -11,8 +11,6 @@ live_design!{
     import crate::drop_down::DropDownBase;
     import crate::file_tree::FileTreeBase;
     import crate::file_tree::FileTreeNodeBase;
-    import crate::outline_tree::OutlineTreeBase;
-    import crate::outline_tree::OutlineTreeNodeBase;
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
     import crate::image::ImageBase;
@@ -52,10 +50,14 @@ live_design!{
     import crate::html::HtmlLinkBase;
     import crate::markdown::MarkdownBase,
     import crate::root::RootBase;
+    
     import crate::designer::DesignerBase;
-    import crate::designer::DesignerOutlineBase;
-    import crate::designer::DesignerViewBase;
-    import crate::designer::DesignerContainerBase;
+    import crate::designer_outline::DesignerOutlineBase;
+    import crate::designer_view::DesignerViewBase;
+    import crate::designer_view::DesignerContainerBase;
+    import crate::designer_outline_tree::DesignerOutlineTreeBase;
+    import crate::designer_outline_tree::DesignerOutlineTreeNodeBase;
+    
     import crate::bare_step::BareStep;
     import crate::turtle_step::TurtleStep;
     import makepad_draw::shader::std::*;
@@ -780,8 +782,6 @@ live_design!{
     DropDownBase = <DropDownBase> {}
     FileTreeBase = <FileTreeBase> {}
     FileTreeNodeBase = <FileTreeNodeBase> {}
-    OutlineTreeBase = <OutlineTreeBase> {}
-    OutlineTreeNodeBase = <OutlineTreeNodeBase> {}
     FoldButtonBase = <FoldButtonBase> {}
     FoldHeaderBase = <FoldHeaderBase> {}
     ImageBase = <ImageBase> {}
@@ -811,10 +811,13 @@ live_design!{
     StackNavigationViewBase = <StackNavigationViewBase>{}
     StackNavigationBase = <StackNavigationBase>{}
     ExpandablePanelBase = <ExpandablePanelBase>{}
+    BareStep = <BareStep>{}
+    TurtleStep = <TurtleStep>{}
+    
     DesignerBase = <DesignerBase>{}
     DesignerOutlineBase = <DesignerOutlineBase>{}
     DesignerViewBase = <DesignerViewBase>{}
-    BareStep = <BareStep>{}
-    TurtleStep = <TurtleStep>{}
     DesignerContainerBase = <DesignerContainerBase>{}
+    DesignerOutlineTreeBase = <DesignerOutlineTreeBase> {}
+    DesignerOutlineTreeNodeBase = <DesignerOutlineTreeNodeBase> {}
 }
