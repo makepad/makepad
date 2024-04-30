@@ -6,6 +6,7 @@ use crate::{
     designer_data::*,
     designer_outline_tree::*,
     widget::*,
+    makepad_platform::studio::*,
 };
 
 live_design!{
@@ -32,34 +33,36 @@ impl LiveHook for Designer {
 impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
-        if let Some(file_id) = outline_tree.link_clicked(&actions) {
+        if let Some((file_id,km)) = outline_tree.name_clicked(&actions) {
             // alright we have a folder clicked
             // lets get a file/line number out of it so we can open it in the code editor.
-            if let Some(node) = self.data.node_map.get(&file_id){
-                match node{
-                    OutlineNode::File{file_id:_,..}=>{
-                        //let live_registry = cx.live_registry.borrow();
-                        //let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+            if km.shift{
+                if let Some(node) = self.data.node_map.get(&file_id){
+                    match node{
+                        OutlineNode::File{file_id:_,..}=>{
+                            //let live_registry = cx.live_registry.borrow();
+                            //let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+                        }
+                        OutlineNode::Component{token_id,..}=>{
+                            let file_id = token_id.file_id().unwrap();
+                            let live_registry = cx.live_registry.borrow();
+                            let tid = live_registry.token_id_to_token(*token_id).clone();
+                            let span = tid.span.start;
+                            let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+                            Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
+                                file_name,
+                                line: span.line,
+                                column: span.column
+                            }));
+                        }
+                        _=>()
                     }
-                    OutlineNode::Component{token_id:_,..}=>{
-                        /*
-                        let file_id = token_id.file_id().unwrap();
-                        let live_registry = cx.live_registry.borrow();
-                        let tid = live_registry.token_id_to_token(*token_id).clone();
-                        let span = tid.span.start;
-                        let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
-                            
-                        Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
-                            file_name,
-                            line: span.line,
-                            column: span.column
-                        }));*/
-                    }
-                    _=>()
                 }
             }
-            self.data.selected = Some(file_id);
-            self.ui.widget(id!(designer_view)).redraw(cx);
+            else{
+                self.data.selected = Some(file_id);
+                self.ui.widget(id!(designer_view)).redraw(cx);
+            }
         }
     }
 }
