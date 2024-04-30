@@ -39,16 +39,18 @@ impl Widget for DesignerOutline {
         fn recur_nodes(buf:&mut String, cx: &mut Cx2d, outline_tree: &mut DesignerOutlineTree,map:&HashMap<LiveId,OutlineNode>, children:&[LiveId]) {
             for child in children{
                 match map.get(&child).unwrap(){
-                    OutlineNode::Folder{name, children}=>{
+                    OutlineNode::Folder{name, children}=> {
                         if outline_tree.begin_node(cx, *child, &name, live_id!(Folder)).is_ok(){
                             recur_nodes(buf, cx, outline_tree, map, children);
                             outline_tree.end_node();
                         }            
                     }
                     OutlineNode::File{name,  file_id:_, children}=>{
-                        if outline_tree.begin_node(cx, *child, &name, live_id!(File)).is_ok(){
-                            recur_nodes(buf, cx, outline_tree, map, children);
-                            outline_tree.end_node();
+                        if children.len() > 0{
+                            if outline_tree.begin_node(cx, *child, &name, live_id!(File)).is_ok(){
+                                recur_nodes(buf, cx, outline_tree, map, children);
+                                outline_tree.end_node();
+                            }
                         }
                     }
                     OutlineNode::Virtual{name, children}=>{

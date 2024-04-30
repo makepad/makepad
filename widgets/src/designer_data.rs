@@ -128,7 +128,7 @@ impl DesignerData{
                             
             path_hash.clear();
                             
-            let parent_id = path_split(self.root, &mut path_hash, file_path, &mut self.node_map, *file_id);
+
             let base_id = LiveId(0).bytes_append(&file_id.0.to_be_bytes());
                             
             let mut children_out = SmallVec::new();
@@ -142,6 +142,10 @@ impl DesignerData{
                 &mut self.node_map, 
                 &mut children_out
             );
+            if children_out.len() == 0{
+                continue
+            }
+            let parent_id = path_split(self.root, &mut path_hash, file_path, &mut self.node_map, *file_id);
             if let Some(OutlineNode::File{children,..}) = self.node_map.get_mut(&parent_id){
                 *children = children_out;
             }

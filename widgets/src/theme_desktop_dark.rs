@@ -3712,28 +3712,28 @@ live_design! {
         
         File =  <DesignerOutlineTreeNode> {
             icon:{draw_icon: {
-                color: #f,
+                color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_file.svg"),
             }}
         }
         
         Folder =  <DesignerOutlineTreeNode> {
             icon:{draw_icon: {
-                color: #f,
+                color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_folder.svg"),
             }}
         }
         
         Layout =  <DesignerOutlineTreeNode> {
             icon:{draw_icon: {
-                color: #f,
+                color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
             }}
         }
         
         Widget =  <DesignerOutlineTreeNode> {
             icon:{draw_icon: {
-                color: #f,
+                color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_vector.svg"),
             }}
         }
