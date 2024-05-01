@@ -474,14 +474,15 @@ impl<'a> LiveParser<'a> {
                     break;
                 }
                 LiveToken::Ident(prop_id) => {
+                    let origin = LiveNodeOrigin::from_token_id(self.get_token_id());
                     self.skip_token();
                     self.expect_token(LiveToken::Punct(live_id!(:))) ?;
-                                                                        
+                                                                                            
                     match self.peek_token() {
                         LiveToken::Bool(val) => {
                             self.skip_token();
                             ld.design_info.push(LiveNode {
-                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                origin,
                                 id: prop_id,
                                 value: LiveValue::Bool(val)
                             });
@@ -489,7 +490,7 @@ impl<'a> LiveParser<'a> {
                         LiveToken::Int(val) => {
                             self.skip_token();
                             ld.design_info.push(LiveNode {
-                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                origin,
                                 id: prop_id,
                                 value: LiveValue::Int64(val)
                             });
@@ -497,7 +498,7 @@ impl<'a> LiveParser<'a> {
                         LiveToken::Float(val) => {
                             self.skip_token();
                             ld.design_info.push(LiveNode {
-                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                origin,
                                 id: prop_id,
                                 value: LiveValue::Float64(val)
                             });
@@ -505,7 +506,7 @@ impl<'a> LiveParser<'a> {
                         LiveToken::Color(val) => {
                             self.skip_token();
                             ld.design_info.push(LiveNode {
-                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                origin,
                                 id: prop_id,
                                 value: LiveValue::Color(val)
                             });
@@ -513,7 +514,7 @@ impl<'a> LiveParser<'a> {
                         LiveToken::String(rcstring) => {
                             self.skip_token();
                             ld.design_info.push(LiveNode {
-                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                origin,
                                 id: prop_id,
                                 value: LiveValue::String(rcstring)
                             });
@@ -894,8 +895,8 @@ impl<'a> LiveParser<'a> {
                     return Ok(());
                 }
                 LiveToken::Punct(live_id!(<))=>{ // class instance
-                    self.skip_token();
                     let token_id = self.get_token_id();
+                    self.skip_token();
                     let ident = self.expect_ident()?;
                     let design_info = self.expect_design_info(ld)?;
                     self.expect_token(LiveToken::Punct(live_id!(>))) ?;

@@ -20,6 +20,7 @@ pub enum OutlineNode{
         children: SmallVec<[LiveId;4]>
     },
     Component{
+        
         name: LiveId,
         class: LiveId,
         prop_type: LivePropType,
