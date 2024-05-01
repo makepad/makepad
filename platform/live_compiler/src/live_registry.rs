@@ -213,17 +213,11 @@ impl LiveRegistry {
             LiveValue::Class {design_info,..}=>{
                 let string = new_design_info.to_string();
                                     
-                // alright lets fetch the original doc
                 if !design_info.is_invalid(){
-                    // alright lets replace the design info struct
                     let old_design_info = &mut live_file.original.design_info[design_info.index()];
                     new_design_info.span = old_design_info.span;
-                    //new_design_info.end = old_design_info.end;
-                    // replace parsed design info
                     *old_design_info = new_design_info;
                     
-                    //let start = live_file.original.tokens[old_design_info.start.token_index()].span;
-                    //let end = &mut live_file.original.tokens[old_design_info.end.token_index()].span;
                     let start = old_design_info.span.start;
                     let end = &mut old_design_info.span.end;
                     
@@ -231,7 +225,6 @@ impl LiveRegistry {
                         println!("ptr_to_design_info_range on multiple lines not supported");
                         return None
                     }
-                    // lets patch it up so subsequent edits match
                     let start_column = start.column;
                     let end_column = end.column - 1;
                     end.column = start.column + string.len() as u32 + 1;

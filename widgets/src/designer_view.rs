@@ -130,7 +130,37 @@ impl LiveHook for DesignerView {
         self.reapply = true;
     }
 }
-        
+
+impl DesignerView{
+    fn draw_container(&mut self, cx:&mut Cx2d, ptr: LivePtr){
+        let registry = cx.live_registry.clone();
+        let registry = registry.borrow();
+        let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
+            rect(info.dx, info.dy, info.dw, info.dh)
+        }
+        else{
+            rect(50.0,50.0,400.0,300.0)
+        };
+                                    
+        let container_ptr = self.container.unwrap();
+        let cd = self.containers.get_or_insert(cx, ptr, | cx | {
+            ContainerData{
+                component:WidgetRef::new_from_ptr(cx, Some(ptr)),
+                container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
+                rect
+            }
+        });
+                                    
+        if self.reapply{
+            self.reapply = false;
+            cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
+            cd.component.apply_from_ptr(cx, Some(ptr));
+        }
+        // ok so we're going to draw the container with the widget inside
+        cd.container.draw_all(cx, &mut Scope::with_props(cd))
+    }
+}
+
 impl Widget for DesignerView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
         
@@ -303,35 +333,18 @@ impl Widget for DesignerView {
             
             if let Some(selected) = &data.selected{
                 // so either we have a file, or a single component.
-                
-                if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
-                    
-                    // alright we have a pointer. lets fetch the design data nodes as the initial container position
-                    let registry = cx.live_registry.clone();
-                    let registry = registry.borrow();
-                    let rect = if let Some(info) =  registry.ptr_to_design_info(*ptr){
-                        rect(info.dx, info.dy, info.dw, info.dh)
+                match data.node_map.get(selected){
+                    Some(OutlineNode::Component{ptr,..})=>{
+                        self.draw_container(cx, *ptr);
                     }
-                    else{
-                        rect(50.0,50.0,400.0,300.0)
-                    };
-                    
-                    let container_ptr = self.container.unwrap();
-                    let cd = self.containers.get_or_insert(cx, *ptr, | cx | {
-                        ContainerData{
-                            component:WidgetRef::new_from_ptr(cx, Some(*ptr)),
-                            container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
-                            rect
+                    Some(OutlineNode::File{children,..})=>{
+                        for child in children{
+                            if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(child){
+                                self.draw_container(cx, *ptr);
+                            }
                         }
-                    });
-                    
-                    if self.reapply{
-                        self.reapply = false;
-                        cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
-                        cd.component.apply_from_ptr(cx, Some(*ptr));
                     }
-                    // ok so we're going to draw the container with the widget inside
-                    cd.container.draw_all(cx, &mut Scope::with_props(cd))
+                    _=>()
                 }
             }
             

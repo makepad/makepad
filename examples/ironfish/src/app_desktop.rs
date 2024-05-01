@@ -145,7 +145,7 @@ live_design! {
         padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1)}
     }
 
-    FishSubTitle = <View> {
+    FishSubTitle = <View dx:17.9 dy:36.0 dw:400.0 dh:300.0> {
         width: Fit,
         height: Fit,
         margin: {top: 1}
@@ -2119,7 +2119,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel> {
+    Play = <FishPanel dx:64.0 dy:110.4 dw:400.0 dh:144.8> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
