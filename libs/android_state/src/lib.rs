@@ -1,4 +1,4 @@
-//! The crate responsible for holding Android-specific context states.
+//! The crate responsible for holding Makepad's Android-specific context states.
 //!
 //! These two states are:
 //! 1. The JavaVM instance initialized by the JNI layer.
@@ -12,6 +12,19 @@
 //!     to obtain the private "set_activity" function, which ensures that
 //!     only the internal Makepad framework can set the activity instance.
 //!
+//! ## Usage
+//! You probably want to use the [`robius-android-env`] crate instead of
+//! using this crate directly.
+//!
+//! External users of this crate should only care about two functions:
+//! 1. [`get_java_vm()`]: returns a pointer to the JavaVM instance,
+//!    through which you can obtain the JNI environment.
+//! 2. [`get_activity()`]: returns a pointer to the current Makepad Activity instance.
+//!
+//! The other functions are intended for Makepad-internal use only,
+//! and will not be useful for external users.
+//!
+//! [`robius-android-env`]: https://github.com/project-robius/robius-android-env
 
 use std::sync::Mutex;
 
