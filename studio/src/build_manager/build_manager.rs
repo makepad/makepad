@@ -47,7 +47,7 @@ pub struct ActiveBuild {
     pub process: BuildProcess,
     pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
     pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
-    pub app_area: Area,
+    pub app_area: HashMap<usize, Area>,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
@@ -281,16 +281,20 @@ impl BuildManager {
         match event {
             Event::MouseDown(e) => {
                 // we should only send this if it was captured by one of our runviews
-                for build in self.active.builds.values(){
-                    if build.app_area.rect(cx).contains(e.abs){
-                        self.broadcast_to_stdin(HostToStdin::MouseDown(StdinMouseDown {
-                            time: e.time,
-                            x: e.abs.x,
-                            y: e.abs.y,
-                            button: e.button,
-                            modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
-                        }));
-                        break;
+                for (build_id,build) in &self.active.builds{
+                    for area in build.app_area.values(){
+                        if e.handled.get() == *area{
+                            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(
+                                HostToStdin::MouseDown(StdinMouseDown {
+                                    time: e.time,
+                                    x: e.abs.x,
+                                    y: e.abs.y,
+                                    button: e.button,
+                                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                                }).to_json()
+                            ));
+                            break;
+                        }
                     }
                 }
             }
