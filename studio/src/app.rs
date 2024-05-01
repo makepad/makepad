@@ -9,6 +9,7 @@ use crate::{
     run_view::*,
     makepad_platform::studio::JumpToFile,
     run_list::*,
+    log_list::*,
     makepad_code_editor::text::{Position},
     build_manager::{
         build_manager::{
@@ -107,7 +108,7 @@ impl MatchEvent for App{
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.view(id!(file_tree));
-        let log_list = self.ui.view(id!(log_list));
+        let log_list = self.ui.log_list(id!(log_list));
         let run_list = self.ui.view(id!(run_list));
         let profiler = self.ui.view(id!(profiler));
         match action.cast(){
@@ -140,6 +141,7 @@ impl MatchEvent for App{
             }
             AppAction::ClearLog=>{
                 self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
+                log_list.reset_scroll(cx);
                 log_list.redraw(cx);
                 profiler.redraw(cx);
             }
