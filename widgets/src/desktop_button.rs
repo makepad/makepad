@@ -27,8 +27,8 @@ impl Widget for DesktopButton{
         self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                cx.widget_action(uid, &scope.path, ButtonAction::Pressed);
+            Hit::FingerDown(fe) => {
+                cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
@@ -39,7 +39,7 @@ impl Widget for DesktopButton{
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
-                cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
+                cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                 if fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));
                 }
@@ -48,7 +48,7 @@ impl Widget for DesktopButton{
                 }
             }
             else {
-                cx.widget_action(uid, &scope.path, ButtonAction::Released);
+                cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
                 self.animator_play(cx, id!(hover.off));
             }
             _ => ()

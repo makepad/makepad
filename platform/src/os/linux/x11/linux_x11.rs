@@ -10,6 +10,7 @@ use {
         egl_sys,
         x11::xlib_event::*,
         x11::xlib_app::*,
+        x11::x11_sys,
         linux_media::CxLinuxMedia
     },
     crate::{
@@ -289,6 +290,13 @@ impl Cx {
                     }
                 },
                 CxOsOp::ShowClipboardActions(_) =>{
+                },
+                CxOsOp::CopyToClipboard(content) => {
+                    if let Some(window) = opengl_windows.get(0) {
+                        unsafe {
+                            xlib_app.copy_to_clipboard(&content, window.xlib_window.window.unwrap(), x11_sys::CurrentTime as u64)
+                        }
+                    }
                 }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     todo!()

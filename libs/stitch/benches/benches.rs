@@ -1,5 +1,5 @@
 use {
-    criterion::{criterion_group, criterion_main, Criterion},
+    criterion::{black_box, criterion_group, criterion_main, Criterion},
     wast::{parser, parser::ParseBuffer, Wat},
 };
 
@@ -13,6 +13,15 @@ fn new_stitch_store_and_instance(
     let module = Module::new(store.engine(), &bytes).unwrap();
     let instance = Linker::new().instantiate(&mut store, &module).unwrap();
     (store, instance)
+}
+
+fn new_wasm3_module(bytes: &[u8], f: impl FnOnce(wasm3::Module)) {
+    use wasm3::Environment;
+
+    let environment = Environment::new().unwrap();
+    let runtime = environment.create_runtime(1024 * 1024).unwrap();
+    let module = runtime.parse_and_load_module(bytes).unwrap();
+    f(module)
 }
 
 fn new_wasmi_store_and_instance(bytes: &[u8]) -> (wasmi::Store<()>, wasmi::Instance) {
@@ -29,86 +38,96 @@ fn new_wasmi_store_and_instance(bytes: &[u8]) -> (wasmi::Store<()>, wasmi::Insta
     (store, instance)
 }
 
-fn count_until(c: &mut Criterion) {
-    let buffer = ParseBuffer::new(include_str!("wat/count_until.wat")).unwrap();
-    let mut wat = parser::parse::<Wat>(&buffer).unwrap();
-    let bytes = wat.encode().unwrap();
-
-    let count = 1_048_576;
-    let mut group = c.benchmark_group("count_until");
-    group.bench_function("stitch", |b| {
-        use makepad_stitch::Val;
-
-        let (mut store, instance) = new_stitch_store_and_instance(&bytes);
-        let count_until = instance.exported_func("count_until").unwrap();
-
-        b.iter(|| {
-            count_until
-                .call(
-                    &mut store,
-                    &[Val::I64(count)],
-                    &mut [Val::I64(0)],
-                )
-                .unwrap();
-        })
-    });
-    group.bench_function("wasmi", |b| {
-        use wasmi::Value;
-
-        let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
-        let count_until = instance
-            .get_func(&store, "count_until")
-            .unwrap();
-
-        b.iter(|| {
-            count_until
-                .call(
-                    &mut store,
-                    &[Value::I64(count)],
-                    &mut [Value::I64(0)],
-                )
-                .unwrap();
-        })
-    });
-}
-
-fn fac(c: &mut Criterion) {
-    let buffer = ParseBuffer::new(include_str!("wat/fac.wat")).unwrap();
+fn fac_iter(c: &mut Criterion) {
+    let buffer = ParseBuffer::new(include_str!("wat/fac_iter.wat")).unwrap();
     let mut wat = parser::parse::<Wat>(&buffer).unwrap();
     let bytes = wat.encode().unwrap();
 
     let n = 32;
-    let mut group = c.benchmark_group("fac");
+    let mut group = c.benchmark_group("fac_iter");
     group.bench_function("stitch", |b| {
         let (mut store, instance) = new_stitch_store_and_instance(&bytes);
-        let fac = instance.exported_func("fac").unwrap();
+        let fac_iter = instance.exported_func("fac_iter").unwrap();
 
         b.iter(|| {
             use makepad_stitch::Val;
 
-            fac
-                .call(
-                    &mut store,
-                    &[Val::I64(n)],
-                    &mut [Val::I64(0)],
-                )
-                .unwrap();
+            fac_iter.call(
+                black_box(&mut store),
+                black_box(&[Val::I64(n)]),
+                black_box(&mut [Val::I64(0)]),
+            )
+            .unwrap();
         })
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fac_iter = module.find_function::<i64, i64>("fac_iter").unwrap();
+            b.iter(|| {
+                fac_iter.call(black_box(n as i64)).unwrap();
+            })
+        });
     });
     group.bench_function("wasmi", |b| {
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
-        let fac = instance.get_func(&store, "fac").unwrap();
+        let fac_iter = instance.get_func(&store, "fac_iter").unwrap();
 
         b.iter(|| {
             use wasmi::Value;
 
-            fac
-                .call(
-                    &mut store,
-                    &[Value::I64(n)],
-                    &mut [Value::I64(0)],
-                )
-                .unwrap();
+            fac_iter.call(
+                black_box(&mut store),
+                black_box(&[Value::I64(n)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
+        })
+    });
+}
+
+fn fac_rec(c: &mut Criterion) {
+    let buffer = ParseBuffer::new(include_str!("wat/fac_rec.wat")).unwrap();
+    let mut wat = parser::parse::<Wat>(&buffer).unwrap();
+    let bytes = wat.encode().unwrap();
+
+    let n = 32;
+    let mut group = c.benchmark_group("fac_rec");
+    group.bench_function("stitch", |b| {
+        let (mut store, instance) = new_stitch_store_and_instance(&bytes);
+        let fac_rec = instance.exported_func("fac_rec").unwrap();
+
+        b.iter(|| {
+            use makepad_stitch::Val;
+
+            fac_rec.call(
+                black_box(&mut store),
+                black_box(&[Val::I64(n)]),
+                black_box(&mut [Val::I64(0)]),
+            )
+            .unwrap();
+        })
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fac_rec = module.find_function::<i64, i64>("fac_rec").unwrap();
+            b.iter(|| {
+                fac_rec.call(black_box(n as i64)).unwrap();
+            })
+        });
+    });
+    group.bench_function("wasmi", |b| {
+        let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
+        let fac_rec = instance.get_func(&store, "fac_rec").unwrap();
+
+        b.iter(|| {
+            use wasmi::Value;
+
+            fac_rec.call(
+                black_box(&mut store),
+                black_box(&[Value::I64(n)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
         })
     });
 }
@@ -127,14 +146,23 @@ fn fib(c: &mut Criterion) {
         let fib = instance.exported_func("fib").unwrap();
 
         b.iter(|| {
-            fib
-                .call(
-                    &mut store,
-                    &[Val::I64(n as i64)],
-                    &mut [Val::I64(0)],
-                )
-                .unwrap();
+            let mut results = [Val::I64(0)];
+            fib.call(
+                black_box(&mut store),
+                black_box(&[Val::I64(n as i64)]),
+                black_box(&mut results),
+            )
+            .unwrap();
+            assert_eq!(results[0].to_i64().unwrap(), 2178309);
         })
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fib = module.find_function::<i64, i64>("fib").unwrap();
+            b.iter(|| {
+                fib.call(black_box(n as i64)).unwrap();
+            })
+        });
     });
     group.bench_function("wasmi", |b| {
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
@@ -143,81 +171,109 @@ fn fib(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fib
-                .call(
-                    &mut store,
-                    &[Value::I64(n as i64)],
-                    &mut [Value::I64(0)],
-                )
-                .unwrap();
+            fib.call(
+                black_box(&mut store),
+                black_box(&[Value::I64(n as i64)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
         })
     });
 }
 
-fn memory_fill(c: &mut Criterion) {
-    let buffer = ParseBuffer::new(include_str!("wat/memory_fill.wat")).unwrap();
+fn fill(c: &mut Criterion) {
+    let buffer = ParseBuffer::new(include_str!("wat/fill.wat")).unwrap();
     let mut wat = parser::parse::<Wat>(&buffer).unwrap();
     let bytes = wat.encode().unwrap();
 
+    let idx = 0;
     let val = 42;
     let count = 1_048_576;
-    let mut group = c.benchmark_group("fib");
+    let mut group = c.benchmark_group("fill");
     group.bench_function("stitch", |b| {
+        use makepad_stitch::Val;
+
         let (mut store, instance) = new_stitch_store_and_instance(&bytes);
-        let memory_fill = instance.exported_func("memory_fill").unwrap();
+        let fill = instance.exported_func("fill").unwrap();
 
         b.iter(|| {
-            memory_fill
-                .call(
-                    &mut store,
-                    &[makepad_stitch::Val::I32(val as i32), makepad_stitch::Val::I32(count as i32)],
-                    &mut [],
+            fill.call(
+                black_box(&mut store),
+                black_box(&[
+                    Val::I32(idx as i32),
+                    Val::I32(val as i32),
+                    Val::I32(count as i32),
+                ]),
+                black_box(&mut []),
+            )
+            .unwrap();
+        });
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let fill = module.find_function::<(i32, i32, i32), ()>("fill").unwrap();
+            b.iter(|| {
+                fill.call(
+                    black_box(idx as i32),
+                    black_box(val as i32),
+                    black_box(count as i32),
                 )
-                .unwrap();
+            })
         });
     });
     group.bench_function("wasmi", |b| {
+        use wasmi::Value;
+
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
-        let memory_fill = instance.get_func(&store, "memory_fill").unwrap();
+        let fill = instance.get_func(&store, "fill").unwrap();
 
         b.iter(|| {
-            memory_fill
-                .call(
-                    &mut store,
-                    &[wasmi::Value::I32(val as i32), wasmi::Value::I32(count as i32)],
-                    &mut [],
-                )
-                .unwrap();
+            fill.call(
+                black_box(&mut store),
+                black_box(&[
+                    Value::I32(idx as i32),
+                    Value::I32(val as i32),
+                    Value::I32(count as i32),
+                ]),
+                black_box(&mut []),
+            )
+            .unwrap();
         })
     });
 }
 
-fn memory_sum(c: &mut Criterion) {
-    let buffer = ParseBuffer::new(include_str!("wat/memory_sum.wat")).unwrap();
+fn sum(c: &mut Criterion) {
+    let buffer = ParseBuffer::new(include_str!("wat/sum.wat")).unwrap();
     let mut wat = parser::parse::<Wat>(&buffer).unwrap();
     let bytes = wat.encode().unwrap();
-    
-    let count = 1_048_576;    
-    let mut group = c.benchmark_group("fib");
+
+    let idx = 0;
+    let count = 1_048_576;
+    let mut group = c.benchmark_group("sum");
     group.bench_function("stitch", |b| {
         use makepad_stitch::Val;
 
         let (mut store, instance) = new_stitch_store_and_instance(&bytes);
         let memory = instance.exported_mem("memory").unwrap();
-        let memory_sum = instance.exported_func("memory_sum").unwrap();
+        let sum = instance.exported_func("sum").unwrap();
 
         for (idx, byte) in &mut memory.bytes_mut(&mut store)[..count].iter_mut().enumerate() {
             let val = (idx % 256) as u8;
             *byte = val;
         }
         b.iter(|| {
-            memory_sum
-                .call(
-                    &mut store,
-                    &[Val::I32(count as i32)],
-                    &mut [Val::I64(0)],
-                )
-                .unwrap();
+            sum.call(
+                black_box(&mut store),
+                black_box(&[Val::I32(idx as i32), Val::I32(count as i32)]),
+                black_box(&mut [Val::I64(0)]),
+            )
+            .unwrap();
+        });
+    });
+    group.bench_function("wasm3", |b| {
+        new_wasm3_module(&bytes, |module| {
+            let sum = module.find_function::<(i32, i32), i64>("sum").unwrap();
+            b.iter(|| sum.call(black_box(idx as i32), black_box(count as i32)))
         });
     });
     group.bench_function("wasmi", |b| {
@@ -225,23 +281,22 @@ fn memory_sum(c: &mut Criterion) {
 
         let (mut store, instance) = new_wasmi_store_and_instance(&bytes);
         let memory = instance.get_memory(&store, "memory").unwrap();
-        let memory_sum = instance.get_func(&store, "memory_sum").unwrap();
+        let sum = instance.get_func(&store, "sum").unwrap();
 
         for (idx, byte) in &mut memory.data_mut(&mut store)[..count].iter_mut().enumerate() {
             let val = (idx % 256) as u8;
             *byte = val;
         }
         b.iter(|| {
-            memory_sum
-                .call(
-                    &mut store,
-                    &[Value::I32(count as i32)],
-                    &mut [Value::I64(0)],
-                )
-                .unwrap();
+            sum.call(
+                black_box(&mut store),
+                black_box(&[Value::I32(idx as i32), Value::I32(count as i32)]),
+                black_box(&mut [Value::I64(0)]),
+            )
+            .unwrap();
         })
     });
 }
 
-criterion_group!(benches, count_until, fac, fib, memory_fill, memory_sum);
+criterion_group!(benches, fac_iter); // fac_ref, fib, fill, sum);
 criterion_main!(benches);

@@ -11,14 +11,14 @@ use {
             StdinMouseDown,
             StdinMouseUp,
             StdinMouseMove,
-            StdinScroll
+            StdinScroll,
+            StdinKeyModifiers
         },
         makepad_platform::studio::{AppToStudio,AppToStudioVec,EventSample, GPUSample, StudioToAppVec, StudioToApp},
         build_manager::{
             build_protocol::*,
             build_client::BuildClient
         },
-        run_view::*,
         app::AppAction,
         makepad_shell::*,
     },
@@ -47,6 +47,7 @@ pub struct ActiveBuild {
     pub process: BuildProcess,
     pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
     pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
+    pub app_area: Area,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
@@ -238,13 +239,13 @@ impl BuildManager {
         self.profile.clear();
     }
     
-    pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+    pub fn start_recompile_timer(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        for item_id in self.active.builds.keys() {
+        /*for item_id in self.active.builds.keys() {
             let view = ui.run_view(&[*item_id]);
             view.recompile_started(cx);
-        }
+        }*/
     }
     
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
@@ -279,12 +280,19 @@ impl BuildManager {
         
         match event {
             Event::MouseDown(e) => {
-                self.broadcast_to_stdin(HostToStdin::MouseDown(StdinMouseDown {
-                    time: e.time,
-                    x: e.abs.x,
-                    y: e.abs.y,
-                    button: e.button,
-                }));
+                // we should only send this if it was captured by one of our runviews
+                for build in self.active.builds.values(){
+                    if build.app_area.rect(cx).contains(e.abs){
+                        self.broadcast_to_stdin(HostToStdin::MouseDown(StdinMouseDown {
+                            time: e.time,
+                            x: e.abs.x,
+                            y: e.abs.y,
+                            button: e.button,
+                            modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                        }));
+                        break;
+                    }
+                }
             }
             Event::MouseMove(e) => {
                 // we send this one to what window exactly?
@@ -292,6 +300,7 @@ impl BuildManager {
                     time: e.time,
                     x: e.abs.x,
                     y: e.abs.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             Event::MouseUp(e) => {
@@ -300,6 +309,7 @@ impl BuildManager {
                     button: e.button,
                     x: e.abs.x,
                     y: e.abs.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             Event::Scroll(e) => {
@@ -309,7 +319,8 @@ impl BuildManager {
                     x: e.abs.x,
                     y: e.abs.y,
                     sx: e.scroll.x,
-                    sy: e.scroll.y
+                    sy: e.scroll.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
                 }));
             }
             _ => ()
@@ -381,6 +392,9 @@ impl BuildManager {
                             let values = self.profile.entry(build_id).or_default();
                             values.gpu.push(sample);
                             cx.action(AppAction::RedrawProfiler)
+                        }
+                        AppToStudio::JumpToFile(jt)=>{
+                            cx.action(AppAction::JumpTo(jt));
                         }
                     }
                 }

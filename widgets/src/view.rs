@@ -195,7 +195,6 @@ impl LiveHook for View {
         _nodes: &[LiveNode],
     ) {
         if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
-            //self.children.clear();
             self.draw_order.clear();
             self.find_cache.clear();
         }
@@ -217,18 +216,6 @@ impl LiveHook for View {
                     Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-        /*
-        if let Some(image_texture) = &mut self.image_texture {
-            if self.image_scale != 0.0 {
-                let texture_desc = image_texture.get_desc(cx);
-                self.walk = Walk::fixed_size(
-                    DVec2 {
-                        x: texture_desc.width.unwrap() as f64 * self.image_scale,
-                        y: texture_desc.height.unwrap() as f64 * self.image_scale
-                    }
-                );
-            }
-        */
     }
 
     fn apply_value_instance(
@@ -238,10 +225,6 @@ impl LiveHook for View {
         index: usize,
         nodes: &[LiveNode],
     ) -> usize { 
-        //! TODO
-        // NOTE FOR LIVE RELOAD
-        // the id is always unique
-        // Draw order is never cleared.
 
         let id = nodes[index].id;
         match apply.from {
@@ -253,7 +236,7 @@ impl LiveHook for View {
                 }
             }
             ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
+                if nodes[index].is_instance_prop() {
                     self.draw_order.push(id);
                     return self
                         .children

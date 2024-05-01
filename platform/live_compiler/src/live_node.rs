@@ -426,6 +426,17 @@ pub enum LiveUnOp {
     Neg,
 }
 
+impl LiveNode{
+        
+    pub fn is_instance_prop(&self) -> bool {
+        self.origin.has_prop_type(LivePropType::Instance)
+    }
+        
+    pub fn is_field_prop(&self,) -> bool {
+        self.origin.has_prop_type(LivePropType::Field)
+    }
+            
+}
 
 const INLINE_STRING_BUFFER_SIZE: usize = 22;
 #[derive(Clone, Debug, PartialEq)]

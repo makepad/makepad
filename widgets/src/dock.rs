@@ -576,7 +576,7 @@ impl Dock {
     }
     
     fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
-        self.needs_save = true;        
+        self.needs_save = true;
         for (splitter_id, item) in self.dock_items.iter_mut() {
             match *item {
                 DockItem::Splitter {a, b, ..} => {
@@ -616,7 +616,6 @@ impl Dock {
             }
         }
     }
-    
     
     fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name:String) {
         self.needs_save = true;
