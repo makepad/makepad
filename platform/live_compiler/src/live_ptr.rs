@@ -80,6 +80,18 @@ pub struct LivePtr {
 pub type LiveRef = Option<LivePtr>;
  
 impl LivePtr{
+    pub fn invalid()->Self{
+        Self{
+            file_id: LiveFileId::default(),
+            generation: LiveFileGeneration(u16::MAX),
+            index: 0
+        }
+    }
+    
+    pub fn is_invalid(&self)->bool{
+        self.generation.0 == u16::MAX
+    }
+    
     pub fn node_index(&self)->usize{
         self.index as usize
     }
