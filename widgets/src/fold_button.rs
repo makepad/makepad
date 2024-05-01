@@ -29,7 +29,7 @@ pub enum FoldButtonAction {
 impl FoldButton {
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.animator_toggle(cx, is_open, animate, id!(open.yes), id!(open.no))
+        self.animator_toggle(cx, is_open, animate, id!(open.on), id!(open.off))
     }
     
     pub fn draw_walk_fold_button(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -47,6 +47,33 @@ impl FoldButton {
             size: self.abs_size
         });
     }
+    
+    pub fn opening(&self, actions:&Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FoldButtonAction::Opening = item.cast() {
+                return true
+            }
+        }
+        false
+    }
+    
+    pub fn closing(&self, actions:&Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FoldButtonAction::Closing = item.cast() {
+                return true
+            }
+        }
+        false
+    }
+        
+    pub fn animating(&self, actions:&Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FoldButtonAction::Animating(v) = item.cast() {
+                return Some(v)
+            }
+        }
+        None
+    }
 }
 
 impl Widget for FoldButton {
@@ -63,12 +90,12 @@ impl Widget for FoldButton {
                 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                if self.animator_in_state(cx, id!(open.yes)) {
-                    self.animator_play(cx, id!(open.no));
+                if self.animator_in_state(cx, id!(open.on)) {
+                    self.animator_play(cx, id!(open.off));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Closing)
                 }
                 else {
-                    self.animator_play(cx, id!(open.yes));
+                    self.animator_play(cx, id!(open.on));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Opening)
                 }
                 self.animator_play(cx, id!(hover.on));

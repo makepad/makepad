@@ -155,7 +155,7 @@ live_design!{
                 fold = <FoldButton> {
                     height: 25, width: 15,
                     margin: { left: (THEME_SPACE_2) }
-                    animator: { open = { default: no } },
+                    animator: { open = { default: off } },
                     draw_bg: {
                         uniform size: 3.75;
                         instance open: 0.0
@@ -205,7 +205,7 @@ struct RunList{
 impl RunList{
     fn draw_run_list(&mut self, cx: &mut Cx2d, list:&mut FlatList, build_manager:&mut BuildManager){
         let mut counter = 0u32;
-        for binary in &build_manager.binaries {
+        for binary in &build_manager.binaries { 
             let is_even = counter & 1 == 0;
                             
             let item_id = LiveId::from_str(&binary.name);
@@ -337,6 +337,7 @@ impl BuildManager {
             active.builds.insert(item_id, ActiveBuild {
                 log_index: format!("[{}]", index),
                 process: process.clone(),
+                app_area: Default::default(),
                 swapchain: Default::default(),
                 last_swapchain_with_completed_draws: Default::default(),
                 aux_chan_host_endpoint: None,

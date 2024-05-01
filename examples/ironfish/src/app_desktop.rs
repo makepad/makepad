@@ -338,7 +338,8 @@ live_design! {
 
     FishButton = <Button> {
 
-        align: {x: 0.5, y: 0.5 padding: <SPACING_2> {}}
+        align: {x: 0.5, y: 0.5}
+        padding: <SPACING_2> {}
 
         draw_text: {
             text_style: <H2_TEXT_BOLD> {}
@@ -2062,13 +2063,13 @@ live_design! {
                         }
                         text: "Preset"
                     }
-
+                    
                     <Label> {
                         draw_text: {
                             text_style: <H2_TEXT_REGULAR> {font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        text: "Ironfish"
+                        text: "Ironfish "
                     }
                 }
                 <View> {

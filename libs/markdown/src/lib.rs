@@ -183,7 +183,6 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                         }
                         Kind::Quote(blocks)=>{
                             let last_is_space = cursor.last_char == ' ';
-                            cursor.next();
                             let mut spaces = 0;
                             while cursor.chars[0] == ' '{
                                 cursor.next();
@@ -204,6 +203,12 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                             }
                             else if !last_is_space{
                                 push_char(&mut nodes, &mut decoded, ' ');
+                            }
+                            else {
+                                for _ in 0..*blocks{
+                                    nodes.push(MarkdownNode::EndQuote);
+                                }
+                                state = State::Root{spaces};
                             }
                         }
                         Kind::Normal=>{
@@ -337,7 +342,24 @@ pub fn parse_markdown(body:&str)->MarkdownDoc{
                 } 
                                 
                 ['`','`','`'] =>{ // big code block
-                    nodes.push(MarkdownNode::EndHead);
+                    match kind{
+                        Kind::Head => {
+                            nodes.push(MarkdownNode::EndHead);
+                        }
+                        Kind::Quote(blocks) => {
+                            for _ in 0..*blocks{
+                                nodes.push(MarkdownNode::EndQuote);
+                            }
+                        }
+                        Kind::Normal => {
+                            nodes.push(MarkdownNode::EndNormal)
+                        }
+                        Kind::List(depth) => {
+                            for _ in 0..*depth{
+                                nodes.push(MarkdownNode::EndListItem);
+                            }
+                        }
+                    }
                     state = State::Root{spaces:0};
                 }
                 ['`',_,_] =>{ // inline code block
