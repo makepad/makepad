@@ -298,7 +298,7 @@ impl RunView {
         self.draw_app.draw_abs(cx, rect);
         // lets store the area 
         if let Some(ab) = manager.active.builds.get_mut(&run_view_id){
-            ab.app_area = self.draw_app.area();
+            ab.app_area.insert(self.window_id, self.draw_app.area());
         }
         
     }
