@@ -39,7 +39,8 @@ pub enum AppToStudio{
     LogItem(StudioLogItem),
     EventSample(EventSample),
     GPUSample(GPUSample),
-    JumpToFile(JumpToFile)
+    JumpToFile(JumpToFile),
+    FocusDesign
 }
 
 #[derive(SerBin, DeBin)]

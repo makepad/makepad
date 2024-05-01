@@ -79,6 +79,7 @@ pub enum AppAction{
     RedrawLog,
     RedrawProfiler,
     RedrawFile(LiveId),
+    FocusDesign(LiveId),
     StartRecompile,
     ReloadFileTree,
     RecompileStarted,
@@ -154,6 +155,25 @@ impl MatchEvent for App{
             AppAction::StartRecompile=>{
                 self.data.build_manager.start_recompile(cx);
             }
+            AppAction::FocusDesign(build_id)=>{
+                let mut id = None;
+                if let Some(mut dock) = dock.borrow_mut() {
+                    for (tab_id, (_, item)) in dock.items().iter() {
+                        if let Some(run_view) = item.as_run_view().borrow_mut() {
+                            if run_view.build_id == build_id {
+                                if let WindowKindId::Design = run_view.kind_id{
+                                    // lets focus this tab
+                                    id = Some(*tab_id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(id) = id{
+                    dock.select_tab(cx, id);
+                }
+            }
             AppAction::RecompileStarted=>{
                 if let Some(mut dock) = dock.borrow_mut() {
                     for (_id, (_, item)) in dock.items().iter() {
@@ -192,6 +212,7 @@ impl MatchEvent for App{
                             if let Some(mut item) = item.as_run_view().borrow_mut(){
                                 item.window_id = window_id;
                                 item.build_id = build_id;
+                                item.kind_id = WindowKindId::from_usize(kind_id);
                             }
                             
                             dock.redraw(cx);

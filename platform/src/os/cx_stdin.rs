@@ -481,6 +481,24 @@ pub struct PresentableDraw {
     pub height: u32,
 }
 
+#[repr(usize)]
+pub enum WindowKindId{
+    Main = 0,
+    Design = 1,
+    Outline = 2
+}
+
+impl WindowKindId{
+    pub fn from_usize(d:usize)->Self{
+        match d{
+            0=>Self::Main,
+            1=>Self::Design,
+            2=>Self::Outline,
+            _=>panic!()
+        }
+    }
+}
+
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
     CreateWindow{window_id: usize, kind_id:usize},

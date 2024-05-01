@@ -393,6 +393,9 @@ impl BuildManager {
                             values.gpu.push(sample);
                             cx.action(AppAction::RedrawProfiler)
                         }
+                        AppToStudio::FocusDesign=>{
+                            cx.action(AppAction::FocusDesign(build_id))
+                        }
                         AppToStudio::JumpToFile(jt)=>{
                             cx.action(AppAction::JumpTo(jt));
                         }
