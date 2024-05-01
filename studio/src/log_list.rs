@@ -8,7 +8,6 @@ use {
         makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
-        makepad_code_editor::text::{Position},
     },
     std::{
         env,

@@ -19,10 +19,8 @@ use {
             build_protocol::*,
             build_client::BuildClient
         },
-        run_view::*,
         app::AppAction,
         makepad_shell::*,
-        makepad_code_editor::text::{Position},
     },
     makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
@@ -241,7 +239,7 @@ impl BuildManager {
         self.profile.clear();
     }
     
-    pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+    pub fn start_recompile_timer(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
         /*for item_id in self.active.builds.keys() {
