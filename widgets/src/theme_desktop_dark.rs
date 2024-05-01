@@ -947,24 +947,16 @@ live_design! {
                 let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
 
                 let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
                 let bot_gradient = mix(
-                    mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
-
-                // the little drop shadow at the bottom
-                let shift_inward = self.border_radius * 2.5;
-                sdf.move_to(shift_inward, self.rect_size.y);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
-                sdf.stroke(
-                    mix(
-                        THEME_COLOR_BEVEL_SHADOW,
-                        THEME_COLOR_U_HIDDEN,
-                        self.pressed
-                    ), THEME_BEVELING
-                )
 
                 sdf.box(
                     1.,
@@ -977,7 +969,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVELING * 1.5
+                    THEME_BEVELING
                 )
 
                 return sdf.result
@@ -3089,11 +3081,6 @@ live_design! {
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
-
-                // some rim-light at the bottom
-                let shift_inward = self.radius * 1.75;
-                sdf.move_to(shift_inward, self.rect_size.y);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
 
                 sdf.box(
                     1.,
