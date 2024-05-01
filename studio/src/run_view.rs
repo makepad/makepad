@@ -71,6 +71,7 @@ pub struct RunView {
     #[rust] started: bool,
     #[rust] pub build_id: LiveId,
     #[rust] pub window_id: usize,
+    #[rust(WindowKindId::Main)] pub kind_id: WindowKindId,
 }
 
 impl LiveHook for RunView {
@@ -297,7 +298,7 @@ impl RunView {
         self.draw_app.draw_abs(cx, rect);
         // lets store the area 
         if let Some(ab) = manager.active.builds.get_mut(&run_view_id){
-            ab.app_area = self.draw_app.area();
+            ab.app_area.insert(self.window_id, self.draw_app.area());
         }
         
     }
