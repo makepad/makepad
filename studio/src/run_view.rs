@@ -169,6 +169,10 @@ impl RunView {
         self.redraw(cx);
     }
     
+    pub fn recompile_started(&mut self, cx: &mut Cx) {
+        self.animator_play(cx, id!(recompiling.on));
+    }
+    
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.draw_app.redraw(cx);
     }
@@ -330,16 +334,6 @@ impl Widget for RunView {
             _ => ()
         }
 
-    }
-    
-}
-
-impl RunViewRef {
-    
-    pub fn recompile_started(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, id!(recompiling.on));
-        }
     }
     
 }

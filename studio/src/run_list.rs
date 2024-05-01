@@ -155,7 +155,7 @@ live_design!{
                 fold = <FoldButton> {
                     height: 25, width: 15,
                     margin: { left: (THEME_SPACE_2) }
-                    animator: { open = { default: no } },
+                    animator: { open = { default: off } },
                     draw_bg: {
                         uniform size: 3.75;
                         instance open: 0.0

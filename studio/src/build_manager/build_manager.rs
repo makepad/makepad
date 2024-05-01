@@ -244,10 +244,10 @@ impl BuildManager {
     pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        for item_id in self.active.builds.keys() {
+        /*for item_id in self.active.builds.keys() {
             let view = ui.run_view(&[*item_id]);
             view.recompile_started(cx);
-        }
+        }*/
     }
     
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {

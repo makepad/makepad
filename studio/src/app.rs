@@ -158,6 +158,7 @@ impl MatchEvent for App{
                 if let Some(mut dock) = dock.borrow_mut() {
                     for (_id, (_, item)) in dock.items().iter() {
                         if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                            run_view.recompile_started(cx);
                             run_view.resend_framebuffer(cx);
                         }
                     }

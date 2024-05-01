@@ -338,7 +338,8 @@ live_design! {
 
     FishButton = <Button> {
 
-        align: {x: 0.5, y: 0.5 padding: <SPACING_2> {}}
+        align: {x: 0.5, y: 0.5}
+        padding: <SPACING_2> {}
 
         draw_text: {
             text_style: <H2_TEXT_BOLD> {}
