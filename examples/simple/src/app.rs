@@ -52,9 +52,10 @@ pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
  }
-
+ 
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
+        //println!("{}", std::mem::size_of::<LiveNode2>());
         /*makepad_draw::live_design(cx);
         makepad_widgets::base::live_design(cx);
         makepad_widgets::theme_desktop_dark::live_design(cx);

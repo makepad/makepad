@@ -19,10 +19,34 @@ use {
 };
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct LiveNode { // 40 bytes. Don't really see ways to compress
+pub struct LiveNode { // 48 bytes. Don't really see ways to compress
     pub origin: LiveNodeOrigin,
     pub id: LiveId,
     pub value: LiveValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveDesignInfo(u32);
+
+impl LiveDesignInfo{
+    pub fn from_usize(val: usize)->Self{
+        Self(val as u32)
+    }
+    
+    pub fn invalid()->Self{
+        Self(u32::MAX)
+    }
+    
+    pub fn is_invalid(&self)->bool{
+        self.0 == u32::MAX
+    }
+    
+    pub fn index(&self)->usize{
+        if self.is_invalid(){
+            panic!()
+        }
+        return self.0 as usize
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,9 +83,9 @@ pub enum LiveValue {
     TupleEnum (LiveId),
     NamedEnum (LiveId),
     Object,
-    Clone(LiveId),
-    Deref{live_type: LiveType, clone:LiveId},
-    Class {live_type: LiveType, class_parent: Option<LivePtr>},
+    Clone{clone:LiveId, design_info:LiveDesignInfo},
+    Deref{live_type: LiveType, clone:LiveId, design_info:LiveDesignInfo},
+    Class {live_type: LiveType, class_parent: LivePtr, design_info:LiveDesignInfo},
     Close,
     
     // shader code and other DSLs
@@ -655,15 +679,15 @@ impl LiveValue {
         }
     }*/
     
-    pub fn set_clone_name(&mut self, name: LiveId) {
-        if let Self::Clone(clone) = self {
-            *clone = name
+    pub fn set_clone_name(&mut self, set_name: LiveId) {
+        if let Self::Clone{clone,..} = self {
+            *clone = set_name
         }
     }
     
     pub fn get_clone_name(&self) -> LiveId {
         match self {
-            Self::Clone(clone) => *clone,
+            Self::Clone{clone,..} => *clone,
             _ => LiveId(0)
         }
     }

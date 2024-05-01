@@ -105,13 +105,13 @@ impl LiveHook for DesignerOutlineTree {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum OutlineTreeAction {
     None,
-    NamePressed(LiveId, KeyModifiers),
+    Selected(LiveId, KeyModifiers),
     EyeClicked(LiveId, bool),
     ShouldStartDrag(LiveId),
 }
 
 pub enum OutlineTreeNodeAction {
-    Pressed(KeyModifiers),
+    Selected(KeyModifiers),
     Opening,
     Closing,
     ShouldStartDrag
@@ -220,7 +220,7 @@ impl DesignerOutlineTreeNode {
             }
             Hit::FingerDown(e) => {
                 self.animator_play(cx, id!(select.on));
-                actions_out.push((node_id, OutlineTreeNodeAction::Pressed(e.modifiers)));
+                actions_out.push((node_id, OutlineTreeNodeAction::Selected(e.modifiers)));
                 /*
                 if self.is_folder {
                     if self.animator_in_state(cx, id!(open.on)) {
@@ -404,8 +404,8 @@ impl Widget for DesignerOutlineTree {
                 /*OutlineTreeNodeAction::EyeClicked(_checked) => {
                     
                 }*/
-                OutlineTreeNodeAction::Pressed(km) => {
-                    cx.widget_action(uid, &scope.path, OutlineTreeAction::NamePressed(node_id, km));
+                OutlineTreeNodeAction::Selected(km) => {
+                    cx.widget_action(uid, &scope.path, OutlineTreeAction::Selected(node_id, km));
                     cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
@@ -470,9 +470,9 @@ impl DesignerOutlineTreeRef{
         None
     }*/
     
-    pub fn name_pressed(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
+    pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let OutlineTreeAction::NamePressed(file_id, km) = item.cast() {
+            if let OutlineTreeAction::Selected(file_id, km) = item.cast() {
                 return Some((file_id,km))
             }
         }

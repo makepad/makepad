@@ -27,6 +27,7 @@ enum Edge{
     Right,
     Bottom,
     Top,
+    Body
 }
 
 impl ContainerData{
@@ -62,8 +63,20 @@ impl ContainerData{
             // bottom edge
             return Some(Edge::Bottom);
         }
+        else if self.rect.contains(cp){
+            // bottom edge
+            return Some(Edge::Body);
+        }
         None
     }
+}
+
+#[derive(Live, LiveHook, LiveRegister, Debug)]
+pub struct DesignInfo {
+    #[live] dx: f64,
+    #[live] dy: f64,
+    #[live] dw: f64,
+    #[live] dh: f64,
 }
 
 #[derive(Live, Widget, LiveHook)]
@@ -141,6 +154,7 @@ impl Widget for DesignerView {
                             cursor = Some(match edge{
                                 Edge::Left|Edge::Right=>MouseCursor::EwResize,
                                 Edge::Top|Edge::Bottom=>MouseCursor::NsResize,
+                                Edge::Body=>MouseCursor::Move
                             });
                             break;
                         }
@@ -219,11 +233,18 @@ impl Widget for DesignerView {
                              Edge::Bottom=>Rect{
                                  pos: rect.pos,
                                  size: dvec2(rect.size.x, rect.size.y + delta.y)
+                             },
+                             Edge::Body=>Rect{
+                                 pos: rect.pos + delta,
+                                 size: rect.size
                              }
                         };
                         if let Some(container) = self.containers.get_mut(ptr){
                             container.container.redraw(cx);
                             container.rect = r;
+                            // alright lets send over the rect to the editor
+                            // we need to find out the text position
+                            
                         }
                     }
                     FingerMove::DragBody{ptr:_}=>{
@@ -268,14 +289,28 @@ impl Widget for DesignerView {
             // lets draw the component container windows and components
             
             if let Some(selected) = &data.selected{
+                // so either we have a file, or a single component.
+                
                 if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
+                    
+                    // alright we have a pointer. lets fetch the design data nodes as the initial container position
+                    let registry = cx.live_registry.clone();
+                    let registry = registry.borrow();
+                    let rect = if let Some(design_info) =  registry.ptr_to_design_info(*ptr){
+                        // lets deserialize from design_info
+                        let info = DesignInfo::new_apply_over(cx, design_info);
+                        rect(info.dx, info.dy, info.dw, info.dh)
+                    }
+                    else{
+                        rect(50.0,50.0,400.0,300.0)
+                    };
                     
                     let container_ptr = self.container.unwrap();
                     let cd = self.containers.get_or_insert(cx, *ptr, | cx | {
                         ContainerData{
                             component:WidgetRef::new_from_ptr(cx, Some(*ptr)),
                             container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
-                            rect: rect(50.0,50.0,800.0,600.0)
+                            rect
                         }
                     });
                     
@@ -292,6 +327,7 @@ impl Widget for DesignerView {
             cx.end_pass_sized_turtle_no_clip();
             self.draw_list.end(cx);
             cx.end_pass(&self.pass);
+            self.containers.retain_visible()
         }
         
         self.draw_bg.draw_vars.set_texture(0, self.color_texture.as_ref().unwrap());
