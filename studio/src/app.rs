@@ -235,7 +235,7 @@ impl MatchEvent for App{
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
             FileSystemAction::RecompileNeeded => {
-                self.data.build_manager.start_recompile_timer(cx, &self.ui);
+                self.data.build_manager.start_recompile_timer(cx);
             }
             FileSystemAction::LiveReloadNeeded(live_file_change) => {
                 self.data.build_manager.live_reload_needed(live_file_change);
