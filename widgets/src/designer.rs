@@ -49,6 +49,7 @@ impl WidgetMatchEvent for Designer{
                             let tid = live_registry.token_id_to_token(*token_id).clone();
                             let span = tid.span.start;
                             let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+                            println!("JUMP TO FILE {:?}", file_name);
                             Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
                                 file_name,
                                 line: span.line,
