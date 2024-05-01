@@ -141,14 +141,21 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_float(&mut self) -> Result<f64, LiveError> {
+        let sign = if let LiveToken::Punct(live_id!(-)) = self.peek_token(){
+            self.skip_token();
+            -1.0
+        }
+        else{
+            1.0
+        };
         match self.peek_token() {
             LiveToken::Float(v) => {
                 self.skip_token();
-                Ok(v)
+                Ok(v*sign)
             }
             LiveToken::Int(v) => {
                 self.skip_token();
-                Ok(v as f64)
+                Ok(v as f64 * sign)
             }
             token => Err(self.error(format!("expected float, unexpected token `{}`", token), live_error_origin!())),
         }
@@ -465,14 +472,21 @@ impl<'a> LiveParser<'a> {
                 LiveToken::Ident(prop_id) => {
                     self.skip_token();
                     self.expect_token(LiveToken::Punct(live_id!(:))) ?;
+                    let sign = if let LiveToken::Punct(live_id!(-)) = self.peek_token(){
+                        self.skip_token();
+                        -1.0
+                    }
+                    else{
+                        1.0
+                    };
                     let val = match self.peek_token() {
                         LiveToken::Int(val) => {
                             self.skip_token();
-                            val as f64
+                            val as f64 * sign
                         },
                         LiveToken::Float(val) => {
                             self.skip_token();
-                            val
+                            val * sign
                         },
                         other => return Err(self.error(format!("Unexpected token {} in design_info", other), live_error_origin!()))
                     };
