@@ -11,6 +11,7 @@ use {
 pub struct LiveOriginal {
     pub nodes: Vec<LiveNode >,
     pub edit_info: Vec<LiveNode>,
+    pub design_info: Vec<LiveNode>,
     pub tokens: Vec<TokenWithSpan>,
 }
 
@@ -37,6 +38,7 @@ impl LiveOriginal {
         Self {
             nodes: Vec::new(),
             edit_info: Vec::new(),
+            design_info: Vec::new(),
             tokens: Vec::new(),
         }
     }

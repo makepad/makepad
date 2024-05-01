@@ -243,7 +243,7 @@ impl ShaderRegistry {
                         }
                     }
                 }
-                LiveValue::Clone(clone) => {
+                LiveValue::Clone{clone,..} => {
                     if ids.len() == 0 {
                         if clone == live_id!(struct) {
                             return LiveNodeFindResult::Struct(StructPtr(now_ptr));
@@ -371,7 +371,7 @@ impl ShaderRegistry {
         let (doc, struct_node) = live_registry.ptr_to_doc_node(struct_ptr.0);
         
         match struct_node.value {
-            LiveValue::Clone(clone) => {
+            LiveValue::Clone{clone,..} => {
                 if clone != live_id!(struct) {
                     panic!()
                 }

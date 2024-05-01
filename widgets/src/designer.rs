@@ -33,39 +33,46 @@ impl LiveHook for Designer {
 impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
-        if let Some((file_id,km)) = outline_tree.name_pressed(&actions) {
+        if let Some((file_id,km)) = outline_tree.selected(&actions) {
             // alright we have a folder clicked
             // lets get a file/line number out of it so we can open it in the code editor.
-            if km.control{
-                if let Some(node) = self.data.node_map.get(&file_id){
-                    match node{
-                        OutlineNode::File{file_id:_,..}=>{
-                            //let live_registry = cx.live_registry.borrow();
-                            //let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
-                        }
-                        OutlineNode::Component{token_id,..}=>{
+            
+            if let Some(node) = self.data.node_map.get(&file_id){
+                match node{
+                    OutlineNode::File{file_id,..}=>{
+                        let live_registry = cx.live_registry.borrow();
+                        let file_name = live_registry.file_id_to_file(*file_id).file_name.clone();
+                        if km.control{
+                            Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
+                                file_name,
+                                line: 0,
+                                column: 0
+                            }));
+                        }        
+                    }
+                    OutlineNode::Component{token_id,..}=>{
+                        if km.control{
                             let file_id = token_id.file_id().unwrap();
                             let live_registry = cx.live_registry.borrow();
                             let tid = live_registry.token_id_to_token(*token_id).clone();
                             let span = tid.span.start;
                             let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
-                            println!("JUMP TO FILE {:?}", file_name);
                             Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
                                 file_name,
                                 line: span.line,
                                 column: span.column
                             }));
                         }
-                        _=>()
+                        else if km.alt{
+                            Cx::send_studio_message(AppToStudio::FocusDesign);
+                        }
+                        else{
+                            self.data.selected = Some(file_id);
+                            self.ui.widget(id!(designer_view)).redraw(cx);
+                        }
                     }
+                    _=>()
                 }
-            }
-            else{
-                if km.alt{
-                    Cx::send_studio_message(AppToStudio::FocusDesign);
-                }
-                self.data.selected = Some(file_id);
-                self.ui.widget(id!(designer_view)).redraw(cx);
             }
         }
     }

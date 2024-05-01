@@ -232,7 +232,7 @@ impl<'a> LiveExpander<'a> {
                         }
                     }
                 },
-                LiveValue::Clone(clone) | LiveValue::Deref{clone,..}=> {
+                LiveValue::Clone{clone,design_info:design_in,..} | LiveValue::Deref{clone,design_info:design_in,..}=> {
                     if let Some(target) = self.live_registry.find_scope_target(*clone, &out_doc.nodes) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
@@ -264,9 +264,10 @@ impl<'a> LiveExpander<'a> {
                                     out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 }
                                 
-                                if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
+                                if let LiveValue::Class {class_parent,design_info,..} = &mut out_doc.nodes[out_index].value {
                                     //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: local_ptr as u32, generation});
+                                    *class_parent = LivePtr {file_id: self.in_file_id, index: local_ptr as u32, generation};
+                                    *design_info = *design_in;
                                 }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
@@ -278,13 +279,14 @@ impl<'a> LiveExpander<'a> {
                                 
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 
-                                if let LiveValue::Class {class_parent,live_type, ..} = &mut out_doc.nodes[out_index].value {
+                                if let LiveValue::Class {class_parent,live_type,design_info, ..} = &mut out_doc.nodes[out_index].value {
                                     if let LiveValue::Deref{live_type:new_live_type,..} = in_value{
                                         *live_type = *new_live_type;
                                     }
                                     else{
-                                        *class_parent = Some(live_ptr);
+                                        *class_parent = live_ptr;
                                     }
+                                    *design_info = *design_in;
                                     //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
                             }
@@ -304,7 +306,7 @@ impl<'a> LiveExpander<'a> {
                     
                     // store the class context
                     if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                        *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                        *class_parent = LivePtr {file_id: self.in_file_id, index: out_index as u32, generation};
                     }
                     
                     let mut insert_point = out_index + 1;
