@@ -71,6 +71,7 @@ pub struct RunView {
     #[rust] started: bool,
     #[rust] pub build_id: LiveId,
     #[rust] pub window_id: usize,
+    #[rust(WindowKindId::Main)] pub kind_id: WindowKindId,
 }
 
 impl LiveHook for RunView {
