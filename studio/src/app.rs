@@ -9,6 +9,7 @@ use crate::{
     run_view::*,
     makepad_platform::studio::JumpToFile,
     run_list::*,
+    log_list::*,
     makepad_code_editor::text::{Position},
     build_manager::{
         build_manager::{
@@ -79,6 +80,7 @@ pub enum AppAction{
     RedrawLog,
     RedrawProfiler,
     RedrawFile(LiveId),
+    FocusDesign(LiveId),
     StartRecompile,
     ReloadFileTree,
     RecompileStarted,
@@ -106,7 +108,7 @@ impl MatchEvent for App{
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.view(id!(file_tree));
-        let log_list = self.ui.view(id!(log_list));
+        let log_list = self.ui.log_list(id!(log_list));
         let run_list = self.ui.view(id!(run_list));
         let profiler = self.ui.view(id!(profiler));
         match action.cast(){
@@ -139,6 +141,7 @@ impl MatchEvent for App{
             }
             AppAction::ClearLog=>{
                 self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
+                log_list.reset_scroll(cx);
                 log_list.redraw(cx);
                 profiler.redraw(cx);
             }
@@ -153,6 +156,25 @@ impl MatchEvent for App{
             }
             AppAction::StartRecompile=>{
                 self.data.build_manager.start_recompile(cx);
+            }
+            AppAction::FocusDesign(build_id)=>{
+                let mut id = None;
+                if let Some(mut dock) = dock.borrow_mut() {
+                    for (tab_id, (_, item)) in dock.items().iter() {
+                        if let Some(run_view) = item.as_run_view().borrow_mut() {
+                            if run_view.build_id == build_id {
+                                if let WindowKindId::Design = run_view.kind_id{
+                                    // lets focus this tab
+                                    id = Some(*tab_id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(id) = id{
+                    dock.select_tab(cx, id);
+                }
             }
             AppAction::RecompileStarted=>{
                 if let Some(mut dock) = dock.borrow_mut() {
@@ -192,6 +214,7 @@ impl MatchEvent for App{
                             if let Some(mut item) = item.as_run_view().borrow_mut(){
                                 item.window_id = window_id;
                                 item.build_id = build_id;
+                                item.kind_id = WindowKindId::from_usize(kind_id);
                             }
                             
                             dock.redraw(cx);
