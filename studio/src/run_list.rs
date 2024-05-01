@@ -59,7 +59,7 @@ live_design!{
                         // PAUSE
                         sdf.box(
                             sz * 0.5,
-                            sz * 1.0,
+                            sz * 1.25,
                             sz * 0.9,
                             sz * 3.0,
                             1.0
@@ -67,7 +67,7 @@ live_design!{
 
                         sdf.box(
                             sz * 1.75,
-                            sz * 1.0,
+                            sz * 1.25,
                             sz * 0.9,
                             sz * 3.0,
                             1.0
