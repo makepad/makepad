@@ -179,6 +179,27 @@ impl LiveRegistry {
         (&doc.expanded.nodes, live_ptr.index as usize)
     }
     
+    pub fn ptr_to_design_info(&self, live_ptr: LivePtr) -> Option<&[LiveNode]> {
+        let doc = &self.live_files[live_ptr.file_id.to_index()];
+        if doc.generation != live_ptr.generation {
+            panic!("ptr_to_nodes_index generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
+        }
+        match &doc.expanded.nodes[live_ptr.index as usize].value{
+            LiveValue::Clone{design_info,..}|
+            LiveValue::Deref{design_info,..}|
+            LiveValue::Class {design_info,..}=>{
+                // alright lets fetch the original doc
+                if !design_info.is_invalid(){
+                    // alright we parse the nodes
+                    let nodes = &doc.original.design_info[design_info.index()..];
+                    return Some(nodes)
+                }
+            }
+            _=>()
+        }
+        None
+    }
+    
     pub fn path_str_to_file_id(&self, path: &str) -> Option<LiveFileId> {
         for (index, file) in self.live_files.iter().enumerate() {
             if file.file_name == path {
@@ -624,7 +645,6 @@ impl LiveRegistry {
             Err(msg) => return Err(msg.into_live_file_error(file_name)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
-        
         original.tokens = tokens;
         
         // update our live type info

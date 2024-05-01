@@ -351,7 +351,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::Id(_) => {
                     return Err("Cannot serialise LiveValue::Id".into())
                 },
-                LiveValue::Clone(_) => {
+                LiveValue::Clone{..} => {
                     return Err("Cannot serialise LiveValue::Clone".into())
                 }, // subnodes including this one
                 LiveValue::ExprBinOp(_) => {

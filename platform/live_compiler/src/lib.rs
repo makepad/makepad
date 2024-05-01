@@ -42,6 +42,7 @@ pub use {
         live_registry::{
             LiveFileChange,
             LiveRegistry,
+            LiveScopeTarget,
             //LiveDocNodes,
         },
         live_ptr::{
@@ -69,6 +70,7 @@ pub use {
             LiveNodeReader,
         },
         live_node::{
+            LiveImport,
             LiveProp,
             LiveIdAsProp,
             LiveEditInfo,

@@ -79,7 +79,7 @@ impl DesignerData{
                                                             
                             // lets emit a class at our level
                             let name = nodes[index].id;
-                            let class = live_registry.ptr_to_node(class_parent.unwrap()).id;
+                            let class = live_registry.ptr_to_node(*class_parent).id;
                             let ptr = base_ptr.with_index(index);
                             let prop_type =  nodes[index].origin.prop_type();
                             let token_id = nodes[index].origin.token_id();
