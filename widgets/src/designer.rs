@@ -36,7 +36,7 @@ impl WidgetMatchEvent for Designer{
         if let Some((file_id,km)) = outline_tree.name_pressed(&actions) {
             // alright we have a folder clicked
             // lets get a file/line number out of it so we can open it in the code editor.
-            if km.shift{
+            if km.control{
                 if let Some(node) = self.data.node_map.get(&file_id){
                     match node{
                         OutlineNode::File{file_id:_,..}=>{
@@ -60,6 +60,9 @@ impl WidgetMatchEvent for Designer{
                 }
             }
             else{
+                if km.alt{
+                    Cx::send_studio_message(AppToStudio::FocusDesign);
+                }
                 self.data.selected = Some(file_id);
                 self.ui.widget(id!(designer_view)).redraw(cx);
             }
