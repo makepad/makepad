@@ -4,11 +4,8 @@ use {
     },
     crate::{
         makepad_derive_widget::*,
-        check_box::*,
         makepad_draw::*,
         widget::*,
-        icon::*,
-        button::*,
         fold_button::*,
         scroll_shadow::DrawScrollShadow,
         scroll_bars::ScrollBars
@@ -32,10 +29,9 @@ struct DrawBgQuad {
 pub struct DesignerOutlineTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] button_open: FoldButton,
-    #[live] icon: Icon,
-    #[live] button_name: Button,
-    #[live] check_eye: CheckBox,
-    
+    #[live] draw_icon: DrawIcon,
+    #[live] draw_name: DrawText,
+    #[live] icon_walk: Walk,
     #[live] button_open_width: f64,
     #[live] draw_eye: bool,
     #[layout] layout: Layout,
@@ -47,7 +43,9 @@ pub struct DesignerOutlineTreeNode {
     #[live] indent_shift: f64,
     
     #[live] selected: f64,
-    #[live] opened: f64
+    #[live] opened: f64,
+    #[live] hover: f64,
+    #[live] focussed: f64
 }
 
 #[derive(Live, Widget)]
@@ -113,8 +111,7 @@ pub enum OutlineTreeAction {
 }
 
 pub enum OutlineTreeNodeAction {
-    NamePressed(KeyModifiers),
-    EyeClicked(bool),
+    Pressed(KeyModifiers),
     Opening,
     Closing,
     ShouldStartDrag
@@ -133,16 +130,17 @@ impl DesignerOutlineTreeNode {
         else{
             cx.walk_turtle(Walk::fixed(self.button_open_width,0.0));
         }
-        
-        self.icon.draw_all(cx, &mut Scope::empty());
-        
-        self.button_name.draw_button(cx, name);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+                
+        //self.icon.draw_all(cx, &mut Scope::empty());
+        //self.button_name.draw_button(cx, name);
         
         // fill.
-        cx.defer_walk(Walk::size(Size::Fill, Size::Fixed(0.0)));
-        if self.draw_eye{
-            self.check_eye.draw_all(cx, &mut Scope::empty());
-        }
+        //cx.defer_walk(Walk::size(Size::Fill, Size::Fixed(0.0)));
+       // if self.draw_eye{
+       //     self.check_eye.draw_all(cx, &mut Scope::empty());
+       // }
         // lets draw the label
         
         //self.draw_icon.draw_walk(cx, self.icon_walk);
@@ -158,11 +156,11 @@ impl DesignerOutlineTreeNode {
             margin: Margin::default()
         }
     }
-    /*
+    
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
     }
-    */
+    
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
     }
@@ -187,13 +185,11 @@ impl DesignerOutlineTreeNode {
     ) {
         let actions = cx.capture_actions(|cx|{
             self.button_open.handle_event(cx, event, scope);
-            self.button_name.handle_event(cx, event, scope);
-            self.check_eye.handle_event(cx, event, scope);
         });
         
-        if let Some(km) = self.button_name.pressed_modifiers(&actions){
+        /*if let Some(km) = self.button_name.pressed_modifiers(&actions){
             actions_out.push((node_id, OutlineTreeNodeAction::NamePressed(km)));
-        }
+        }*/
         
         if let Some(anim) = self.button_open.animating(&actions){
             self.opened = anim;
@@ -205,25 +201,26 @@ impl DesignerOutlineTreeNode {
         if self.button_open.closing(&actions){
             actions_out.push((node_id, OutlineTreeNodeAction::Closing));
         }
-                
+        
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-               // self.animator_play(cx, id!(hover.on));
+               self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-               // self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
                     actions_out.push((node_id, OutlineTreeNodeAction::ShouldStartDrag));
                 }
             }
-            Hit::FingerDown(_) => {
-                //self.animator_play(cx, id!(select.on));
+            Hit::FingerDown(e) => {
+                self.animator_play(cx, id!(select.on));
+                actions_out.push((node_id, OutlineTreeNodeAction::Pressed(e.modifiers)));
                 /*
                 if self.is_folder {
                     if self.animator_in_state(cx, id!(open.on)) {
@@ -404,18 +401,18 @@ impl Widget for DesignerOutlineTree {
                 OutlineTreeNodeAction::Closing => {
                     self.open_nodes.remove(&node_id);
                 }
-                OutlineTreeNodeAction::EyeClicked(_checked) => {
+                /*OutlineTreeNodeAction::EyeClicked(_checked) => {
                     
-                }
-                OutlineTreeNodeAction::NamePressed(km) => {
+                }*/
+                OutlineTreeNodeAction::Pressed(km) => {
                     cx.widget_action(uid, &scope.path, OutlineTreeAction::NamePressed(node_id, km));
-                    /*cx.set_key_focus(self.scroll_bars.area());
+                    cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
                             self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
                         }
                     }
-                    self.selected_node_id = Some(node_id);*/
+                    self.selected_node_id = Some(node_id);
                     //cx.widget_action(uid, &scope.path, OutlineTreeAction::LinkClicked(node_id));
                 }
                 OutlineTreeNodeAction::ShouldStartDrag => {
