@@ -4,6 +4,7 @@ use {
         span::{TextPos, TextSpan},
         live_token::{TokenWithSpan,LiveTokenId},
         live_node::LiveNode,
+        live_node::LiveDesignInfo,
     }
 };
 
@@ -11,7 +12,7 @@ use {
 pub struct LiveOriginal {
     pub nodes: Vec<LiveNode >,
     pub edit_info: Vec<LiveNode>,
-    pub design_info: Vec<LiveNode>,
+    pub design_info: Vec<LiveDesignInfo>,
     pub tokens: Vec<TokenWithSpan>,
 }
 

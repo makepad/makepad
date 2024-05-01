@@ -72,14 +72,6 @@ impl ContainerData{
     }
 }
 
-#[derive(Live, LiveHook, LiveRegister, Debug)]
-pub struct DesignInfo {
-    #[live] dx: f64,
-    #[live] dy: f64,
-    #[live] dw: f64,
-    #[live] dh: f64,
-}
-
 #[derive(Live, Widget, LiveHook)]
 pub struct DesignerContainer {
     #[deref] view: View
@@ -247,8 +239,16 @@ impl Widget for DesignerView {
                             // we need to find out the text position
                             let registry = cx.live_registry.clone();
                             let mut registry = registry.borrow_mut();
-                            let replace = format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", r.pos.x, r.pos.y, r.size.x, r.size.y);
-                            if let Some((file_name, range)) =  registry.patch_design_info_range(*ptr, replace.len() as u32){
+                            //let replace = format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", r.pos.x, r.pos.y, r.size.x, r.size.y);
+                            let design_info = LiveDesignInfo{
+                                span: Default::default(),
+                                dx: r.pos.x,
+                                dy: r.pos.y,
+                                dw: r.size.x,
+                                dh: r.size.y,
+                            };
+                            if let Some((replace, file_name, range)) =  registry.patch_design_info(*ptr, design_info){
+                                
                                Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
                                     file_name: file_name.into(),
                                     line: range.line,
@@ -258,18 +258,6 @@ impl Widget for DesignerView {
                                 }));
                                 //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
                             }
-                            else{ // we dont yet have design info, so we have to insert it
-                                // alright lets convert our ptr to 
-                                // and wait for the host to update
-                                /*Cx::send_studio_message(AppToStudio::EditFile(EditFile{
-                                    file_name: file_name.into(),
-                                    line: range.line,
-                                    column_start: range.start_column,
-                                    column_end: range.end_column,
-                                    replace: format!(" {}", replace);
-                                }));*/
-                            }
-                            
                         }
                     }
                     FingerMove::DragBody{ptr:_}=>{
@@ -321,9 +309,7 @@ impl Widget for DesignerView {
                     // alright we have a pointer. lets fetch the design data nodes as the initial container position
                     let registry = cx.live_registry.clone();
                     let registry = registry.borrow();
-                    let rect = if let Some(design_info) =  registry.ptr_to_design_info(*ptr){
-                        // lets deserialize from design_info
-                        let info = DesignInfo::new_apply_over(cx, design_info);
+                    let rect = if let Some(info) =  registry.ptr_to_design_info(*ptr){
                         rect(info.dx, info.dy, info.dw, info.dh)
                     }
                     else{
