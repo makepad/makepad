@@ -46,7 +46,7 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni-sys = { path = "../libs/jni-sys", version = "0.4.0" }
-makepad-android-state = { path = "./android_state", version = "0.4.0" }
+makepad-android-state = { path = "../libs/android_state", version = "0.1.0" }
 
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../libs/futures_legacy"
