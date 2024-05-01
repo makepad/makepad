@@ -21,12 +21,17 @@ use {
     } 
 };
 
+#[derive(Default)]
+pub(crate) struct StdinWindow{
+    swapchain: Option<Swapchain<Texture>>,
+    present_index: usize
+}
+
 impl Cx {
     
     pub (crate) fn stdin_handle_repaint(
         &mut self,
-        swapchain: Option<&Swapchain<Texture>>,
-        present_index: &mut usize,
+        windows: &mut Vec<StdinWindow>,
     ) {
         self.os.opengl_cx.as_ref().unwrap().make_current();
         let mut passes_todo = Vec::new();
@@ -36,9 +41,10 @@ impl Cx {
             match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
-                    if let Some(swapchain) = swapchain {
-                        let current_image = &swapchain.presentable_images[*present_index];
-                        *present_index = (*present_index + 1) % swapchain.presentable_images.len();
+                    let window = &mut windows[window_id.id()];
+                    if let Some(swapchain) = &window.swapchain {
+                        let current_image = &swapchain.presentable_images[window.present_index];
+                        window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
 
                         // render to swapchain
                         self.draw_pass_to_texture(pass_id, &current_image.image);
@@ -105,10 +111,9 @@ impl Cx {
         }
 
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
-
-        let mut swapchain = None;
-        let mut present_index = 0;
-
+        
+        let mut stdin_windows:Vec<StdinWindow> = Vec::new();
+ 
         self.call_event_handler(&Event::Startup);
 
         while let Ok(msg) = json_msg_rx.recv(){
@@ -191,16 +196,30 @@ impl Cx {
                         }
                         new_texture
                     });
-                    let swapchain = swapchain.insert(new_swapchain);
-
+                    let window_id = new_swapchain.window_id;
+                    let stdin_window = &mut stdin_windows[window_id];
+                    stdin_window.swapchain = Some(new_swapchain);
+                    
                     // reset present_index
-                    present_index = 0;
+                    stdin_window.present_index = 0;
+                                        
+                    // lets set up our render pass target
+                    let window = &mut self.windows[CxWindowPool::from_usize(window_id)];
+                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                    if let Some(swapchain) = &stdin_window.swapchain {
+                        pass.color_textures = vec![CxPassColorTexture {
+                            clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                            texture: swapchain.presentable_images[stdin_window.present_index].image.clone(),
+                        }];
+                    }
+                    
 
                     self.redraw_all();
-                    self.stdin_handle_platform_ops(Some(swapchain), present_index);
+                    self.stdin_handle_platform_ops(&mut stdin_windows);
                 }
 
-                HostToStdin::Tick  => if swapchain.is_some() {
+                HostToStdin::Tick  =>  {
 
                     // poll the service for updates
                     // check signals
@@ -218,7 +237,7 @@ impl Cx {
                     self.handle_networking_events();
                     
                     // we should poll our runloop
-                    self.stdin_handle_platform_ops(swapchain.as_ref(), present_index);
+                    self.stdin_handle_platform_ops(&mut stdin_windows);
 
                     // alright a tick.
                     // we should now run all the stuff.
@@ -231,7 +250,7 @@ impl Cx {
                         self.opengl_compile_shaders();
                     }
 
-                    self.stdin_handle_repaint(swapchain.as_ref(), &mut present_index);
+                    self.stdin_handle_repaint(&mut stdin_windows);
                 }
             }
         }
@@ -240,26 +259,19 @@ impl Cx {
     
     fn stdin_handle_platform_ops(
         &mut self,
-        swapchain: Option<&Swapchain<Texture>>,
-        present_index: usize,
+        stdin_windows: &mut Vec<StdinWindow>,
     ) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
-                    if window_id != CxWindowPool::id_zero() {
-                        panic!("ONLY ONE WINDOW SUPPORTED");
+                    while window_id.id() >= stdin_windows.len(){
+                        stdin_windows.push(StdinWindow::default());
                     }
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
+                    //let stdin_window = &mut stdin_windows[window_id.id()];
+                    let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    // lets set up our render pass target
-                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                    if let Some(swapchain) = swapchain {
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
-                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
-                            texture: swapchain.presentable_images[present_index].image.clone(),
-                        }];
-                    }
+                    
+                    let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
