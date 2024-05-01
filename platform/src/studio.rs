@@ -1,6 +1,6 @@
 use crate::makepad_micro_serde::*;
 use crate::log::LogLevel;
-
+pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
 // communication enums for studio
 
 #[derive(SerBin, DeBin, Debug)]
