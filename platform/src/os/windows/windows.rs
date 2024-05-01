@@ -15,6 +15,7 @@ use {
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
+                win32_window::Win32Window,
             },
             cx_native::EventFlow,
         },
@@ -347,7 +348,12 @@ impl Cx {
                     }
                 }
                 CxOsOp::ShowClipboardActions(_) => {
-                }
+                },
+                CxOsOp::CopyToClipboard(content) => {
+                    unsafe {
+                        Win32Window::copy_to_clipboard(&content);
+                    }
+                },
                 CxOsOp::XrStartPresenting => {
                     //todo!()
                 },

@@ -5,9 +5,9 @@ use {
             build_manager::*,
             build_protocol::*,
         },
+        makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
-        makepad_code_editor::text::{Position},
     },
     std::{
         env,
@@ -21,6 +21,7 @@ live_design!{
     
     Icon = <View> {
         width: 10, height: 10
+        margin:{top:2},
         show_bg: true,
     }
     
@@ -29,7 +30,6 @@ live_design!{
         active_page: log
         lazy_init: true,
         wait = <Icon> {
-            margin: { top: 2. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -47,7 +47,6 @@ live_design!{
             }
         },
         log = <Icon> {
-            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -62,7 +61,6 @@ live_design!{
             }
         }
         error = <Icon> {
-            margin: { top: 6. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -79,7 +77,6 @@ live_design!{
             }
         },
         warning = <Icon> {
-            margin: { top: 7. }
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -124,7 +121,7 @@ live_design!{
         height: Fit, width: Fill
         padding: <THEME_MSPACE_2> {} // TODO: Fix. Changing this value to i.e. '0.' causes Makepad Studio to freeze when switching to the log tab.
         spacing: (THEME_SPACE_2)
-        align: { x: 0.0, y: 0.5 }
+        align: { x: 0.0, y: 0.0 }
         show_bg: true,
         draw_bg: {
             instance is_even: 0.0
@@ -174,7 +171,7 @@ live_design!{
                     apply: {
                         draw_bg: {selected: 1.0}
                     }
-                }
+                }  
             }
         }
     }
@@ -190,18 +187,19 @@ live_design!{
             Location = <LogItem> {
                 icon = <LogIcon> {},
                 binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
-                location = <LinkLabel> {margin: 0, text: ""}
-                body = <P> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
+                location = <LinkLabel> {padding:0, margin: 0, text: ""}
+                body = <P> {width: Fill, margin: {left: 5, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
             }
             Bare = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <P> { draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
-                body = <P> { }
+                binary = <P> { margin: 0, draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
+                body = <P> {  margin: 0 }
             }
             Empty = <LogItem> {
                 cursor: Default
                 width: Fill
-                body = <P> { text: "" }
+                height: 25,
+                body = <P> {  margin: 0, text: "" }
             }
         }
     }
@@ -209,14 +207,8 @@ live_design!{
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum LogListAction {
-    JumpTo(JumpTo),
+    JumpTo(JumpToFile),
     None
-}
-
-#[derive(Clone, Debug)]
-pub struct JumpTo{
-    pub file_name:String, 
-    pub start:Position
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -300,13 +292,11 @@ impl Widget for LogList {
                     if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
                         match log_item {
                             LogItem::Location(msg) => {
-                                cx.action(AppAction::JumpTo(JumpTo{
+                                cx.action(AppAction::JumpTo(JumpToFile{
                                     file_name:msg.file_name.clone(), 
-                                    start:Position{
-                                        line_index: msg.start.line_index,
-                                        byte_index: msg.start.byte_index,
-                                    },
-                                }));
+                                    line: msg.start.line_index as u32,
+                                    column: msg.start.byte_index as u32
+                                })); 
                             }
                             _ => ()
                         }

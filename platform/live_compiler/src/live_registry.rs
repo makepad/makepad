@@ -1,6 +1,6 @@
 //use crate::id::Id;
 use {
-    std::collections::{HashMap, BTreeSet},
+    std::collections::{BTreeMap, BTreeSet},
     crate::{
         makepad_live_id::*,
        // makepad_error_log::*,
@@ -39,10 +39,10 @@ pub struct LiveFile {
 }
 
 pub struct LiveRegistry {
-    pub (crate) file_ids: HashMap<String, LiveFileId>,
-    pub module_id_to_file_id: HashMap<LiveModuleId, LiveFileId>,
+    pub (crate) file_ids: BTreeMap<String, LiveFileId>,
+    pub module_id_to_file_id: BTreeMap<LiveModuleId, LiveFileId>,
     pub live_files: Vec<LiveFile>,
-    pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
+    pub live_type_infos: BTreeMap<LiveType, LiveTypeInfo>,
     //pub ignore_no_dsl: HashSet<LiveId>,
     pub main_module: Option<LiveTypeInfo>,
     pub components: LiveComponentRegistries,
@@ -53,10 +53,10 @@ impl Default for LiveRegistry {
     fn default() -> Self {
         Self {
             main_module: None,
-            file_ids: HashMap::new(),
-            module_id_to_file_id: HashMap::new(),
+            file_ids: Default::default(),
+            module_id_to_file_id: Default::default(),
             live_files: Vec::new(),
-            live_type_infos: HashMap::new(),
+            live_type_infos: Default::default(),
             components: LiveComponentRegistries::default(),
             package_root: None
         }
@@ -83,7 +83,7 @@ pub struct LiveFileChange {
 }
 
 impl LiveRegistry {
-    pub fn file_ids(&self)->&HashMap<String, LiveFileId>{
+    pub fn file_ids(&self)->&BTreeMap<String, LiveFileId>{
         &self.file_ids
     }
     

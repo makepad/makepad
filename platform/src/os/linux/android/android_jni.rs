@@ -619,10 +619,16 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
     return None;
 }
 
-
 pub unsafe fn to_java_show_keyboard(visible: bool) {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(env, ACTIVITY, "showKeyboard", "(Z)V", visible as i32);
+}
+
+pub unsafe fn to_java_copy_to_clipboard(content: String) {
+    let env = attach_jni_env();
+    let content = CString::new(content.clone()).unwrap();
+    let content = ((**env).NewStringUTF.unwrap())(env, content.as_ptr());
+    ndk_utils::call_void_method!(env, ACTIVITY, "copyToClipboard", "(Ljava/lang/String;)V", content);
 }
 
 pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
