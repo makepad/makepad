@@ -2181,7 +2181,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer> {
+    FishPanelEffects = <FishPanelContainer dx:41.0 dy:93.7 dw:400.0 dh:300.0> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2209,8 +2209,8 @@ live_design! {
         }
     }
 
-
-    PresetHeader = <View> {
+ 
+    PresetHeader = <View dx:32.2 dy:456.0 dw:400.0 dh:115.3> {
         width: Fill,
         height: Fit,
         margin: {top: 0, right: (SSPACING_4), bottom: 0, left: (SSPACING_4)}
@@ -2430,7 +2430,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-2.8 dy:116.6 dw:661.0 dh:777.1> {
+    AppDesktop = <View dx:56.3 dy:53.7 dw:500.6 dh:676.4>{
         flow: Right
         width: Fill,
         height: Fill
