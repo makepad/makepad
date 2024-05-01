@@ -291,6 +291,11 @@ impl RunView {
         }
         self.last_rect = rect;
         self.draw_app.draw_abs(cx, rect);
+        // lets store the area 
+        if let Some(ab) = manager.active.builds.get_mut(&run_view_id){
+            ab.app_area = self.draw_app.area();
+        }
+        
     }
 }
 

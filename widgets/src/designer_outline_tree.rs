@@ -305,7 +305,6 @@ impl DesignerOutlineTree {
                 let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
                     let mut tree_node = DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr));
                     if is_open {
-                        log!("SET IT OPEN");
                         tree_node.set_is_open(cx, true, Animate::No)
                     }
                     (tree_node, template)

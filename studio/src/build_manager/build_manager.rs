@@ -49,6 +49,7 @@ pub struct ActiveBuild {
     pub process: BuildProcess,
     pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
     pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
+    pub app_area: Area,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
@@ -281,13 +282,19 @@ impl BuildManager {
         
         match event {
             Event::MouseDown(e) => {
-                self.broadcast_to_stdin(HostToStdin::MouseDown(StdinMouseDown {
-                    time: e.time,
-                    x: e.abs.x,
-                    y: e.abs.y,
-                    button: e.button,
-                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
-                }));
+                // we should only send this if it was captured by one of our runviews
+                for build in self.active.builds.values(){
+                    if build.app_area.rect(cx).contains(e.abs){
+                        self.broadcast_to_stdin(HostToStdin::MouseDown(StdinMouseDown {
+                            time: e.time,
+                            x: e.abs.x,
+                            y: e.abs.y,
+                            button: e.button,
+                            modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                        }));
+                        break;
+                    }
+                }
             }
             Event::MouseMove(e) => {
                 // we send this one to what window exactly?
