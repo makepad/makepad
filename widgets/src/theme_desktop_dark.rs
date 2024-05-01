@@ -386,23 +386,6 @@ live_design! {
     // Spacer = <View> { width: Fill, height: Fill }
     Filler = <View> { width: Fill, height: Fill }
 
-    CachedScrollXY = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
-    }
-
-    CachedScrollX = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
-    }
-
-    CachedScrollY = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
-    }
-
-    ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
-    ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
-    ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
-
-
     HtmlLink = <HtmlLinkBase> {
         width: Fit, height: Fit,
         align: {x: 0., y: 0.}
@@ -3179,6 +3162,23 @@ live_design! {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         flow: Down
     }
+
+    CachedScrollXY = <CachedView> {
+        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
+    }
+
+    CachedScrollX = <CachedView> {
+        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
+    }
+
+    CachedScrollY = <CachedView> {
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+    }
+
+    ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
+    ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
+    ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
+
 
     TextInput = <TextInputBase> {
         width: 200, height: Fit,
