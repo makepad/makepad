@@ -1813,7 +1813,8 @@ live_design! {
                 );
 
                 sdf.subtract()
-                return sdf.fill(THEME_COLOR_BG_APP)
+                sdf.fill(THEME_COLOR_BG_APP)
+                return sdf.result
             }
         }
         border_size: (THEME_DOCK_BORDER_SIZE)
@@ -3729,6 +3730,21 @@ live_design! {
         }
     }
     
+    STUDIO_PALETTE_1 = #B2FF64
+    STUDIO_PALETTE_2 = #80FFBF
+    STUDIO_PALETTE_3 = #80BFFF
+    STUDIO_PALETTE_4 = #BF80FF
+    STUDIO_PALETTE_5 = #FF80BF
+    STUDIO_PALETTE_6 = #FFB368
+    STUDIO_PALETTE_7 = #FFD864
+    
+    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT_DEFAULT)
+    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT_DEFAULT)
+    STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)
+    STUDIO_COLOR_WIDGET = (STUDIO_PALETTE_2)
+    STUDIO_COLOR_ASSET = (STUDIO_PALETTE_5)
+    STUDIO_COLOR_TEXT = (STUDIO_PALETTE_1)
+
     DesignerOutlineTree = <DesignerOutlineTreeBase> {
         flow: Down,
                 
@@ -3738,32 +3754,46 @@ live_design! {
         clip_x: true,
         clip_y: true
         
-        File =  <DesignerOutlineTreeNode> {
+        File = <DesignerOutlineTreeNode> {
             draw_eye: true,
             draw_icon: {
-                color: #7,
+                color: (STUDIO_COLOR_FILE)
                 svg_file: dep("crate://self/resources/icons/icon_file.svg"),
             }
         }
         
-        Folder =  <DesignerOutlineTreeNode> {
+        Folder = <DesignerOutlineTreeNode> {
             draw_icon: {
-                color: #7,
+                color: (STUDIO_COLOR_FOLDER)
                 svg_file: dep("crate://self/resources/icons/icon_folder.svg"),
             }
         }
         
-        Layout =  <DesignerOutlineTreeNode> {
+        Layout = <DesignerOutlineTreeNode> {
             draw_icon: {
-                color: #7,
+                color: (STUDIO_COLOR_LAYOUT)
                 svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
             }
         }
         
-        Widget =  <DesignerOutlineTreeNode> {
+        Widget = <DesignerOutlineTreeNode> {
             draw_icon: {
-                color: #7,
+                color: (STUDIO_COLOR_WIDGET)
                 svg_file: dep("crate://self/resources/icons/icon_vector.svg"),
+            }
+        }
+                
+        Asset = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_ASSET)
+                svg_file: dep("crate://self/resources/icons/icon_image.svg"),
+            }
+        }
+                
+        Text = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_TEXT)
+                svg_file: dep("crate://self/resources/icons/icon_text.svg"),
             }
         }
                 
