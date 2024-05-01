@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_platform::studio::*,
     designer_data::*,
     turtle_step::*,
     view::View,
@@ -165,7 +166,7 @@ impl Widget for DesignerView {
                     cx.set_cursor(cursor);
                 }
                 else{
-                    cx.set_cursor(MouseCursor::Move);
+                    cx.set_cursor(MouseCursor::Default);
                 }
             }
             Hit::FingerHoverOut(_fh)=>{
@@ -244,6 +245,30 @@ impl Widget for DesignerView {
                             container.rect = r;
                             // alright lets send over the rect to the editor
                             // we need to find out the text position
+                            let registry = cx.live_registry.clone();
+                            let mut registry = registry.borrow_mut();
+                            let replace = format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", r.pos.x, r.pos.y, r.size.x, r.size.y);
+                            if let Some((file_name, range)) =  registry.patch_design_info_range(*ptr, replace.len() as u32){
+                               Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
+                                    file_name: file_name.into(),
+                                    line: range.line,
+                                    column_start: range.start_column,
+                                    column_end: range.end_column,
+                                    replace
+                                }));
+                                //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
+                            }
+                            else{ // we dont yet have design info, so we have to insert it
+                                // alright lets convert our ptr to 
+                                // and wait for the host to update
+                                /*Cx::send_studio_message(AppToStudio::EditFile(EditFile{
+                                    file_name: file_name.into(),
+                                    line: range.line,
+                                    column_start: range.start_column,
+                                    column_end: range.end_column,
+                                    replace: format!(" {}", replace);
+                                }));*/
+                            }
                             
                         }
                     }

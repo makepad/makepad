@@ -200,6 +200,46 @@ impl LiveRegistry {
         None
     }
     
+    pub fn patch_design_info_range(&mut self, live_ptr: LivePtr, new_len: u32) -> Option<(&str,DesignInfoRange)> {
+        let live_file = &mut self.live_files[live_ptr.file_id.to_index()];
+        if live_file.generation != live_ptr.generation {
+            panic!("ptr_to_nodes_index generation invalid for file {} gen:{} ptr:{}", live_file.file_name, live_file.generation, live_ptr.generation);
+        }
+        match &live_file.expanded.nodes[live_ptr.index as usize].value{
+            LiveValue::Clone{design_info,..}|
+            LiveValue::Deref{design_info,..}|
+            LiveValue::Class {design_info,..}=>{
+                // alright lets fetch the original doc
+                if !design_info.is_invalid(){
+                    // alright we parse the nodes
+                    let nodes = &live_file.original.design_info[design_info.index()..];
+                    let start = live_file.original.tokens[nodes[0].origin.token_id().unwrap().token_index()].span;
+                    let end_index = nodes.skip_node(0);
+                    let end = &mut live_file.original.tokens[nodes[end_index - 1].origin.token_id().unwrap().token_index()].span;
+                    if start.start.line != end.end.line{
+                        println!("ptr_to_design_info_range on multiple lines not supported");
+                        return None
+                    }
+                    // lets patch it up so subsequent edits match
+                    let start_column = start.start.column;
+                    let end_column = end.end.column - 1;
+                    end.end.column = start.start.column + new_len + 1;
+                    
+                    return Some((
+                        &live_file.file_name, 
+                        DesignInfoRange{
+                            line: start.start.line,
+                            start_column,
+                            end_column
+                        }
+                    ))
+                }
+            }
+            _=>()
+        }
+        None
+    }
+    
     pub fn path_str_to_file_id(&self, path: &str) -> Option<LiveFileId> {
         for (index, file) in self.live_files.iter().enumerate() {
             if file.file_name == path {
@@ -443,7 +483,7 @@ impl LiveRegistry {
                 for i in 0..full_token.len{
                     if chars[last_index + i] == '\n'{
                         line_end += 1;
-                        next_new_line = last_index + 2;
+                        next_new_line = last_index + i + 1;
                     }
                 }
                 let span = TextSpan {
@@ -504,7 +544,7 @@ impl LiveRegistry {
                 for i in 0..full_token.len{
                     if chars[last_index + i] == '\n'{
                         line_end += 1;
-                        next_new_line = last_index + 1;
+                        next_new_line = last_index + i + 1;
                     }
                 }
                 //log!("PARSE STATE {:?} {:?}", parse, full_token);
@@ -627,7 +667,6 @@ impl LiveRegistry {
         live_type_infos: Vec<LiveTypeInfo>,
         start_pos: TextPos,
     ) -> Result<LiveFileId, LiveFileError> {
-        
         // lets register our live_type_infos
         if self.file_ids.get(file_name).is_some() {
             panic!("cant register same file twice {}", file_name);
@@ -813,6 +852,13 @@ impl LiveRegistry {
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
         }
     }
+}
+
+#[derive(Debug)]
+pub struct DesignInfoRange{
+    pub line: u32,
+    pub start_column: u32,
+    pub end_column: u32
 }
 
 struct FileDepIter {
