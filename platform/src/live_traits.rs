@@ -60,6 +60,12 @@ pub trait LiveNew: LiveApply {
         ret
     }
     
+    fn new_apply_over(cx: &mut Cx, nodes: &[LiveNode]) -> Self where Self: Sized {
+        let mut ret = Self::new(cx);
+        ret.apply_over(cx, nodes);
+        ret
+    }
+    
     fn new_apply_mut_index(cx: &mut Cx, apply: &mut Apply, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         *index = ret.apply(cx, apply, *index, nodes);

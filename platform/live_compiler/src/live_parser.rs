@@ -14,11 +14,11 @@ use {
             Vec4
         },
         live_token::{LiveToken, TokenWithSpan, LiveTokenId},
-        live_ptr::{LiveFileId, LiveModuleId},
+        live_ptr::{LiveFileId, LiveModuleId, LivePtr},
         span::{TextSpan, TextPos},
         live_error::{LiveError},
         live_document::LiveOriginal,
-        live_node::{LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
+        live_node::{LiveDesignInfo, LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
     }
 };
 
@@ -460,6 +460,83 @@ impl<'a> LiveParser<'a> {
         LiveTokenId::new(self.file_id, self.token_index)
     }
     
+    fn expect_design_info(&mut self, ld: &mut LiveOriginal)->Result<LiveDesignInfo, LiveError>{
+        // lets parse key/values
+        let design_info_len = ld.design_info.len();
+        ld.design_info.push(LiveNode {
+            origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+            id: live_id!(design),
+            value: LiveValue::Object
+        });
+        while self.peek_token() != LiveToken::Eof {
+            match self.peek_token() {
+                LiveToken::Punct(live_id!(>)) => {
+                    break;
+                }
+                LiveToken::Ident(prop_id) => {
+                    self.skip_token();
+                    self.expect_token(LiveToken::Punct(live_id!(:))) ?;
+                                                                        
+                    match self.peek_token() {
+                        LiveToken::Bool(val) => {
+                            self.skip_token();
+                            ld.design_info.push(LiveNode {
+                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                id: prop_id,
+                                value: LiveValue::Bool(val)
+                            });
+                        },
+                        LiveToken::Int(val) => {
+                            self.skip_token();
+                            ld.design_info.push(LiveNode {
+                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                id: prop_id,
+                                value: LiveValue::Int64(val)
+                            });
+                        },
+                        LiveToken::Float(val) => {
+                            self.skip_token();
+                            ld.design_info.push(LiveNode {
+                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                id: prop_id,
+                                value: LiveValue::Float64(val)
+                            });
+                        },
+                        LiveToken::Color(val) => {
+                            self.skip_token();
+                            ld.design_info.push(LiveNode {
+                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                id: prop_id,
+                                value: LiveValue::Color(val)
+                            });
+                        },
+                        LiveToken::String(rcstring) => {
+                            self.skip_token();
+                            ld.design_info.push(LiveNode {
+                                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                id: prop_id,
+                                value: LiveValue::String(rcstring)
+                            });
+                        },
+                        other => return Err(self.error(format!("Unexpected token {} in design_info", other), live_error_origin!()))
+                    }
+                    self.accept_optional_delim();
+                },
+                other => return Err(self.error(format!("Unexpected token {} in edit_info", other), live_error_origin!()))
+            }
+        }
+        if ld.design_info.len() > design_info_len+1{
+            ld.design_info.push(LiveNode {
+                origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                id: live_id!(design),
+                value: LiveValue::Close
+            });
+            return Ok(LiveDesignInfo::from_usize(design_info_len))
+        }
+        ld.design_info.pop();
+        Ok(LiveDesignInfo::invalid())
+    }
+    
     fn expect_live_value(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         // now we can have an array or a class instance
         match self.peek_token() {
@@ -467,12 +544,13 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 
                 let ident = self.expect_ident()?;
+                let design_info = self.expect_design_info(ld)?;
                 self.expect_token(LiveToken::Punct(live_id!(>))) ?;
                 self.expect_token(LiveToken::Open(Delim::Brace))?;
                 ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::Clone(ident)
+                    value: LiveValue::Clone{clone:ident, design_info}
                 });
                 self.expect_live_class(false, prop_id, ld) ?;
             }
@@ -482,7 +560,7 @@ impl<'a> LiveParser<'a> {
                 ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::Clone(live_id!(struct))
+                    value: LiveValue::Clone{clone:live_id!(struct), design_info:LiveDesignInfo::invalid()}
                 });
                 self.expect_live_class(false, prop_id, ld) ?;
             },
@@ -516,7 +594,8 @@ impl<'a> LiveParser<'a> {
                             id: prop_id,
                             value: LiveValue::Deref{
                                 live_type: self.live_type_infos[val].live_type,
-                                clone: ident
+                                clone: ident,
+                                design_info:LiveDesignInfo::invalid()
                             }
                         });
                     }
@@ -526,7 +605,8 @@ impl<'a> LiveParser<'a> {
                             id: prop_id,
                             value: LiveValue::Class {
                                 live_type: self.live_type_infos[val].live_type,
-                                class_parent: None,
+                                class_parent: LivePtr::invalid(),
+                                design_info:LiveDesignInfo::invalid()
                             }
                         });
                     }
@@ -817,12 +897,13 @@ impl<'a> LiveParser<'a> {
                     self.skip_token();
                     let token_id = self.get_token_id();
                     let ident = self.expect_ident()?;
+                    let design_info = self.expect_design_info(ld)?;
                     self.expect_token(LiveToken::Punct(live_id!(>))) ?;
                     self.expect_token(LiveToken::Open(Delim::Brace))?;
                     ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
                         id: LiveId(nameless_id),
-                        value: LiveValue::Clone(ident)
+                        value: LiveValue::Clone{clone:ident, design_info}
                     });
                     nameless_id += 1;
                     self.expect_live_class(false, prop_id, ld) ?;
