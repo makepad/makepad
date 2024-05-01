@@ -3581,6 +3581,8 @@ live_design! {
                 
         draw_bg: {
             instance selected: 0.0
+            instance hover: 0.0
+            instance focussed: 0.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -3605,7 +3607,37 @@ live_design! {
                 return sdf.result
             }
         }
-                
+        icon_walk:{
+            margin:{top:3,left:3,right:5}
+            width:12,
+            height:12,
+        }
+        draw_icon: {
+            instance selected: 0.0
+            instance hover: 0.0
+            instance focussed: 0.0
+            instance scale: 1.0
+        }
+        
+        draw_name: {
+            instance selected: 0.0
+            instance hover: 0.0
+            instance focussed: 0.0
+            instance scale: 1.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT_SELECTED,
+                    self.selected
+                )
+            }
+            
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+                top_drop: 1.2,
+            }
+        }
+        
         button_open: <FoldButton> {
             height: 25, width: 15,
             margin: { left: (THEME_SPACE_2) }
@@ -3632,23 +3664,45 @@ live_design! {
                 }
             }
         }
-        icon: <Icon>{
-            icon_walk:{
-                width: 10,
-                height: 10
-            }
-            draw_icon: {
-                color: #f,
-                svg_file: dep("crate://self/resources/icons/back.svg"),
-            }
-        }
-        button_name: <Button>{
-        }
-        check_eye: <CheckBox>{
-            text:"o"
-        }
-
+        
         animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        hover: 0.0
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    cursor: Hand
+                    from: {all: Snap}
+                    apply: {
+                        hover: 1.0
+                        draw_bg: {hover: 1.0}
+                        draw_name: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    },
+                }
+            }
+            
+            focus = {
+                default: on
+                on = {
+                    from: {all: Snap}
+                    apply: {focussed: 1.0}
+                }
+                
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {focussed: 0.0}
+                }
+            }
+            
             select = {
                 default: off
                 off = {
@@ -3656,6 +3710,8 @@ live_design! {
                     apply: {
                         selected: 0.0
                         draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
                     }
                 }
                 on = {
@@ -3663,41 +3719,11 @@ live_design! {
                     apply: {
                         selected: 1.0
                         draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
                     }
                 }
-                                
-            }
-                        
-            open = {
-                default: off
-                off = {
-                    //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
-                    //duration: 0.2
-                    redraw: true
-                                        
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.80, d2: 0.97}
-                                        
-                    //ease: Ease::OutExp
-                    apply: {
-                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                    }
-                }
-                                
-                on = {
-                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-                                        
-                    from: {all: Forward {duration: 0.2}}
-                    ease: ExpDecay {d1: 0.82, d2: 0.95}
-                                        
-                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
-                    redraw: true
-                    apply: {
-                        opened: 1.0
-                        draw_bg: {opened: 1.0}
-                    }
-                }
+                
             }
         }
     }
@@ -3713,31 +3739,31 @@ live_design! {
         
         File =  <DesignerOutlineTreeNode> {
             draw_eye: true,
-            icon:{draw_icon: {
+            draw_icon: {
                 color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_file.svg"),
-            }}
+            }
         }
         
         Folder =  <DesignerOutlineTreeNode> {
-            icon:{draw_icon: {
+            draw_icon: {
                 color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_folder.svg"),
-            }}
+            }
         }
         
         Layout =  <DesignerOutlineTreeNode> {
-            icon:{draw_icon: {
+            draw_icon: {
                 color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
-            }}
+            }
         }
         
         Widget =  <DesignerOutlineTreeNode> {
-            icon:{draw_icon: {
+            draw_icon: {
                 color: #7,
                 svg_file: dep("crate://self/resources/icons/icon_vector.svg"),
-            }}
+            }
         }
                 
         filler: {
