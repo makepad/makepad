@@ -5,7 +5,7 @@ use {
         error::Error,
         extern_::UnguardedExtern,
         extern_ref::UnguardedExternRef,
-        func::{Code, Func, FuncEntity, InstrSlot, UnguardedFunc},
+        func::{Code, CodeSlot, Func, FuncEntity, UnguardedFunc},
         func_ref::UnguardedFuncRef,
         global::UnguardedGlobal,
         mem::UnguardedMem,
@@ -19,9 +19,18 @@ use {
     std::{hint, mem, ptr},
 };
 
-pub(crate) type Instr = unsafe extern "C" fn(Ip, Sp, Md, Ms, Ix, Sx, Dx, Cx) -> ControlFlowBits;
+pub(crate) type ThreadedInstr = unsafe extern "C" fn(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits;
 
-pub(crate) type Ip = *mut InstrSlot;
+pub(crate) type Ip = *mut CodeSlot;
 pub(crate) type Sp = *mut StackSlot;
 pub(crate) type Md = *mut u8;
 pub(crate) type Ms = u32;
@@ -88,10 +97,10 @@ pub(crate) fn exec(
                 panic!();
             };
             let mut trampoline = [
-                call as InstrSlot,
-                state.code.as_mut_ptr() as InstrSlot,
+                call as CodeSlot,
+                state.slots.as_mut_ptr() as CodeSlot,
                 type_.callee_stack_slot_count() * mem::size_of::<StackSlot>(),
-                stop as InstrSlot,
+                stop as CodeSlot,
             ];
             let ptr = stack.ptr();
             let mut context = Context {
@@ -406,7 +415,7 @@ pub(crate) unsafe extern "C" fn call_indirect(
             let Code::Compiled(state) = func.code_mut() else {
                 hint::unreachable_unchecked();
             };
-            let target = state.code.as_mut_ptr();
+            let target = state.slots.as_mut_ptr();
             let new_sp: Sp = sp.cast::<u8>().add(stack_offset).cast();
             *new_sp.offset(-4).cast() = ip;
             *new_sp.offset(-3).cast() = sp;
@@ -766,8 +775,8 @@ global_get!(global_get_i32, i32);
 global_get!(global_get_i64, i64);
 global_get!(global_get_f32, f32);
 global_get!(global_get_f64, f64);
-global_get!(global_get_raw_func_ref, UnguardedFuncRef);
-global_get!(global_get_raw_extern_ref, UnguardedExternRef);
+global_get!(global_get_func_ref, UnguardedFuncRef);
+global_get!(global_get_extern_ref, UnguardedExternRef);
 
 macro_rules! global_set {
     ($global_set_t_s:ident, $global_set_t_r:ident, $T:ty) => {
@@ -922,8 +931,8 @@ macro_rules! table_set {
             cx: Cx,
         ) -> ControlFlowBits {
             // Read operands
-            let (idx, ip) = read_stack(ip, sp);
             let (val, ip) = read_stack(ip, sp);
+            let (idx, ip) = read_stack(ip, sp);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -949,8 +958,8 @@ macro_rules! table_set {
             cx: Cx,
         ) -> ControlFlowBits {
             // Read operands
-            let idx = read_reg(ix, sx, dx);
             let (val, ip) = read_stack(ip, sp);
+            let idx = read_reg(ix, sx, dx);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -976,8 +985,8 @@ macro_rules! table_set {
             cx: Cx,
         ) -> ControlFlowBits {
             // Read operands
-            let (idx, ip) = read_stack(ip, sp);
             let val = read_reg(ix, sx, dx);
+            let (idx, ip) = read_stack(ip, sp);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -2219,9 +2228,9 @@ pub(crate) unsafe extern "C" fn compile(
     let Code::Compiled(state) = func.code_mut() else {
         hint::unreachable_unchecked();
     };
-    *ip.cast() = state.code.as_mut_ptr();
+    *ip.cast() = state.slots.as_mut_ptr();
     let ip = ip.offset(-1);
-    *ip.cast() = call as Instr;
+    *ip.cast() = call as ThreadedInstr;
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 }
 
@@ -2276,7 +2285,7 @@ pub(crate) unsafe fn next_instr(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
-    let (instr, ip): (Instr, _) = read_imm(ip);
+    let (instr, ip): (ThreadedInstr, _) = read_imm(ip);
     (instr)(ip, sp, md, ms, ix, sx, dx, cx)
 }
 

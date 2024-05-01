@@ -21,9 +21,9 @@ live_design!{
                 let tp2 = sample2d_rt(self.tex, vec2(1.5/self.tex_size.x,0.5/self.tex_size.y));
                 let tp = vec2(tp1.r*65280.0 + tp1.b*255.0,tp2.r*65280.0 + tp2.b*255.0);
                 // ok so we should be having the same size in self.pos
-                let counter = tp / (self.rect_size * self.dpi_factor);
+                let counter = (self.rect_size * self.dpi_factor) / tp;
                 let tex_scale = tp / self.tex_size;
-                let fb = sample2d_rt(self.tex, self.pos * tex_scale / counter)
+                let fb = sample2d_rt(self.tex, self.pos * tex_scale * counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
@@ -169,6 +169,10 @@ impl RunView {
         self.redraw(cx);
     }
     
+    pub fn recompile_started(&mut self, cx: &mut Cx) {
+        self.animator_play(cx, id!(recompiling.on));
+    }
+    
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.draw_app.redraw(cx);
     }
@@ -291,6 +295,11 @@ impl RunView {
         }
         self.last_rect = rect;
         self.draw_app.draw_abs(cx, rect);
+        // lets store the area 
+        if let Some(ab) = manager.active.builds.get_mut(&run_view_id){
+            ab.app_area = self.draw_app.area();
+        }
+        
     }
 }
 
@@ -325,16 +334,6 @@ impl Widget for RunView {
             _ => ()
         }
 
-    }
-    
-}
-
-impl RunViewRef {
-    
-    pub fn recompile_started(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, id!(recompiling.on));
-        }
     }
     
 }

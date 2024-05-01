@@ -95,6 +95,7 @@ pub struct IosApp {
     pub textfield: Option<ObjcId>,
     event_callback: Option<Box<dyn FnMut(IosEvent) -> EventFlow >>,
     event_flow: EventFlow,
+    pasteboard: ObjcId
 }
 
 impl IosApp {
@@ -102,6 +103,13 @@ impl IosApp {
         unsafe {
             
             // Construct the bits that are shared between windows
+            let ns_app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
+            let app_delegate_instance: ObjcId = msg_send![get_ios_class_global().app_delegate, new];
+            
+            let () = msg_send![ns_app, setDelegate: app_delegate_instance];
+            
+            let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
+            
             IosApp {
                 virtual_keyboard_event: None,
                 touches: Vec::new(),
@@ -115,6 +123,7 @@ impl IosApp {
                 timers: Vec::new(),
                 event_flow: EventFlow::Poll,
                 event_callback: Some(event_callback),
+                pasteboard,
             }
         }
     }
@@ -397,5 +406,13 @@ impl IosApp {
     
     pub fn send_paint_event() {
         IosApp::do_callback(IosEvent::Paint);
+    }
+
+    pub fn copy_to_clipboard(&self, content: &str) {
+        unsafe {
+            let nsstring = str_to_nsstring(content);
+            let pasteboard: ObjcId = self.pasteboard;
+            let _: () = msg_send![pasteboard, setString: nsstring];
+        }
     }
 }

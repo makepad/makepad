@@ -25,7 +25,6 @@ pub mod vectorline;
 pub mod fold_header;
 pub mod fold_button;
 pub mod multi_window;
-pub mod designer;
 pub mod dock;
 pub mod tab;
 pub mod tab_bar;
@@ -49,7 +48,6 @@ pub mod page_flip;
 pub mod keyboard_view;
 pub mod flat_list;
 pub mod file_tree;
-pub mod outline_tree;
 pub mod slides_view;
 pub mod color_picker;
 pub mod root;
@@ -72,6 +70,12 @@ pub mod theme_desktop_dark;
 pub mod image_cache;
 pub mod bare_step;
 pub mod turtle_step;
+
+pub mod designer;
+pub mod designer_outline_tree;
+pub mod designer_view;
+pub mod designer_outline;
+pub mod designer_data;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -164,7 +168,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::popup_menu::live_design(cx);
     crate::drop_down::live_design(cx);
     crate::multi_window::live_design(cx);
-    crate::designer::live_design(cx);
     crate::portal_list::live_design(cx);
     crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);
@@ -173,7 +176,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::dock::live_design(cx);
     crate::color_picker::live_design(cx);
     crate::file_tree::live_design(cx);
-    crate::outline_tree::live_design(cx);
     crate::slides_view::live_design(cx);
     crate::tab_close_button::live_design(cx);
     crate::keyboard_view::live_design(cx);
@@ -186,4 +188,9 @@ pub fn live_design(cx: &mut Cx) {
     crate::root::live_design(cx);
     crate::bare_step::live_design(cx);
     crate::turtle_step::live_design(cx);
+    
+    crate::designer::live_design(cx);
+    crate::designer_view::live_design(cx);
+    crate::designer_outline::live_design(cx);
+    crate::designer_outline_tree::live_design(cx);
 }
