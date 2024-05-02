@@ -135,8 +135,7 @@ pub struct DesignerView {
 
 impl LiveHook for DesignerView {
     fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
-        
-        // hmm. we might need to re-apply the data
+        // find a bit cleaner way to do this
         self.reapply = true;
     }
 }
@@ -153,23 +152,27 @@ impl DesignerView{
         };
                                     
         let container_ptr = self.container.unwrap();
+        let mut is_new = false;
         let cd = self.containers.get_or_insert(cx, id, | cx | {
-            let ret = ContainerData{
+            is_new = true;
+            ContainerData{
                 ptr,
                 component :WidgetRef::new_from_ptr(cx, Some(ptr)),
                 container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
                 rect
-            };
-            ret.container.apply_over(cx, live!{
-                label = {text:(name)}
-            });
-            ret
+            }
         });
         cd.rect = rect;
         cd.ptr = ptr;
+        // fix up the livecoding of the
         if self.reapply{
             cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
             cd.component.apply_from_ptr(cx, Some(ptr));
+        }
+        if self.reapply || is_new{
+            cd.container.apply_over(cx, live!{
+                label = {text:(name)}
+            });
         }
         // ok so we're going to draw the container with the widget inside
         cd.container.draw_all(cx, &mut Scope::with_props(cd))

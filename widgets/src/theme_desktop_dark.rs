@@ -3605,14 +3605,15 @@ live_design! {
             instance selected: 0.0
             instance hover: 0.0
             instance focussed: 0.0
-            instance scale: 1.0
+            fn get_color(self) -> vec4 {
+                return self.color * self.scale;
+            }
         }
         
         draw_name: {
             instance selected: 0.0
             instance hover: 0.0
             instance focussed: 0.0
-            instance scale: 1.0
             fn get_color(self) -> vec4 {
                 return mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
@@ -3857,7 +3858,7 @@ live_design! {
             }
         }
         container: <DesignerContainer>{
-
+            
         }
     }
 
@@ -3874,7 +3875,7 @@ live_design! {
         }
         <Window>{
             window:{ kind_id: 1 }
-            body = <View>{
+            body = <View>{ 
                 designer_view = <DesignerView> {
                     width: Fill, height: Fill }
             }
