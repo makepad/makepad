@@ -23,7 +23,7 @@ impl Widget for DesignerOutline {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         self.view.handle_event(cx, event, scope);
     }
-            
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let file_tree = self.view.designer_outline_tree(id!(outline_tree));
         let data = scope.props.get::<DesignerData>().unwrap();
