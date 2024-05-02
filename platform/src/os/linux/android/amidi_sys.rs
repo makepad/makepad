@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)]
-
+use makepad_jni_sys as jni_sys;
 use jni_sys::*;
 use std::os::raw::{c_long,c_ulong};
 
