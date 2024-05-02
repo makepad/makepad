@@ -18,6 +18,69 @@ live_design!{
     TORAD = 0.017453292519943295
     GOLDEN = 1.618033988749895
     
+    GaussShadow = {
+        fn gaussian(x:float, sigma:float )->float{
+            let pi = 3.141592653589793;
+            return exp(-(x * x) / (2.0 * sigma * sigma)) / (sqrt(2.0 * pi) * sigma);
+        }
+                    
+        // This approximates the error function, needed for the gaussian integral
+        fn erf_vec2(x0:vec2)->vec2 {
+            let s = sign(x0);
+            let a = abs(x0);
+            let x1 = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+            x1 *= x1;
+            return s - s / (x1 * x1);
+        }
+        
+        fn erf_vec4(x0:vec4)->vec4 {
+            let s = sign(x0);
+            let a = abs(x0);
+            let x1 = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+            x1 *= x1;
+            return s - s / (x1 * x1);
+        }
+                    
+        // Return the blurred mask along the x dimension
+        fn rounded_box_shadow_x(x:float, y:float, sigma:float, corner:float, half_size:vec2)->float{
+            let delta = min(half_size.y - corner - abs(y), 0.0);
+            let curved = half_size.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+            let integral = 0.5 + 0.5 * erf_vec2((x + vec2(-curved, curved)) * (sqrt(0.5) / sigma));
+            return integral.y - integral.x;
+        }
+                    
+        // Return the mask for the shadow of a box from lower to upper
+        fn rounded_box_shadow(lower:vec2, upper:vec2, point:vec2, sigma:float, corner:float)->float{
+            // Center everything to make the math easier
+            let center = (lower + upper) * 0.5;
+            let half_size = (upper - lower) * 0.5;
+            point -= center;
+                            
+            // The signal is only non-zero in a limited range, so don't waste samples
+            let low = point.y - half_size.y;
+            let high = point.y + half_size.y;
+            let start = clamp(-3.0 * sigma, low, high);
+            let end = clamp(3.0 * sigma, low, high);
+                            
+            // Accumulate samples (we can get away with surprisingly few samples)
+            let step = (end - start) / 4.0;
+            let y = start + step * 0.5;
+            let value = 0.0;
+            for i in 0..4{
+                value += rounded_box_shadow_x(point.x, point.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
+                y += step;
+            }
+                            
+            return value;
+        }
+        
+        fn box_shadow(lower:vec2, upper:vec2, point:vec2, sigma:float)->float {
+            let query = vec4(point - lower, point - upper);
+            let integral = 0.5 + 0.5 * erf_vec4(query * (sqrt(0.5) / sigma));
+            return (integral.z - integral.x) * (integral.w - integral.y);
+        }
+    }
+    
     Math = {
         fn rotate_2d(v: vec2, a: float) -> vec2 {
             let ca = cos(a);
