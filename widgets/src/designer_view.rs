@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_platform::studio::*,
     designer_data::*,
     turtle_step::*,
     view::View,
@@ -15,6 +16,13 @@ live_design!{
     }
     
 }
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum DesignerViewAction {
+    None,
+    Selected(LivePtr, KeyModifiers),
+}
+
 
 struct ContainerData{
     component: WidgetRef,
@@ -69,14 +77,6 @@ impl ContainerData{
         }
         None
     }
-}
-
-#[derive(Live, LiveHook, LiveRegister, Debug)]
-pub struct DesignInfo {
-    #[live] dx: f64,
-    #[live] dy: f64,
-    #[live] dw: f64,
-    #[live] dh: f64,
 }
 
 #[derive(Live, Widget, LiveHook)]
@@ -137,10 +137,40 @@ impl LiveHook for DesignerView {
         self.reapply = true;
     }
 }
-        
+
+impl DesignerView{
+    fn draw_container(&mut self, cx:&mut Cx2d, ptr: LivePtr){
+        let registry = cx.live_registry.clone();
+        let registry = registry.borrow();
+        let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
+            rect(info.dx, info.dy, info.dw, info.dh)
+        }
+        else{
+            rect(50.0,50.0,400.0,300.0)
+        };
+                                    
+        let container_ptr = self.container.unwrap();
+        let cd = self.containers.get_or_insert(cx, ptr, | cx | {
+            ContainerData{
+                component:WidgetRef::new_from_ptr(cx, Some(ptr)),
+                container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
+                rect
+            }
+        });
+                                    
+        if self.reapply{
+            self.reapply = false;
+            cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
+            cd.component.apply_from_ptr(cx, Some(ptr));
+        }
+        // ok so we're going to draw the container with the widget inside
+        cd.container.draw_all(cx, &mut Scope::with_props(cd))
+    }
+}
+
 impl Widget for DesignerView {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
-        
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        let uid = self.widget_uid();
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
                 
@@ -165,7 +195,7 @@ impl Widget for DesignerView {
                     cx.set_cursor(cursor);
                 }
                 else{
-                    cx.set_cursor(MouseCursor::Move);
+                    cx.set_cursor(MouseCursor::Default);
                 }
             }
             Hit::FingerHoverOut(_fh)=>{
@@ -179,6 +209,8 @@ impl Widget for DesignerView {
                                 ptr: *ptr,
                                 edge
                             });
+                            // lets send out a click on this containter
+                             cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*ptr, fe.modifiers));
                             break;
                         }
                         None=>()
@@ -244,11 +276,31 @@ impl Widget for DesignerView {
                             container.rect = r;
                             // alright lets send over the rect to the editor
                             // we need to find out the text position
-                            
+                            let registry = cx.live_registry.clone();
+                            let mut registry = registry.borrow_mut();
+                            //let replace = format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", r.pos.x, r.pos.y, r.size.x, r.size.y);
+                            let design_info = LiveDesignInfo{
+                                span: Default::default(),
+                                dx: r.pos.x,
+                                dy: r.pos.y,
+                                dw: r.size.x,
+                                dh: r.size.y,
+                            };
+                            if let Some((replace, file_name, range)) =  registry.patch_design_info(*ptr, design_info){
+                                
+                               Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
+                                    file_name: file_name.into(),
+                                    line: range.line,
+                                    column_start: range.start_column,
+                                    column_end: range.end_column,
+                                    replace
+                                }));
+                                //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
+                            }
                         }
                     }
                     FingerMove::DragBody{ptr:_}=>{
-                                                
+                        
                     }
                 }
             }
@@ -290,37 +342,18 @@ impl Widget for DesignerView {
             
             if let Some(selected) = &data.selected{
                 // so either we have a file, or a single component.
-                
-                if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(selected){
-                    
-                    // alright we have a pointer. lets fetch the design data nodes as the initial container position
-                    let registry = cx.live_registry.clone();
-                    let registry = registry.borrow();
-                    let rect = if let Some(design_info) =  registry.ptr_to_design_info(*ptr){
-                        // lets deserialize from design_info
-                        let info = DesignInfo::new_apply_over(cx, design_info);
-                        rect(info.dx, info.dy, info.dw, info.dh)
+                match data.node_map.get(selected){
+                    Some(OutlineNode::Component{ptr,..})=>{
+                        self.draw_container(cx, *ptr);
                     }
-                    else{
-                        rect(50.0,50.0,400.0,300.0)
-                    };
-                    
-                    let container_ptr = self.container.unwrap();
-                    let cd = self.containers.get_or_insert(cx, *ptr, | cx | {
-                        ContainerData{
-                            component:WidgetRef::new_from_ptr(cx, Some(*ptr)),
-                            container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
-                            rect
+                    Some(OutlineNode::File{children,..})=>{
+                        for child in children{
+                            if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(child){
+                                self.draw_container(cx, *ptr);
+                            }
                         }
-                    });
-                    
-                    if self.reapply{
-                        self.reapply = false;
-                        cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
-                        cd.component.apply_from_ptr(cx, Some(*ptr));
                     }
-                    // ok so we're going to draw the container with the widget inside
-                    cd.container.draw_all(cx, &mut Scope::with_props(cd))
+                    _=>()
                 }
             }
             
@@ -342,5 +375,16 @@ impl Widget for DesignerView {
         cx.set_pass_shift_scale(&self.pass, self.pan, dvec2(self.zoom,self.zoom));
         
         DrawStep::done()
+    }
+}
+
+impl DesignerViewRef{
+    pub fn selected(&self, actions: &Actions) -> Option<(LivePtr,KeyModifiers)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let DesignerViewAction::Selected(ptr, km) = item.cast() {
+                return Some((ptr,km))
+            }
+        }
+        None
     }
 }

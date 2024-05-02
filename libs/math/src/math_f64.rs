@@ -64,12 +64,10 @@ impl Rect {
     }
     
     pub fn intersects(&self, r: Rect) -> bool {
-        !(
-            r.pos.x > self.pos.x + self.size.x ||
-            r.pos.x + r.size.x < self.pos.x ||
-            r.pos.y > self.pos.y + self.size.y ||
-            r.pos.y + r.size.y < self.pos.y
-        )
+        r.pos.x < self.pos.x + self.size.x &&
+        r.pos.x + r.size.x > self.pos.x &&
+        r.pos.y < self.pos.y + self.size.y &&
+        r.pos.y + r.size.y > self.pos. y
     }
     
     pub fn add_margin(self, size: DVec2) -> Rect {

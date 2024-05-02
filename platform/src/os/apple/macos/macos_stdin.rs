@@ -61,7 +61,7 @@ impl Cx {
     pub (crate) fn stdin_handle_repaint(
         &mut self,
         metal_cx: &mut MetalCx,
-        windows: &mut [StdinWindow],
+        stdin_windows: &mut [StdinWindow],
         time: f32,
     ) {
         let mut passes_todo = Vec::new();
@@ -71,7 +71,7 @@ impl Cx {
             self.passes[pass_id].set_time(time as f32);
             match self.passes[pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
-                    if let Some(swapchain) = &mut windows[window_id.id()].swapchain{
+                    if let Some(swapchain) = &mut stdin_windows[window_id.id()].swapchain{
                         
                         let [current_image] = &swapchain.presentable_images;
                         if let Some(texture) = &current_image.image {
@@ -139,7 +139,7 @@ impl Cx {
 
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         
-        let mut windows:Vec<StdinWindow> = Vec::new();
+        let mut stdin_windows:Vec<StdinWindow> = Vec::new();
                 
         self.call_event_handler(&Event::Startup);
         
@@ -227,20 +227,20 @@ impl Cx {
                 }
                 HostToStdin::Swapchain(new_swapchain) => {
                     
-                    windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
+                    stdin_windows[new_swapchain.window_id].swapchain = Some(new_swapchain.images_map(|_| None));
                     
                     self.redraw_all();
-                    self.stdin_handle_platform_ops(metal_cx, &mut windows);
+                    self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
                 }
                 HostToStdin::Tick=>{
-                    for window in &mut windows{
-                        if window.swapchain.is_some() {
-                            let swapchain = window.swapchain.as_mut().unwrap();
+                    for stdin_window in &mut stdin_windows{
+                        if stdin_window.swapchain.is_some() {
+                            let swapchain = stdin_window.swapchain.as_mut().unwrap();
                             let [presentable_image] = &swapchain.presentable_images;
                             // lets fetch the framebuffers
                             if presentable_image.image.is_none() {
                                                         
-                                let tx_fb = window.tx_fb.clone();
+                                let tx_fb = stdin_window.tx_fb.clone();
                                 fetch_xpc_service_texture(
                                     service_proxy.as_id(),
                                     presentable_image.id,
@@ -248,7 +248,7 @@ impl Cx {
                                 ); 
                                 // this is still pretty bad at 100ms if the service is still starting up
                                 // we should 
-                                if let Ok(fb) = window.rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
+                                if let Ok(fb) = stdin_window.rx_fb.recv_timeout(std::time::Duration::from_millis(100)) {
                                                                 
                                     let format = TextureFormat::SharedBGRAu8 {
                                         id: presentable_image.id,
@@ -279,7 +279,7 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-                    self.stdin_handle_platform_ops(metal_cx, &mut windows);
+                    self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
@@ -290,7 +290,7 @@ impl Cx {
                         self.call_draw_event();
                         self.mtl_compile_shaders(metal_cx);
                     }
-                    self.stdin_handle_repaint(metal_cx, &mut windows, self.os.stdin_timers.time_now() as f32);
+                    self.stdin_handle_repaint(metal_cx, &mut stdin_windows, self.os.stdin_timers.time_now() as f32);
                 }
             }
         }
@@ -390,12 +390,12 @@ impl Cx {
     }
     
     
-    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, windows: &mut Vec<StdinWindow>) {
+    fn stdin_handle_platform_ops(&mut self, _metal_cx: &MetalCx, stdin_windows: &mut Vec<StdinWindow>) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
-                    while window_id.id() >= windows.len(){
-                        windows.push(StdinWindow::new());
+                    while window_id.id() >= stdin_windows.len(){
+                        stdin_windows.push(StdinWindow::new());
                     }
                     let window = &mut self.windows[window_id];
                     window.is_created = true;

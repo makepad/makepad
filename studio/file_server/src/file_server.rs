@@ -73,7 +73,7 @@ impl FileServerConnection {
         match request {
             FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
             FileRequest::OpenFile(path,id) => FileResponse::OpenFile(self.open_file(path, id)),
-            FileRequest::SaveFile(path, delta, id) => FileResponse::SaveFile(self.save_file(path, delta, id)),
+            FileRequest::SaveFile(path, delta, id, was_patch) => FileResponse::SaveFile(self.save_file(path, delta, id, was_patch)),
         }
     }
     
@@ -188,8 +188,9 @@ impl FileServerConnection {
         &self,
         child_path: String,
         new_content: String,
-        id: u64
-    ) -> Result<(String, String, String, u64), FileError> {
+        id: u64,
+        was_patch: bool
+    ) -> Result<(String, String, String, u64, bool), FileError> {
         let path = self.make_full_path(&child_path);
         
         let old_content = String::from_utf8_lossy(&fs::read(&path).map_err(
@@ -200,7 +201,7 @@ impl FileServerConnection {
             | error | FileError::Unknown(error.to_string())
         ) ?;
         
-        Ok((child_path, old_content, new_content, id))
+        Ok((child_path, old_content, new_content, id, was_patch))
     }
 }
 
