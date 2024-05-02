@@ -1,4 +1,5 @@
 #[allow(unused)]
+use makepad_jni_sys as jni_sys;
 use {
     std::rc::Rc,
     std::cell::{RefCell},

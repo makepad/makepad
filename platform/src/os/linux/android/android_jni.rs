@@ -1,3 +1,4 @@
+use makepad_jni_sys as jni_sys;
 use {
     std::{cell::{Cell, RefCell}, ffi::CString, sync::mpsc::{self, Sender}},
     self::super::{

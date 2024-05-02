@@ -1,4 +1,5 @@
 #![allow(non_upper_case_globals)]
+use makepad_jni_sys as jni_sys;
 use {
     std::sync::{Arc, Mutex, mpsc},
     jni_sys::jobject,
