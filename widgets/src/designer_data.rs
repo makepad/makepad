@@ -4,6 +4,7 @@ use crate::{
     makepad_live_compiler::LiveTokenId,
 };
 use std::collections::HashMap;
+use std::fmt::Write;
 
 pub enum OutlineNode{
     Virtual{
@@ -20,8 +21,8 @@ pub enum OutlineNode{
         children: SmallVec<[LiveId;4]>
     },
     Component{
-        
-        name: LiveId,
+        name: String,        
+        id: LiveId,
         class: LiveId,
         prop_type: LivePropType,
         token_id: LiveTokenId,
@@ -79,12 +80,12 @@ impl DesignerData{
                         if main_module_lti.live_type == *live_type || wr.map.get(live_type).is_some(){
                                                             
                             // lets emit a class at our level
-                            let name = nodes[index].id;
+                            let id = nodes[index].id;
                             let class = live_registry.ptr_to_node(*class_parent).id;
                             let ptr = base_ptr.with_index(index);
                             let prop_type =  nodes[index].origin.prop_type();
                             let token_id = nodes[index].origin.token_id();
-                            let uid = hash_id.bytes_append(&name.0.to_be_bytes());
+                            let uid = hash_id.bytes_append(&id.0.to_be_bytes());
                             let mut children = SmallVec::new();
                                                             
                             index = recur_walk_components(
@@ -100,7 +101,22 @@ impl DesignerData{
                                                             
                             let uid = uid.into();
                             parent_children.push(uid);
+                            
+                            let mut name = String::new();
+                            if !id.is_unique(){
+                                if let LivePropType::Field = prop_type {
+                                    write!(name, "{}: <{}>", id, class).unwrap();
+                                }
+                                else {
+                                    write!(name, "{}=<{}>", id, class).unwrap();
+                                }
+                            }
+                            else {
+                                write!(name, "<{}>", class).unwrap();
+                            }
+                            
                             map.insert(uid, OutlineNode::Component {
+                                id,
                                 name,
                                 token_id: token_id.unwrap(), 
                                 prop_type,
@@ -272,8 +288,8 @@ impl DesignerData{
                         }
                     }
                 }
-                Some(OutlineNode::Component{children, name, ..}) => {
-                    if *name == path[0]{
+                Some(OutlineNode::Component{children, id, ..}) => {
+                    if *id == path[0]{
                         if path.len()>1{
                             for child in children{
                                  if let Some(v) = get_node(*child, &path[1..], map){
