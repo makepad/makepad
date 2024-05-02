@@ -67,8 +67,9 @@ pub struct DesignerOutlineTree {
     #[rust] dragging_node_id: Option<LiveId>,
     #[rust] selected_node_id: Option<LiveId>,
     #[rust] open_nodes: HashSet<LiveId>,
-    #[rust] scroll_into_view: Option<LiveId>,
-    
+    #[rust] scroll_into_view_id: Option<LiveId>,
+    #[rust] scroll_into_view_rect: Option<Rect>,
+        
     #[rust] tree_nodes: ComponentMap<LiveId, (DesignerOutlineTreeNode, LiveId)>,
     
     #[rust] count: usize,
@@ -248,6 +249,11 @@ impl DesignerOutlineTree {
         self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
         
+        if let Some(rect) = self.scroll_into_view_rect.take(){
+            let rect = rect.add_margin(dvec2(0.0,self.node_height*3.0)).translate(self.scroll_bars.get_scroll_pos());
+            self.scroll_bars.scroll_into_view_abs(cx, rect);
+        }
+        
         let selected_node_id = self.selected_node_id;
         self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
     }
@@ -261,15 +267,20 @@ impl DesignerOutlineTree {
         let height = self.node_height * scale;
         let walk = Walk::size(Size::Fill, Size::Fixed(height));
         if scale > 0.01 && cx.walk_turtle_would_be_visible(walk) {
+            if let Some(view_id) = &self.scroll_into_view_id{
+                if *view_id == node_id{
+                    self.scroll_into_view_id.take();
+                }
+            }
             return true
         }
         else {
             // alright so the node is NOT visible. what if we should be
             let rect = cx.walk_turtle(walk);
-            if let Some(view_id) = &self.scroll_into_view{
+            if let Some(view_id) = &self.scroll_into_view_id{
                 if *view_id == node_id{
-                    self.scroll_into_view.take();
-                    self.scroll_bars.scroll_into_view(cx, rect.add_margin(dvec2(0.0,self.node_height*3.0)));
+                    self.scroll_into_view_id.take();
+                    self.scroll_into_view_rect = Some(rect);
                 }
             }
             return false
@@ -369,8 +380,9 @@ impl DesignerOutlineTree {
             }
         }
         let last = *id_path.last().unwrap();
-        self.scroll_into_view = Some(last);
+        self.scroll_into_view_id = Some(last);
         self.selected_node_id = Some(last);
+        
         for (id,(tree_node,_)) in self.tree_nodes.iter_mut(){
             if *id == last{
                 tree_node.set_is_selected(cx, true, Animate::No);
