@@ -3852,6 +3852,7 @@ live_design! {
     }
 
     DesignerView = <DesignerViewBase>{
+        clear_color: #2
         draw_bg: {
             texture image: texture2d
             varying scale: vec2
