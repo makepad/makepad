@@ -19,6 +19,8 @@ live_design!{
     GOLDEN = 1.618033988749895
     
     GaussShadow = {
+        // ported from https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/
+        
         fn gaussian(x:float, sigma:float )->float{
             let pi = 3.141592653589793;
             return exp(-(x * x) / (2.0 * sigma * sigma)) / (sqrt(2.0 * pi) * sigma);
