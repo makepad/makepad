@@ -20,6 +20,7 @@ pub enum OutlineNode{
         children: SmallVec<[LiveId;4]>
     },
     Component{
+        
         name: LiveId,
         class: LiveId,
         prop_type: LivePropType,
@@ -198,6 +199,52 @@ impl DesignerData{
                 }
             }
         }
+    }
+    
+    pub fn find_component_by_ptr(&mut self, find_ptr:LivePtr)->Option<LiveId>{
+        for (node_id, node) in &self.node_map{
+            if let OutlineNode::Component{ptr,..} = node{
+                if *ptr == find_ptr{
+                    return Some(*node_id)
+                }
+            }
+        }
+        None
+    }
+    
+    pub fn construct_path(&mut self, find_node:LiveId)->Vec<LiveId>{
+        let mut result = Vec::new();
+        result.push(find_node);
+        let mut iter = find_node;
+        while let Some(parent) = self.find_parent(iter){
+            result.insert(0, parent);
+            iter = parent;
+        }
+        result
+    }
+        
+    pub fn find_parent(&mut self, find_node:LiveId)->Option<LiveId>{
+        for (node_id, node) in &self.node_map{
+            match node{
+                OutlineNode::Component{children,..} | OutlineNode::Virtual{children,..} | OutlineNode::File{children,..} | OutlineNode::Folder{children, ..} =>{
+                    if children.iter().position(|v| *v == find_node).is_some(){
+                        return Some(*node_id)
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    pub fn find_file_parent(&mut self, find_node:LiveId)->Option<LiveId>{
+        let mut iter = find_node;
+        while let Some(parent) = self.find_parent(iter){
+            if let Some(OutlineNode::File{..}) = self.node_map.get(&parent){
+                return Some(parent);
+            }
+            iter = parent;
+        }
+        None
     }
     
     pub fn _remove_child(&mut self, find_node:LiveId){

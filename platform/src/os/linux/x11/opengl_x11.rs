@@ -217,7 +217,7 @@ impl CxTexture {
         opengl_cx: &OpenglCx,
         dma_buf_image: &dma_buf::Image<os::fd::OwnedFd>,
     ) {
-        if self.alloc_shared(){
+        if !self.alloc_shared(){
             return
         }
         let alloc = self.alloc.as_ref().unwrap();

@@ -1,6 +1,6 @@
 use crate::makepad_micro_serde::*;
 use crate::log::LogLevel;
-
+pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
 // communication enums for studio
 
 #[derive(SerBin, DeBin, Debug)]
@@ -34,12 +34,33 @@ pub struct JumpToFile{
     pub column: u32    
 }
 
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct PatchFile{
+    pub file_name: String,
+    pub line: u32,
+    pub column_start: u32,
+    pub column_end: u32,
+    pub replace: String
+}
+
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct EditFile{
+    pub file_name: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub column_start: u32,
+    pub column_end: u32,
+    pub replace: String
+}
+
 #[derive(SerBin, DeBin, Debug)]
 pub enum AppToStudio{
     LogItem(StudioLogItem),
     EventSample(EventSample),
     GPUSample(GPUSample),
     JumpToFile(JumpToFile),
+    PatchFile(PatchFile),
+    EditFile(EditFile),
     FocusDesign
 }
 

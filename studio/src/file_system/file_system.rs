@@ -139,10 +139,10 @@ impl FileSystem {
                             }
                         }
                         FileResponse::SaveFile(result) => match result {
-                            Ok((path, old, new, _id)) => {
+                            Ok((path, old, new, _id, was_patch)) => {
                                 // alright file has been saved
                                 // now we need to check if a live_design!{} changed or something outside it
-                                if old != new {
+                                if old != new && !was_patch {
                                     let mut old_neg = Vec::new();
                                     let mut new_neg = Vec::new();
                                     match LiveRegistry::tokenize_from_str_live_design(&old, Default::default(), Default::default(), Some(&mut old_neg)) {
@@ -158,7 +158,7 @@ impl FileSystem {
                                                 if old_neg != new_neg {
                                                     cx.action(FileSystemAction::RecompileNeeded)
                                                 }
-                                                if old_tokens != new_tokens {
+                                                if old_tokens != new_tokens{
                                                     // design code changed, hotreload it
                                                     cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
                                                         file_name: path,
@@ -212,17 +212,20 @@ impl FileSystem {
         self.file_client.send_request(FileRequest::OpenFile(path, file_id.0));
     }
     
-    
-    pub fn request_save_file(&mut self, tab_id: LiveId) {
+    pub fn request_save_file_for_tab_id(&mut self, tab_id: LiveId, was_patch:bool) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
-            if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
-                let text = doc.as_text().to_string();
-                let path = self.file_node_path(*file_id);
-                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0));
-            }
+            self.request_save_file_for_file_node_id(*file_id, was_patch)
         };
+    }
+    
+    pub fn request_save_file_for_file_node_id(&mut self, file_id: LiveId, was_patch:bool) {
+        if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
+            let text = doc.as_text().to_string();
+            let path = self.file_node_path(file_id);
+            self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0, was_patch));
+        }
     }
     
     pub fn clear_decorations(&mut self, file_node_id: &LiveId) {
