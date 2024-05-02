@@ -57,7 +57,8 @@ live_design!{
     import crate::designer_view::DesignerContainerBase;
     import crate::designer_outline_tree::DesignerOutlineTreeBase;
     import crate::designer_outline_tree::DesignerOutlineTreeNodeBase;
-    
+    import crate::designer_toolbox::DesignerToolboxBase;
+        
     import crate::bare_step::BareStep;
     import crate::turtle_step::TurtleStep;
     import makepad_draw::shader::std::*;
@@ -420,6 +421,44 @@ live_design!{
         }
     }}
     
+    RectShadowView = <ViewBase> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance blur_color: #0007
+        instance blur_shift: vec2(0.0,0.0)
+        instance blur_radius: 10.0
+                            
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+                                    
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+                            
+        fn pixel(self) -> vec4 {
+                                        
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.rect(
+                self.border_width + self.blur_radius - self.blur_shift.x ,
+                self.border_width + self.blur_radius - self.blur_shift.y ,
+                self.rect_size.x - (self.blur_radius * 2.0 + self.border_width * 2.0),
+                self.rect_size.y - (self.blur_radius * 2.0 + self.border_width * 2.0)
+            )
+            if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
+                let m = self.blur_radius;
+                let v = GaussShadow::box_shadow(vec2(m), self.rect_size, self.pos * (self.rect_size+vec2(m)), m*0.5);
+                sdf.clear(self.blur_color*v)
+            }
+                                                
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
     RoundedView = <ViewBase> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
@@ -448,6 +487,47 @@ live_design!{
                 sdf.stroke(self.get_border_color(), self.border_width)
             }
             return sdf.result;
+        }
+    }}
+    
+    RoundedShadowView = <ViewBase>{show_bg: true, draw_bg: {
+        color:#8
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance shadow_color: #0007
+        instance shadow_radius: 20.0,
+        instance shadow_shift: vec2(0.0,0.0)
+        instance radius: 2.5
+                    
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+                            
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+                    
+        fn pixel(self) -> vec4 {
+                            
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box(
+                self.border_width + self.blur_radius - self.blur_shift.x ,
+                self.border_width + self.blur_radius - self.blur_shift.y ,
+                self.rect_size.x - (self.blur_radius * 2.0 + self.border_width * 2.0),
+                self.rect_size.y - (self.blur_radius * 2.0 + self.border_width * 2.0),
+                max(1.0, self.radius)
+            )
+            if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
+                let m = self.blur_radius;
+                let v = GaussShadow::rounded_box_shadow(vec2(m), self.rect_size, self.pos * (self.rect_size+vec2(m)), self.blur_radius*0.5, self.radius*2.0);
+                sdf.clear(self.blur_color*v)
+            }
+                                
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result
         }
     }}
     
@@ -820,4 +900,5 @@ live_design!{
     DesignerContainerBase = <DesignerContainerBase>{}
     DesignerOutlineTreeBase = <DesignerOutlineTreeBase> {}
     DesignerOutlineTreeNodeBase = <DesignerOutlineTreeNodeBase> {}
+    DesignerToolboxBase = <DesignerToolboxBase> {}
 }
