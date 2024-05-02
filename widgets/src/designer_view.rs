@@ -142,7 +142,7 @@ impl LiveHook for DesignerView {
 }
 
 impl DesignerView{
-    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr){
+    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str){
         let registry = cx.live_registry.clone();
         let registry = registry.borrow();
         let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
@@ -154,17 +154,20 @@ impl DesignerView{
                                     
         let container_ptr = self.container.unwrap();
         let cd = self.containers.get_or_insert(cx, id, | cx | {
-            ContainerData{
+            let ret = ContainerData{
                 ptr,
-                component:WidgetRef::new_from_ptr(cx, Some(ptr)),
+                component :WidgetRef::new_from_ptr(cx, Some(ptr)),
                 container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
                 rect
-            }
+            };
+            ret.container.apply_over(cx, live!{
+                label = {text:(name)}
+            });
+            ret
         });
         cd.rect = rect;
         cd.ptr = ptr;
         if self.reapply{
-            self.reapply = false;
             cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
             cd.component.apply_from_ptr(cx, Some(ptr));
         }
@@ -369,15 +372,16 @@ impl Widget for DesignerView {
                 match data.node_map.get(view_file){
                     Some(OutlineNode::File{children,..})=>{
                         for child in children{
-                            if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(child){
-                                self.draw_container(cx, *child, *ptr);
+                            if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(child){
+                                self.draw_container(cx, *child, *ptr, name);
                             }
                         }
                     }
                     _=>()
                 }
             }
-            
+            self.reapply = false;
+                        
             cx.end_pass_sized_turtle_no_clip();
             self.draw_list.end(cx);
             cx.end_pass(&self.pass);
