@@ -101,7 +101,7 @@ impl LiveIdInterner {
     }
 }
 
-#[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
+#[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LiveId(pub u64);
 
 pub const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
@@ -269,7 +269,7 @@ impl LiveId {
 }
 
 pub (crate) static UNIQUE_LIVE_ID: AtomicU64 = AtomicU64::new(1);
-
+/*
 impl Ord for LiveId {
     fn cmp(&self, other: &LiveId) -> cmp::Ordering {
         LiveIdInterner::with( | idmap | {
@@ -287,7 +287,7 @@ impl PartialOrd for LiveId {
     fn partial_cmp(&self, other: &LiveId) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
-}
+}*/
 
 impl fmt::Debug for LiveId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
