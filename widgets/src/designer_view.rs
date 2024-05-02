@@ -17,6 +17,13 @@ live_design!{
     
 }
 
+#[derive(Clone, Debug, DefaultNone)]
+pub enum DesignerViewAction {
+    None,
+    Selected(LivePtr, KeyModifiers),
+}
+
+
 struct ContainerData{
     component: WidgetRef,
     container: WidgetRef,
@@ -162,8 +169,8 @@ impl DesignerView{
 }
 
 impl Widget for DesignerView {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
-        
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
+        let uid = self.widget_uid();
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
                 
@@ -202,6 +209,8 @@ impl Widget for DesignerView {
                                 ptr: *ptr,
                                 edge
                             });
+                            // lets send out a click on this containter
+                             cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*ptr, fe.modifiers));
                             break;
                         }
                         None=>()
@@ -291,7 +300,7 @@ impl Widget for DesignerView {
                         }
                     }
                     FingerMove::DragBody{ptr:_}=>{
-                                                
+                        
                     }
                 }
             }
@@ -366,5 +375,16 @@ impl Widget for DesignerView {
         cx.set_pass_shift_scale(&self.pass, self.pan, dvec2(self.zoom,self.zoom));
         
         DrawStep::done()
+    }
+}
+
+impl DesignerViewRef{
+    pub fn selected(&self, actions: &Actions) -> Option<(LivePtr,KeyModifiers)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let DesignerViewAction::Selected(ptr, km) = item.cast() {
+                return Some((ptr,km))
+            }
+        }
+        None
     }
 }

@@ -4,6 +4,7 @@ use crate::{
     multi_window::*,
     widget_match_event::*,
     designer_data::*,
+    designer_view::*,
     designer_outline_tree::*,
     widget::*,
     makepad_platform::studio::*,
@@ -33,6 +34,16 @@ impl LiveHook for Designer {
 impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
+        let designer_view = self.ui.designer_view(id!(designer_view));
+        if let Some((ptr, _km)) = designer_view.selected(&actions){
+            // select the right node in the filetree
+            if let Some(file_id) = self.data.find_component_by_ptr(ptr){
+                let path = self.data.construct_path(file_id);
+                println!("{:?}", path);
+                outline_tree.select_and_show_node(cx, &path);
+            }
+        }
+        
         if let Some((selected_file_id,km)) = outline_tree.selected(&actions) {
             // alright we have a folder clicked
             // lets get a file/line number out of it so we can open it in the code editor.
@@ -73,8 +84,11 @@ impl WidgetMatchEvent for Designer{
                             Cx::send_studio_message(AppToStudio::FocusDesign);
                         }
                         else{
-                            self.data.selected = Some(selected_file_id);
-                            self.ui.widget(id!(designer_view)).redraw(cx);
+                            // only select the file 
+                            if let Some(file_id) = self.data.find_file_parent(selected_file_id){
+                                self.data.selected = Some(file_id);
+                                self.ui.widget(id!(designer_view)).redraw(cx);
+                            }
                         }
                     }
                     _=>()

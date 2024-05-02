@@ -67,6 +67,7 @@ pub struct DesignerOutlineTree {
     #[rust] dragging_node_id: Option<LiveId>,
     #[rust] selected_node_id: Option<LiveId>,
     #[rust] open_nodes: HashSet<LiveId>,
+    #[rust] scroll_into_view: Option<LiveId>,
     
     #[rust] tree_nodes: ComponentMap<LiveId, (DesignerOutlineTreeNode, LiveId)>,
     
@@ -132,19 +133,6 @@ impl DesignerOutlineTreeNode {
         }
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
-                
-        //self.icon.draw_all(cx, &mut Scope::empty());
-        //self.button_name.draw_button(cx, name);
-        
-        // fill.
-        //cx.defer_walk(Walk::size(Size::Fill, Size::Fixed(0.0)));
-       // if self.draw_eye{
-       //     self.check_eye.draw_all(cx, &mut Scope::empty());
-       // }
-        // lets draw the label
-        
-        //self.draw_icon.draw_walk(cx, self.icon_walk);
-        //self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     
@@ -268,7 +256,7 @@ impl DesignerOutlineTree {
         if count % 2 == 1 {0.0}else {1.0}
     }
     
-    pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
+    pub fn should_node_draw(&mut self, node_id: LiveId, cx: &mut Cx2d) -> bool {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         let walk = Walk::size(Size::Fill, Size::Fixed(height));
@@ -276,7 +264,14 @@ impl DesignerOutlineTree {
             return true
         }
         else {
-            cx.walk_turtle(walk);
+            // alright so the node is NOT visible. what if we should be
+            let rect = cx.walk_turtle(walk);
+            if let Some(view_id) = &self.scroll_into_view{
+                if *view_id == node_id{
+                    self.scroll_into_view.take();
+                    self.scroll_bars.scroll_into_view(cx, rect.add_margin(dvec2(0.0,self.node_height*3.0)));
+                }
+            }
             return false
         }
     }
@@ -295,14 +290,17 @@ impl DesignerOutlineTree {
         }
         
         let is_open = self.open_nodes.contains(&node_id);
-        
-        if self.should_node_draw(cx) {
+        let is_selected = self.selected_node_id == Some(node_id);
+        if self.should_node_draw(node_id, cx) {
             // lets create the node
             if let Some(ptr) = self.templates.get(&template){
                 let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
                     let mut tree_node = DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr));
                     if is_open {
                         tree_node.set_is_open(cx, true, Animate::No)
+                    }
+                    if is_selected{
+                        tree_node.set_is_selected(cx, true, Animate::No)
                     }
                     (tree_node, template)
                 });
@@ -338,10 +336,16 @@ impl DesignerOutlineTree {
         if scale > 0.2 {
             self.count += 1;
         }
-        if self.should_node_draw(cx) {
+        let is_selected = self.selected_node_id == Some(node_id);
+        if self.should_node_draw(node_id, cx) {
             if let Some(ptr) = self.templates.get(&template){
                 let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                    (DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr)), template)
+                    let mut tree_node = DesignerOutlineTreeNode::new_from_ptr(cx, Some(*ptr));
+                    if is_selected{
+                        tree_node.set_is_selected(cx, true, Animate::No)
+                    }
+                    (tree_node, template)
+                    
                 });
                 tree_node.draw(cx, name, Self::is_even_as_f32(self.count), self.node_height, self.stack.len(), scale, false);
             }
@@ -356,6 +360,27 @@ impl DesignerOutlineTree {
         self.tree_nodes.remove(&file_node_id);
     }
     
+    pub fn select_and_show_node(&mut self, cx:&mut Cx, id_path:&[LiveId])  {
+        for i in 0..id_path.len()-1{
+            let id = id_path[i];
+            self.open_nodes.insert(id);
+            if let Some((tree_node,_)) = self.tree_nodes.get_mut(&id){
+                tree_node.set_is_open(cx, true, Animate::No);
+            }
+        }
+        let last = *id_path.last().unwrap();
+        self.scroll_into_view = Some(last);
+        self.selected_node_id = Some(last);
+        for (id,(tree_node,_)) in self.tree_nodes.iter_mut(){
+            if *id == last{
+                tree_node.set_is_selected(cx, true, Animate::No);
+            }
+            else{
+                tree_node.set_is_selected(cx, false, Animate::No);
+            }
+        }
+        self.redraw(cx);
+    }
     
     pub fn start_dragging_file_node(
         &mut self,
@@ -469,6 +494,14 @@ impl DesignerOutlineTreeRef{
         }
         None
     }*/
+    
+        
+    pub fn select_and_show_node(&self, cx:&mut Cx, id_path:&[LiveId])  {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.select_and_show_node(cx, id_path);
+        }
+    }
+        
     
     pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
