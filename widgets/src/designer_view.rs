@@ -21,7 +21,11 @@ live_design!{
 #[derive(Clone, Debug, DefaultNone)]
 pub enum DesignerViewAction {
     None,
-    Selected(LiveId, KeyModifiers),
+    Selected{
+        id:LiveId, 
+        km:KeyModifiers,
+        tap_count: u32,
+    }
 }
 
 
@@ -279,7 +283,11 @@ impl Widget for DesignerView {
                                         edge
                                     });
                                     // lets send out a click on this containter
-                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*id, fe.modifiers));
+                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Selected{
+                                        id:*id, 
+                                        tap_count: fe.tap_count , 
+                                        km:fe.modifiers
+                                    });
                                     // set selected component
                                     // unselect all other components
                                     self.select_component(cx, Some(*id));
@@ -456,10 +464,10 @@ impl DesignerViewRef{
         None
     }
     
-    pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
+    pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers,u32)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesignerViewAction::Selected(id, km) = item.cast() {
-                return Some((id,km))
+            if let DesignerViewAction::Selected{id, km, tap_count} = item.cast() {
+                return Some((id, km, tap_count))
             }
         }
         None

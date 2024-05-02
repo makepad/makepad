@@ -61,12 +61,12 @@ impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
         let designer_view = self.ui.designer_view(id!(designer_view));
-        if let Some((outline_id, km)) = designer_view.selected(&actions){
+        if let Some((outline_id, km, tap_count)) = designer_view.selected(&actions){
             // select the right node in the filetree
             let path = self.data.construct_path(outline_id);
             outline_tree.select_and_show_node(cx, &path);
             // if we click with control
-            if km.control{
+            if km.control || tap_count > 1{
                 self.studio_jump_to_component(cx, outline_id)
             }
         }
