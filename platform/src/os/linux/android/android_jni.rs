@@ -1,50 +1,20 @@
 use {
-    crate::makepad_math::*,
-    std::ffi::CString,
-    std::{cell::RefCell, cell::Cell},
-    std::sync::{mpsc, mpsc::Sender},
+    std::{cell::{Cell, RefCell}, ffi::CString, sync::mpsc::{self, Sender}},
     self::super::{
         ndk_sys,
         ndk_utils,
     },
     crate::{
-        makepad_live_id::*,
         area::Area,
-        event::{TouchPoint, TouchState, HttpRequest, VideoSource},
         cx::AndroidParams,
+        event::{HttpRequest, TouchPoint, TouchState, VideoSource},
+        makepad_live_id::*,
+        makepad_math::*,
         WebSocketMessage,
     },
+    makepad_android_state::{get_activity, get_java_vm},
 };
 
-#[no_mangle]
-pub unsafe extern "C" fn JNI_OnLoad(
-    vm: *mut jni_sys::JavaVM,
-    _: std::ffi::c_void,
-) -> jni_sys::jint {
-    VM = vm as *mut _ as _;
-
-    jni_sys::JNI_VERSION_1_6 as _
-}
-
-/// Returns a raw pointer to the JavaVM instance initialized by the JNI layer.
-///
-/// If the JavaVM instance has not been initialized, this returns a null pointer.
-pub fn get_java_vm() -> *mut jni_sys::JavaVM {
-    unsafe { VM }
-}
-
-/// Returns a raw pointer to the main Makepad Activity instance.
-///
-/// Note that the caller should not cache or re-use the returned activity pointer,
-/// but should instead re-call this function whenever the activity instance is needed.
-/// This is because the activity instance may be destroyed and recreated behind the scenes
-/// upon certain system actions, e.g., when the device is rotated,
-/// the app is put into split screen, resized/moved, etc.
-///
-/// If the Activity instance has not been initialized, this returns a null pointer.
-pub fn get_activity() -> jni_sys::jobject {
-    unsafe { ACTIVITY }
-}
 
 #[derive(Debug)]
 pub enum TouchPhase{
@@ -156,31 +126,30 @@ pub const ANDROID_META_SHIFT_MASK: u32 = 193;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
 pub const ANDROID_META_ALT_MASK: u32 = 50;
 
-static mut ACTIVITY: jni_sys::jobject = std::ptr::null_mut();
-static mut VM: *mut jni_sys::JavaVM = std::ptr::null_mut();
+static mut SET_ACTIVITY_FN: unsafe fn(jni_sys::jobject) = |_| {};
 
 pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: mpsc::Sender<FromJavaMessage>){
+    if let Some(func) = makepad_android_state::get_activity_setter_fn() {
+        // This will only occur once during the entire process lifetime.
+        SET_ACTIVITY_FN = func;
+    }
+
     let env = attach_jni_env();
-    ACTIVITY = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
+    let activity = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
+    SET_ACTIVITY_FN(activity);
     MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(from_java_tx));
 }
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
     let mut env: *mut jni_sys::JNIEnv = std::ptr::null_mut();
-    let attach_current_thread = (**VM).AttachCurrentThread.unwrap();
+    let attach_current_thread = (**get_java_vm()).AttachCurrentThread.unwrap();
 
-    let res = attach_current_thread(VM, &mut env, std::ptr::null_mut());
+    let res = attach_current_thread(get_java_vm(), &mut env, std::ptr::null_mut());
     assert!(res == 0);
 
     env
 }
 
-#[no_mangle]
-extern "C" fn jni_on_load(vm: *mut std::ffi::c_void) {
-    unsafe {
-        VM = vm as _;
-    }
-}
 
 unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANativeWindow {
     let env = attach_jni_env();
@@ -585,7 +554,7 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
 }
 
 pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: bool) {
-    ndk_utils::call_void_method!(env, ACTIVITY, "setFullScreen", "(Z)V", fullscreen as i32);
+    ndk_utils::call_void_method!(env, get_activity(), "setFullScreen", "(Z)V", fullscreen as i32);
 }
 
 pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
@@ -597,11 +566,11 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
 
     let mid = (get_method_id)(
         env,
-        get_object_class(env, ACTIVITY),
+        get_object_class(env, get_activity()),
         b"getAssets\0".as_ptr() as _,
         b"()Landroid/content/res/AssetManager;\0".as_ptr() as _,
     );
-    let asset_manager = (call_object_method)(env, ACTIVITY, mid);
+    let asset_manager = (call_object_method)(env, get_activity(), mid);
     let mgr = ndk_sys::AAssetManager_fromJava(env, asset_manager);
     let file_path = CString::new(filepath).unwrap();
     let asset = ndk_sys::AAssetManager_open(mgr, file_path.as_ptr(), ndk_sys::AASSET_MODE_BUFFER as _);
@@ -621,14 +590,14 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
 
 pub unsafe fn to_java_show_keyboard(visible: bool) {
     let env = attach_jni_env();
-    ndk_utils::call_void_method!(env, ACTIVITY, "showKeyboard", "(Z)V", visible as i32);
+    ndk_utils::call_void_method!(env, get_activity(), "showKeyboard", "(Z)V", visible as i32);
 }
 
 pub unsafe fn to_java_copy_to_clipboard(content: String) {
     let env = attach_jni_env();
     let content = CString::new(content.clone()).unwrap();
     let content = ((**env).NewStringUTF.unwrap())(env, content.as_ptr());
-    ndk_utils::call_void_method!(env, ACTIVITY, "copyToClipboard", "(Ljava/lang/String;)V", content);
+    ndk_utils::call_void_method!(env, get_activity(), "copyToClipboard", "(Ljava/lang/String;)V", content);
 }
 
 pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
@@ -660,7 +629,7 @@ pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
 
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "requestHttp",
         "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V",
         request_id.get_value() as jni_sys::jlong,
@@ -683,7 +652,7 @@ pub unsafe fn to_java_websocket_open(
 
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "openWebSocket",
         "(JLjava/lang/String;J)V",
         request_id.get_value() as jni_sys::jlong,
@@ -705,7 +674,7 @@ pub unsafe fn to_java_websocket_send_message(request_id: LiveId, message: Vec<u8
 
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "sendWebSocketMessage",
         "(J[B)V",
         request_id.get_value() as jni_sys::jlong,
@@ -718,7 +687,7 @@ pub unsafe fn to_java_websocket_close(request_id: LiveId) {
 
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "closeWebSocket",
         "(J)V",
         request_id.get_value() as jni_sys::jlong
@@ -728,7 +697,7 @@ pub unsafe fn to_java_websocket_close(request_id: LiveId) {
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();
-        let string_array = ndk_utils::call_object_method!(env, ACTIVITY, "getAudioDevices", "(J)[Ljava/lang/String;", flag);
+        let string_array = ndk_utils::call_object_method!(env, get_activity(), "getAudioDevices", "(J)[Ljava/lang/String;", flag);
         return java_string_array_to_vec(env, string_array);
     }
 }
@@ -736,7 +705,7 @@ pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
 pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     unsafe {
         let env = attach_jni_env();
-        ndk_utils::call_void_method!(env, ACTIVITY, "openAllMidiDevices", "(J)V", delay);
+        ndk_utils::call_void_method!(env, get_activity(), "openAllMidiDevices", "(J)V", delay);
     }
 }
 
@@ -765,7 +734,7 @@ pub unsafe fn to_java_prepare_video_playback(env: *mut jni_sys::JNIEnv, video_id
 
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "prepareVideoPlayback",
         "(JLjava/lang/Object;IZZ)V",
         video_id.get_value() as jni_sys::jlong,
@@ -798,7 +767,7 @@ pub unsafe fn to_java_update_tex_image(env: *mut jni_sys::JNIEnv, video_decoder_
 pub unsafe fn to_java_begin_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "beginVideoPlayback",
         "(J)V",
         video_id
@@ -808,7 +777,7 @@ pub unsafe fn to_java_begin_video_playback(env: *mut jni_sys::JNIEnv, video_id: 
 pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "pauseVideoPlayback",
         "(J)V",
         video_id
@@ -818,7 +787,7 @@ pub unsafe fn to_java_pause_video_playback(env: *mut jni_sys::JNIEnv, video_id: 
 pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "resumeVideoPlayback",
         "(J)V",
         video_id
@@ -828,7 +797,7 @@ pub unsafe fn to_java_resume_video_playback(env: *mut jni_sys::JNIEnv, video_id:
 pub unsafe fn to_java_mute_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "muteVideoPlayback",
         "(J)V",
         video_id
@@ -838,7 +807,7 @@ pub unsafe fn to_java_mute_video_playback(env: *mut jni_sys::JNIEnv, video_id: L
 pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "unmuteVideoPlayback",
         "(J)V",
         video_id
@@ -848,7 +817,7 @@ pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id:
 pub unsafe fn to_java_cleanup_video_playback_resources(env: *mut jni_sys::JNIEnv, video_id: LiveId) {
     ndk_utils::call_void_method!(
         env,
-        ACTIVITY,
+        get_activity(),
         "cleanupVideoPlaybackResources",
         "(J)V",
         video_id
