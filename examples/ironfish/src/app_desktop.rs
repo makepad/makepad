@@ -95,15 +95,15 @@ live_design! {
 
 
     // HELPERS
-    FillerH = <View dx:-5329.4 dy:-6047.6 dw:98.3 dh:29.8> {
+    FillerH = <View dx:-1202.6 dy:-229.5 dw:98.3 dh:29.8> {
         width: Fill
     }
 
-    FillerV = <View dx:-5185.6 dy:-6082.5 dw:31.6 dh:73.9> {
+    FillerV = <View dx:-1058.8 dy:-264.4 dw:31.6 dh:73.9> {
         height: Fill
     }
 
-    Divider = <View dx:-5381.9 dy:-5439.5 dw:253.3 dh:41.0> {
+    Divider = <View dx:-1255.1 dy:378.6 dw:253.3 dh:41.0> {
         width: Fill,
         height: Fit,
         margin: {top: (SSPACING_3), right: 0, bottom: (SSPACING_3), left: (SSPACING_0)}
@@ -122,7 +122,7 @@ live_design! {
 
 
     // WIDGETS
-    ElementBox = <View dx:-5359.1 dy:-5957.3 dw:222.4 dh:49.6> {
+    ElementBox = <View dx:-1232.3 dy:-139.2 dw:222.4 dh:49.6> {
         draw_bg: {color: (COLOR_DOWN_0)}
         width: Fill,
         height: Fit
@@ -131,13 +131,13 @@ live_design! {
         spacing: (SSPACING_1)
     }
 
-    FishPanelContainer = <View dx:-5368.0 dy:-5790.3 dw:238.0 dh:50.0> {
+    FishPanelContainer = <View dx:-1241.2 dy:27.8 dw:238.0 dh:50.0> {
         flow: Down
         width: Fill,
         height: Fit
     }
 
-    SubheaderContainer = <RoundedView dx:-5365.5 dy:-5848.1 dw:228.1 dh:43.6> {
+    SubheaderContainer = <RoundedView dx:-1238.7 dy:-30.0 dw:228.1 dh:43.6> {
         draw_bg: {color: (COLOR_UP_2)}
         width: Fill,
         height: Fit,
@@ -145,7 +145,7 @@ live_design! {
         padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1)}
     }
 
-    FishSubTitle = <View dx:-5381.2 dy:-5496.4 dw:253.3 dh:45.6> {
+    FishSubTitle = <View dx:-1254.4 dy:321.7 dw:253.3 dh:45.6> {
         width: Fit,
         height: Fit,
         margin: {top: 1}
@@ -160,7 +160,7 @@ live_design! {
         }
     }
 
-    FishPanel = <GradientYView dx:-5365.4 dy:-5898.8 dw:230.8 dh:41.1> {
+    FishPanel = <GradientYView dx:-1238.6 dy:-80.7 dw:230.8 dh:41.1> {
         flow: Down,
         padding: <SPACING_2> {}
         width: Fill,
@@ -207,12 +207,12 @@ live_design! {
         }
     }
 
-    FishPanelScrollY = <FishPanel dx:-5375.3 dy:-5733.1 dw:250.0 dh:56.5> {
+    FishPanelScrollY = <FishPanel dx:-1248.5 dy:85.0 dw:250.0 dh:56.5> {
         height: Fill
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
 
-    FishDropDown = <DropDown dx:-5396.2 dy:-5067.3 dw:229.5 dh:54.0> {
+    FishDropDown = <DropDown dx:-1269.4 dy:750.8 dw:229.5 dh:54.0> {
         width: Fit
         padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
 
@@ -279,7 +279,7 @@ live_design! {
         }
     }
 
-    IconButton = <Button dx:-5389.6 dy:-5192.4 dw:220.7 dh:47.3> {
+    IconButton = <Button dx:-1262.8 dy:625.7 dw:220.7 dh:47.3> {
         draw_icon: {
             svg_file: (ICO_SAVE),
             fn get_color(self) -> vec4 {
@@ -305,7 +305,7 @@ live_design! {
         text: ""
     }
 
-    TextButton = <Button dx:-5390.3 dy:-5250.2 dw:226.8 dh:46.6> {
+    TextButton = <Button dx:-1263.5 dy:567.9 dw:226.8 dh:46.6> {
         align: {x: 0.5, y: 0.5}
         padding: <SPACING_0> {}
         margin: {left: 2.5, right: 2.5}
@@ -337,7 +337,7 @@ live_design! {
 
     }
 
-    FishButton = <Button dx:-5388.9 dy:-5310.9 dw:227.0 dh:52.6> {
+    FishButton = <Button dx:-1262.1 dy:507.2 dw:227.0 dh:52.6> {
 
         align: {x: 0.5, y: 0.5}
         padding: <SPACING_2> {}
@@ -401,7 +401,7 @@ live_design! {
 
     }
 
-    FishSlider = <Slider dx:-3711.2 dy:-2375.8 dw:398.1 dh:92.6> {
+    FishSlider = <Slider dx:415.6 dy:3442.3 dw:398.1 dh:92.6> {
         height: 36
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
@@ -472,19 +472,19 @@ live_design! {
         }
     }
 
-    InstrumentSlider = <ElementBox dx:-3713.9 dy:-2480.7 dw:390.4 dh:79.1> {
+    InstrumentSlider = <ElementBox dx:412.9 dy:3337.4 dw:390.4 dh:79.1> {
         slider = <FishSlider> {
             draw_slider: {bipolar: 0.0}
         }
     }
 
-    InstrumentBipolarSlider = <ElementBox dx:-5401.2 dy:-4947.3 dw:234.7 dh:79.9> {
+    InstrumentBipolarSlider = <ElementBox dx:-1274.4 dy:870.8 dw:234.7 dh:79.9> {
         slider = <FishSlider> {
             draw_slider: {bipolar: 1.0}
         }
     }
 
-    FishToggle = <ElementBox dx:-5392.1 dy:-5128.3 dw:227.0 dh:50.9> {
+    FishToggle = <ElementBox dx:-1265.3 dy:689.8 dw:227.0 dh:50.9> {
         padding: <SPACING_0> {}
         checkbox = <CheckBox> {
             padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}
@@ -544,7 +544,7 @@ live_design! {
         }
     }
 
-    InstrumentDropdown = <ElementBox dx:-5398.1 dy:-5003.5 dw:232.9 dh:44.3> {
+    InstrumentDropdown = <ElementBox dx:-1271.3 dy:814.6 dw:232.9 dh:44.3> {
         align: {y: 0.5}
         padding: <SPACING_0> {},
         flow: Right
@@ -560,7 +560,7 @@ live_design! {
         }
     }
 
-    GraphPaper = <RoundedView dx:-3732.0 dy:-3052.6 dw:390.0 dh:132.5> {
+    GraphPaper = <RoundedView dx:394.8 dy:2765.5 dw:390.0 dh:132.5> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -604,7 +604,7 @@ live_design! {
         }
     }
 
-    FishTitle = <RoundedView dx:-5381.4 dy:-5552.3 dw:252.3 dh:42.9> {
+    FishTitle = <RoundedView dx:-1254.6 dy:265.8 dw:252.3 dh:42.9> {
         width: Fit,
         height: Fit,
         margin: {bottom: (SSPACING_1)}
@@ -619,7 +619,7 @@ live_design! {
         }
     }
 
-    FishHeader = <RoundedView dx:-5381.0 dy:-5625.5 dw:249.0 dh:63.1> {
+    FishHeader = <RoundedView dx:-1254.2 dy:192.6 dw:249.0 dh:63.1> {
         flow: Right
         height: Fit,
         width: Fill,
@@ -637,7 +637,7 @@ live_design! {
         }
     }
 
-    CheckboxTextual = <CheckBox dx:-5397.8 dy:-4789.5 dw:229.5 dh:61.3> {
+    CheckboxTextual = <CheckBox dx:-1271.0 dy:1028.6 dw:229.5 dh:61.3> {
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -661,7 +661,7 @@ live_design! {
 
     }
 
-    PlayPause = <FishToggle dx:-2595.1 dy:-3195.6 dw:76.7 dh:82.8> {
+    PlayPause = <FishToggle dx:1531.7 dy:2622.5 dw:76.7 dh:82.8> {
         width: Fit,
         height: Fit,
         margin: <SPACING_3> {}
@@ -782,7 +782,7 @@ live_design! {
         }
     }
 
-    FishCheckbox = <CheckBox dx:-5396.5 dy:-4854.9 dw:229.1 dh:57.8> {
+    FishCheckbox = <CheckBox dx:-1269.7 dy:963.2 dw:229.1 dh:57.8> {
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -845,7 +845,7 @@ live_design! {
         }
     }
 
-    FishInput = <TextInput dx:-4598.8 dy:-4226.0 dw:395.4 dh:54.0> {
+    FishInput = <TextInput dx:-472.0 dy:1592.1 dw:395.4 dh:54.0> {
         width: Fill,
         height: Fit,
         margin: 0
@@ -882,7 +882,7 @@ live_design! {
         }
     }
 
-    PresetFavorite = <CheckBox dx:-4595.9 dy:-4149.4 dw:390.1 dh:82.3> {
+    PresetFavorite = <CheckBox dx:-469.1 dy:1668.7 dw:390.1 dh:82.3> {
         height: Fit,
         width: Fit,
         margin: 0.0
@@ -930,7 +930,7 @@ live_design! {
 
 
     // PANELS
-    EnvelopePanel = <RoundedView dx:-3735.4 dy:-3262.1 dw:392.2 dh:197.0> {
+    EnvelopePanel = <RoundedView dx:391.4 dy:2556.0 dw:392.2 dh:197.0> {
         flow: Down,
         padding: <SPACING_0> {}
         width: Fill,
@@ -992,7 +992,7 @@ live_design! {
 
     }
 
-    VolumeEnvelopePanel = <View dx:-3736.7 dy:-3472.0 dw:395.0 dh:196.4> {
+    VolumeEnvelopePanel = <View dx:390.1 dy:2346.1 dw:395.0 dh:196.4> {
         vol_env = <EnvelopePanel> {
             flow: Down
             width: Fill,
@@ -1000,7 +1000,7 @@ live_design! {
         }
     }
 
-    ModEnvelopePanel = <View dx:-3735.6 dy:-3792.5 dw:397.1 dh:299.0> {
+    ModEnvelopePanel = <View dx:391.2 dy:2025.6 dw:397.1 dh:299.0> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1047,7 +1047,7 @@ live_design! {
 
     }
 
-    SequencerControls = <View dx:-2864.5 dy:-3291.3 dw:345.2 dh:76.3> {
+    SequencerControls = <View dx:1262.3 dy:2526.8 dw:345.2 dh:76.3> {
         height: Fit,
         width: Fill,
         margin: <SPACING_1> {}
@@ -1090,7 +1090,7 @@ live_design! {
         }
     }
 
-    Arp = <GradientYView dx:-4126.9 dy:-1614.2 dw:144.1 dh:107.1> {
+    Arp = <GradientYView dx:-0.1 dy:4203.9 dw:144.1 dh:107.1> {
         flow: Down,
         padding: <SPACING_0> {}
         spacing: (SSPACING_2)
@@ -1149,7 +1149,7 @@ live_design! {
         }
     }
 
-    PianoSettings = <View dx:-2879.0 dy:-1651.2 dw:142.2 dh:109.1> {
+    PianoSettings = <View dx:1247.8 dy:4166.9 dw:142.2 dh:109.1> {
         flow: Down,
         padding: <SPACING_0> {} spacing: (SSPACING_2)
         height: Fit,
@@ -1180,7 +1180,7 @@ live_design! {
         }
     }
 
-    SequencerPanel = <RoundedView dx:-2930.1 dy:-4370.2 dw:400.0 dh:537.8> {
+    SequencerPanel = <RoundedView dx:1196.7 dy:1447.9 dw:400.0 dh:537.8> {
         flow: Down
         margin: <SPACING_0> {}
 
@@ -1307,7 +1307,7 @@ live_design! {
     }
 
 
-    BlurFXPanel = <View dx:-4143.5 dy:-2279.6 dw:400.0 dh:164.7> {
+    BlurFXPanel = <View dx:-16.7 dy:3538.5 dw:400.0 dh:164.7> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1363,7 +1363,7 @@ live_design! {
     }
 
 
-    ShadowFXPanel = <View dx:-4149.7 dy:-2072.0 dw:400.5 dh:219.2> {
+    ShadowFXPanel = <View dx:-22.9 dy:3746.1 dw:400.5 dh:219.2> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1429,7 +1429,7 @@ live_design! {
         }
     }
 
-    CrushFXPanel = <View dx:-3304.4 dy:-3718.8 dw:338.6 dh:110.0> {
+    CrushFXPanel = <View dx:822.4 dy:2099.3 dw:338.6 dh:110.0> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1483,7 +1483,7 @@ live_design! {
         }
     }
 
-    DelayFXPanel = <FishPanelContainer dx:-3298.3 dy:-3170.6 dw:323.8 dh:182.3> {
+    DelayFXPanel = <FishPanelContainer dx:828.5 dy:2647.5 dw:323.8 dh:182.3> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1553,7 +1553,7 @@ live_design! {
         }
     }
 
-    ChorusFXPanel = <FishPanelContainer dx:-3302.7 dy:-3592.0 dw:329.5 dh:238.6> {
+    ChorusFXPanel = <FishPanelContainer dx:824.1 dy:2226.1 dw:329.5 dh:238.6> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1639,7 +1639,7 @@ live_design! {
         }
     }
 
-    DelayToyFXPanel = <FishPanelContainer dx:-3297.3 dy:-3322.0 dw:320.5 dh:123.9> {
+    DelayToyFXPanel = <FishPanelContainer dx:829.5 dy:2496.1 dw:320.5 dh:123.9> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1678,7 +1678,7 @@ live_design! {
         }
     }
 
-    FishPanelFilter = <FishPanelContainer dx:-3714.1 dy:-2708.6 dw:377.3 dh:214.6> {
+    FishPanelFilter = <FishPanelContainer dx:412.7 dy:3109.5 dw:377.3 dh:214.6> {
 
         <FishPanel> {
             height: Fit
@@ -1811,7 +1811,7 @@ live_design! {
         }
     }
 
-    OscPanel = <View dx:-4137.5 dy:-2908.2 dw:400.0 dh:587.9> {
+    OscPanel = <View dx:-10.7 dy:2909.9 dw:400.0 dh:587.9> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1940,7 +1940,7 @@ live_design! {
         }
     }
 
-    MixerPanel = <View dx:-3304.4 dy:-2714.8 dw:447.7 dh:128.6> {
+    MixerPanel = <View dx:822.4 dy:3103.3 dw:447.7 dh:128.6> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1981,7 +1981,7 @@ live_design! {
         }
     }
 
-    FishPanelSoundSources = <FishPanelContainer dx:-4158.6 dy:-4386.3 dw:400.0 dh:1144.3> {
+    FishPanelSoundSources = <FishPanelContainer dx:-31.8 dy:1431.8 dw:400.0 dh:1144.3> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2027,7 +2027,7 @@ live_design! {
         }
     }
 
-    HeaderMenu = <View dx:-5394.0 dy:-4714.6 dw:229.6 dh:65.2> {
+    HeaderMenu = <View dx:-1267.2 dy:1103.5 dw:229.6 dh:65.2> {
         width: Fill,
         height: Fit,
         margin: {top: -150}
@@ -2117,7 +2117,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel dx:-4129.0 dy:-1821.9 dw:1392.9 dh:143.2> {
+    Play = <FishPanel dx:-2.2 dy:3996.2 dw:1392.9 dh:143.2> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
@@ -2135,7 +2135,7 @@ live_design! {
 
 
     // TABS
-    FishPanelEnvelopes = <FishPanelContainer dx:-3736.6 dy:-4378.8 dw:400.0 dh:555.7> {
+    FishPanelEnvelopes = <FishPanelContainer dx:390.2 dy:1439.3 dw:400.0 dh:555.7> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2179,7 +2179,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer dx:-3304.4 dy:-4383.0 dw:338.4 dh:644.1> {
+    FishPanelEffects = <FishPanelContainer dx:822.4 dy:1435.1 dw:338.4 dh:644.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2208,7 +2208,7 @@ live_design! {
     }
 
  
-    PresetHeader = <View dx:-4604.0 dy:-4371.4 dw:400.0 dh:121.8> {
+    PresetHeader = <View dx:-477.2 dy:1446.7 dw:400.0 dh:121.8> {
         width: Fill,
         height: Fit,
         margin: {top: 0, right: (SSPACING_4), bottom: 0, left: (SSPACING_4)}
@@ -2428,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-4146.9 dy:-5849.7 dw:1382.4 dh:1442.1>{
+    AppDesktop = <View dx:-20.1 dy:-31.6 dw:1382.4 dh:1442.1>{
         flow: Right
         width: Fill,
         height: Fill

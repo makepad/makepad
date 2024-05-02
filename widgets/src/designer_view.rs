@@ -7,6 +7,7 @@ use crate::{
     view::View,
     widget::*,
 };
+use std::collections::BTreeMap;
 
 live_design!{
     DesignerViewBase = {{DesignerView}}{
@@ -112,7 +113,8 @@ impl Widget for DesignerContainer {
 enum FingerMove{
     Pan{start_pan: DVec2},
     DragBody{ptr: LivePtr},
-    DragEdge{edge: Edge, rect:Rect, id: LiveId}
+    DragEdge{edge: Edge, rect:Rect, id: LiveId},
+    DragAll{rects:BTreeMap<LiveId,Rect>}
 }
 
 #[derive(Live, Widget)]
@@ -122,6 +124,7 @@ pub struct DesignerView {
     #[rust] reapply: bool,
     #[rust(1.5)] zoom: f64,
     #[rust] pan: DVec2,
+    #[live] clear_color: Vec4,
     #[rust] finger_move: Option<FingerMove>,
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,
@@ -191,6 +194,38 @@ impl DesignerView{
         }
         self.selected_component = what_id;
     }
+    
+    fn patch_design_info(&mut self, cx:&mut Cx, id: LiveId, rect:Rect){
+        if let Some(container) = self.containers.get_mut(&id){
+            container.container.redraw(cx);
+            container.rect = rect;
+            // alright lets send over the rect to the editor
+            // we need to find out the text position
+            let registry = cx.live_registry.clone();
+            let mut registry = registry.borrow_mut();
+            //let replace = format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", r.pos.x, r.pos.y, r.size.x, r.size.y);
+            let design_info = LiveDesignInfo{
+                span: Default::default(),
+                dx: rect.pos.x,
+                dy: rect.pos.y,
+                dw: rect.size.x,
+                dh: rect.size.y,
+            };
+            // lets find the ptr
+                                        
+            if let Some((replace, file_name, range)) =  registry.patch_design_info(container.ptr, design_info){
+                                                
+                Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
+                    file_name: file_name.into(),
+                    line: range.line,
+                    column_start: range.start_column,
+                    column_end: range.end_column,
+                    replace
+                }));
+                //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
+            }
+        }
+    }
 }
 
 impl Widget for DesignerView {
@@ -226,24 +261,36 @@ impl Widget for DesignerView {
             Hit::FingerHoverOut(_fh)=>{
             }
             Hit::FingerDown(fe) => {
-                for (id, cd) in self.containers.iter(){
-                    match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
-                        Some(edge)=>{
-                            self.finger_move = Some(FingerMove::DragEdge{
-                                rect: cd.rect,
-                                id: *id,
-                                edge
-                            });
-                            // lets send out a click on this containter
-                            cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*id, fe.modifiers));
-                            // set selected component
-                            // unselect all other components
-                            self.select_component(cx, Some(*id));
-                            break;
+                if !fe.modifiers.shift{
+                    if fe.modifiers.control{
+                        let mut rects = BTreeMap::new();
+                        for (id, cd) in self.containers.iter(){
+                            rects.insert(*id, cd.rect);
                         }
-                        None=>()
+                        self.finger_move = Some(FingerMove::DragAll{rects})
+                    }
+                    else{
+                        for (id, cd) in self.containers.iter(){
+                            match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
+                                Some(edge)=>{
+                                    self.finger_move = Some(FingerMove::DragEdge{
+                                        rect: cd.rect,
+                                        id: *id,
+                                        edge
+                                    });
+                                    // lets send out a click on this containter
+                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*id, fe.modifiers));
+                                    // set selected component
+                                    // unselect all other components
+                                    self.select_component(cx, Some(*id));
+                                    break;
+                                }
+                                None=>()
+                            }
+                        }
                     }
                 }
+                
                 if self.finger_move.is_none(){
                     self.finger_move = Some(FingerMove::Pan{
                         start_pan: self.pan
@@ -275,9 +322,20 @@ impl Widget for DesignerView {
                         self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
                         self.redraw(cx);
                     }
+                    FingerMove::DragAll{rects}=>{
+                        let delta = (fe.abs - fe.abs_start)* self.zoom;
+                        let rects = rects.clone();
+                        for (id, rect) in rects{
+                            let r = Rect{
+                                pos: rect.pos + delta,
+                                size: rect.size
+                            };
+                            self.patch_design_info(cx, id, r);
+                        }
+                    }
                     FingerMove::DragEdge{edge, rect, id}=>{
                         let delta = (fe.abs - fe.abs_start)* self.zoom;
-                        let r = match edge{
+                        let rect = match edge{
                              Edge::Left=>Rect{
                                 pos:dvec2(rect.pos.x + delta.x, rect.pos.y),
                                 size:dvec2(rect.size.x - delta.x, rect.size.y)
@@ -299,35 +357,7 @@ impl Widget for DesignerView {
                                  size: rect.size
                              }
                         };
-                        if let Some(container) = self.containers.get_mut(id){
-                            container.container.redraw(cx);
-                            container.rect = r;
-                            // alright lets send over the rect to the editor
-                            // we need to find out the text position
-                            let registry = cx.live_registry.clone();
-                            let mut registry = registry.borrow_mut();
-                            //let replace = format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", r.pos.x, r.pos.y, r.size.x, r.size.y);
-                            let design_info = LiveDesignInfo{
-                                span: Default::default(),
-                                dx: r.pos.x,
-                                dy: r.pos.y,
-                                dw: r.size.x,
-                                dh: r.size.y,
-                            };
-                            // lets find the ptr
-                            
-                            if let Some((replace, file_name, range)) =  registry.patch_design_info(container.ptr, design_info){
-                                
-                               Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
-                                    file_name: file_name.into(),
-                                    line: range.line,
-                                    column_start: range.start_column,
-                                    column_end: range.end_column,
-                                    replace
-                                }));
-                                //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
-                            }
-                        }
+                        self.patch_design_info(cx, *id, rect);
                     }
                     FingerMove::DragBody{ptr:_}=>{
                         
@@ -353,7 +383,7 @@ impl Widget for DesignerView {
             self.pass.add_color_texture(
                 cx,
                 self.color_texture.as_ref().unwrap(),
-                PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+                PassClearColor::ClearWith(self.clear_color),
             )
         }
         
