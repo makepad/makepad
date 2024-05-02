@@ -99,11 +99,11 @@ live_design! {
         width: Fill
     }
 
-    FillerV = <View> {
+    FillerV = <View dx:-277.1 dy:357.5 dw:400.0 dh:300.0> {
         height: Fill
     }
 
-    Divider = <View> {
+    Divider = <View dx:45.7 dy:712.8 dw:400.0 dh:300.0> {
         width: Fill,
         height: Fit,
         margin: {top: (SSPACING_3), right: 0, bottom: (SSPACING_3), left: (SSPACING_0)}
@@ -306,7 +306,8 @@ live_design! {
     }
 
     TextButton = <Button> {
-        align: {x: 0.5, y: 0.5 padding: <SPACING_0> {}}
+        align: {x: 0.5, y: 0.5}
+        padding: <SPACING_0> {}
         margin: {left: 2.5, right: 2.5}
 
         draw_text: {
@@ -400,7 +401,7 @@ live_design! {
 
     }
 
-    FishSlider = <Slider> {
+    FishSlider = <Slider dx:53.1 dy:94.3 dw:400.0 dh:300.0> {
         height: 36
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
@@ -853,9 +854,7 @@ live_design! {
         clip_y: true,
         align: {y: 0.5},
         text: "Search"
-        label_walk: {
-            margin: 0.0
-        }
+        
         draw_bg: {
             instance radius: 3.0
             instance border_width: 0.0
@@ -931,7 +930,7 @@ live_design! {
 
 
     // PANELS
-    EnvelopePanel = <RoundedView> {
+    EnvelopePanel = <RoundedView dx:222.7 dy:354.3 dw:400.0 dh:300.0> {
         flow: Down,
         padding: <SPACING_0> {}
         width: Fill,
@@ -1484,7 +1483,7 @@ live_design! {
         }
     }
 
-    DelayFXPanel = <FishPanelContainer> {
+    DelayFXPanel = <FishPanelContainer dx:103.7 dy:271.5 dw:400.0 dh:300.0> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -2210,7 +2209,7 @@ live_design! {
     }
 
  
-    PresetHeader = <View dx:32.2 dy:456.0 dw:400.0 dh:115.3> {
+    PresetHeader = <View dx:128.6 dy:616.2 dw:400.0 dh:115.3> {
         width: Fill,
         height: Fit,
         margin: {top: 0, right: (SSPACING_4), bottom: 0, left: (SSPACING_4)}
@@ -2430,7 +2429,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:56.3 dy:53.7 dw:500.6 dh:676.4>{
+    AppDesktop = <View dx:539.9 dy:50.5 dw:500.6 dh:676.4>{
         flow: Right
         width: Fill,
         height: Fill
