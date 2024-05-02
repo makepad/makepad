@@ -3801,7 +3801,25 @@ live_design! {
     DesignerContainer = <DesignerContainerBase>{
         width: 1200,
         height: 1200,
-        <RoundedView>{
+        animator: {
+            select = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        view = {draw_bg:{border_color:#0}}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        view = {draw_bg:{border_color:#f}}
+                    }
+                }
+                                
+            }
+        }
+        view = <RoundedView>{
             draw_bg:{
                 color:#3,
                 border_width:2

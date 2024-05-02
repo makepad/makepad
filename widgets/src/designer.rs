@@ -61,15 +61,13 @@ impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
         let designer_view = self.ui.designer_view(id!(designer_view));
-        if let Some((ptr, km)) = designer_view.selected(&actions){
+        if let Some((outline_id, km)) = designer_view.selected(&actions){
             // select the right node in the filetree
-            if let Some(outline_id) = self.data.find_component_by_ptr(ptr){
-                let path = self.data.construct_path(outline_id);
-                outline_tree.select_and_show_node(cx, &path);
-                // if we click with control
-                if km.control{
-                    self.studio_jump_to_component(cx, outline_id)
-                }
+            let path = self.data.construct_path(outline_id);
+            outline_tree.select_and_show_node(cx, &path);
+            // if we click with control
+            if km.control{
+                self.studio_jump_to_component(cx, outline_id)
             }
         }
         
@@ -87,8 +85,8 @@ impl WidgetMatchEvent for Designer{
                             Cx::send_studio_message(AppToStudio::FocusDesign);
                         }
                         else{
-                            self.data.selected = Some(outline_id);
-                            self.ui.widget(id!(designer_view)).redraw(cx);
+                            designer_view.select_component_and_redraw(cx, None);
+                            designer_view.view_file_and_redraw(cx, outline_id);
                         }        
                     }
                     OutlineNode::Component{..}=>{
@@ -101,8 +99,8 @@ impl WidgetMatchEvent for Designer{
                         else{
                             // only select the file 
                             if let Some(file_id) = self.data.find_file_parent(outline_id){
-                                self.data.selected = Some(file_id);
-                                self.ui.widget(id!(designer_view)).redraw(cx);
+                                designer_view.select_component_and_redraw(cx, Some(outline_id));
+                                designer_view.view_file_and_redraw(cx, file_id);
                             }
                         }
                     }
