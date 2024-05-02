@@ -1,7 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    designer_outline_tree::*,
     designer_data::*,
     view::View,
     widget::*,
@@ -23,8 +22,8 @@ impl Widget for DesignerToolbox {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
-        let data = scope.props.get::<DesignerData>().unwrap();
-        while let Some(next) = self.view.draw(cx, &mut Scope::empty()).step() {
+        let _data = scope.props.get::<DesignerData>().unwrap();
+        while let Some(_next) = self.view.draw(cx, &mut Scope::empty()).step() {
         }
         DrawStep::done()
     }
