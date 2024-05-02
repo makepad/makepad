@@ -62,7 +62,7 @@ impl App {
             let dock = self.ui.dock(id!(dock));            
             let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
-            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), live_id!(ClosableTab));
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), live_id!(CloseableTab));
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
         }
     }
@@ -134,7 +134,7 @@ impl MatchEvent for App{
                         let tab_id = dock.unique_tab_id(file_id.0);
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
-                        dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), live_id!(ClosableTab));
+                        dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab));
                         // lets scan the entire doc for duplicates
                         self.data.file_system.ensure_unique_tab_names(cx, &dock)
                     }
@@ -270,7 +270,7 @@ impl MatchEvent for App{
                             
                             // we might already have it
                             
-                            let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), live_id!(ClosableTab)).unwrap();
+                            let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), live_id!(CloseableTab)).unwrap();
                             
                             if let Some(mut item) = item.as_run_view().borrow_mut(){
                                 item.window_id = window_id;
@@ -383,7 +383,7 @@ impl MatchEvent for App{
                         if let Some(internal_id) = internal_id { // from inside the dock
                             if drop_event.modifiers.logo {
                                 let tab_id = dock.unique_tab_id(internal_id.0);
-                                dock.drop_clone(cx, drop_event.abs, *internal_id, tab_id, live_id!(ClosableTab));
+                                dock.drop_clone(cx, drop_event.abs, *internal_id, tab_id, live_id!(CloseableTab));
                             }
                             else {
                                 dock.drop_move(cx, drop_event.abs, *internal_id);
@@ -394,7 +394,7 @@ impl MatchEvent for App{
                             if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
                                 let tab_id = dock.unique_tab_id(file_id.0);
                                 self.data.file_system.request_open_file(tab_id, file_id);
-                                dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(ClosableTab));
+                                dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab));
                                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
                             }
                         }
@@ -443,7 +443,7 @@ impl MatchEvent for App{
             let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
             // lets add a file tab 'somewhere'
-            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), live_id!(ClosableTab));
+            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab));
                                         
             // lets scan the entire doc for duplicates
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
