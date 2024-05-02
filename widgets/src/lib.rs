@@ -76,6 +76,7 @@ pub mod designer_outline_tree;
 pub mod designer_view;
 pub mod designer_outline;
 pub mod designer_data;
+pub mod designer_toolbox;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -193,4 +194,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::designer_view::live_design(cx);
     crate::designer_outline::live_design(cx);
     crate::designer_outline_tree::live_design(cx);
+    crate::designer_toolbox::live_design(cx);
 }
