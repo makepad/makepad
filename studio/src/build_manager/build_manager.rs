@@ -400,6 +400,12 @@ impl BuildManager {
                         AppToStudio::FocusDesign=>{
                             cx.action(AppAction::FocusDesign(build_id))
                         }
+                        AppToStudio::PatchFile(ef)=>{
+                            cx.action(AppAction::PatchFile(ef))
+                        }
+                        AppToStudio::EditFile(ef)=>{
+                            cx.action(AppAction::EditFile(ef))
+                        }
                         AppToStudio::JumpToFile(jt)=>{
                             cx.action(AppAction::JumpTo(jt));
                         }

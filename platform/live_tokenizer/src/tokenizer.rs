@@ -185,6 +185,8 @@ impl InitialState {
             }
             ('#', ch1, ch2) if ch1 == 'x' && ch2.is_ascii_hexdigit() || ch1.is_ascii_hexdigit() => self.color(cursor),
             ('.', ch1, _) if ch1.is_ascii_digit() => self.number(cursor),
+            //('-', ch1, _) if ch1.is_ascii_digit() => self.number(cursor),
+            //('-', '.', ch1) if ch1.is_ascii_digit() => self.number(cursor),
             ('!', _, _)
                 | ('#', _, _)
                 | ('$', _, _)
@@ -290,6 +292,9 @@ impl InitialState {
             }
             _ => {
                 let start = cursor.index();
+                //if cursor.peek(0) == '-'{
+                //    cursor.skip(1);
+                //}
                 // normal number
                 cursor.skip_digits(10);
                 
