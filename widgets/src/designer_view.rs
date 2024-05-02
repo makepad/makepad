@@ -262,7 +262,7 @@ impl Widget for DesignerView {
             }
             Hit::FingerDown(fe) => {
                 if !fe.modifiers.shift{
-                    if fe.modifiers.control{
+                    if fe.modifiers.control && fe.modifiers.alt{
                         let mut rects = BTreeMap::new();
                         for (id, cd) in self.containers.iter(){
                             rects.insert(*id, cd.rect);
