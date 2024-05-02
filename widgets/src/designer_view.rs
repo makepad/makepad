@@ -20,11 +20,12 @@ live_design!{
 #[derive(Clone, Debug, DefaultNone)]
 pub enum DesignerViewAction {
     None,
-    Selected(LivePtr, KeyModifiers),
+    Selected(LiveId, KeyModifiers),
 }
 
 
 struct ContainerData{
+    ptr: LivePtr,
     component: WidgetRef,
     container: WidgetRef,
     rect: Rect
@@ -111,7 +112,7 @@ impl Widget for DesignerContainer {
 enum FingerMove{
     Pan{start_pan: DVec2},
     DragBody{ptr: LivePtr},
-    DragEdge{edge: Edge, rect:Rect, ptr: LivePtr}
+    DragEdge{edge: Edge, rect:Rect, id: LiveId}
 }
 
 #[derive(Live, Widget)]
@@ -124,7 +125,9 @@ pub struct DesignerView {
     #[rust] finger_move: Option<FingerMove>,
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,
-    #[rust] containers: ComponentMap<LivePtr, ContainerData>,
+    #[rust] view_file: Option<LiveId>,
+    #[rust] selected_component: Option<LiveId>,
+    #[rust] containers: ComponentMap<LiveId, ContainerData>,
     #[redraw] #[rust(DrawList2d::new(cx))] draw_list: DrawList2d,
     #[rust(Pass::new(cx))] pass: Pass,
     #[rust] color_texture: Option<Texture>,
@@ -139,7 +142,7 @@ impl LiveHook for DesignerView {
 }
 
 impl DesignerView{
-    fn draw_container(&mut self, cx:&mut Cx2d, ptr: LivePtr){
+    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr){
         let registry = cx.live_registry.clone();
         let registry = registry.borrow();
         let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
@@ -150,14 +153,16 @@ impl DesignerView{
         };
                                     
         let container_ptr = self.container.unwrap();
-        let cd = self.containers.get_or_insert(cx, ptr, | cx | {
+        let cd = self.containers.get_or_insert(cx, id, | cx | {
             ContainerData{
+                ptr,
                 component:WidgetRef::new_from_ptr(cx, Some(ptr)),
                 container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
                 rect
             }
         });
-                                    
+        cd.rect = rect;
+        cd.ptr = ptr;
         if self.reapply{
             self.reapply = false;
             cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
@@ -165,6 +170,20 @@ impl DesignerView{
         }
         // ok so we're going to draw the container with the widget inside
         cd.container.draw_all(cx, &mut Scope::with_props(cd))
+    }
+    
+    fn select_component(&mut self, cx:&mut Cx, what_id:Option<LiveId>){
+        for (id, comp) in self.containers.iter_mut(){
+            if what_id == Some(*id){
+                comp.container.as_designer_container().borrow_mut().unwrap()
+                    .animator_cut(cx, id!(select.on));
+            }
+            else{
+                comp.container.as_designer_container().borrow_mut().unwrap()
+                    .animator_cut(cx, id!(select.off));
+            }
+        }
+        self.selected_component = what_id;
     }
 }
 
@@ -201,16 +220,19 @@ impl Widget for DesignerView {
             Hit::FingerHoverOut(_fh)=>{
             }
             Hit::FingerDown(fe) => {
-                for (ptr, cd) in self.containers.iter(){
+                for (id, cd) in self.containers.iter(){
                     match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
                         Some(edge)=>{
                             self.finger_move = Some(FingerMove::DragEdge{
                                 rect: cd.rect,
-                                ptr: *ptr,
+                                id: *id,
                                 edge
                             });
                             // lets send out a click on this containter
-                             cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*ptr, fe.modifiers));
+                            cx.widget_action(uid, &scope.path, DesignerViewAction::Selected(*id, fe.modifiers));
+                            // set selected component
+                            // unselect all other components
+                            self.select_component(cx, Some(*id));
                             break;
                         }
                         None=>()
@@ -247,7 +269,7 @@ impl Widget for DesignerView {
                         self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
                         self.redraw(cx);
                     }
-                    FingerMove::DragEdge{edge, rect, ptr}=>{
+                    FingerMove::DragEdge{edge, rect, id}=>{
                         let delta = (fe.abs - fe.abs_start)* self.zoom;
                         let r = match edge{
                              Edge::Left=>Rect{
@@ -271,7 +293,7 @@ impl Widget for DesignerView {
                                  size: rect.size
                              }
                         };
-                        if let Some(container) = self.containers.get_mut(ptr){
+                        if let Some(container) = self.containers.get_mut(id){
                             container.container.redraw(cx);
                             container.rect = r;
                             // alright lets send over the rect to the editor
@@ -286,7 +308,9 @@ impl Widget for DesignerView {
                                 dw: r.size.x,
                                 dh: r.size.y,
                             };
-                            if let Some((replace, file_name, range)) =  registry.patch_design_info(*ptr, design_info){
+                            // lets find the ptr
+                            
+                            if let Some((replace, file_name, range)) =  registry.patch_design_info(container.ptr, design_info){
                                 
                                Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
                                     file_name: file_name.into(),
@@ -340,16 +364,13 @@ impl Widget for DesignerView {
             
             // lets draw the component container windows and components
             
-            if let Some(selected) = &data.selected{
+            if let Some(view_file) = &self.view_file{
                 // so either we have a file, or a single component.
-                match data.node_map.get(selected){
-                    Some(OutlineNode::Component{ptr,..})=>{
-                        self.draw_container(cx, *ptr);
-                    }
+                match data.node_map.get(view_file){
                     Some(OutlineNode::File{children,..})=>{
                         for child in children{
                             if let Some(OutlineNode::Component{ptr,..}) = data.node_map.get(child){
-                                self.draw_container(cx, *ptr);
+                                self.draw_container(cx, *child, *ptr);
                             }
                         }
                     }
@@ -379,10 +400,28 @@ impl Widget for DesignerView {
 }
 
 impl DesignerViewRef{
-    pub fn selected(&self, actions: &Actions) -> Option<(LivePtr,KeyModifiers)> {
+    pub fn select_component_and_redraw(&self, cx:&mut Cx, comp:Option<LiveId>) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.select_component(cx, comp);
+            inner.redraw(cx);
+        }
+    }
+    
+    pub fn view_file_and_redraw(&self, cx:&mut Cx, file_id:LiveId) -> Option<(LivePtr,KeyModifiers)> {
+        if let Some(mut inner) = self.borrow_mut(){
+            if inner.view_file != Some(file_id){
+                inner.containers.clear();
+                inner.view_file = Some(file_id);
+                inner.redraw(cx);
+            }
+        }
+        None
+    }
+    
+    pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesignerViewAction::Selected(ptr, km) = item.cast() {
-                return Some((ptr,km))
+            if let DesignerViewAction::Selected(id, km) = item.cast() {
+                return Some((id,km))
             }
         }
         None

@@ -328,7 +328,7 @@ impl ViewRef {
         None
     }
 
-    pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_cut(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.animator_cut(cx, state);
         }
@@ -410,9 +410,9 @@ impl ViewRef {
 }
 
 impl ViewSet {
-    pub fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
-            item.cut_state(cx, state)
+            item.animator_cut(cx, state)
         }
     }
 
