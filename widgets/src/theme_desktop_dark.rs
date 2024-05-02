@@ -3605,14 +3605,15 @@ live_design! {
             instance selected: 0.0
             instance hover: 0.0
             instance focussed: 0.0
-            instance scale: 1.0
+            fn get_color(self) -> vec4 {
+                return self.color * self.scale;
+            }
         }
         
         draw_name: {
             instance selected: 0.0
             instance hover: 0.0
             instance focussed: 0.0
-            instance scale: 1.0
             fn get_color(self) -> vec4 {
                 return mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
@@ -3798,6 +3799,18 @@ live_design! {
     DesignerOutline = <DesignerOutlineBase>{
     }
     
+    DesignerToolbox = <DesignerToolboxBase>{
+        abs_pos: vec2(0,0)
+        width: 100,
+        height: 300
+        show_bg: true
+        <RectShadowView>{
+            width: Fill,
+            height: Fill,
+            draw_bg:{color:#7}
+        }
+    }
+    
     DesignerContainer = <DesignerContainerBase>{
         width: 1200,
         height: 1200,
@@ -3857,7 +3870,7 @@ live_design! {
             }
         }
         container: <DesignerContainer>{
-
+            
         }
     }
 
@@ -3874,9 +3887,13 @@ live_design! {
         }
         <Window>{
             window:{ kind_id: 1 }
-            body = <View>{
+            body = <View>{ 
+                flow: Overlay
                 designer_view = <DesignerView> {
-                    width: Fill, height: Fill }
+                    width: Fill, height: Fill 
+                }
+                toolbox = <DesignerToolbox>{
+                }
             }
         }
     }
