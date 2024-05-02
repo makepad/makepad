@@ -380,18 +380,19 @@ impl Widget for DesignerView {
                     size: TextureSize::Auto,
                 },
             ));
-            self.pass.add_color_texture(
-                cx,
-                self.color_texture.as_ref().unwrap(),
-                PassClearColor::ClearWith(self.clear_color),
-            )
         }
         
         if cx.will_redraw(&mut self.draw_list, walk) {
             
             cx.make_child_pass(&self.pass);
             cx.begin_pass(&self.pass, None);
-            
+            self.pass.clear_color_textures(cx);
+            self.pass.add_color_texture(
+                cx,
+                self.color_texture.as_ref().unwrap(),
+                PassClearColor::ClearWith(self.clear_color),
+            );
+                        
             self.draw_list.begin_always(cx);
     
             cx.begin_pass_sized_turtle_no_clip(Layout::flow_down());
