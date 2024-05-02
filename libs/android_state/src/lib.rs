@@ -27,6 +27,7 @@
 //! [`robius-android-env`]: https://github.com/project-robius/robius-android-env
 
 use std::sync::Mutex;
+use makepad_jni_sys as jni_sys;
 
 static mut ACTIVITY: jni_sys::jobject = std::ptr::null_mut();
 static mut VM: *mut jni_sys::JavaVM = std::ptr::null_mut();
