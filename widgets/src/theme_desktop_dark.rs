@@ -3807,13 +3807,13 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        view = {draw_bg:{border_color:#0}}
+                        view = {draw_bg:{border_color:#5}}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        view = {draw_bg:{border_color:#f}}
+                        view = {draw_bg:{border_color:#c}}
                     }
                 }
                                 
