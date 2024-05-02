@@ -30,6 +30,11 @@ live_design!{
         margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0}
     }
     
+    IconTab = <Tab> {
+        closeable:false
+        icon_walk:{width:15,height:15}
+    }
+    
     AppUI =  <Window> {
         margin: 5. 
         caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
@@ -85,7 +90,52 @@ live_design!{
         }
         body = {dock = <Dock> {
             width: Fill, height: Fill,
-                
+            tab_bar:{
+                OutlineFirstTab = <IconTab> {
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
+                    }
+                }
+                EditFirstTab = <IconTab> {
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+                    }
+                }
+                DesignFirstTab = <IconTab> {
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
+                    }
+                }
+                RunFirstTab = <IconTab> {
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                    }
+                }
+                RunListTab = <IconTab> {
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                    }
+                }
+                LogTab = <IconTab> {
+                    icon_walk:{margin:{right:10}}
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_log.svg"),
+                    }
+                }
+                ProfilerTab = <IconTab> {
+                    icon_walk:{margin:{right:10}}
+                    draw_icon: {
+                        color: (#f)
+                        svg_file: dep("crate://self/resources/icons/icon_profiler.svg"),
+                    }
+                }
+            }
             root = Splitter {
                 axis: Horizontal,
                 align: FromA(250.0),
@@ -141,61 +191,61 @@ live_design!{
                 
             file_tree = Tab {
                 name: "Explore",
-                closable: false,
+                template: PermanentTab,
                 kind: StudioFileTree
             }
                 
             search = Tab {
                 name: "Search"
-                closable: false,
+                template: PermanentTab,
                 kind: Search
             }
                 
             run_first = Tab {
-                name: "Run"
-                closable: false,
+                name: ""
+                template: RunFirstTab,
                 kind: RunFirst
             }
             
             design_first = Tab {
-                name: "Design"
-                closable: false,
+                name: ""
+                template: DesignFirstTab,
                 kind: DesignFirst
             }
             
             edit_first = Tab {
-                name: "Edit"
-                closable: false,
+                name: ""
+                template: EditFirstTab,
                 kind: EditFirst
             }
             
             outline_first = Tab {
-                name: "Outline"
-                closable: false,
+                name: ""
+                template: OutlineFirstTab,
                 kind: OutlineFirst
             }
             
             run_list = Tab {
-                name: "Run"
-                closable: false,
+                name: ""
+                template: RunListTab,
                 kind: RunList
             }
                 
             file1 = Tab {
                 name: "app.rs",
-                closable: true,
+                template: PermanentTab,
                 kind: StudioEditor
             }
                 
             log_list = Tab {
                 name: "Log",
-                closable: false,
+                template: LogTab,
                 kind: LogList
             }
             
             profiler = Tab {
                 name: "Profiler",
-                closable: false,
+                template: ProfilerTab,
                 kind: Profiler
             }
                 
