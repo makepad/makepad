@@ -3766,7 +3766,7 @@ live_design! {
         Widget = <DesignerOutlineTreeNode> {
             draw_icon: {
                 color: (STUDIO_COLOR_WIDGET)
-                svg_file: dep("crate://self/resources/icons/icon_vector.svg"),
+                svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
             }
         }
                 
