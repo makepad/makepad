@@ -3801,6 +3801,10 @@ live_design! {
     DesignerContainer = <DesignerContainerBase>{
         width: 1200,
         height: 1200,
+        flow: Overlay,
+        clip_x:false,
+        clip_y:false,
+        align:{x:1.0},
         animator: {
             select = {
                 default: off
@@ -3827,6 +3831,10 @@ live_design! {
             }
             padding: 10
             inner = <BareStep>{}
+        }
+        label = <Button>{
+            margin:{top:-10,right:-20}
+            text:"Hello world"
         }
     }
 
