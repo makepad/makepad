@@ -13,24 +13,41 @@ use {
 };
 
 live_design!{
-    DrawBgQuad = {{DrawBgQuad}} {}
+    DrawNodeQuad = {{DrawNodeQuad}} {}
+    DrawNodeText = {{DrawNodeText}} {}
+    DrawNodeIcon = {{DrawNodeIcon}} {}
     DesignerOutlineTreeNodeBase = {{DesignerOutlineTreeNode}} {}
     DesignerOutlineTreeBase = {{DesignerOutlineTree}} {}
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
-struct DrawBgQuad {
+struct DrawNodeQuad {
     #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
+    #[live] scale: f32,
+}
+
+// TODO support a shared 'inputs' struct on drawshaders
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
+struct DrawNodeIcon {
+    #[deref] draw_super: DrawIcon,
+    #[live] scale: f32,
+}
+
+// TODO support a shared 'inputs' struct on drawshaders
+#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
+struct DrawNodeText {
+    #[deref] draw_super: DrawText,
+    #[live] scale: f32,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct DesignerOutlineTreeNode {
-    #[live] draw_bg: DrawBgQuad,
+    #[live] draw_bg: DrawNodeQuad,
     #[live] button_open: FoldButton,
-    #[live] draw_icon: DrawIcon,
-    #[live] draw_name: DrawText,
+    #[live] draw_icon: DrawNodeIcon,
+    #[live] draw_name: DrawNodeText,
     #[live] icon_walk: Walk,
     #[live] button_open_width: f64,
     #[live] draw_eye: bool,
@@ -56,7 +73,7 @@ pub struct DesignerOutlineTree {
         
     #[walk] walk: Walk,
     #[layout] layout: Layout,
-    #[live] filler: DrawBgQuad,
+    #[live] filler: DrawNodeQuad,
     
     #[live] node_height: f64,
     
@@ -122,6 +139,10 @@ pub enum OutlineTreeNodeAction {
 impl DesignerOutlineTreeNode {
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64, draw_open_button:bool) {
         self.draw_bg.is_even = is_even;
+        self.draw_bg.scale = scale as f32;
+        self.draw_icon.scale = scale as f32;
+        self.draw_name.scale = scale as f32;
+                        
         
         self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
                 
