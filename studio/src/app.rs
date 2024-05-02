@@ -1,5 +1,7 @@
 use crate::{
     makepad_code_editor::code_editor::*,
+    makepad_code_editor::selection::Affinity,
+    makepad_code_editor::session::SelectionMode,
     makepad_widgets::*,
     makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
@@ -7,7 +9,7 @@ use crate::{
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
-    makepad_platform::studio::JumpToFile,
+    makepad_platform::studio::{JumpToFile,EditFile, PatchFile},
     run_list::*,
     log_list::*,
     makepad_code_editor::text::{Position},
@@ -81,6 +83,8 @@ pub enum AppAction{
     RedrawProfiler,
     RedrawFile(LiveId),
     FocusDesign(LiveId),
+    EditFile(EditFile),
+    PatchFile(PatchFile),
     StartRecompile,
     ReloadFileTree,
     RecompileStarted,
@@ -133,6 +137,63 @@ impl MatchEvent for App{
                         dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), TabClosable::Yes);
                         // lets scan the entire doc for duplicates
                         self.data.file_system.ensure_unique_tab_names(cx, &dock)
+                    }
+                }
+            }
+            AppAction::PatchFile(ef)=>{
+                let start = Position{line_index: ef.line as usize, byte_index:ef.column_start as usize};
+                let end = Position{line_index: ef.line as usize, byte_index:ef.column_end as usize};
+                if let Some(file_id) = self.data.file_system.path_to_file_node_id(&ef.file_name) {
+                    if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
+                        dock.select_tab(cx, tab_id);
+                        // ok lets scroll into view
+                        if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
+                            if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
+                                // alright lets do 
+                                session.set_selection(
+                                    start,
+                                    Affinity::After,
+                                    SelectionMode::Simple
+                                );
+                                session.move_to(
+                                    end,
+                                    Affinity::Before,
+                                );
+                                session.paste(ef.replace.into());
+                            }
+                            self.data.file_system.handle_sessions();
+                            editor.redraw(cx);
+                            self.data.file_system.request_save_file_for_file_node_id(file_id, true)
+                        }
+                    }
+                }
+            }
+            AppAction::EditFile(ef)=>{
+                let start = Position{line_index: ef.line_start as usize, byte_index:ef.column_start as usize};
+                let end = Position{line_index: ef.line_end as usize, byte_index:ef.column_end as usize};
+                if let Some(file_id) = self.data.file_system.path_to_file_node_id(&ef.file_name) {
+                    if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
+                        dock.select_tab(cx, tab_id);
+                        // ok lets scroll into view
+                        if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
+                            if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
+                                // alright lets do 
+                                session.set_selection(
+                                    start,
+                                    Affinity::After,
+                                    SelectionMode::Simple
+                                );
+                                session.move_to(
+                                    end,
+                                    Affinity::Before,
+                                );
+                                session.paste(ef.replace.into());
+                                // lets serialise the session
+                            }
+                            self.data.file_system.handle_sessions();
+                            editor.redraw(cx);
+                            self.data.file_system.request_save_file_for_file_node_id(file_id, false)
+                        }
                     }
                 }
             }
@@ -286,7 +347,7 @@ impl MatchEvent for App{
             match action.cast(){
                 CodeEditorAction::TextDidChange => {
                     // lets write the file
-                    self.data.file_system.request_save_file(action.path.last())
+                    self.data.file_system.request_save_file_for_tab_id(action.path.last(), false)
                 }
                 CodeEditorAction::None=>{}
             }

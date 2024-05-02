@@ -11,6 +11,7 @@ use {
             Vec3,
             Vec4
         },
+        span::TextSpan,
         live_registry::LiveScopeTarget,
         makepad_live_tokenizer::{LiveId},
         live_ptr::{LiveModuleId, LivePtr},
@@ -26,9 +27,25 @@ pub struct LiveNode { // 48 bytes. Don't really see ways to compress
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LiveDesignInfo(u32);
+pub struct LiveDesignInfoIndex(u32);
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct LiveDesignInfo{
+    pub span: TextSpan,
+    pub dx: f64,
+    pub dy: f64,
+    pub dw: f64,
+    pub dh: f64
+}
 
 impl LiveDesignInfo{
+    pub fn to_string(&self)->String{
+        format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", self.dx, self.dy, self.dw, self.dh)
+    }
+}
+
+impl LiveDesignInfoIndex{
     pub fn from_usize(val: usize)->Self{
         Self(val as u32)
     }
@@ -83,9 +100,9 @@ pub enum LiveValue {
     TupleEnum (LiveId),
     NamedEnum (LiveId),
     Object,
-    Clone{clone:LiveId, design_info:LiveDesignInfo},
-    Deref{live_type: LiveType, clone:LiveId, design_info:LiveDesignInfo},
-    Class {live_type: LiveType, class_parent: LivePtr, design_info:LiveDesignInfo},
+    Clone{clone:LiveId, design_info:LiveDesignInfoIndex},
+    Deref{live_type: LiveType, clone:LiveId, design_info:LiveDesignInfoIndex},
+    Class {live_type: LiveType, class_parent: LivePtr, design_info:LiveDesignInfoIndex},
     Close,
     
     // shader code and other DSLs
