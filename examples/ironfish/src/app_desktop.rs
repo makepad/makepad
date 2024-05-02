@@ -131,7 +131,7 @@ live_design! {
         spacing: (SSPACING_1)
     }
 
-    FishPanelContainer = <View dx:-1266.2 dy:7.2 dw:238.0 dh:50.0> {
+    FishPanelContainer = <View dx:-1266.2 dy:8.3 dw:238.0 dh:50.0> {
         flow: Down
         width: Fill,
         height: Fit
@@ -207,7 +207,7 @@ live_design! {
         }
     }
 
-    FishPanelScrollY = <FishPanel dx:-1273.5 dy:64.4 dw:250.0 dh:56.5> {
+    FishPanelScrollY = <FishPanel dx:-1268.5 dy:71.9 dw:250.0 dh:56.5> {
         height: Fill
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
@@ -560,7 +560,7 @@ live_design! {
         }
     }
 
-    GraphPaper = <RoundedView dx:369.8 dy:2744.9 dw:390.0 dh:132.5> {
+    GraphPaper = <RoundedView dx:369.5 dy:2741.1 dw:390.0 dh:137.4> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -1000,7 +1000,7 @@ live_design! {
         }
     }
 
-    ModEnvelopePanel = <View dx:366.2 dy:2005.0 dw:397.1 dh:299.0> {
+    ModEnvelopePanel = <View dx:365.1 dy:1991.6 dw:397.1 dh:299.0> {
         width: Fill,
         height: Fit
         flow: Down
