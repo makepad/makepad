@@ -106,7 +106,6 @@ pub use crate::{
     expandable_panel::*,
     window::*,
     multi_window::*,
-    tab::TabClosable,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},

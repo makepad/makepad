@@ -1760,7 +1760,9 @@ live_design! {
     }
 
     TabBar = <TabBarBase> {
-        tab: <Tab> {}
+        CloseableTab = <Tab> {closeable:true}
+        PermanentTab = <Tab> {closeable:false}
+        
         draw_drag: {
             draw_depth: 10
             color: (THEME_COLOR_BG_CONTAINER)
