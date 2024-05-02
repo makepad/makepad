@@ -457,6 +457,16 @@ impl<'a> Cx2d<'a> {
         let rect = self.walk_turtle_peek(walk);
         self.turtle().rect_is_visible(rect)
     }
+       
+    
+    pub fn walk_turtle_would_be_visible2(&mut self, walk: Walk) -> bool {
+        let rect = self.walk_turtle_peek(walk);
+        let t = self.turtle();
+        let view = Rect {pos: t.origin + t.layout.scroll, size: dvec2(t.width, t.height)};
+        self.debug.rect(view, vec4(1.0,1.0,0.0,1.0));
+        self.debug.rect(rect, vec4(0.0,1.0,0.0,1.0));
+        return view.intersects(rect)
+    }
     
     pub fn peek_walk_pos(&self, walk: Walk) -> DVec2 {
         if let Some(pos) = walk.abs_pos {
@@ -828,11 +838,12 @@ impl Turtle {
             dvec2(0.0, 0.0)
         }
     }
-    
-    pub fn rect_is_visible(&self, geom: Rect) -> bool {
+        
+    pub fn rect_is_visible(&self,  geom: Rect) -> bool {
         let view = Rect {pos: self.origin + self.layout.scroll, size: dvec2(self.width, self.height)};
         return view.intersects(geom)
     }
+    
     
     pub fn origin(&self) -> DVec2 {
         self.origin
