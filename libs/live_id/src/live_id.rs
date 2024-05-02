@@ -7,7 +7,6 @@ use {
         collections::{HashMap},
         sync::Once,
         fmt,
-        cmp,
     }
 };
 
