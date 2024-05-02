@@ -1,5 +1,5 @@
 use crate::makepad_widgets::*;
-
+ 
 live_design! {
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -95,15 +95,15 @@ live_design! {
 
 
     // HELPERS
-    FillerH = <View> {
+    FillerH = <View dx:-214.2 dy:-659.7 dw:400.0 dh:300.0> {
         width: Fill
     }
 
-    FillerV = <View dx:-430.9 dy:516.4 dw:400.0 dh:300.0> {
+    FillerV = <View dx:-15.8 dy:-473.5 dw:395.5 dh:300.0> {
         height: Fill
     }
 
-    Divider = <View dx:84.0 dy:614.4 dw:400.0 dh:300.0> {
+    Divider = <View dx:-40.1 dy:828.5 dw:400.0 dh:298.1> {
         width: Fill,
         height: Fit,
         margin: {top: (SSPACING_3), right: 0, bottom: (SSPACING_3), left: (SSPACING_0)}
@@ -122,7 +122,7 @@ live_design! {
 
 
     // WIDGETS
-    ElementBox = <View dx:125.2 dy:-232.8 dw:400.0 dh:300.0> {
+    ElementBox = <View dx:541.0 dy:-748.8 dw:400.0 dh:300.0> {
         draw_bg: {color: (COLOR_DOWN_0)}
         width: Fill,
         height: Fit
@@ -137,7 +137,7 @@ live_design! {
         height: Fit
     }
 
-    SubheaderContainer = <RoundedView> {
+    SubheaderContainer = <RoundedView dx:-105.8 dy:-20.8 dw:400.0 dh:300.0> {
         draw_bg: {color: (COLOR_UP_2)}
         width: Fill,
         height: Fit,
@@ -160,7 +160,7 @@ live_design! {
         }
     }
 
-    FishPanel = <GradientYView> {
+    FishPanel = <GradientYView dx:-45.1 dy:1670.6 dw:400.0 dh:300.0> {
         flow: Down,
         padding: <SPACING_2> {}
         width: Fill,
@@ -279,7 +279,7 @@ live_design! {
         }
     }
 
-    IconButton = <Button> {
+    IconButton = <Button dx:55.9 dy:455.8 dw:433.3 dh:325.1> {
         draw_icon: {
             svg_file: (ICO_SAVE),
             fn get_color(self) -> vec4 {
@@ -401,7 +401,7 @@ live_design! {
 
     }
 
-    FishSlider = <Slider dx:53.1 dy:94.3 dw:400.0 dh:300.0> {
+    FishSlider = <Slider dx:53.1 dy:1245.9 dw:400.0 dh:-851.6> {
         height: 36
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
@@ -472,13 +472,13 @@ live_design! {
         }
     }
 
-    InstrumentSlider = <ElementBox dx:600.2 dy:-205.9 dw:400.0 dh:300.0> {
+    InstrumentSlider = <ElementBox dx:427.0 dy:-374.3 dw:400.0 dh:300.0> {
         slider = <FishSlider> {
             draw_slider: {bipolar: 0.0}
         }
     }
 
-    InstrumentBipolarSlider = <ElementBox> {
+    InstrumentBipolarSlider = <ElementBox dx:766.5 dy:150.7 dw:400.0 dh:338.5> {
         slider = <FishSlider> {
             draw_slider: {bipolar: 1.0}
         }
@@ -560,7 +560,7 @@ live_design! {
         }
     }
 
-    GraphPaper = <RoundedView> {
+    GraphPaper = <RoundedView dx:97.2 dy:81.4 dw:400.0 dh:300.0> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -661,7 +661,7 @@ live_design! {
 
     }
 
-    PlayPause = <FishToggle> {
+    PlayPause = <FishToggle dx:134.4 dy:142.6 dw:400.0 dh:300.0> {
         width: Fit,
         height: Fit,
         margin: <SPACING_3> {}
@@ -882,7 +882,7 @@ live_design! {
         }
     }
 
-    PresetFavorite = <CheckBox> {
+    PresetFavorite = <CheckBox dx:393.9 dy:158.8 dw:400.0 dh:300.0> {
         height: Fit,
         width: Fit,
         margin: 0.0
@@ -992,7 +992,7 @@ live_design! {
 
     }
 
-    VolumeEnvelopePanel = <View dx:50.0 dy:49.3 dw:400.0 dh:300.0> {
+    VolumeEnvelopePanel = <View dx:308.0 dy:1567.2 dw:395.0 dh:300.0> {
         vol_env = <EnvelopePanel> {
             flow: Down
             width: Fill,
@@ -1000,7 +1000,7 @@ live_design! {
         }
     }
 
-    ModEnvelopePanel = <View> {
+    ModEnvelopePanel = <View dx:-137.4 dy:1982.1 dw:405.3 dh:330.7> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1047,7 +1047,7 @@ live_design! {
 
     }
 
-    SequencerControls = <View dx:113.2 dy:761.9 dw:400.0 dh:300.0> {
+    SequencerControls = <View dx:-401.9 dy:1725.9 dw:345.2 dh:300.0> {
         height: Fit,
         width: Fill,
         margin: <SPACING_1> {}
@@ -1090,7 +1090,7 @@ live_design! {
         }
     }
 
-    Arp = <GradientYView> {
+    Arp = <GradientYView dx:373.0 dy:333.3 dw:400.0 dh:300.0> {
         flow: Down,
         padding: <SPACING_0> {}
         spacing: (SSPACING_2)
@@ -1149,7 +1149,7 @@ live_design! {
         }
     }
 
-    PianoSettings = <View> {
+    PianoSettings = <View dx:424.1 dy:1861.2 dw:400.0 dh:300.0> {
         flow: Down,
         padding: <SPACING_0> {} spacing: (SSPACING_2)
         height: Fit,
@@ -1483,7 +1483,7 @@ live_design! {
         }
     }
 
-    DelayFXPanel = <FishPanelContainer dx:-365.6 dy:617.1 dw:397.7 dh:300.0> {
+    DelayFXPanel = <FishPanelContainer dx:-302.6 dy:635.1 dw:397.7 dh:300.0> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1553,7 +1553,7 @@ live_design! {
         }
     }
 
-    ChorusFXPanel = <FishPanelContainer dx:250.0 dy:303.9 dw:400.0 dh:311.1> {
+    ChorusFXPanel = <FishPanelContainer dx:95.9 dy:418.7 dw:413.4 dh:311.1> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1609,7 +1609,6 @@ live_design! {
                         min: 0.0
                         max: 1.0
                         text: "Rate"
-
                     }
                 }
             }
@@ -1679,7 +1678,7 @@ live_design! {
         }
     }
 
-    FishPanelFilter = <FishPanelContainer> {
+    FishPanelFilter = <FishPanelContainer dx:40.4 dy:29.6 dw:400.0 dh:300.0> {
 
         <FishPanel> {
             height: Fit
@@ -1812,7 +1811,7 @@ live_design! {
         }
     }
 
-    OscPanel = <View> {
+    OscPanel = <View dx:118.6 dy:103.7 dw:400.0 dh:300.0> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1941,7 +1940,7 @@ live_design! {
         }
     }
 
-    MixerPanel = <View dx:643.8 dy:500.4 dw:400.0 dh:300.0> {
+    MixerPanel = <View dx:623.4 dy:513.0 dw:400.0 dh:300.0> {
         width: Fill,
         height: Fit
         flow: Down
@@ -2028,7 +2027,7 @@ live_design! {
         }
     }
 
-    HeaderMenu = <View> {
+    HeaderMenu = <View dx:250.4 dy:669.9 dw:402.1 dh:311.1> {
         width: Fill,
         height: Fit,
         margin: {top: -150}
@@ -2118,7 +2117,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel dx:444.3 dy:129.7 dw:445.2 dh:144.8> {
+    Play = <FishPanel dx:569.9 dy:-22.7 dw:445.2 dh:144.8> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
@@ -2429,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-293.6 dy:929.5 dw:500.6 dh:676.4>{
+    AppDesktop = <View dx:-232.3 dy:868.2 dw:500.6 dh:676.4>{
         flow: Right
         width: Fill,
         height: Fill
