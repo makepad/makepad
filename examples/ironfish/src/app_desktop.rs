@@ -782,7 +782,7 @@ live_design! {
         }
     }
 
-    FishCheckbox = <CheckBox dx:-1294.7 dy:942.6 dw:229.1 dh:57.8> {
+    FishCheckbox = <CheckBox dx:-1295.5 dy:943.4 dw:229.1 dh:57.8> {
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -2135,7 +2135,7 @@ live_design! {
 
 
     // TABS
-    FishPanelEnvelopes = <FishPanelContainer dx:362.9 dy:1422.5 dw:400.0 dh:555.7> {
+    FishPanelEnvelopes = <FishPanelContainer dx:362.2 dy:1421.0 dw:400.0 dh:555.7> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2179,7 +2179,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer dx:797.4 dy:1414.5 dw:338.4 dh:644.1> {
+    FishPanelEffects = <FishPanelContainer dx:796.8 dy:1414.2 dw:338.4 dh:644.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2428,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-471.0 dy:-266.1 dw:1388.9 dh:1522.3>{
+    AppDesktop = <View dx:-470.6 dy:-266.1 dw:1388.9 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill

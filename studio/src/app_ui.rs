@@ -34,6 +34,23 @@ live_design!{
         closeable:false
         icon_walk:{width:15,height:15}
     }
+
+    Vr = <View> {
+        width: Fit, height: 27.,
+        flow: Right,
+        spacing: 0.,
+        margin: <THEME_MSPACE_V_2> {}
+        <View> {
+            width: (THEME_BEVELING * 2.0), height: Fill
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+        }
+        <View> {
+            width: (THEME_BEVELING), height: Fill,
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+        }
+    }
     
     AppUI =  <Window> {
         margin: 5. 
@@ -223,7 +240,7 @@ live_design!{
             }*/
                 
             file_tree_tab = Tab {
-                name: "Explore",
+                name: "Files",
                 template: PermanentTab,
                 kind: StudioFileTree
             }
@@ -281,18 +298,23 @@ live_design!{
                 template: ProfilerTab,
                 kind: Profiler
             }
-                
+ 
             StudioEditor = <View> {
                 flow: Down,
                 <DockToolbar> {
-                    content = <View> {
+                    content = {
+                        align: { x: 0., y: 0.5}
+                        height: Fit, width: Fill,
+                        spacing: (THEME_SPACE_1)
                         flow: Right,
-                        padding: 0., margin: 0.,
-                        <Label> { text = "File"}
-                        <Label> { text = "Edit"}
-                        <Label> { text = "Search"}
-                        <Label> { text = "Debug"}
-                        <Label> { text = "Docs"}
+                        margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
+
+                        <ButtonFlat> { width: Fit, text: "File"}
+                        <ButtonFlat> { width: Fit, text: "Edit"}
+                        <ButtonFlat> { width: Fit, text: "Search"}
+                        <ButtonFlat> { width: Fit, text: "Debug"}
+                        <Filler> {}
+                        <ButtonFlat> { width: Fit, text: "Docs"}
                     }
                 }
                 editor = <StudioEditor> {}
@@ -344,9 +366,44 @@ live_design!{
             Search = <RectView> {
             flow: Down,
                 <DockToolbar> {
-                    content = <TextInput> {
-                        width: Fill,
-                        empty_message: "Search here",
+                    content = {
+                        padding: { right: (THEME_SPACE_2) }
+                        spacing: (THEME_SPACE_2)
+                        <TextInput> {
+                            width: Fill,
+                            empty_message: "Search",
+                        }
+
+                        <CheckBoxCustom> {
+                            text:""
+                            draw_check: { check_type: None }
+                            icon_walk: {width: 14.}
+                            draw_icon: {
+                                color: (THEME_COLOR_U_3),
+                                color_active: (THEME_COLOR_U_5),
+                                svg_file: dep("crate://self/resources/icons/icon_search_case_sensitive.svg"),
+                            }
+                        }
+                        <CheckBoxCustom> {
+                            text:""
+                            draw_check: { check_type: None }
+                            icon_walk: {width: 16.}
+                            draw_icon: {
+                                color: (THEME_COLOR_U_3),
+                                color_active: (THEME_COLOR_U_5),
+                                svg_file: dep("crate://self/resources/icons/icon_search_full_word.svg"),
+                            }
+                        }
+                        <CheckBoxCustom> {
+                            text:""
+                            draw_check: { check_type: None }
+                            icon_walk: {width: 12.}
+                            draw_icon: {
+                                color: (THEME_COLOR_U_3),
+                                color_active: (THEME_COLOR_U_5),
+                                svg_file: dep("crate://self/resources/icons/icon_search_regex.svg"),
+                            }
+                        }
                     }
                 }
                 <View> {
@@ -358,17 +415,139 @@ live_design!{
             RunView = <RunView> {}
             StudioFileTree = <View> {
                 flow: Down,
-                <DockToolbar> {}
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5 }
+                        spacing: (THEME_SPACE_1)
+                        <View> {
+                            align: { x: 0., y: 0.5 }
+                            width: Fit, height: Fit,
+                            flow: Right,
+                            spacing: 0.,
+                            <ButtonFlat> {
+                                text: ""
+                                icon_walk: { width: 14. }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/icons/icon_filetree_folder_create.svg"),
+                                }
+                            }
+                            <ButtonFlat> {
+                                text: ""
+                                icon_walk: { width: 11. }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/icons/icon_filetree_file_create.svg"),
+                                }
+                            }
+                        }
+                        <Vr> {}
+                        <TextInput> {
+                            width: Fill,
+                            empty_message: "Filter",
+                        }
+                    }
+                }
                 file_tree = <StudioFileTree> {}
             }
             LogList = <View> {
                 flow: Down,
-                <DockToolbar> {}
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5 }
+                        spacing: (THEME_SPACE_1)
+                        <View> {
+                            width: Fit
+                            flow: Right,
+                            spacing: (THEME_SPACE_2)
+                            <CheckBoxCustom> {
+                                margin: {left: (THEME_SPACE_1)}
+                                text:"Error"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_4),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Warning"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_1),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Log"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (THEME_COLOR_U_5),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Wait"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_2),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Panic"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_5),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                        }
+                        <Vr> {}
+                        <Filler> {}
+                        <TextInput> {
+                            width: 200.
+                            empty_message: "Filter",
+                        }
+                    }
+                }
                 log_list = <LogList> {}
             }
             Profiler = <View> {
                 flow: Down,
-                <DockToolbar> {}
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5 }
+                        spacing: (THEME_SPACE_1)
+                        <ButtonFlat> {
+                            text: "Start"
+                            icon_walk: { width: 8. }
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                            }
+                        }
+                        <ButtonFlat> {
+                            text: "Clear"
+                            icon_walk: { width: 12. }
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/icons/icon_profiler_clear.svg"),
+                            }
+                        }
+                        <ButtonGroup> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5 }
+                        }
+                        <Vr> {}
+                    }
+                }
                 <Profiler> {}
             }
         }}
