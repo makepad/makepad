@@ -3812,9 +3812,9 @@ live_design! {
             height: 400,
             draw_bg:{
                 color:#8,
-                shadow_offset:vec2(10,10)
+                shadow_offset:vec2(30,30)
                 //radius: 30.0
-                shadow_radius:10.0
+                shadow_radius:30.0
             }
         }
     }
