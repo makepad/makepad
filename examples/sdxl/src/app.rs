@@ -104,10 +104,7 @@ pub struct App {
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
-    #[rust(vec![(
-        LLMMsg::Human,
-        "You are an AI that generates prompts for an image generator. Respond in short, terse answers.".to_string(),
-    )])] llm_chat: Vec<(LLMMsg,String)>,
+    #[rust] llm_chat: Vec<(LLMMsg,String)>,
     
     #[rust] delay_timer: Timer,
 }
@@ -258,12 +255,16 @@ impl App {
         // alright we have a query. now what
         let url = format!("http://localhost:8080/completion");
         let mut request = HttpRequest::new(url, HttpMethod::POST);
-        
         let mut prompt = String::new();
+        
+        prompt.push_str(&format!("<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are an assistant that answers in very short image generator prompts of maximum 2 lines<|eot_id|>\n\n"));
+        
         for (ai, msg) in &self.llm_chat{
             match ai{
-                LLMMsg::Human=>prompt.push_str(&format!("<s>[INST]{}[/INST]</s>\n", msg)),
-                LLMMsg::AI=>prompt.push_str(&format!("{}\n", msg)),
+               LLMMsg::Human=>prompt.push_str(&format!("<|start_header_id|>user<|end_header_id|>
+                {}<|eot_id|>", msg)),
+               LLMMsg::AI=>prompt.push_str(&format!("<|start_header_id|>assistant<|end_header_id|>
+                {}<|eot_id|>\n", msg)),
                 LLMMsg::Progress=>()
             }
         }
@@ -274,7 +275,7 @@ impl App {
             \"stream\":false,
             \"n_predict\":400,
             \"temperature\":0.7,
-            \"stop\":[\"</s>\",\"Llama:\",\"User:\"],
+            \"stop\":[\"<|eot_id|>\"],
             \"repeat_last_n\":256,
             \"repeat_penalty\":1.18,
             \"top_k\":40,
@@ -846,6 +847,9 @@ impl MatchEvent for App {
                                         if let Some((LLMMsg::Progress,_)) = self.llm_chat.last(){
                                             self.llm_chat.pop();
                                         }
+                                        let val = val.strip_prefix("assistant").unwrap_or(val);
+                                        let val = val.to_string().replace("\"","");
+                                        let val = val.trim();
                                         self.ui.text_input(id!(positive)).set_text(&val);
                                         self.llm_chat.push((LLMMsg::AI,val.into()));
                                         self.ui.widget(id!(llm_chat)).redraw(cx);
@@ -1074,7 +1078,7 @@ impl MatchEvent for App {
         }
         
         if self.ui.button(id!(clear_button)).clicked(&actions) {
-            self.llm_chat.drain(1..);
+            self.llm_chat.clear();
             self.ui.widget(id!(llm_chat)).redraw(cx);
         }
                     
