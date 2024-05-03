@@ -151,7 +151,7 @@ impl<'a> Compile<'a> {
     }
 
     /// Constants
-    
+
     fn copy_const_to_opd(&mut self, opd_depth: usize) {
         let opd_idx = self.opds.len() - 1 - opd_depth;
         self.emit(copy_imm_to_stack(self.opds[opd_idx].type_));
@@ -285,7 +285,7 @@ impl<'a> Compile<'a> {
             self.copy_const_to_opd(opd_depth);
         }
     }
-    
+
     fn ensure_opd_not_in_local(&mut self, opd_depth: usize) {
         if self.opd(opd_depth).is_in_local() {
             self.copy_local_to_opd(self.opds.len() - 1 - opd_depth);
@@ -441,10 +441,8 @@ impl<'a> Compile<'a> {
 
     fn emit_opd(&mut self, opd_depth: usize) {
         match self.opd(opd_depth).kind() {
-            OpdKind::Stack => {
-                self.emit_stack_offset(self.opd_stack_idx(opd_depth))
-            }
-            OpdKind::Reg => {},
+            OpdKind::Stack => self.emit_stack_offset(self.opd_stack_idx(opd_depth)),
+            OpdKind::Reg => {}
             OpdKind::Imm => {
                 self.emit_val(self.opd(opd_depth).val.unwrap());
             }
@@ -827,7 +825,10 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         self.ensure_opd_not_const(0);
-        self.emit(ref_is_null(self.opd(0).type_.to_ref().unwrap(), self.opd(0).kind()));
+        self.emit(ref_is_null(
+            self.opd(0).type_.to_ref().unwrap(),
+            self.opd(0).kind(),
+        ));
         self.pop_opd_and_emit();
         self.push_opd_and_alloc_reg(ValType::I32);
         Ok(())
