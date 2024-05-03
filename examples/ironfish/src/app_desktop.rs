@@ -661,7 +661,7 @@ live_design! {
 
     }
 
-    PlayPause = <FishToggle dx:1506.7 dy:2601.9 dw:76.7 dh:82.8> {
+    PlayPause = <FishToggle dx:1506.1 dy:2601.9 dw:77.3 dh:82.8> {
         width: Fit,
         height: Fit,
         margin: <SPACING_3> {}
@@ -882,7 +882,7 @@ live_design! {
         }
     }
 
-    PresetFavorite = <CheckBox dx:-494.1 dy:1648.1 dw:390.1 dh:82.3> {
+    PresetFavorite = <CheckBox dx:-494.1 dy:1648.1 dw:390.1 dh:84.5> {
         height: Fit,
         width: Fit,
         margin: 0.0
@@ -1149,7 +1149,7 @@ live_design! {
         }
     }
 
-    PianoSettings = <View dx:1222.8 dy:4146.3 dw:142.2 dh:109.1> {
+    PianoSettings = <View dx:1220.6 dy:4151.7 dw:142.2 dh:109.1> {
         flow: Down,
         padding: <SPACING_0> {} spacing: (SSPACING_2)
         height: Fit,
@@ -1180,7 +1180,7 @@ live_design! {
         }
     }
 
-    SequencerPanel = <RoundedView dx:1173.2 dy:1539.4 dw:400.0 dh:580.2> {
+    SequencerPanel = <RoundedView dx:1181.8 dy:1424.5 dw:400.0 dh:580.2> {
         flow: Down
         margin: <SPACING_0> {}
 
@@ -2117,7 +2117,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel dx:-27.2 dy:3975.6 dw:1392.9 dh:143.2> {
+    Play = <FishPanel dx:-27.6 dy:3975.6 dw:1392.9 dh:143.2> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
@@ -2428,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-69.9 dy:-226.4 dw:1388.9 dh:1522.3>{
+    AppDesktop = <View dx:-502.8 dy:-192.9 dw:1388.9 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
