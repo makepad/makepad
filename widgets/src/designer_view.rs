@@ -309,12 +309,17 @@ impl Widget for DesignerView {
             }
             Hit::FingerScroll(fs)=>{
                 let last_zoom = self.zoom;
+                
                 if fs.scroll.y < 0.0{
-                    self.zoom *= 0.9;
+                    let step = (-fs.scroll.y).min(200.0) / 500.0;
+                    self.zoom *= 1.0 - step; 
                 }
                 else{
-                    self.zoom *= 1.1;
+                    let step = (fs.scroll.y).min(200.0) / 500.0;
+                    self.zoom *= 1.0 + step;
                 }
+                self.zoom = self.zoom.max(0.01).min(10.0);
+                
                 // we should shift the pan to stay in the same place
                 let pan1 = (fs.abs - fs.rect.pos) * last_zoom;
                 let pan2 = (fs.abs - fs.rect.pos) * self.zoom;
