@@ -431,17 +431,24 @@ live_design!{
         instance shadow_color: #0007
         instance shadow_offset: vec2(0.0,0.0)
         instance shadow_radius: 10.0
+        
         varying rect_size2: vec2,
+        varying rect_size3: vec2,
         varying rect_pos2: vec2,     
-              
+        varying rect_shift: vec2,      
         fn get_color(self) -> vec4 {
             return self.color
         }
         
         fn vertex(self) -> vec4 {
+            let min_offset = min(self.shadow_offset,vec2(0));
             self.rect_size2 = self.rect_size + 2.0*vec2(self.shadow_radius);
-            self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius);
-            return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size2)
+            self.rect_size3 = self.rect_size2 + abs(self.shadow_offset);
+            self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset;
+            
+            self.rect_shift = -min_offset;
+            
+            return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
         }
                                     
         fn get_border_color(self) -> vec4 {
@@ -450,16 +457,18 @@ live_design!{
                             
         fn pixel(self) -> vec4 {
             
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size2)
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size3)
+            let bw = self.border_width + self.shadow_radius;
             sdf.rect(
-                self.border_width + self.shadow_radius  ,
-                self.border_width + self.shadow_radius  ,
+                bw + self.rect_shift.x,
+                bw + self.rect_shift.y,
                 self.rect_size2.x - (self.shadow_radius * 2.0 + self.border_width * 2.0),
                 self.rect_size2.y - (self.shadow_radius * 2.0 + self.border_width * 2.0)
             )
             if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
                 let m = self.shadow_radius;
-                let v = GaussShadow::box_shadow(vec2(m), self.rect_size2, self.pos * (self.rect_size2+vec2(m)) , m*0.5);
+                let o = self.shadow_offset + self.rect_shift;
+                let v = GaussShadow::box_shadow(vec2(m) + o, self.rect_size2+o, self.pos * (self.rect_size3+vec2(m)) , m*0.5);
                 sdf.clear(self.shadow_color*v)
             }
                                                 
@@ -514,18 +523,25 @@ live_design!{
         instance shadow_radius: 20.0,
         instance shadow_offset: vec2(0.0,0.0)
         instance radius: 2.5
-                    
+                
         varying rect_size2: vec2,
+        varying rect_size3: vec2,
         varying rect_pos2: vec2,     
-                      
+        varying rect_shift: vec2,    
+          
         fn get_color(self) -> vec4 {
             return self.color
         }
                 
         fn vertex(self) -> vec4 {
+            let min_offset = min(self.shadow_offset,vec2(0));
             self.rect_size2 = self.rect_size + 2.0*vec2(self.shadow_radius);
-            self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius);
-            return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size2)
+            self.rect_size3 = self.rect_size2 + abs(self.shadow_offset);
+            self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset;
+                        
+            self.rect_shift = -min_offset;
+                        
+            return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
         }
                             
         fn get_border_color(self) -> vec4 {
@@ -534,17 +550,19 @@ live_design!{
                     
         fn pixel(self) -> vec4 {
                             
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size2)
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size3)
+            let bw = self.border_width + self.shadow_radius;
             sdf.box(
-                self.border_width + self.shadow_radius - self.shadow_offset.x ,
-                self.border_width + self.shadow_radius - self.shadow_offset.y ,
+                bw + self.rect_shift.x,
+                bw + self.rect_shift.y,
                 self.rect_size2.x - (self.shadow_radius * 2.0 + self.border_width * 2.0),
                 self.rect_size2.y - (self.shadow_radius * 2.0 + self.border_width * 2.0),
                 max(1.0, self.radius)
             )
             if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
                 let m = self.shadow_radius;
-                let v = GaussShadow::rounded_box_shadow(vec2(m), self.rect_size2, self.pos * (self.rect_size2+vec2(m)), self.shadow_radius*0.5, self.radius*2.0);
+                let o = self.shadow_offset + self.rect_shift;
+                let v = GaussShadow::rounded_box_shadow(vec2(m) + o, self.rect_size2+o, self.pos * (self.rect_size3+vec2(m)), self.shadow_radius*0.5, self.radius*2.0);
                 sdf.clear(self.shadow_color*v)
             }
                                 
