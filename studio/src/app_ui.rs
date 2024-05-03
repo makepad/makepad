@@ -289,22 +289,41 @@ live_design!{
                     <Logo> {}
                 }
             }
-            RunList = <RunList> {}
+            RunList = <View> {
+            flow: Down,
+            <DockToolbar> {}
+                <RunList> {}
+            }
             Search = <RectView> {
-                <View> {
-                    flow: Down
-                    margin: <THEME_MSPACE_2> {}
-                    <TextInput> {
+            flow: Down,
+                <DockToolbar> {
+                    content = <TextInput> {
                         width: Fill,
                         empty_message: "Search here",
                     }
+                }
+                <View> {
+                    flow: Down
+                    margin: <THEME_MSPACE_2> {}
                     <P> { text: "this does not work yet." }
                 }
             }
             RunView = <RunView> {}
-            StudioFileTree = <StudioFileTree> {}
-            LogList = <LogList> {}
-            Profiler = <Profiler> {}
+            StudioFileTree = <View> {
+                flow: Down,
+                <DockToolbar> {}
+                <StudioFileTree> {}
+            }
+            LogList = <View> {
+                flow: Down,
+                <DockToolbar> {}
+                <LogList> {}
+            }
+            Profiler = <View> {
+                flow: Down,
+                <DockToolbar> {}
+                <Profiler> {}
+            }
         }}
     }
 }

@@ -69,7 +69,15 @@ live_design! {
     // BASICS
     THEME_COLOR_MAKEPAD = #FF5C39FF
 
-    THEME_COLOR_BG_APP = (mix(mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT), (mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)), pow(0.3, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_BG_APP = (mix(
+        mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT),
+        mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT),
+        pow(0.3, THEME_COLOR_CONTRAST)))
+    THEME_COLOR_FG_APP = (mix(
+        mix(THEME_COLOR_B, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT),
+        mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT),
+        pow(0.36, THEME_COLOR_CONTRAST))
+    )
     THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
@@ -99,7 +107,7 @@ live_design! {
     THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_3) // i.e. inline code
 
     THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
-    THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_4)
+    THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_3)
 
     // WIDGET COLORS
     THEME_COLOR_CTRL_DEFAULT = (THEME_COLOR_U_1)
@@ -144,7 +152,7 @@ live_design! {
     THEME_COLOR_CTRL_SCROLLBAR_HOVER = (THEME_COLOR_U_3)
 
     THEME_COLOR_DOCK_CONTAINER = (THEME_COLOR_BG_CONTAINER)
-    THEME_COLOR_DOCK_TAB_SELECTED = (THEME_COLOR_BG_CONTAINER)
+    THEME_COLOR_DOCK_TAB_SELECTED = (THEME_COLOR_FG_APP)
     THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL = (THEME_COLOR_U_4)
 
 
@@ -1762,7 +1770,7 @@ live_design! {
     TabBar = <TabBarBase> {
         CloseableTab = <Tab> {closeable:true}
         PermanentTab = <Tab> {closeable:false}
-        
+
         draw_drag: {
             draw_depth: 10
             color: (THEME_COLOR_BG_CONTAINER)
@@ -1970,6 +1978,25 @@ live_design! {
         show_bg: true,
         draw_bg: { color: (THEME_COLOR_DOCK_CONTAINER) }
     }
+
+    DockToolbar = <RectShadowView> {
+        margin: { top: -1. }
+        padding: <THEME_MSPACE_2> {}
+        width: Fill, height: 47.,
+
+        draw_bg: {
+            border_width: 0.0
+            border_color: (THEME_COLOR_BEVEL_LIGHT)
+            shadow_color: (THEME_COLOR_D_4)
+            shadow_radius: 7.5
+            shadow_offset: vec2(10.0, 0.0)
+            color: (THEME_COLOR_FG_APP),
+        }
+        content = <View> {
+            width: Fill, height: Fill,
+        }
+    }
+                
 
     PopupMenuItem = <PopupMenuItemBase> {
         width: Fill, height: Fit,
@@ -3559,22 +3586,22 @@ live_design! {
 
         root_view = <View> {}
     }
-    
-        
+
+
     DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
         align: { y: 0.5 }
         padding: { left: (THEME_SPACE_1) },
-        
+
         indent_width: 10.0
         min_drag_distance: 10.0
         button_open_width: 24.0,
         draw_eye: false,
-                
+
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
             instance focussed: 0.0
-            
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -3611,7 +3638,7 @@ live_design! {
                 return self.color * self.scale;
             }
         }
-        
+
         draw_name: {
             instance selected: 0.0
             instance hover: 0.0
@@ -3623,13 +3650,13 @@ live_design! {
                     self.selected
                 )
             }
-            
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
                 top_drop: 1.2,
             }
         }
-        
+
         button_open: <FoldButton> {
             height: 25, width: 15,
             margin: { left: (THEME_SPACE_2) }
@@ -3637,26 +3664,26 @@ live_design! {
             draw_bg: {
                 uniform size: 3.75;
                 instance open: 0.0
-                                        
+
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let left = 2;
                     let sz = self.size;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
-                                                
+
                     // PLUS
                     sdf.box(0.5, sz * 3.0, sz * 2.5, sz * 0.7, 1.0); // rounding = 3rd value
                     // vertical
                     sdf.fill_keep(mix(#8F, #FF, self.hover));
                     sdf.box(sz * 1.0, sz * 2.125, sz * 0.7, sz * 2.5, 1.0); // rounding = 3rd value
-                        
+
                     sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
-                        
+
                     return sdf.result
                 }
             }
         }
-        
+
         animator: {
             hover = {
                 default: off
@@ -3669,7 +3696,7 @@ live_design! {
                         draw_icon: {hover: 0.0}
                     }
                 }
-                
+
                 on = {
                     cursor: Hand
                     from: {all: Snap}
@@ -3681,20 +3708,20 @@ live_design! {
                     },
                 }
             }
-            
+
             focus = {
                 default: on
                 on = {
                     from: {all: Snap}
                     apply: {focussed: 1.0}
                 }
-                
+
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {focussed: 0.0}
                 }
             }
-            
+
             select = {
                 default: off
                 off = {
@@ -3715,11 +3742,11 @@ live_design! {
                         draw_icon: {selected: 1.0}
                     }
                 }
-                
+
             }
         }
     }
-    
+
     STUDIO_PALETTE_1 = #B2FF64
     STUDIO_PALETTE_2 = #80FFBF
     STUDIO_PALETTE_3 = #80BFFF
@@ -3727,7 +3754,7 @@ live_design! {
     STUDIO_PALETTE_5 = #FF80BF
     STUDIO_PALETTE_6 = #FFB368
     STUDIO_PALETTE_7 = #FFD864
-    
+
     STUDIO_COLOR_FILE = (THEME_COLOR_TEXT_DEFAULT)
     STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT_DEFAULT)
     STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)
@@ -3737,13 +3764,13 @@ live_design! {
 
     DesignerOutlineTree = <DesignerOutlineTreeBase> {
         flow: Down,
-                
+
         scroll_bars: <ScrollBars> {}
         scroll_bars: {}
         node_height: (THEME_DATA_ITEM_HEIGHT),
         clip_x: true,
         clip_y: true
-        
+
         File = <DesignerOutlineTreeNode> {
             draw_eye: true,
             draw_icon: {
@@ -3751,42 +3778,42 @@ live_design! {
                 svg_file: dep("crate://self/resources/icons/icon_file.svg"),
             }
         }
-        
+
         Folder = <DesignerOutlineTreeNode> {
             draw_icon: {
                 color: (STUDIO_COLOR_FOLDER)
                 svg_file: dep("crate://self/resources/icons/icon_folder.svg"),
             }
         }
-        
+
         Layout = <DesignerOutlineTreeNode> {
             draw_icon: {
                 color: (STUDIO_COLOR_LAYOUT)
                 svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
             }
         }
-        
+
         Widget = <DesignerOutlineTreeNode> {
             draw_icon: {
                 color: (STUDIO_COLOR_WIDGET)
                 svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
             }
         }
-                
+
         Asset = <DesignerOutlineTreeNode> {
             draw_icon: {
                 color: (STUDIO_COLOR_ASSET)
                 svg_file: dep("crate://self/resources/icons/icon_image.svg"),
             }
         }
-                
+
         Text = <DesignerOutlineTreeNode> {
             draw_icon: {
                 color: (STUDIO_COLOR_TEXT)
                 svg_file: dep("crate://self/resources/icons/icon_text.svg"),
             }
         }
-                
+
         filler: {
             fn pixel(self) -> vec4 {
                 return mix(
@@ -3797,29 +3824,123 @@ live_design! {
             }
         }
     }
-    
+
     DesignerOutline = <DesignerOutlineBase>{
     }
-    
+
     DesignerToolbox = <DesignerToolboxBase>{
         width: Fill,
         height: Fill
         show_bg: false
-        
+
+        <DockToolbar> {
+
+        }
+
         <RoundedShadowView>{
-            clip_x:false,
-            clip_y:false,
-            abs_pos:vec2(50.,50)
-            width: 200,
-            height: 400,
-            draw_bg:{
-                color:#8,
-                shadow_offset:vec2(0,0)
-                shadow_radius:10.0
+            abs_pos:vec2(25., 65.)
+            padding: 0.
+            width: Fit, height: Fit,
+            spacing: 0.,
+            align: { x: 0.5, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
+
+            draw_bg: {
+                border_width: 1.0
+                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                shadow_color: (THEME_COLOR_D_4)
+                shadow_radius: 20.0,
+                shadow_offset: vec2(0.0, 10.0)
+                radius: 2.5
+                color: (THEME_COLOR_FG_APP),
+            }
+
+            <View> {
+                width: Fit, height: 38.,
+                align: { x: 0.5, y: 0.5}
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 9. }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_select.svg"),
+                    }
+                    text: ""
+                }
+            }
+            <Hr> { margin: 0. }
+            <View> {
+                width: Fit, height: 38.,
+                align: { x: 0.5, y: 0.5}
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 14.5 }
+                    align: { x: 0.5, y: 0.5 }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_draw.svg"),
+                    }
+                    text: ""
+                }
+            }
+            <Hr> { margin: 0. }
+            <View> {
+                width: Fit, height: 38.,
+                align: { x: 0.5, y: 0.5}
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 12. }
+                    align: { x: 0.5, y: 0.5 }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_text.svg"),
+                    }
+                    text: ""
+                }
+            }
+            <Hr> { margin: 0. }
+            <View> {
+                width: Fit, height: 38.,
+                align: { x: 0.5, y: 0.5}
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 13.5 }
+                    align: { x: 0.5, y: 0.5 }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
+                    }
+                    text: ""
+                }
+            }
+            <Hr> { margin: 0. }
+            <View> {
+                width: Fit, height: 38.,
+                align: { x: 0.5, y: 0.5}
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 15.5 }
+                    align: { x: 0.5, y: 0.5 }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
+                    }
+                    text: ""
+                }
+            }
+            <Hr> { margin: 0. }
+            <View> {
+                width: Fit, height: 38.,
+                align: { x: 0.5, y: 0.5}
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 15.5 }
+                    align: { x: 0.5, y: 0.5 }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_image.svg"),
+                    }
+                    text: ""
+                }
             }
         }
     }
-    
+
     DesignerContainer = <DesignerContainerBase>{
         width: 1200,
         height: 1200,
@@ -3842,7 +3963,7 @@ live_design! {
                         view = {draw_bg:{border_color:#c}}
                     }
                 }
-                                
+
             }
         }
         view = <RoundedView>{
@@ -3861,7 +3982,7 @@ live_design! {
     }
 
     DesignerView = <DesignerViewBase>{
-        clear_color: #7
+        clear_color: #333333
         draw_bg: {
             texture image: texture2d
             varying scale: vec2
@@ -3880,7 +4001,7 @@ live_design! {
             }
         }
         container: <DesignerContainer>{
-            
+
         }
     }
 
@@ -3890,17 +4011,17 @@ live_design! {
             body = <View> {
                 designer_outline = <DesignerOutline> {
                     outline_tree = <DesignerOutlineTree>{
-                                                
+
                     }
                 }
             }
         }
         <Window>{
             window:{ kind_id: 1 }
-            body = <View>{ 
+            body = <View>{
                 flow: Overlay
                 designer_view = <DesignerView> {
-                    width: Fill, height: Fill 
+                    width: Fill, height: Fill
                 }
                 toolbox = <DesignerToolbox>{
                 }
