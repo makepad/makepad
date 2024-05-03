@@ -1000,7 +1000,7 @@ live_design! {
         }
     }
 
-    ModEnvelopePanel = <View dx:365.1 dy:1991.6 dw:397.1 dh:299.0> {
+    ModEnvelopePanel = <View dx:372.9 dy:1990.3 dw:397.1 dh:299.0> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1180,7 +1180,7 @@ live_design! {
         }
     }
 
-    SequencerPanel = <RoundedView dx:1171.7 dy:1427.3 dw:400.0 dh:537.8> {
+    SequencerPanel = <RoundedView dx:1173.6 dy:1540.3 dw:400.0 dh:537.8> {
         flow: Down
         margin: <SPACING_0> {}
 
@@ -1981,7 +1981,7 @@ live_design! {
         }
     }
 
-    FishPanelSoundSources = <FishPanelContainer dx:-56.8 dy:1410.1 dw:400.0 dh:1144.3> {
+    FishPanelSoundSources = <FishPanelContainer dx:-44.3 dy:1429.3 dw:400.0 dh:1144.3> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2135,7 +2135,7 @@ live_design! {
 
 
     // TABS
-    FishPanelEnvelopes = <FishPanelContainer dx:365.2 dy:1418.7 dw:400.0 dh:555.7> {
+    FishPanelEnvelopes = <FishPanelContainer dx:362.9 dy:1422.5 dw:400.0 dh:555.7> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2428,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-58.9 dy:-59.9 dw:1382.4 dh:1442.1>{
+    AppDesktop = <View dx:-57.0 dy:-59.2 dw:1389.6 dh:1442.1>{
         flow: Right
         width: Fill,
         height: Fill

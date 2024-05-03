@@ -132,7 +132,7 @@ live_design!{
         }
     }
     
-    BarLabel = <Label> {
+    BarLabel = <Label dx:-103.6 dy:393.8 dw:400.0 dh:300.0> {
         margin: {left: 10},
         text: "Workflow",
         draw_text: {
@@ -143,7 +143,7 @@ live_design!{
         }
     }
     
-    BarButton = <Button> {
+    BarButton = <Button dx:279.6 dy:-136.8 dw:400.0 dh:300.0> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
         text: "Cancel"
@@ -285,7 +285,7 @@ live_design!{
         }
     }
     
-    SettingsSlider = <View> {
+    SettingsSlider = <View dx:210.7 dy:304.6 dw:400.0 dh:300.0> {
         width: 130,
         height: Fit,
         margin: {top: 0},
@@ -303,7 +303,7 @@ live_design!{
         }
     }
     
-    FillerH = <View> {
+    FillerH = <View dx:303.1 dy:271.4 dw:400.0 dh:300.0> {
         width: Fill,
         height: Fit
     }
@@ -314,7 +314,7 @@ live_design!{
     }
     
     
-    DividerV = <View> {
+    DividerV = <View dx:-313.3 dy:119.9 dw:400.0 dh:300.0> {
         flow: Down,
         spacing: 0.0
         margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
@@ -413,7 +413,7 @@ live_design!{
         text: "Slideshow"
     }
     
-    ProgressCircle = <View> {
+    ProgressCircle = <View dx:-194.2 dy:-240.4 dw:400.0 dh:300.0> {
         show_bg: true,
         width: 24,
         height: 24
@@ -604,7 +604,7 @@ live_design!{
         }
     }
     
-    VideoFrame = <Image> {
+    VideoFrame = <Image dx:-22.8 dy:313.4 dw:400.0 dh:300.0> {
         height: 160,
         width: 90,
         width_scale: 2.0,
@@ -780,8 +780,6 @@ live_design!{
                                     }
                                     draw_bg: {
                                         color: (#335)
-                                        border_width: 1.0
-                                        border_color: #x00000044
                                     }
                                 }
                                 Human = <TextInput> {
@@ -795,8 +793,6 @@ live_design!{
                                     }
                                     draw_bg: {
                                         color: (#353)
-                                        border_width: 1.0
-                                        border_color: #x00000044
                                     }
                                 }
                             }
@@ -810,8 +806,6 @@ live_design!{
                             empty_message: "Talk here"
                             draw_bg: {
                                 color: (COLOR_TEXT_INPUT)
-                                border_width: 1.0
-                                border_color: #x00000044
                             }
                             draw_text: {
                                 text_style: {font_size: (TEXT_BIG)}
@@ -845,8 +839,6 @@ live_design!{
                         }
                         draw_bg: {
                             color: (COLOR_TEXT_INPUT)
-                            border_width: 1.0
-                            border_color: #x00000044
                         }
                     }
                     <View>{
@@ -860,8 +852,6 @@ live_design!{
                             text: "text, watermark, cartoon"
                             draw_bg: {
                                 color: (COLOR_TEXT_INPUT)
-                                border_width: 1.0
-                                border_color: #x00000044
                             }
                         }
                     }
@@ -902,8 +892,6 @@ live_design!{
                         empty_message: "Search"
                         draw_bg: {
                             color: (COLOR_TEXT_INPUT)
-                            border_width: 1.0
-                            border_color: #x00000044
                         }
                         draw_text: {
                             text_style: {font_size: (TEXT_BIG)}
