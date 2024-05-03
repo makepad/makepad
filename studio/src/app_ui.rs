@@ -249,7 +249,21 @@ live_design!{
                 kind: Profiler
             }
                 
-            StudioEditor = <StudioEditor> {}
+            StudioEditor = <View> {
+                flow: Down,
+                <DockToolbar> {
+                    content = <View> {
+                        flow: Right,
+                        padding: 0., margin: 0.,
+                        <Label> { text = "File"}
+                        <Label> { text = "Edit"}
+                        <Label> { text = "Search"}
+                        <Label> { text = "Debug"}
+                        <Label> { text = "Docs"}
+                    }
+                }
+                <StudioEditor> {}
+            }
             EditFirst = <RectView> {
                 draw_bg: {color: #052329}
                 <View> {
