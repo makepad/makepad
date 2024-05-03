@@ -92,46 +92,79 @@ live_design!{
             width: Fill, height: Fill,
             tab_bar:{
                 OutlineFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 11.
+                        margin: { top: 4. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_1)
                         svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
                     }
                 }
                 EditFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 6.
+                        margin: { top: 3. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_6)
                         svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
                     }
                 }
                 DesignFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 13.
+                        margin: { top: 2. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_3)
                         svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
                     }
                 }
                 RunFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 9,
+                        margin: { top: 4. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_4)
                         svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                     }
                 }
                 RunListTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 9.
+                        margin: { top: 4. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_5)
                         svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                     }
                 }
                 LogTab = <IconTab> {
-                    icon_walk:{margin:{right:10}}
+                    spacing: (THEME_SPACE_2)
+                    icon_walk:{
+                        width: 12.5
+                        margin: { top: 5. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_2)
                         svg_file: dep("crate://self/resources/icons/icon_log.svg"),
                     }
                 }
                 ProfilerTab = <IconTab> {
-                    icon_walk:{margin:{right:10}}
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 11.
+                        margin: { top: 2. }
+                    }
                     draw_icon: {
-                        color: (#f)
+                        color: (STUDIO_PALETTE_7)
                         svg_file: dep("crate://self/resources/icons/icon_profiler.svg"),
                     }
                 }
