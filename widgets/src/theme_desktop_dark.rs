@@ -89,7 +89,7 @@ live_design! {
     THEME_COLOR_TEXT_DEFAULT_DARK = (THEME_COLOR_D_4)
     THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT_DEFAULT)
 
-    THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_3)
+    THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_4)
     THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
     THEME_COLOR_TEXT_ACTIVE = (THEME_COLOR_U_5)
     THEME_COLOR_TEXT_INACTIVE = (THEME_COLOR_U_5)
@@ -113,14 +113,14 @@ live_design! {
     THEME_COLOR_CTRL_DEFAULT = (THEME_COLOR_U_1)
     THEME_COLOR_CTRL_PRESSED = (THEME_COLOR_D_1)
     THEME_COLOR_CTRL_HOVER = (THEME_COLOR_U_2)
-    THEME_COLOR_CTRL_ACTIVE = (THEME_COLOR_D_1)
+    THEME_COLOR_CTRL_ACTIVE = (THEME_COLOR_D_2)
     THEME_COLOR_CTRL_SELECTED = (THEME_COLOR_U_2)
     THEME_COLOR_CTRL_INACTIVE = (THEME_COLOR_D_HIDDEN)
 
     THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
 
     // Background of textinputs, radios, checkboxes etc.
-    THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_U_1)
+    THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_D_1)
     THEME_COLOR_INSET_PIT_TOP = (THEME_COLOR_D_4)
     THEME_COLOR_INSET_PIT_TOP_HOVER = (THEME_COLOR_D_4)
     THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)
@@ -375,7 +375,7 @@ live_design! {
 
 //    TODO: enable once Makepad's layout supports Fill that knows how high adjacent elements are. For now this is not possible.
 //    Vr = <View> {
-//         width: Fit., height: Fill,
+//         width: Fit, height: Fill,
 //         flow: Right,
 //         spacing: 0.,
 //         margin: <THEME_MSPACE_V_2> {}
@@ -1108,7 +1108,8 @@ live_design! {
 
     ButtonFlat = <ButtonIcon> {
         height: Fit, width: Fit,
-        margin: <THEME_MSPACE_H_1> {}
+        padding: <THEME_MSPACE_2> {}
+        margin: 0.
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
         draw_bg: {
@@ -1135,6 +1136,48 @@ live_design! {
                     THEME_COLOR_TEXT_PRESSED,
                     self.pressed
                 )
+            }
+        }
+
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+                let bot_gradient = mix(
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING
+                )
+
+                return sdf.result
             }
         }
 
@@ -1260,12 +1303,12 @@ live_design! {
                 return mix(
                     mix(
                         self.color,
-                        mix(self.color, #f, 0.4),
+                        self.color * 1.4,
                         self.hover
                     ),
                     mix(
                         self.color_active,
-                        mix(self.color_active, #f, 0.75),
+                        self.color_active * 1.4,
                         self.hover
                     ),
                     self.selected
@@ -2060,9 +2103,9 @@ live_design! {
 
     DockToolbar = <RectShadowView> {
         margin: { top: -1. }
-        padding: <THEME_MSPACE_2> {}
-        width: Fill, height: 47.,
-
+        padding: <THEME_MSPACE_1> {}
+        width: Fill, height: 35.,
+        align: { x: 0., y: 0.5 }
         draw_bg: {
             border_width: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
@@ -2072,6 +2115,8 @@ live_design! {
             color: (THEME_COLOR_FG_APP),
         }
         content = <View> {
+            margin: 0.
+            padding: 0.
             width: Fill, height: Fill,
         }
     }
@@ -3904,8 +3949,7 @@ live_design! {
         }
     }
 
-    DesignerOutline = <DesignerOutlineBase>{
-    }
+    DesignerOutline = <DesignerOutlineBase>{ }
 
     DesignerToolbox = <DesignerToolboxBase>{
         width: Fill,
@@ -3917,7 +3961,7 @@ live_design! {
         }
 
         <RoundedShadowView>{
-            abs_pos:vec2(25., 65.)
+            abs_pos: vec2(25., 65.)
             padding: 0.
             width: Fit, height: Fit,
             spacing: 0.,
@@ -3929,8 +3973,8 @@ live_design! {
                 border_width: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_4)
-                shadow_radius: 20.0,
-                shadow_offset: vec2(0.0, 10.0)
+                shadow_radius: 10.0,
+                shadow_offset: vec2(0.0, 5.0)
                 radius: 2.5
                 color: (THEME_COLOR_FG_APP),
             }
@@ -3964,6 +4008,7 @@ live_design! {
             <Hr> { margin: 0. }
             <View> {
                 width: Fit, height: 38.,
+
                 align: { x: 0.5, y: 0.5}
                 <ButtonFlat> {
                     flow: Down,
