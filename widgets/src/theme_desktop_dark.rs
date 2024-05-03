@@ -3807,14 +3807,13 @@ live_design! {
         show_bg: false
         
         <RoundedShadowView>{
-            clip_x:false,
-            clip_y:false,
             abs_pos:vec2(50.,50)
             width: 200,
             height: 400,
             draw_bg:{
                 color:#8,
-                shadow_offset:vec2(0,0)
+                shadow_offset:vec2(10,10)
+                //radius: 30.0
                 shadow_radius:10.0
             }
         }
