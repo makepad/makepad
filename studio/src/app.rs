@@ -122,7 +122,7 @@ impl MatchEvent for App{
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
                             if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
                                 editor.editor.set_cursor_and_scroll(cx, pos, session);
                                 editor.editor.set_key_focus(cx);
@@ -147,7 +147,7 @@ impl MatchEvent for App{
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
                             if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do 
                                 session.set_selection(
@@ -175,7 +175,7 @@ impl MatchEvent for App{
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).as_studio_editor().borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
                             if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do 
                                 session.set_selection(

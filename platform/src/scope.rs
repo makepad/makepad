@@ -13,6 +13,10 @@ impl HeapLiveIdPath{
         *self.data.last().unwrap_or(&LiveId(0))
     }
     
+    pub fn from_end(&self, pos:usize)->LiveId{
+        *self.data.iter().rev().nth(pos).unwrap_or(&LiveId(0))
+    }
+    
     pub fn push(&mut self, id:LiveId){
         self.data.push(id);
     }
