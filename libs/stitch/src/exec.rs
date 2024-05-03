@@ -461,7 +461,7 @@ pub(crate) unsafe extern "C" fn call_indirect(
 // Reference instructions
 
 macro_rules! ref_is_null {
-    ($ref_is_null_s:ident, $ref_is_null_r:ident, $T:ty) => {
+    ($ref_is_null_s:ident, $ref_is_null_r:ident, $ref_is_null_i:ident, $T:ty) => {
         pub(crate) unsafe extern "C" fn $ref_is_null_s(
             ip: Ip,
             sp: Sp,
@@ -507,24 +507,63 @@ macro_rules! ref_is_null {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $ref_is_null_i(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+
+            // Perform operation
+            let y = x.is_none() as u32;
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 ref_is_null!(
     ref_is_null_func_ref_s,
     ref_is_null_func_ref_r,
+    ref_is_null_func_ref_i,
     UnguardedFuncRef
 );
 ref_is_null!(
     ref_is_null_extern_ref_s,
     ref_is_null_extern_ref_r,
+    ref_is_null_extern_ref_i,
     UnguardedExternRef
 );
 
 // Parametric instructions
 
 macro_rules! select {
-    ($select_sss:ident, $select_rss:ident, $select_srs:ident, $select_ssr:ident, $T:ty) => {
+    (
+        $select_sss:ident,
+        $select_rss:ident,
+        $select_iss:ident,
+        $select_srs:ident,
+        $select_irs:ident,
+        $select_sis:ident,
+        $select_ris:ident,
+        $select_iis:ident,
+        $select_ssr:ident,
+        $select_isr:ident,
+        $select_sir:ident,
+        $select_iir:ident,
+        $T:ty
+    ) => {
         pub(crate) unsafe extern "C" fn $select_sss(
             ip: Ip,
             sp: Sp,
@@ -575,6 +614,31 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
+        pub(crate) unsafe extern "C" fn $select_iss(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let (x0, ip): ($T, _) = read_imm(ip);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
         pub(crate) unsafe extern "C" fn $select_srs(
             ip: Ip,
             sp: Sp,
@@ -589,6 +653,106 @@ macro_rules! select {
             let (cond, ip): (u32, _) = read_stack(ip, sp);
             let x1: $T = read_reg(ix, sx, dx);
             let (x0, ip): ($T, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_irs(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let x1: $T = read_reg(ix, sx, dx);
+            let (x0, ip): ($T, _) = read_imm(ip);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_sis(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_ris(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let x0: $T = read_reg(ix, sx, dx);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_iis(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (cond, ip): (u32, _) = read_stack(ip, sp);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_imm(ip);
 
             // Perform operation
             let y = if cond != 0 { x0 } else { x1 };
@@ -624,6 +788,81 @@ macro_rules! select {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $select_isr(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_stack(ip, sp);
+            let (x0, ip): ($T, _) = read_imm(ip);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_sir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_iir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let (x0, ip): ($T, _) = read_imm(ip);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
@@ -631,13 +870,37 @@ macro_rules! select_float {
     (
         $select_sss:ident,
         $select_rss:ident,
+        $select_iss:ident,
         $select_srs:ident,
+        $select_irs:ident,
+        $select_sis:ident,
+        $select_ris:ident,
+        $select_iis:ident,
         $select_ssr:ident,
+        $select_isr:ident,
+        $select_sir:ident,
+        $select_iir:ident,
         $select_rsr:ident,
         $select_srr:ident,
+        $select_irr:ident,
+        $select_rir:ident,
         $T:ty
     ) => {
-        select!($select_sss, $select_rss, $select_srs, $select_ssr, $T);
+        select!(
+            $select_sss,
+            $select_rss,
+            $select_iss,
+            $select_srs,
+            $select_irs,
+            $select_sis,
+            $select_ris,
+            $select_iis,
+            $select_ssr,
+            $select_isr,
+            $select_sir,
+            $select_iir,
+            $T
+        );
 
         pub(crate) unsafe extern "C" fn $select_rsr(
             ip: Ip,
@@ -688,53 +951,155 @@ macro_rules! select_float {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $select_irr(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let x1 = read_reg(ix, sx, dx);
+            let (x0, ip): ($T, _) = read_imm(ip);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $select_rir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let cond: u32 = read_reg(ix, sx, dx);
+            let (x1, ip): ($T, _) = read_imm(ip);
+            let x0 = read_reg(ix, sx, dx);
+
+            // Perform operation
+            let y = if cond != 0 { x0 } else { x1 };
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 select!(
     select_i32_sss,
     select_i32_rss,
+    select_i32_iss,
     select_i32_srs,
+    select_i32_irs,
+    select_i32_sis,
+    select_i32_ris,
+    select_i32_iis,
     select_i32_ssr,
+    select_i32_isr,
+    select_i32_sir,
+    select_i32_iir,
     i32
 );
 select!(
     select_i64_sss,
     select_i64_rss,
+    select_i64_iss,
     select_i64_srs,
+    select_i64_irs,
+    select_i64_sis,
+    select_i64_ris,
+    select_i64_iis,
     select_i64_ssr,
+    select_i64_isr,
+    select_i64_sir,
+    select_i64_iir,
     i64
 );
 select_float!(
     select_f32_sss,
     select_f32_rss,
+    select_f32_iss,
     select_f32_srs,
+    select_f32_irs,
+    select_f32_sis,
+    select_f32_ris,
+    select_f32_iis,
     select_f32_ssr,
+    select_f32_isr,
+    select_f32_sir,
+    select_f32_iir,
     select_f32_rsr,
     select_f32_srr,
+    select_f32_irr,
+    select_f32_rir,
     f32
 );
 select_float!(
     select_f64_sss,
     select_f64_rss,
+    select_f64_iss,
     select_f64_srs,
+    select_f64_irs,
+    select_f64_sis,
+    select_f64_ris,
+    select_f64_iis,
     select_f64_ssr,
+    select_f64_isr,
+    select_f64_sir,
+    select_f64_iir,
     select_f64_rsr,
     select_f64_srr,
+    select_f64_irr,
+    select_f64_rir,
     f64
 );
 select!(
     select_func_ref_sss,
     select_func_ref_rss,
+    select_func_ref_iss,
     select_func_ref_srs,
+    select_func_ref_irs,
+    select_func_ref_sis,
+    select_func_ref_ris,
+    select_func_ref_iis,
     select_func_ref_ssr,
+    select_func_ref_isr,
+    select_func_ref_sir,
+    select_func_ref_iir,
     UnguardedFuncRef
 );
 select!(
     select_extern_ref_sss,
     select_extern_ref_rss,
+    select_extern_ref_iss,
     select_extern_ref_srs,
+    select_extern_ref_irs,
+    select_extern_ref_sis,
+    select_extern_ref_ris,
+    select_extern_ref_iis,
     select_extern_ref_ssr,
+    select_extern_ref_isr,
+    select_extern_ref_sir,
+    select_extern_ref_iir,
     UnguardedExternRef
 );
 
@@ -779,8 +1144,8 @@ global_get!(global_get_func_ref, UnguardedFuncRef);
 global_get!(global_get_extern_ref, UnguardedExternRef);
 
 macro_rules! global_set {
-    ($global_set_t_s:ident, $global_set_t_r:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $global_set_t_s(
+    ($global_set_s:ident, $global_set_r:ident, $global_set_i:ident, $T:ty) => {
+        pub(crate) unsafe extern "C" fn $global_set_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -805,7 +1170,7 @@ macro_rules! global_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
-        pub(crate) unsafe extern "C" fn $global_set_t_r(
+        pub(crate) unsafe extern "C" fn $global_set_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -829,29 +1194,56 @@ macro_rules! global_set {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $global_set_i(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (val, ip) = read_imm(ip);
+            let (mut global, ip): (UnguardedGlobal, _) = read_imm(ip);
+
+            // Perform operation
+            global
+                .as_mut()
+                .downcast_mut::<$T>()
+                .unwrap_unchecked()
+                .set(val);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
-global_set!(global_set_i32_s, global_set_i32_r, i32);
-global_set!(global_set_i64_s, global_set_i64_r, i64);
-global_set!(global_set_f32_s, global_set_f32_r, f32);
-global_set!(global_set_f64_s, global_set_f64_r, f64);
+global_set!(global_set_i32_s, global_set_i32_r, global_set_i32_i, i32);
+global_set!(global_set_i64_s, global_set_i64_r, global_set_i64_i, i64);
+global_set!(global_set_f32_s, global_set_f32_r, global_set_f32_i, f32);
+global_set!(global_set_f64_s, global_set_f64_r, global_set_f64_i, f64);
 global_set!(
     global_set_func_ref_s,
     global_set_func_ref_r,
+    global_set_func_ref_i,
     UnguardedFuncRef
 );
 global_set!(
     global_set_extern_ref_s,
     global_set_extern_ref_r,
+    global_set_extern_ref_i,
     UnguardedExternRef
 );
 
 // Table instructions
 
 macro_rules! table_get {
-    ($table_get_t_s:ident, $table_get_t_r:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_get_t_s(
+    ($table_get_s:ident, $table_get_r:ident, $table_get_i:ident, $T:ty) => {
+        pub(crate) unsafe extern "C" fn $table_get_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -880,7 +1272,7 @@ macro_rules! table_get {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
-        pub(crate) unsafe extern "C" fn $table_get_t_r(
+        pub(crate) unsafe extern "C" fn $table_get_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -892,6 +1284,35 @@ macro_rules! table_get {
         ) -> ControlFlowBits {
             // Read operands
             let idx = read_reg(ix, sx, dx);
+            let (table, ip): (UnguardedTable, _) = read_imm(ip);
+
+            // Perform operation
+            let val = r#try!(table
+                .as_ref()
+                .downcast_ref::<$T>()
+                .unwrap_unchecked()
+                .get(idx)
+                .ok_or(Trap::TableAccessOutOfBounds));
+
+            // Write result
+            let ip = write_stack(ip, sp, val);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $table_get_i(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (idx, ip) = read_imm(ip);
             let (table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -911,16 +1332,32 @@ macro_rules! table_get {
     };
 }
 
-table_get!(table_get_func_ref_s, table_get_func_ref_r, UnguardedFuncRef);
+table_get!(
+    table_get_func_ref_s,
+    table_get_func_ref_r,
+    table_get_func_ref_i,
+    UnguardedFuncRef
+);
 table_get!(
     table_get_extern_ref_s,
     table_get_extern_ref_r,
+    table_get_extern_ref_i,
     UnguardedExternRef
 );
 
 macro_rules! table_set {
-    ($table_get_t_ss:ident, $table_set_t_rs:ident, $table_set_t_sr:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_get_t_ss(
+    (
+        $table_set_ss:ident,
+        $table_set_rs:ident,
+        $table_set_is:ident,
+        $table_set_ir:ident,
+        $table_set_ii:ident,
+        $table_set_sr:ident,
+        $table_set_si:ident,
+        $table_set_ri:ident,
+        $T:ty
+    ) => {
+        pub(crate) unsafe extern "C" fn $table_set_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -947,7 +1384,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
-        pub(crate) unsafe extern "C" fn $table_set_t_rs(
+        pub(crate) unsafe extern "C" fn $table_set_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -974,7 +1411,88 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
-        pub(crate) unsafe extern "C" fn $table_set_t_sr(
+        pub(crate) unsafe extern "C" fn $table_set_is(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (val, ip) = read_stack(ip, sp);
+            let (idx, ip) = read_imm(ip);
+            let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
+
+            // Perform operation
+            r#try!(table
+                .as_mut()
+                .downcast_mut::<$T>()
+                .unwrap_unchecked()
+                .set(idx, val)
+                .map_err(|_| Trap::TableAccessOutOfBounds));
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $table_set_ir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let val = read_reg(ix, sx, dx);
+            let (idx, ip) = read_imm(ip);
+            let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
+
+            // Perform operation
+            r#try!(table
+                .as_mut()
+                .downcast_mut::<$T>()
+                .unwrap_unchecked()
+                .set(idx, val)
+                .map_err(|_| Trap::TableAccessOutOfBounds));
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $table_set_ii(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (val, ip) = read_imm(ip);
+            let (idx, ip) = read_imm(ip);
+            let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
+
+            // Perform operation
+            r#try!(table
+                .as_mut()
+                .downcast_mut::<$T>()
+                .unwrap_unchecked()
+                .set(idx, val)
+                .map_err(|_| Trap::TableAccessOutOfBounds));
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $table_set_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -987,6 +1505,60 @@ macro_rules! table_set {
             // Read operands
             let val = read_reg(ix, sx, dx);
             let (idx, ip) = read_stack(ip, sp);
+            let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
+
+            // Perform operation
+            r#try!(table
+                .as_mut()
+                .downcast_mut::<$T>()
+                .unwrap_unchecked()
+                .set(idx, val)
+                .map_err(|_| Trap::TableAccessOutOfBounds));
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $table_set_si(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (val, ip) = read_imm(ip);
+            let (idx, ip) = read_stack(ip, sp);
+            let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
+
+            // Perform operation
+            r#try!(table
+                .as_mut()
+                .downcast_mut::<$T>()
+                .unwrap_unchecked()
+                .set(idx, val)
+                .map_err(|_| Trap::TableAccessOutOfBounds));
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $table_set_ri(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (val, ip) = read_imm(ip);
+            let idx = read_reg(ix, sx, dx);
             let (mut table, ip): (UnguardedTable, _) = read_imm(ip);
 
             // Perform operation
@@ -1006,13 +1578,23 @@ macro_rules! table_set {
 table_set!(
     table_set_func_ref_ss,
     table_set_func_ref_rs,
+    table_set_func_ref_is,
+    table_set_func_ref_ir,
+    table_set_func_ref_ii,
     table_set_func_ref_sr,
+    table_set_func_ref_si,
+    table_set_func_ref_ri,
     UnguardedFuncRef
 );
 table_set!(
     table_set_extern_ref_ss,
     table_set_extern_ref_rs,
+    table_set_extern_ref_is,
+    table_set_extern_ref_ir,
+    table_set_extern_ref_ii,
     table_set_extern_ref_sr,
+    table_set_extern_ref_si,
+    table_set_extern_ref_ri,
     UnguardedExternRef
 );
 
@@ -1242,7 +1824,7 @@ elem_drop!(elem_drop_extern_ref, UnguardedExternRef);
 // Memory instructions
 
 macro_rules! load {
-    ($load_s:ident, $load_r:ident, $T:ty, $U:ty) => {
+    ($load_s:ident, $load_r:ident, $load_i:ident, $T:ty, $U:ty) => {
         pub(crate) unsafe extern "C" fn $load_s(
             ip: Ip,
             sp: Sp,
@@ -1302,11 +1884,52 @@ macro_rules! load {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $load_i(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$T>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let mut bytes = [0u8; mem::size_of::<$T>()];
+            ptr::copy_nonoverlapping(md.add(offset as usize), bytes.as_mut_ptr(), bytes.len());
+            let y = <$T>::from_le_bytes(bytes) as $U;
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 macro_rules! store {
-    ($store_ss:ident, $store_rs:ident, $store_sr:ident, $T:ty, $U:ty) => {
+    (
+        $store_ss:ident,
+        $store_rs:ident,
+        $store_is:ident,
+        $store_ir:ident,
+        $store_ii:ident,
+        $store_sr:ident,
+        $store_si:ident,
+        $store_ri:ident,
+        $T:ty,
+        $U:ty
+    ) => {
         pub(crate) unsafe extern "C" fn $store_ss(
             ip: Ip,
             sp: Sp,
@@ -1361,6 +1984,87 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
+        pub(crate) unsafe extern "C" fn $store_is(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_stack(ip, sp);
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $store_ir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let x: $T = read_reg(ix, sx, dx);
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $store_ii(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+            let (dyn_offset, ip): (u32, _) = read_imm(ip);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
         pub(crate) unsafe extern "C" fn $store_sr(
             ip: Ip,
             sp: Sp,
@@ -1387,12 +2091,81 @@ macro_rules! store {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $store_si(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+            let (dyn_offset, ip): (u32, _) = read_stack(ip, sp);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $store_ri(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): ($T, _) = read_imm(ip);
+            let dyn_offset: u32 = read_reg(ix, sx, dx);
+            let (static_offset, ip): (u32, _) = read_imm(ip);
+
+            // Perform operation
+            let offset = dyn_offset as u64 + static_offset as u64;
+            if offset + mem::size_of::<$U>() as u64 > ms as u64 {
+                return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+            }
+            let bytes = (x as $U).to_le_bytes();
+            ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 macro_rules! store_float {
-    ($store_ss:ident, $store_rs:ident, $store_sr:ident, $store_rr:ident, $T:ty, $U:ty) => {
-        store!($store_ss, $store_rs, $store_sr, $T, $U);
+    (
+        $store_ss:ident,
+        $store_rs:ident,
+        $store_is:ident,
+        $store_ir:ident,
+        $store_ii:ident,
+        $store_sr:ident,
+        $store_si:ident,
+        $store_ri:ident,
+        $store_rr:ident,
+        $T:ty,
+        $U:ty
+    ) => {
+        store!(
+            $store_ss, $store_rs, $store_is, $store_ir, $store_ii, $store_sr, $store_si, $store_ri,
+            $T, $U
+        );
 
         pub(crate) unsafe extern "C" fn $store_rr(
             ip: Ip,
@@ -1423,26 +2196,53 @@ macro_rules! store_float {
     };
 }
 
-load!(i32_load_s, i32_load_r, i32, i32);
-load!(i64_load_s, i64_load_r, i64, i64);
-load!(f32_load_s, f32_load_r, f32, f32);
-load!(f64_load_s, f64_load_r, f64, f64);
-load!(i32_load8_s_s, i32_load8_s_r, i8, i32);
-load!(i32_load8_u_s, i32_load8_u_r, u8, u32);
-load!(i32_load16_s_s, i32_load16_s_r, i16, i32);
-load!(i32_load16_u_s, i32_load16_u_r, u16, u32);
-load!(i64_load8_s_s, i64_load8_s_r, i8, i64);
-load!(i64_load8_u_s, i64_load8_u_r, u8, u64);
-load!(i64_load16_s_s, i64_load16_s_r, i16, i64);
-load!(i64_load16_u_s, i64_load16_u_r, u16, u64);
-load!(i64_load32_s_s, i64_load32_s_r, i32, i64);
-load!(i64_load32_u_s, i64_load32_u_r, u32, u64);
-store!(i32_store_ss, i32_store_rs, i32_store_sr, i32, i32);
-store!(i64_store_ss, i64_store_rs, i64_store_sr, i64, i64);
+load!(i32_load_s, i32_load_r, i32_load_i, i32, i32);
+load!(i64_load_s, i64_load_r, i64_load_i, i64, i64);
+load!(f32_load_s, f32_load_r, f32_load_i, f32, f32);
+load!(f64_load_s, f64_load_r, f64_load_i, f64, f64);
+load!(i32_load8_s_s, i32_load8_s_r, i32_load8_s_i, i8, i32);
+load!(i32_load8_u_s, i32_load8_u_r, i32_load8_u_i, u8, u32);
+load!(i32_load16_s_s, i32_load16_s_r, i32_load16_s_i, i16, i32);
+load!(i32_load16_u_s, i32_load16_u_r, i32_load16_u_i, u16, u32);
+load!(i64_load8_s_s, i64_load8_s_r, i64_load8_s_i, i8, i64);
+load!(i64_load8_u_s, i64_load8_u_r, i64_load8_u_i, u8, u64);
+load!(i64_load16_s_s, i64_load16_s_r, i64_load16_s_i, i16, i64);
+load!(i64_load16_u_s, i64_load16_u_r, i64_load16_u_i, u16, u64);
+load!(i64_load32_s_s, i64_load32_s_r, i64_load32_s_i, i32, i64);
+load!(i64_load32_u_s, i64_load32_u_r, i64_load32_u_i, u32, u64);
+store!(
+    i32_store_ss,
+    i32_store_rs,
+    i32_store_is,
+    i32_store_ir,
+    i32_store_ii,
+    i32_store_sr,
+    i32_store_si,
+    i32_store_ri,
+    i32,
+    i32
+);
+store!(
+    i64_store_ss,
+    i64_store_rs,
+    i64_store_is,
+    i64_store_ir,
+    i64_store_ii,
+    i64_store_sr,
+    i64_store_si,
+    i64_store_ri,
+    i64,
+    i64
+);
 store_float!(
     f32_store_ss,
     f32_store_rs,
+    f32_store_is,
+    f32_store_ir,
+    f32_store_ii,
     f32_store_sr,
+    f32_store_si,
+    f32_store_ri,
     f32_store_rr,
     f32,
     f32
@@ -1450,16 +2250,76 @@ store_float!(
 store_float!(
     f64_store_ss,
     f64_store_rs,
+    f64_store_is,
+    f64_store_ir,
+    f64_store_ii,
     f64_store_sr,
+    f64_store_si,
+    f64_store_ri,
     f64_store_rr,
     f64,
     f64
 );
-store!(i32_store8_ss, i32_store8_rs, i32_store8_sr, u32, u8);
-store!(i32_store16_ss, i32_store16_rs, i32_store16_sr, u32, u16);
-store!(i64_store8_ss, i64_store8_rs, i64_store8_sr, u64, u8);
-store!(i64_store16_ss, i64_store16_rs, i64_store16_sr, u64, u16);
-store!(i64_store32_ss, i64_store32_rs, i64_store32_sr, u64, u32);
+store!(
+    i32_store8_ss,
+    i32_store8_rs,
+    i32_store8_is,
+    i32_store8_ir,
+    i32_store8_ii,
+    i32_store8_sr,
+    i32_store8_si,
+    i32_store8_ri,
+    u32,
+    u8
+);
+store!(
+    i32_store16_ss,
+    i32_store16_rs,
+    i32_store16_is,
+    i32_store16_ir,
+    i32_store16_ii,
+    i32_store16_sr,
+    i32_store16_si,
+    i32_store16_ri,
+    u32,
+    u16
+);
+store!(
+    i64_store8_ss,
+    i64_store8_rs,
+    i64_store8_is,
+    i64_store8_ir,
+    i64_store8_ii,
+    i64_store8_sr,
+    i64_store8_si,
+    i64_store8_ri,
+    u64,
+    u8
+);
+store!(
+    i64_store16_ss,
+    i64_store16_rs,
+    i64_store16_is,
+    i64_store16_ir,
+    i64_store16_ii,
+    i64_store16_sr,
+    i64_store16_si,
+    i64_store16_ri,
+    u64,
+    u16
+);
+store!(
+    i64_store32_ss,
+    i64_store32_rs,
+    i64_store32_is,
+    i64_store32_ir,
+    i64_store32_ii,
+    i64_store32_sr,
+    i64_store32_si,
+    i64_store32_ri,
+    u64,
+    u32
+);
 
 pub(crate) unsafe extern "C" fn memory_size(
     ip: Ip,
@@ -1660,7 +2520,13 @@ macro_rules! un_op {
 }
 
 macro_rules! bin_op {
-    ($bin_op_ss:ident, $bin_op_rs:ident, $f:expr) => {
+    (
+        $bin_op_ss:ident,
+        $bin_op_rs:ident,
+        $bin_op_is:ident,
+        $bin_op_ir:ident,
+        $f:expr
+    ) => {
         pub(crate) unsafe extern "C" fn $bin_op_ss(
             ip: Ip,
             sp: Sp,
@@ -1671,10 +2537,17 @@ macro_rules! bin_op {
             dx: Dx,
             cx: Cx,
         ) -> ControlFlowBits {
+            // Read operands
             let (x1, ip) = read_stack(ip, sp);
             let (x0, ip) = read_stack(ip, sp);
+
+            // Perform operation
             let y = r#try!($f(x0, x1));
+
+            // Write result
             let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
 
@@ -1701,12 +2574,69 @@ macro_rules! bin_op {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $bin_op_is(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x1, ip) = read_stack(ip, sp);
+            let (x0, ip) = read_imm(ip);
+
+            // Perform operation
+            let y = r#try!($f(x0, x1));
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $bin_op_ir(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let x1 = read_reg(ix, sx, dx);
+            let (x0, ip) = read_imm(ip);
+
+            // Perform operation
+            let y = r#try!($f(x0, x1));
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 macro_rules! bin_op_noncommutative {
-    ($bin_op_ss:ident, $bin_op_rs:ident, $bin_op_sr:ident, $f:expr) => {
-        bin_op!($bin_op_ss, $bin_op_rs, $f);
+    (
+        $bin_op_ss:ident,
+        $bin_op_rs:ident,
+        $bin_op_is:ident,
+        $bin_op_ir:ident,
+        $bin_op_sr:ident,
+        $bin_op_si:ident,
+        $bin_op_ri:ident,
+        $f:expr
+    ) => {
+        bin_op!($bin_op_ss, $bin_op_rs, $bin_op_is, $bin_op_ir, $f);
 
         pub(crate) unsafe extern "C" fn $bin_op_sr(
             ip: Ip,
@@ -1731,144 +2661,637 @@ macro_rules! bin_op_noncommutative {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
+
+        pub(crate) unsafe extern "C" fn $bin_op_si(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x1, ip) = read_imm(ip);
+            let (x0, ip) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = r#try!($f(x0, x1));
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
+
+        pub(crate) unsafe extern "C" fn $bin_op_ri(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x1, ip) = read_imm(ip);
+            let x0 = read_reg(ix, sx, dx);
+
+            // Perform operation
+            let y = r#try!($f(x0, x1));
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        }
     };
 }
 
 un_op!(i32_eqz_s, i32_eqz_r, <u32 as IntOps>::eqz);
-bin_op!(i32_eq_ss, i32_eq_rs, <u32 as RelOps>::eq);
-bin_op!(i32_ne_ss, i32_ne_rs, <u32 as RelOps>::ne);
-bin_op_noncommutative!(i32_lt_s_ss, i32_lt_s_rs, i32_lt_s_sr, <i32 as RelOps>::lt);
-bin_op_noncommutative!(i32_lt_u_ss, i32_lt_u_rs, i32_lt_u_sr, <u32 as RelOps>::lt);
-bin_op_noncommutative!(i32_gt_s_ss, i32_gt_s_rs, i32_gt_s_sr, <i32 as RelOps>::gt);
-bin_op_noncommutative!(i32_gt_u_ss, i32_gt_u_rs, i32_gt_u_sr, <u32 as RelOps>::gt);
-bin_op_noncommutative!(i32_le_s_ss, i32_le_s_rs, i32_le_s_sr, <i32 as RelOps>::le);
-bin_op_noncommutative!(i32_le_u_ss, i32_le_u_rs, i32_le_u_sr, <u32 as RelOps>::le);
-bin_op_noncommutative!(i32_ge_s_ss, i32_ge_s_rs, i32_ge_s_sr, <i32 as RelOps>::ge);
-bin_op_noncommutative!(i32_ge_u_ss, i32_ge_u_rs, i32_ge_u_sr, <u32 as RelOps>::ge);
+bin_op!(
+    i32_eq_ss,
+    i32_eq_rs,
+    i32_eq_is,
+    i32_eq_ir,
+    <u32 as RelOps>::eq
+);
+
+bin_op!(
+    i32_ne_ss,
+    i32_ne_rs,
+    i32_ne_is,
+    i32_ne_ir,
+    <u32 as RelOps>::ne
+);
+bin_op_noncommutative!(
+    i32_lt_s_ss,
+    i32_lt_s_rs,
+    i32_lt_s_is,
+    i32_lt_s_ir,
+    i32_lt_s_sr,
+    i32_lt_s_si,
+    i32_lt_s_ri,
+    <i32 as RelOps>::lt
+);
+bin_op_noncommutative!(
+    i32_lt_u_ss,
+    i32_lt_u_rs,
+    i32_lt_u_is,
+    i32_lt_u_ir,
+    i32_lt_u_sr,
+    i32_lt_u_si,
+    i32_lt_u_ri,
+    <u32 as RelOps>::lt
+);
+bin_op_noncommutative!(
+    i32_gt_s_ss,
+    i32_gt_s_rs,
+    i32_gt_s_is,
+    i32_gt_s_ir,
+    i32_gt_s_sr,
+    i32_gt_s_si,
+    i32_gt_s_ri,
+    <i32 as RelOps>::gt
+);
+bin_op_noncommutative!(
+    i32_gt_u_ss,
+    i32_gt_u_rs,
+    i32_gt_u_is,
+    i32_gt_u_ir,
+    i32_gt_u_sr,
+    i32_gt_u_si,
+    i32_gt_u_ri,
+    <u32 as RelOps>::gt
+);
+bin_op_noncommutative!(
+    i32_le_s_ss,
+    i32_le_s_rs,
+    i32_le_s_is,
+    i32_le_s_ir,
+    i32_le_s_sr,
+    i32_le_s_si,
+    i32_le_s_ri,
+    <i32 as RelOps>::le
+);
+bin_op_noncommutative!(
+    i32_le_u_ss,
+    i32_le_u_rs,
+    i32_le_u_is,
+    i32_le_u_ir,
+    i32_le_u_sr,
+    i32_le_u_si,
+    i32_le_u_ri,
+    <u32 as RelOps>::le
+);
+bin_op_noncommutative!(
+    i32_ge_s_ss,
+    i32_ge_s_rs,
+    i32_ge_s_is,
+    i32_ge_s_ir,
+    i32_ge_s_sr,
+    i32_ge_s_si,
+    i32_ge_s_ri,
+    <i32 as RelOps>::ge
+);
+bin_op_noncommutative!(
+    i32_ge_u_ss,
+    i32_ge_u_rs,
+    i32_ge_u_is,
+    i32_ge_u_ir,
+    i32_ge_u_sr,
+    i32_ge_u_si,
+    i32_ge_u_ri,
+    <u32 as RelOps>::ge
+);
 
 un_op!(i64_eqz_s, i64_eqz_r, <u64 as IntOps>::eqz);
-bin_op!(i64_eq_ss, i64_eq_rs, <u64 as RelOps>::eq);
-bin_op!(i64_ne_ss, i64_ne_rs, <u64 as RelOps>::ne);
-bin_op_noncommutative!(i64_lt_s_ss, i64_lt_s_rs, i64_lt_s_sr, <i64 as RelOps>::lt);
-bin_op_noncommutative!(i64_lt_u_ss, i64_lt_u_rs, i64_lt_u_sr, <u64 as RelOps>::lt);
-bin_op_noncommutative!(i64_gt_s_ss, i64_gt_s_rs, i64_gt_s_sr, <i64 as RelOps>::gt);
-bin_op_noncommutative!(i64_gt_u_ss, i64_gt_u_rs, i64_gt_u_sr, <u64 as RelOps>::gt);
-bin_op_noncommutative!(i64_le_s_ss, i64_le_s_rs, i64_le_s_sr, <i64 as RelOps>::le);
-bin_op_noncommutative!(i64_le_u_ss, i64_le_u_rs, i64_le_u_sr, <u64 as RelOps>::le);
-bin_op_noncommutative!(i64_ge_s_ss, i64_ge_s_rs, i64_ge_s_sr, <i64 as RelOps>::ge);
-bin_op_noncommutative!(i64_ge_u_ss, i64_ge_u_rs, i64_ge_u_sr, <u64 as RelOps>::ge);
+bin_op!(
+    i64_eq_ss,
+    i64_eq_rs,
+    i64_eq_is,
+    i64_eq_ir,
+    <u64 as RelOps>::eq
+);
+bin_op!(
+    i64_ne_ss,
+    i64_ne_rs,
+    i64_ne_is,
+    i64_ne_ir,
+    <u64 as RelOps>::ne
+);
+bin_op_noncommutative!(
+    i64_lt_s_ss,
+    i64_lt_s_rs,
+    i64_lt_s_is,
+    i64_lt_s_ir,
+    i64_lt_s_sr,
+    i64_lt_s_si,
+    i64_lt_s_ri,
+    <i64 as RelOps>::lt
+);
+bin_op_noncommutative!(
+    i64_lt_u_ss,
+    i64_lt_u_rs,
+    i64_lt_u_is,
+    i64_lt_u_ir,
+    i64_lt_u_sr,
+    i64_lt_u_si,
+    i64_lt_u_ri,
+    <u64 as RelOps>::lt
+);
+bin_op_noncommutative!(
+    i64_gt_s_ss,
+    i64_gt_s_rs,
+    i64_gt_s_is,
+    i64_gt_s_ir,
+    i64_gt_s_sr,
+    i64_gt_s_si,
+    i64_gt_s_ri,
+    <i64 as RelOps>::gt
+);
+bin_op_noncommutative!(
+    i64_gt_u_ss,
+    i64_gt_u_rs,
+    i64_gt_u_is,
+    i64_gt_u_ir,
+    i64_gt_u_sr,
+    i64_gt_u_si,
+    i64_gt_u_ri,
+    <u64 as RelOps>::gt
+);
+bin_op_noncommutative!(
+    i64_le_s_ss,
+    i64_le_s_rs,
+    i64_le_s_is,
+    i64_le_s_ir,
+    i64_le_s_sr,
+    i64_le_s_si,
+    i64_le_s_ri,
+    <i64 as RelOps>::le
+);
+bin_op_noncommutative!(
+    i64_le_u_ss,
+    i64_le_u_rs,
+    i64_le_u_is,
+    i64_le_u_ir,
+    i64_le_u_sr,
+    i64_le_u_si,
+    i64_le_u_ri,
+    <u64 as RelOps>::le
+);
+bin_op_noncommutative!(
+    i64_ge_s_ss,
+    i64_ge_s_rs,
+    i64_ge_s_is,
+    i64_ge_s_ir,
+    i64_ge_s_sr,
+    i64_ge_s_si,
+    i64_ge_s_ri,
+    <i64 as RelOps>::ge
+);
+bin_op_noncommutative!(
+    i64_ge_u_ss,
+    i64_ge_u_rs,
+    i64_ge_u_is,
+    i64_ge_u_ir,
+    i64_ge_u_sr,
+    i64_ge_u_si,
+    i64_ge_u_ri,
+    <u64 as RelOps>::ge
+);
 
-bin_op!(f32_eq_ss, f32_eq_rs, <f32 as RelOps>::eq);
-bin_op!(f32_ne_ss, f32_ne_rs, <f32 as RelOps>::ne);
-bin_op_noncommutative!(f32_lt_ss, f32_lt_rs, f32_lt_sr, <f32 as RelOps>::lt);
-bin_op_noncommutative!(f32_gt_ss, f32_gt_rs, f32_gt_sr, <f32 as RelOps>::gt);
-bin_op_noncommutative!(f32_le_ss, f32_le_rs, f32_le_sr, <f32 as RelOps>::le);
-bin_op_noncommutative!(f32_ge_ss, f32_ge_rs, f32_ge_sr, <f32 as RelOps>::ge);
+bin_op!(
+    f32_eq_ss,
+    f32_eq_rs,
+    f32_eq_is,
+    f32_eq_ir,
+    <f32 as RelOps>::eq
+);
+bin_op!(
+    f32_ne_ss,
+    f32_ne_rs,
+    f32_ne_is,
+    f32_ne_ir,
+    <f32 as RelOps>::ne
+);
+bin_op_noncommutative!(
+    f32_lt_ss,
+    f32_lt_rs,
+    f32_lt_is,
+    f32_lt_ir,
+    f32_lt_sr,
+    f32_lt_si,
+    f32_lt_ri,
+    <f32 as RelOps>::lt
+);
+bin_op_noncommutative!(
+    f32_gt_ss,
+    f32_gt_rs,
+    f32_gt_is,
+    f32_gt_ir,
+    f32_gt_sr,
+    f32_gt_si,
+    f32_gt_ri,
+    <f32 as RelOps>::gt
+);
+bin_op_noncommutative!(
+    f32_le_ss,
+    f32_le_rs,
+    f32_le_is,
+    f32_le_ir,
+    f32_le_sr,
+    f32_le_si,
+    f32_le_ri,
+    <f32 as RelOps>::le
+);
+bin_op_noncommutative!(
+    f32_ge_ss,
+    f32_ge_rs,
+    f32_ge_is,
+    f32_ge_ir,
+    f32_ge_sr,
+    f32_ge_si,
+    f32_ge_ri,
+    <f32 as RelOps>::ge
+);
 
-bin_op!(f64_eq_ss, f64_eq_rs, <f64 as RelOps>::eq);
-bin_op!(f64_ne_ss, f64_ne_rs, <f64 as RelOps>::ne);
-bin_op_noncommutative!(f64_lt_ss, f64_lt_rs, f64_lt_sr, <f64 as RelOps>::lt);
-bin_op_noncommutative!(f64_gt_ss, f64_gt_rs, f64_gt_sr, <f64 as RelOps>::gt);
-bin_op_noncommutative!(f64_le_ss, f64_le_rs, f64_le_sr, <f64 as RelOps>::le);
-bin_op_noncommutative!(f64_ge_ss, f64_ge_rs, f64_ge_sr, <f64 as RelOps>::ge);
+bin_op!(
+    f64_eq_ss,
+    f64_eq_rs,
+    f64_eq_is,
+    f64_eq_ir,
+    <f64 as RelOps>::eq
+);
+bin_op!(
+    f64_ne_ss,
+    f64_ne_rs,
+    f64_ne_is,
+    f64_ne_ir,
+    <f64 as RelOps>::ne
+);
+bin_op_noncommutative!(
+    f64_lt_ss,
+    f64_lt_rs,
+    f64_lt_is,
+    f64_lt_ir,
+    f64_lt_sr,
+    f64_lt_si,
+    f64_lt_ri,
+    <f64 as RelOps>::lt
+);
+bin_op_noncommutative!(
+    f64_gt_ss,
+    f64_gt_rs,
+    f64_gt_is,
+    f64_gt_ir,
+    f64_gt_sr,
+    f64_gt_si,
+    f64_gt_ri,
+    <f64 as RelOps>::gt
+);
+bin_op_noncommutative!(
+    f64_le_ss,
+    f64_le_rs,
+    f64_le_is,
+    f64_le_ir,
+    f64_le_sr,
+    f64_le_si,
+    f64_le_ri,
+    <f64 as RelOps>::le
+);
+bin_op_noncommutative!(
+    f64_ge_ss,
+    f64_ge_rs,
+    f64_ge_is,
+    f64_ge_ir,
+    f64_ge_sr,
+    f64_ge_si,
+    f64_ge_ri,
+    <f64 as RelOps>::ge
+);
 
 un_op!(i32_clz_s, i32_clz_r, <u32 as IntOps>::clz);
 un_op!(i32_ctz_s, i32_ctz_r, <u32 as IntOps>::ctz);
 un_op!(i32_popcnt_s, i32_popcnt_r, <u32 as IntOps>::popcnt);
-bin_op!(i32_add_ss, i32_add_rs, <u32 as IntOps>::add);
-bin_op_noncommutative!(i32_sub_ss, i32_sub_rs, i32_sub_sr, <u32 as IntOps>::sub);
-bin_op!(i32_mul_ss, i32_mul_rs, <u32 as IntOps>::mul);
+bin_op!(
+    i32_add_ss,
+    i32_add_rs,
+    i32_add_is,
+    i32_add_ir,
+    <u32 as IntOps>::add
+);
+bin_op_noncommutative!(
+    i32_sub_ss,
+    i32_sub_rs,
+    i32_sub_is,
+    i32_sub_ir,
+    i32_sub_sr,
+    i32_sub_si,
+    i32_sub_ri,
+    <u32 as IntOps>::sub
+);
+bin_op!(
+    i32_mul_ss,
+    i32_mul_rs,
+    i32_mul_is,
+    i32_mul_ir,
+    <u32 as IntOps>::mul
+);
 bin_op_noncommutative!(
     i32_div_s_ss,
     i32_div_s_rs,
+    i32_div_s_is,
+    i32_div_s_ir,
     i32_div_s_sr,
+    i32_div_s_si,
+    i32_div_s_ri,
     <i32 as IntOps>::div
 );
 bin_op_noncommutative!(
     i32_div_u_ss,
     i32_div_u_rs,
+    i32_div_u_is,
+    i32_div_u_ir,
     i32_div_u_sr,
+    i32_div_u_si,
+    i32_div_u_ri,
     <u32 as IntOps>::div
 );
 bin_op_noncommutative!(
     i32_rem_s_ss,
     i32_rem_s_rs,
+    i32_rem_s_is,
+    i32_rem_s_ir,
     i32_rem_s_sr,
+    i32_rem_s_si,
+    i32_rem_s_ri,
     <i32 as IntOps>::rem
 );
 bin_op_noncommutative!(
     i32_rem_u_ss,
     i32_rem_u_rs,
+    i32_rem_u_is,
+    i32_rem_u_ir,
     i32_rem_u_sr,
+    i32_rem_u_si,
+    i32_rem_u_ri,
     <u32 as IntOps>::rem
 );
-bin_op!(i32_and_ss, i32_and_rs, <u32 as IntOps>::and);
-bin_op!(i32_or_ss, i32_or_rs, <u32 as IntOps>::or);
-bin_op!(i32_xor_ss, i32_xor_rs, <u32 as IntOps>::xor);
-bin_op_noncommutative!(i32_shl_ss, i32_shl_rs, i32_shl_sr, <u32 as IntOps>::shl);
+bin_op!(
+    i32_and_ss,
+    i32_and_rs,
+    i32_and_is,
+    i32_and_ir,
+    <u32 as IntOps>::and
+);
+bin_op!(
+    i32_or_ss,
+    i32_or_rs,
+    i32_or_is,
+    i32_or_ir,
+    <u32 as IntOps>::or
+);
+bin_op!(
+    i32_xor_ss,
+    i32_xor_rs,
+    i32_xor_is,
+    i32_xor_ir,
+    <u32 as IntOps>::xor
+);
+bin_op_noncommutative!(
+    i32_shl_ss,
+    i32_shl_rs,
+    i32_shl_is,
+    i32_shl_ir,
+    i32_shl_sr,
+    i32_shl_si,
+    i32_shl_ri,
+    <u32 as IntOps>::shl
+);
 bin_op_noncommutative!(
     i32_shr_s_ss,
     i32_shr_s_rs,
+    i32_shr_s_is,
+    i32_shr_s_ir,
     i32_shr_s_sr,
+    i32_shr_s_si,
+    i32_shr_s_ri,
     <i32 as IntOps>::shr
 );
 bin_op_noncommutative!(
     i32_shr_u_ss,
     i32_shr_u_rs,
+    i32_shr_u_is,
+    i32_shr_u_ir,
     i32_shr_u_sr,
+    i32_shr_u_si,
+    i32_shr_u_ri,
     <u32 as IntOps>::shr
 );
-bin_op_noncommutative!(i32_rotl_ss, i32_rotl_rs, i32_rotl_sr, <u32 as IntOps>::rotl);
-bin_op_noncommutative!(i32_rotr_ss, i32_rotr_rs, i32_rotr_sr, <u32 as IntOps>::rotr);
+bin_op_noncommutative!(
+    i32_rotl_ss,
+    i32_rotl_rs,
+    i32_rotl_is,
+    i32_rotl_ir,
+    i32_rotl_sr,
+    i32_rotl_si,
+    i32_rotl_ri,
+    <u32 as IntOps>::rotl
+);
+bin_op_noncommutative!(
+    i32_rotr_ss,
+    i32_rotr_rs,
+    i32_rotr_is,
+    i32_rotr_ir,
+    i32_rotr_sr,
+    i32_rotr_si,
+    i32_rotr_ri,
+    <u32 as IntOps>::rotr
+);
 
 un_op!(i64_clz_s, i64_clz_r, <u64 as IntOps>::clz);
 un_op!(i64_ctz_s, i64_ctz_r, <u64 as IntOps>::ctz);
 un_op!(i64_popcnt_s, i64_popcnt_r, <u64 as IntOps>::popcnt);
-bin_op!(i64_add_ss, i64_add_rs, <u64 as IntOps>::add);
-bin_op_noncommutative!(i64_sub_ss, i64_sub_rs, i64_sub_sr, <u64 as IntOps>::sub);
-bin_op!(i64_mul_ss, i64_mul_rs, <u64 as IntOps>::mul);
+bin_op!(
+    i64_add_ss,
+    i64_add_rs,
+    i64_add_is,
+    i64_add_ir,
+    <u64 as IntOps>::add
+);
+bin_op_noncommutative!(
+    i64_sub_ss,
+    i64_sub_rs,
+    i64_sub_is,
+    i64_sub_ir,
+    i64_sub_sr,
+    i64_sub_si,
+    i64_sub_ri,
+    <u64 as IntOps>::sub
+);
+bin_op!(
+    i64_mul_ss,
+    i64_mul_rs,
+    i64_mul_is,
+    i64_mul_ir,
+    <u64 as IntOps>::mul
+);
 bin_op_noncommutative!(
     i64_div_s_ss,
     i64_div_s_rs,
+    i64_div_s_is,
+    i64_div_s_ir,
     i64_div_s_sr,
+    i64_div_s_si,
+    i64_div_s_ri,
     <i64 as IntOps>::div
 );
 bin_op_noncommutative!(
     i64_div_u_ss,
     i64_div_u_rs,
+    i64_div_u_is,
+    i64_div_u_ir,
     i64_div_u_sr,
+    i64_div_u_si,
+    i64_div_u_ri,
     <u64 as IntOps>::div
 );
 bin_op_noncommutative!(
     i64_rem_s_ss,
     i64_rem_s_rs,
+    i64_rem_s_is,
+    i64_rem_s_ir,
     i64_rem_s_sr,
+    i64_rem_s_si,
+    i64_rem_s_ri,
     <i64 as IntOps>::rem
 );
 bin_op_noncommutative!(
     i64_rem_u_ss,
     i64_rem_u_rs,
+    i64_rem_u_is,
+    i64_rem_u_ir,
     i64_rem_u_sr,
+    i64_rem_u_si,
+    i64_rem_u_ri,
     <u64 as IntOps>::rem
 );
-bin_op!(i64_and_ss, i64_and_rs, <u64 as IntOps>::and);
-bin_op!(i64_or_ss, i64_or_rs, <u64 as IntOps>::or);
-bin_op!(i64_xor_ss, i64_xor_rs, <u64 as IntOps>::xor);
-bin_op_noncommutative!(i64_shl_ss, i64_shl_rs, i64_shl_sr, <u64 as IntOps>::shl);
+bin_op!(
+    i64_and_ss,
+    i64_and_rs,
+    i64_and_is,
+    i64_and_ir,
+    <u64 as IntOps>::and
+);
+bin_op!(
+    i64_or_ss,
+    i64_or_rs,
+    i64_or_is,
+    i64_or_ir,
+    <u64 as IntOps>::or
+);
+bin_op!(
+    i64_xor_ss,
+    i64_xor_rs,
+    i64_xor_is,
+    i64_xor_ir,
+    <u64 as IntOps>::xor
+);
+bin_op_noncommutative!(
+    i64_shl_ss,
+    i64_shl_rs,
+    i64_shl_is,
+    i64_shl_ir,
+    i64_shl_sr,
+    i64_shl_si,
+    i64_shl_ri,
+    <u64 as IntOps>::shl
+);
 bin_op_noncommutative!(
     i64_shr_s_ss,
     i64_shr_s_rs,
+    i64_shr_s_is,
+    i64_shr_s_ir,
     i64_shr_s_sr,
+    i64_shr_s_si,
+    i64_shr_s_ri,
     <i64 as IntOps>::shr
 );
 bin_op_noncommutative!(
     i64_shr_u_ss,
     i64_shr_u_rs,
+    i64_shr_u_is,
+    i64_shr_u_ir,
     i64_shr_u_sr,
+    i64_shr_u_si,
+    i64_shr_u_ri,
     <u64 as IntOps>::shr
 );
-bin_op_noncommutative!(i64_rotl_ss, i64_rotl_rs, i64_rotl_sr, <u64 as IntOps>::rotl);
-bin_op_noncommutative!(i64_rotr_ss, i64_rotr_rs, i64_rotr_sr, <u64 as IntOps>::rotr);
+bin_op_noncommutative!(
+    i64_rotl_ss,
+    i64_rotl_rs,
+    i64_rotl_is,
+    i64_rotl_ir,
+    i64_rotl_sr,
+    i64_rotl_si,
+    i64_rotl_ri,
+    <u64 as IntOps>::rotl
+);
+bin_op_noncommutative!(
+    i64_rotr_ss,
+    i64_rotr_rs,
+    i64_rotr_is,
+    i64_rotr_ir,
+    i64_rotr_sr,
+    i64_rotr_si,
+    i64_rotr_ri,
+    <u64 as IntOps>::rotr
+);
 
 un_op!(f32_abs_s, f32_abs_r, <f32 as FloatOps>::abs);
 un_op!(f32_neg_s, f32_neg_r, <f32 as FloatOps>::neg);
@@ -1877,16 +3300,62 @@ un_op!(f32_floor_s, f32_floor_r, <f32 as FloatOps>::floor);
 un_op!(f32_trunc_s, f32_trunc_r, <f32 as FloatOps>::trunc);
 un_op!(f32_nearest_s, f32_nearest_r, <f32 as FloatOps>::nearest);
 un_op!(f32_sqrt_s, f32_sqrt_r, <f32 as FloatOps>::sqrt);
-bin_op!(f32_add_ss, f32_add_rs, <f32 as FloatOps>::add);
-bin_op_noncommutative!(f32_sub_ss, f32_sub_rs, f32_sub_sr, <f32 as FloatOps>::sub);
-bin_op!(f32_mul_ss, f32_mul_rs, <f32 as FloatOps>::mul);
-bin_op_noncommutative!(f32_div_ss, f32_div_rs, f32_div_sr, <f32 as FloatOps>::div);
-bin_op!(f32_min_ss, f32_min_rs, <f32 as FloatOps>::min);
-bin_op!(f32_max_ss, f32_max_rs, <f32 as FloatOps>::max);
+bin_op!(
+    f32_add_ss,
+    f32_add_rs,
+    f32_add_is,
+    f32_add_ir,
+    <f32 as FloatOps>::add
+);
+bin_op_noncommutative!(
+    f32_sub_ss,
+    f32_sub_rs,
+    f32_sub_is,
+    f32_sub_ir,
+    f32_sub_sr,
+    f32_sub_si,
+    f32_sub_ri,
+    <f32 as FloatOps>::sub
+);
+bin_op!(
+    f32_mul_ss,
+    f32_mul_rs,
+    f32_mul_is,
+    f32_mul_ir,
+    <f32 as FloatOps>::mul
+);
+bin_op_noncommutative!(
+    f32_div_ss,
+    f32_div_rs,
+    f32_div_is,
+    f32_div_ir,
+    f32_div_sr,
+    f32_div_si,
+    f32_div_ri,
+    <f32 as FloatOps>::div
+);
+bin_op!(
+    f32_min_ss,
+    f32_min_rs,
+    f32_min_is,
+    f32_min_ir,
+    <f32 as FloatOps>::min
+);
+bin_op!(
+    f32_max_ss,
+    f32_max_rs,
+    f32_max_is,
+    f32_max_ir,
+    <f32 as FloatOps>::max
+);
 bin_op_noncommutative!(
     f32_copysign_ss,
     f32_copysign_rs,
+    f32_copysign_is,
+    f32_copysign_ir,
     f32_copysign_sr,
+    f32_copysign_si,
+    f32_copysign_ri,
     <f32 as FloatOps>::copysign
 );
 
@@ -1897,16 +3366,62 @@ un_op!(f64_floor_s, f64_floor_r, <f64 as FloatOps>::floor);
 un_op!(f64_trunc_s, f64_trunc_r, <f64 as FloatOps>::trunc);
 un_op!(f64_nearest_s, f64_nearest_r, <f64 as FloatOps>::nearest);
 un_op!(f64_sqrt_s, f64_sqrt_r, <f64 as FloatOps>::sqrt);
-bin_op!(f64_add_ss, f64_add_rs, <f64 as FloatOps>::add);
-bin_op_noncommutative!(f64_sub_ss, f64_sub_rs, f64_sub_sr, <f64 as FloatOps>::sub);
-bin_op!(f64_mul_ss, f64_mul_rs, <f64 as FloatOps>::mul);
-bin_op_noncommutative!(f64_div_ss, f64_div_rs, f64_div_sr, <f64 as FloatOps>::div);
-bin_op!(f64_min_ss, f64_min_rs, <f64 as FloatOps>::min);
-bin_op!(f64_max_ss, f64_max_rs, <f64 as FloatOps>::max);
+bin_op!(
+    f64_add_ss,
+    f64_add_rs,
+    f64_add_is,
+    f64_add_ir,
+    <f64 as FloatOps>::add
+);
+bin_op_noncommutative!(
+    f64_sub_ss,
+    f64_sub_rs,
+    f64_sub_is,
+    f64_sub_ir,
+    f64_sub_sr,
+    f64_sub_si,
+    f64_sub_ri,
+    <f64 as FloatOps>::sub
+);
+bin_op!(
+    f64_mul_ss,
+    f64_mul_rs,
+    f64_mul_is,
+    f64_mul_ir,
+    <f64 as FloatOps>::mul
+);
+bin_op_noncommutative!(
+    f64_div_ss,
+    f64_div_rs,
+    f64_div_is,
+    f64_div_ir,
+    f64_div_sr,
+    f64_div_si,
+    f64_div_ri,
+    <f64 as FloatOps>::div
+);
+bin_op!(
+    f64_min_ss,
+    f64_min_rs,
+    f64_min_is,
+    f64_min_ir,
+    <f64 as FloatOps>::min
+);
+bin_op!(
+    f64_max_ss,
+    f64_max_rs,
+    f64_max_is,
+    f64_max_ir,
+    <f64 as FloatOps>::max
+);
 bin_op_noncommutative!(
     f64_copysign_ss,
     f64_copysign_rs,
+    f64_copysign_is,
+    f64_copysign_ir,
     f64_copysign_sr,
+    f64_copysign_si,
+    f64_copysign_ri,
     <f64 as FloatOps>::copysign
 );
 
