@@ -3802,14 +3802,21 @@ live_design! {
     }
     
     DesignerToolbox = <DesignerToolboxBase>{
-        abs_pos: vec2(0,0)
-        width: 100,
-        height: 300
-        show_bg: true
-        <RectShadowView>{
-            width: Fill,
-            height: Fill,
-            draw_bg:{color:#7}
+        width: Fill,
+        height: Fill
+        show_bg: false
+        
+        <RoundedShadowView>{
+            clip_x:false,
+            clip_y:false,
+            abs_pos:vec2(50.,50)
+            width: 200,
+            height: 400,
+            draw_bg:{
+                color:#8,
+                shadow_offset:vec2(0,0)
+                shadow_radius:10.0
+            }
         }
     }
     
@@ -3854,7 +3861,7 @@ live_design! {
     }
 
     DesignerView = <DesignerViewBase>{
-        clear_color: #2
+        clear_color: #7
         draw_bg: {
             texture image: texture2d
             varying scale: vec2
