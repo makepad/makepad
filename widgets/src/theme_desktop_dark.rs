@@ -3817,6 +3817,22 @@ live_design! {
                 shadow_radius:30.0
             }
         }
+        
+        <RoundedShadowView>{
+            abs_pos:vec2(50.,550)
+            width: 200,
+            height: 200,
+            draw_bg:{
+                color:#8,
+                shadow_offset:vec2(30,30)
+                //radius: 30.0
+                shadow_radius:30.0
+            }
+            <ColorPicker>{
+                width:Fill,
+                height:Fill
+            }
+        }
     }
     
     DesignerContainer = <DesignerContainerBase>{
