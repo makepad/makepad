@@ -165,7 +165,7 @@ live_design!{
             }*/
             
             file_tree_tabs = Tabs {
-                tabs: [file_tree, search, run_list, outline_first],
+                tabs: [file_tree_tab, search, run_list_tab, outline_first],
                 selected: 0
             }
                 
@@ -175,7 +175,7 @@ live_design!{
             }
                 
             log_tabs = Tabs {
-                tabs: [log_list, profiler],
+                tabs: [log_list_tab, profiler],
                 selected: 0
             }
                 
@@ -189,7 +189,7 @@ live_design!{
                 selected: 0
             }*/
                 
-            file_tree = Tab {
+            file_tree_tab = Tab {
                 name: "Explore",
                 template: PermanentTab,
                 kind: StudioFileTree
@@ -225,7 +225,7 @@ live_design!{
                 kind: OutlineFirst
             }
             
-            run_list = Tab {
+            run_list_tab = Tab {
                 name: ""
                 template: RunListTab,
                 kind: RunList
@@ -237,7 +237,7 @@ live_design!{
                 kind: StudioEditor
             }
                 
-            log_list = Tab {
+            log_list_tab = Tab {
                 name: "Log",
                 template: LogTab,
                 kind: LogList
@@ -262,7 +262,7 @@ live_design!{
                         <Label> { text = "Docs"}
                     }
                 }
-                <StudioEditor> {}
+                editor = <StudioEditor> {}
             }
             EditFirst = <RectView> {
                 draw_bg: {color: #052329}
@@ -326,12 +326,12 @@ live_design!{
             StudioFileTree = <View> {
                 flow: Down,
                 <DockToolbar> {}
-                <StudioFileTree> {}
+                file_tree = <StudioFileTree> {}
             }
             LogList = <View> {
                 flow: Down,
                 <DockToolbar> {}
-                <LogList> {}
+                log_list = <LogList> {}
             }
             Profiler = <View> {
                 flow: Down,
