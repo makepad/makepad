@@ -52,12 +52,13 @@ fn fac_iter(c: &mut Criterion) {
         b.iter(|| {
             use makepad_stitch::Val;
 
-            fac_iter.call(
-                black_box(&mut store),
-                black_box(&[Val::I64(n)]),
-                black_box(&mut [Val::I64(0)]),
-            )
-            .unwrap();
+            fac_iter
+                .call(
+                    black_box(&mut store),
+                    black_box(&[Val::I64(n)]),
+                    black_box(&mut [Val::I64(0)]),
+                )
+                .unwrap();
         })
     });
     group.bench_function("wasm3", |b| {
@@ -75,12 +76,13 @@ fn fac_iter(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fac_iter.call(
-                black_box(&mut store),
-                black_box(&[Value::I64(n)]),
-                black_box(&mut [Value::I64(0)]),
-            )
-            .unwrap();
+            fac_iter
+                .call(
+                    black_box(&mut store),
+                    black_box(&[Value::I64(n)]),
+                    black_box(&mut [Value::I64(0)]),
+                )
+                .unwrap();
         })
     });
 }
@@ -99,12 +101,13 @@ fn fac_rec(c: &mut Criterion) {
         b.iter(|| {
             use makepad_stitch::Val;
 
-            fac_rec.call(
-                black_box(&mut store),
-                black_box(&[Val::I64(n)]),
-                black_box(&mut [Val::I64(0)]),
-            )
-            .unwrap();
+            fac_rec
+                .call(
+                    black_box(&mut store),
+                    black_box(&[Val::I64(n)]),
+                    black_box(&mut [Val::I64(0)]),
+                )
+                .unwrap();
         })
     });
     group.bench_function("wasm3", |b| {
@@ -122,12 +125,13 @@ fn fac_rec(c: &mut Criterion) {
         b.iter(|| {
             use wasmi::Value;
 
-            fac_rec.call(
-                black_box(&mut store),
-                black_box(&[Value::I64(n)]),
-                black_box(&mut [Value::I64(0)]),
-            )
-            .unwrap();
+            fac_rec
+                .call(
+                    black_box(&mut store),
+                    black_box(&[Value::I64(n)]),
+                    black_box(&mut [Value::I64(0)]),
+                )
+                .unwrap();
         })
     });
 }
@@ -298,5 +302,5 @@ fn sum(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, fac_iter); // fac_ref, fib, fill, sum);
+criterion_group!(benches, fac_rec); // fac_iter, fib, fill, sum);
 criterion_main!(benches);
