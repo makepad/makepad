@@ -640,7 +640,7 @@ live_design! {
         }
     }
 
-    CheckboxTextual = <CheckBox dx:-1296.0 dy:1008.0 dw:229.5 dh:61.3> {
+    CheckboxTextual = <CheckBox dx:-1296.2 dy:1008.2 dw:237.9 dh:66.2> {
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -2046,7 +2046,7 @@ live_design! {
         }
     }
 
-    HeaderMenu = <View dx:-1292.2 dy:1082.9 dw:229.6 dh:65.2> {
+    HeaderMenu = <View dx:-1292.2 dy:1082.9 dw:243.0 dh:51.1> {
         width: Fill,
         height: Fit,
         margin: {top: -150}
@@ -2071,23 +2071,34 @@ live_design! {
                 <View> {
                     flow: Down,
                     align: {x: 0.0, y: 0.0}
-
                     <Label> {
-                        margin: {bottom: (SSPACING_1)}
+                        margin: {bottom: (SSPACING_1), right:10}
                         draw_text: {
                             text_style: <H2_TEXT_BOLD> {},
                             color: (COLOR_UP_5)
                         }
                         text: "Preset"
                     }
+                    <View>{
+                        preset_1 = <Button>{text:"1"}
+                        preset_2 = <Button>{text:"2"}
+                        preset_3 = <Button>{text:"3"}
+                        preset_4 = <Button>{text:"4"}
+                        preset_5 = <Button>{text:"5"}
+                        preset_6 = <Button>{text:"6"}
+                        preset_7 = <Button>{text:"7"}
+                        preset_8 = <Button>{text:"8"}
+                    }
+                        
                     
+                    /*
                     <Label> {
                         draw_text: {
                             text_style: <H2_TEXT_REGULAR> {font_size: 18},
                             color: (COLOR_UP_6)
                         }
                         text: "Ironfish "
-                    }
+                    }*/
                 }
                 <View> {
                     width: Fill,
@@ -2452,16 +2463,15 @@ live_design! {
         height: Fill
         // padding: <SPACING_0> { align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
 
-            <View> {
+        <View> {
             width: Fill,
             height: Fill
             padding: <SPACING_0> {}
             align: {x: 0.0, y: 0.0},
             spacing: (SSPACING_0),
             flow: Down
-
             // APPLICATION HEADER
-                <GradientYView> {
+            <GradientYView> {
                 width: Fill,
                 height: (HEIGHT_AUDIOVIZ)
                 draw_bg: {color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2)}
@@ -2474,7 +2484,8 @@ live_design! {
                 }
             }
 
-            <HeaderMenu> {}
+            <HeaderMenu> {
+            }
 
             // CONTROLS
             <View> {
