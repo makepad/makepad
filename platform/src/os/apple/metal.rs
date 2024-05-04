@@ -647,7 +647,7 @@ impl CxOsDrawShader {
         };
         
         let mut error: ObjcId = nil;
-        
+        std::env::set_var("MTL_IGNORE_WARNINGS","-W");
         let library = RcObjcId::from_owned(match NonNull::new(unsafe {
             msg_send![
                 metal_cx.device,
