@@ -637,11 +637,11 @@ impl Dock {
         }
     }
     
-    fn find_tab_bar_of_tab(&mut self, tab_id: LiveId) -> Option<LiveId> {
+    fn find_tab_bar_of_tab(&mut self, tab_id: LiveId) -> Option<(LiveId, usize)> {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, ..} => if let Some(_) = tabs.iter().position( | v | *v == tab_id) {
-                    return Some(*tabs_id)
+                DockItem::Tabs {tabs, ..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                    return Some((*tabs_id, pos))
                 }
                 _ => ()
             }
@@ -793,9 +793,9 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    let tab_bar_id = self.find_tab_bar_of_tab(pos.id).unwrap();
+                    let (tab_bar_id, pos) = self.find_tab_bar_of_tab(pos.id).unwrap();
                     if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get_mut(&tab_bar_id) {
-                        if let Some(pos) = tabs.iter().position( | v | *v == pos.id) {
+                        //if let Some(pos) = tabs.iter().position( | v | *v == pos.id) {
                             let old = tabs[pos];
                             tabs[pos] = item;
                             tabs.push(old);
@@ -803,7 +803,7 @@ impl Dock {
                             if let Some(tab_bar) = self.tab_bars.get(&tab_bar_id) {
                                 tab_bar.contents_draw_list.redraw(cx);
                             }
-                        }
+                        //}
                     }
                     return true
                 }
@@ -845,21 +845,26 @@ impl Dock {
         }
     }
     
-    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId)->Option<WidgetRef> {
+    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if self.items.get(&item).is_some(){
             self.select_tab(cx, item);
             Some(self.items.get(&item).unwrap().1.clone())
         }
         else{
-            let ret =self.create_tab(cx, parent, item, kind, name, template);
+            let ret =self.create_tab(cx, parent, item, kind, name, template, insert_after);
             self.select_tab(cx, item);
             ret
         }
     }
     
-    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId)->Option<WidgetRef> {
+    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if let Some(DockItem::Tabs {tabs, ..}) = self.dock_items.get_mut(&parent) {
-            tabs.push(item);
+            if let Some(after) = insert_after{
+                tabs.insert(after+1, item);
+            }
+            else{
+                tabs.push(item);
+            }
             self.needs_save = true;
             self.dock_items.insert(item, DockItem::Tab {
                 name,
@@ -1149,18 +1154,18 @@ impl DockRef {
         }
     }
     
-    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId)->Option<WidgetRef> {
+    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_and_select_tab(cx, parent, item, kind, name, template)
+            dock.create_and_select_tab(cx, parent, item, kind, name, template, insert_after)
         }
         else{
             None
         }        
     }
     
-    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId)->Option<WidgetRef> {
+    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_tab(cx, parent, item, kind, name, template)
+            dock.create_tab(cx, parent, item, kind, name, template, insert_after)
         }
         else{
             None
@@ -1174,7 +1179,7 @@ impl DockRef {
     }
     
     
-    pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<LiveId> {
+    pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<(LiveId, usize)> {
         if let Some(mut dock) = self.borrow_mut() {
             return dock.find_tab_bar_of_tab(tab_id);
         }
