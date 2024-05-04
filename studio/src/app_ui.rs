@@ -57,7 +57,7 @@ live_design!{
         spacing: (THEME_SPACE_2)
         <Button> { text: "New File"}
         <Filler> {}
-        <P> { width: Fit, text: "Default Dock for"}
+        <P> { width: Fit, text: "Open here"}
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
