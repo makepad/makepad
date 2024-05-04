@@ -277,6 +277,7 @@ impl App {
 
         db.bind(id!(delay.difference), ids!(delaydifference.slider));
         db.bind(id!(delay.cross), ids!(delaycross.slider));
+        db.bind(id!(delay.length), ids!(delaylength.slider));
 
         // Chorus panel
         db.bind(id!(chorus.mix), ids!(chorusmix.slider));
@@ -428,7 +429,7 @@ impl App {
             |v| v,
         );
 
-        db.apply(id!(shadow.opacity), ids!(shadowstep, draw_bg.shadowopacity), |v| v);
+        /*db.apply(id!(shadow.opacity), ids!(shadowstep, draw_bg.shadowopacity), |v| v);
         db.apply(id!(shadow.x), ids!(shadowstep, draw_bg.shadowx), |v| v);
         db.apply(id!(shadow.y), ids!(shadowstep, draw_bg.shadowy), |v| v);
 
@@ -439,7 +440,7 @@ impl App {
         db.apply(id!(blur.size), ids!(step3, draw_bg.blursize), |v| v);
         db.apply(id!(blur.std), ids!(step3, draw_bg.blurstd), |v| v);
         db.apply(id!(blur.size), ids!(step4, draw_bg.blursize), |v| v);
-        db.apply(id!(blur.std), ids!(step4, draw_bg.blurstd), |v| v);
+        db.apply(id!(blur.std), ids!(step4, draw_bg.blurstd), |v| v);*/
     }
 }
 
