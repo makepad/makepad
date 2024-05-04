@@ -884,7 +884,7 @@ live_design! {
         }
     }
 
-    PresetFavorite = <CheckBox dx:-494.1 dy:1648.1 dw:390.1 dh:84.5> {
+    PresetFavorite = <CheckBox dx:-494.1 dy:1647.3 dw:390.1 dh:84.5> {
         height: Fit,
         width: Fit,
         margin: 0.0
@@ -1182,7 +1182,7 @@ live_design! {
         }
     }
 
-    SequencerPanel = <RoundedView dx:1134.4 dy:1594.0 dw:400.0 dh:580.2> {
+    SequencerPanel = <RoundedView dx:1181.8 dy:1424.5 dw:400.0 dh:580.2> {
         flow: Down
         margin: <SPACING_0> {}
 
@@ -1309,7 +1309,7 @@ live_design! {
     }
 
 
-    BlurFXPanel = <View dx:-40.8 dy:3526.9 dw:400.0 dh:164.7> {
+    BlurFXPanel = <View dx:-41.7 dy:3517.9 dw:400.0 dh:164.7> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1365,7 +1365,7 @@ live_design! {
     }
 
 
-    ShadowFXPanel = <View dx:-47.8 dy:3725.8 dw:400.5 dh:219.2> {
+    ShadowFXPanel = <View dx:-47.9 dy:3725.5 dw:400.5 dh:219.2> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1555,7 +1555,7 @@ live_design! {
         }
     }
 
-    ChorusFXPanel = <FishPanelContainer dx:789.4 dy:2215.0 dw:329.5 dh:238.6> {
+    ChorusFXPanel = <FishPanelContainer dx:799.1 dy:2205.5 dw:329.5 dh:238.6> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -2118,7 +2118,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel dx:-34.9 dy:3976.5 dw:1392.9 dh:147.1> {
+    Play = <FishPanel dx:-27.6 dy:3975.6 dw:1392.9 dh:143.2> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
@@ -2180,7 +2180,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer dx:796.8 dy:1413.0 dw:338.4 dh:644.1> {
+    FishPanelEffects = <FishPanelContainer dx:796.8 dy:1414.2 dw:338.4 dh:644.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2429,7 +2429,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-489.3 dy:-181.2 dw:1388.9 dh:1522.3>{
+    AppDesktop = <View dx:-498.8 dy:-180.3 dw:1388.9 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
