@@ -402,6 +402,7 @@ live_design! {
     }
 
     FishSlider = <Slider dx:390.6 dy:3421.7 dw:398.1 dh:92.6> {
+        margin: 0
         height: 36
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
