@@ -4179,10 +4179,15 @@ live_design! {
             padding: 10
             inner = <BareStep>{}
         }
-        label = <Button>{
-            margin:{ top: -40., right: 0. }
-            padding: <THEME_MSPACE_2> {}
-            text:"Hello world"
+
+        widget_label = <RoundedShadowView>{
+            margin: { top: -40., right: 0. }
+            padding: 0.
+            width: Fit, height: Fit,
+            spacing: 0.,
+            align: { x: 1.0, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
 
             draw_bg: {
                 border_width: 1.0
