@@ -514,6 +514,11 @@ impl MatchEvent for App {
         if ui.button_set(ids!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx);
         }
+        
+        if let Some((index,km)) = ui.button_set(ids!(preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7,preset_8)).which_clicked_modifiers(&actions){
+            self.preset(cx, index, km.shift);
+        }
+        
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &ui, Self::data_bind);
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -538,6 +543,50 @@ impl MatchEvent for App {
         }
     }
 }
+impl App{
+    #[cfg(target_arch = "wasm32")]
+    pub fn preset(&mut self, _cx: &mut Cx, _index: usize, _save: bool) {
+        
+    }
+    
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
+        use std::fs::File;
+        use std::io::prelude::*;
+        
+        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let file_name = format!("examples/ironfish/preset_{}.txt", index);
+        if save {
+            let nodes = ironfish.settings.live_read();
+            let data = nodes.to_cbor(0).unwrap();
+            let data = makepad_miniz::compress_to_vec(&data, 10);
+            let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
+            log!("Saving preset {}", file_name);
+            let mut file = File::create(&file_name).unwrap();
+            file.write_all(&data).unwrap();
+        }
+        else if let Ok(mut file) = std::fs::File::open(&file_name) {
+            log!("Loading preset {}", file_name);
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            if let Ok(data) = makepad_base64::base64_decode(&data) {
+                if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
+                    let mut nodes = Vec::new();
+                    nodes.from_cbor(&data).unwrap();
+                    nodes.debug_print(0,100);
+                    ironfish.settings.apply_over(cx, &nodes);
+                    //self.imgui.root_frame().bind_read(cx, &nodes);
+                }
+                else {
+                    log!("Error decompressing preset");
+                }
+            }
+            else {
+                log!("Error base64 decoding preset");
+            }
+        }
+    }
+}
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -557,37 +606,4 @@ impl AppMain for App {
                 };
             });
     }
-    /*
-    pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
-        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let file_name = format!("preset_{}.txt", index);
-        if save {
-            let nodes = ironfish.settings.live_read();
-            let data = nodes.to_cbor(0).unwrap();
-            let data = makepad_miniz::compress_to_vec(&data, 10);
-            let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
-            log!("Saving preset {}", file_name);
-            let mut file = File::create(&file_name).unwrap();
-            file.write_all(&data).unwrap();
-        }
-        else if let Ok(mut file) = File::open(&file_name) {
-            log!("Loading preset {}", file_name);
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).unwrap();
-            if let Ok(data) = makepad_base64::base64_decode(&data) {
-                if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
-                    let mut nodes = Vec::new();
-                    nodes.from_cbor(&data).unwrap();
-                    ironfish.settings.apply_over(cx, &nodes);
-                    //self.imgui.root_frame().bind_read(cx, &nodes);
-                }
-                else {
-                    log!("Error decompressing preset");
-                }
-            }
-            else {
-                log!("Error base64 decoding preset");
-            }
-        }
-    }*/
 }

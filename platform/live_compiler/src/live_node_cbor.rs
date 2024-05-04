@@ -791,6 +791,10 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                 }
             };
         }
+        if stack.last().unwrap().count == stack.last().unwrap().len {
+            self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
+            stack.pop();
+        }
         // lets unwind the stack
         while let Some(item) = stack.pop() {
             if item.count != item.len {
