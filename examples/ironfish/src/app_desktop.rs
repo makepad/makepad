@@ -1825,7 +1825,7 @@ live_design! {
                 }
             }
 
-            sync = <FishToggle> {checkbox = {text: "LFO Key sync"}}
+            sync = <FishToggle> { checkbox = {width: 200, text: "LFO Key sync"}}
         }
     }
 
