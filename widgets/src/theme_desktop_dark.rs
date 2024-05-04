@@ -1183,6 +1183,83 @@ live_design! {
 
     }
 
+    ButtonFlatter = <ButtonIcon> {
+        height: Fit, width: Fit,
+        padding: <THEME_MSPACE_2> {}
+        margin: 0.
+        align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: 12. }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.fill(#f00)
+                return sdf.result
+            }
+        }
+
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                )
+            }
+        }
+
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_U_HIDDEN)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_HIDDEN, self.pressed);
+
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+                let bot_gradient = mix(
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING
+                )
+
+                return sdf.result
+            }
+        }
+
+    }
+
     CheckBox = <CheckBoxBase> {
         width: Fit, height: 20,
         margin: { top: (THEME_SPACE_1), bottom: (THEME_SPACE_1) }
@@ -3963,7 +4040,7 @@ live_design! {
         <RoundedShadowView>{
             abs_pos: vec2(25., 65.)
             padding: 0.
-            width: Fit, height: Fit,
+            width: 36., height: Fit,
             spacing: 0.,
             align: { x: 0.5, y: 0.0 }
             flow: Down,
@@ -3980,9 +4057,9 @@ live_design! {
             }
 
             <View> {
-                width: Fit, height: 38.,
+                width: Fit, height: 36.,
                 align: { x: 0.5, y: 0.5}
-                <ButtonFlat> {
+                <ButtonFlatter> {
                     flow: Down,
                     icon_walk: { width: 9. }
                     draw_icon: {
@@ -3993,9 +4070,9 @@ live_design! {
             }
             <Hr> { margin: 0. }
             <View> {
-                width: Fit, height: 38.,
+                width: Fit, height: 36.,
                 align: { x: 0.5, y: 0.5}
-                <ButtonFlat> {
+                <ButtonFlatter> {
                     flow: Down,
                     icon_walk: { width: 14.5 }
                     align: { x: 0.5, y: 0.5 }
@@ -4007,10 +4084,10 @@ live_design! {
             }
             <Hr> { margin: 0. }
             <View> {
-                width: Fit, height: 38.,
+                width: Fit, height: 36.,
 
                 align: { x: 0.5, y: 0.5}
-                <ButtonFlat> {
+                <ButtonFlatter> {
                     flow: Down,
                     icon_walk: { width: 12. }
                     align: { x: 0.5, y: 0.5 }
@@ -4022,9 +4099,9 @@ live_design! {
             }
             <Hr> { margin: 0. }
             <View> {
-                width: Fit, height: 38.,
+                width: Fit, height: 36.,
                 align: { x: 0.5, y: 0.5}
-                <ButtonFlat> {
+                <ButtonFlatter> {
                     flow: Down,
                     icon_walk: { width: 13.5 }
                     align: { x: 0.5, y: 0.5 }
@@ -4036,9 +4113,10 @@ live_design! {
             }
             <Hr> { margin: 0. }
             <View> {
-                width: Fit, height: 38.,
+                width: Fit, height: 36.,
                 align: { x: 0.5, y: 0.5}
-                <ButtonFlat> {
+                <ButtonFlatter> {
+                    flow: Down,
                     flow: Down,
                     icon_walk: { width: 15.5 }
                     align: { x: 0.5, y: 0.5 }
@@ -4050,9 +4128,9 @@ live_design! {
             }
             <Hr> { margin: 0. }
             <View> {
-                width: Fit, height: 38.,
+                width: Fit, height: 36.,
                 align: { x: 0.5, y: 0.5}
-                <ButtonFlat> {
+                <ButtonFlatter> {
                     flow: Down,
                     icon_walk: { width: 15.5 }
                     align: { x: 0.5, y: 0.5 }
