@@ -57,7 +57,7 @@ live_design!{
         spacing: (THEME_SPACE_2)
         <Button> { text: "New File"}
         <Filler> {}
-        <P> { width: Fit, text: "Default"}
+        <P> { width: Fit, text: "Default Dock for"}
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
@@ -415,6 +415,7 @@ live_design!{
                     width: Fill, height: Fill,
                     align: { x: 0.5, y: 0.5 }
                     flow: Down
+                    <DockToolbar> { content = <DockSettings> {} }
                     <View> {
                         width: Fill, height: Fill,
                         align: { x: 0.5, y: 0.5 }
@@ -426,12 +427,12 @@ live_design!{
                 <View> {
                     width: Fill, height: Fill
                     flow: Down
+                    <DockToolbar> { content = <DockSettings> {} }
                     <View> {
                         width: Fill, height: Fill,
                         align: { x: 0.5, y: 0.5 }
                         <Logo> {}
                     }
-                    <DockToolbar> { content = <DockSettings> {} }
                 }
             }
             RunFirst = <RectView> {
