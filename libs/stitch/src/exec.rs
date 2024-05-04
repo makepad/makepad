@@ -41,14 +41,22 @@ pub(crate) type Cx<'a> = *mut Context<'a>;
 
 #[derive(Debug)]
 pub(crate) struct Context<'a> {
-    pub(crate) store: &'a mut Store,
-    pub(crate) stack: Option<StackGuard>,
-    pub(crate) error: Option<Error>,
+    store: &'a mut Store,
+    stack: Option<StackGuard>,
+    error: Option<Error>,
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ControlFlow {
     Stop,
+    Continue,
     Trap(Trap),
     Error,
 }
@@ -57,6 +65,8 @@ impl ControlFlow {
     pub(crate) fn from_bits(bits: usize) -> Option<Self> {
         if bits == 0 {
             Some(Self::Stop)
+        } else if bits & 0x03 == 1 {
+            Some(Self::Continue)
         } else if bits & 0x03 == 2 {
             Trap::from_usize(bits >> 2).map(Self::Trap)
         } else if bits & 0x03 == 3 {
@@ -69,6 +79,7 @@ impl ControlFlow {
     pub(crate) fn to_bits(self) -> ControlFlowBits {
         match self {
             Self::Stop => 0,
+            Self::Continue => 1,
             Self::Trap(trap) => trap.to_usize() << 2 | 2,
             Self::Error => 3,
         }
@@ -104,26 +115,33 @@ pub(crate) fn exec(
             ];
             let ptr = stack.ptr();
             let mut context = Context {
+                ip: trampoline.as_mut_ptr(),
+                sp: ptr,
+                md: ptr::null_mut(),
+                ms: 0,
+                ix: 0,
+                sx: 0.0,
+                dx: 0.0,
                 store,
                 stack: Some(stack),
                 error: None,
             };
             loop {
                 match ControlFlow::from_bits(unsafe {
-                    next_instr(
-                        trampoline.as_mut_ptr(),
-                        ptr,
-                        ptr::null_mut(),
-                        0,
-                        0,
-                        0.0,
-                        0.0,
+                    let (instr, ip): (ThreadedInstr, _) = read_imm(context.ip);
+                    instr(
+                        ip,
+                        context.sp,
+                        context.md,
+                        context.ms,
+                        context.ix,
+                        context.sx,
+                        context.dx,
                         &mut context as *mut _,
                     )
-                })
-                .unwrap()
-                {
+                }).unwrap() {
                     ControlFlow::Stop => break,
+                    ControlFlow::Continue => continue,
                     ControlFlow::Trap(trap) => {
                         drop(context.stack.take().unwrap());
                         return Err(trap)?;
@@ -3800,8 +3818,14 @@ pub(crate) unsafe fn next_instr(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
-    let (instr, ip): (ThreadedInstr, _) = read_imm(ip);
-    (instr)(ip, sp, md, ms, ix, sx, dx, cx)
+    (*cx).ip = ip;
+    (*cx).sp = sp;
+    (*cx).md = md;
+    (*cx).ms = ms;
+    (*cx).ix = ix;
+    (*cx).sx = sx;
+    (*cx).dx = dx;
+    ControlFlow::Continue.to_bits()
 }
 
 /// Reads an immediate value.
