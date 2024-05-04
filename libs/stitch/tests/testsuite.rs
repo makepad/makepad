@@ -301,7 +301,7 @@ fn assert_result(store: &Store, actual: Val, expected: WastRet<'_>) {
                 NanPattern::ArithmeticNan => {
                     assert!(
                         actual.to_f32().unwrap().to_bits() & 0b0_11111111_11111111111111111111111
-                            > 0b0_11111111_10000000000000000000000
+                            >= 0b0_11111111_10000000000000000000000
                     );
                 }
                 NanPattern::Value(expected_result) => {
@@ -320,7 +320,7 @@ fn assert_result(store: &Store, actual: Val, expected: WastRet<'_>) {
                     assert!(
                         actual.to_f64().unwrap().to_bits()
                             & 0b0_11111111111_1111111111111111111111111111111111111111111111111111
-                            > 0b0_11111111111_1000000000000000000000000000000000000000000000000000
+                            >= 0b0_11111111111_1000000000000000000000000000000000000000000000000000
                     );
                 }
                 NanPattern::Value(expected_result) => {
