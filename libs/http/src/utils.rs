@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::net::{TcpStream, Shutdown, SocketAddr};
 use std::io::BufReader;
 use std::io::prelude::*;
@@ -57,20 +56,6 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     }
     
     Some((url, search))
-}
-
-pub fn parse_headers(headers_string: String) -> BTreeMap<String, Vec<String>> {
-    let mut headers = BTreeMap::new();
-    for line in headers_string.lines() {
-        let mut split = line.split(":");
-        let key = split.next().unwrap();
-        let values = split.next().unwrap().to_string();
-        for val in values.split(",") {
-            let entry = headers.entry(key.to_string()).or_insert(Vec::new());
-            entry.push(val.to_string());
-        }
-    }
-    headers
 }
 
 #[derive(Debug)]
