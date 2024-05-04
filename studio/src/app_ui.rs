@@ -562,6 +562,22 @@ live_design!{
                             align: { x: 0.0, y: 0.5 }
                         }
                         <Vr> {}
+                        <View> {
+                            width: Fit,
+                            flow: Right,
+                            spacing: 0.,
+                            <Pbold> {
+                                width: Fit,
+                                text: "Last"
+                                draw_text: { color: (THEME_COLOR_D_4) }
+                                margin: { left: 10, right: 3. }
+                            }
+                            <P> {
+                                width: Fit,
+                                text: "500 ms"
+                                draw_text: { color: (THEME_COLOR_D_4) }
+                            }
+                        }
                     }
                 }
                 <Profiler> {}
