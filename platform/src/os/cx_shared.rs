@@ -32,7 +32,7 @@ impl Cx {
             }
         }
     }
-    /*
+    
     pub (crate) fn any_passes_dirty(&self) -> bool {
         for pass_id in self.passes.id_iter() {
             if self.passes[pass_id].paint_dirty {
@@ -40,7 +40,7 @@ impl Cx {
             }
         }
         false
-    }*/
+    }
     
     pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<PassId>) {
         passes_todo.clear();
