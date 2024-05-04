@@ -6,6 +6,7 @@ pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
 #[derive(SerBin, DeBin, Debug)]
 pub struct EventSample{
     pub event_u32: u32,
+    pub event_meta: u64,
     pub start: f64,
     pub end: f64,
 }
