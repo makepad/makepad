@@ -217,4 +217,13 @@ impl ButtonSet {
     pub fn released(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.released(actions))
     }
+    
+    pub fn which_clicked_modifiers(&self, actions: &Actions) -> Option<(usize,KeyModifiers)> {
+        for (index,btn) in self.iter().enumerate(){
+            if let Some(km) = btn.clicked_modifiers(actions){
+                return Some((index, km))
+            }
+        }
+        None
+    }
 }
