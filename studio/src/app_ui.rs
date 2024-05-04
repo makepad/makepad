@@ -375,8 +375,17 @@ live_design!{
                 }
             }
             RunList = <View> {
-            flow: Down,
-            <DockToolbar> {}
+                flow: Down,
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0.0, y: 0. }
+                        padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
+                        spacing: (THEME_SPACE_2)
+                        <Pbold> { width: Fit, text: "Types" } 
+                        <CheckBoxToggle> { text: "Release"}
+                        <CheckBoxToggle> { text: "Debug"}
+                    }
+                }
                 <RunList> {}
             }
             Search = <RectView> {
