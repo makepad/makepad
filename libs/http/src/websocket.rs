@@ -135,7 +135,7 @@ impl ServerWebSocketMessageHeader {
     }
 
     // TODO Improve this using a proper random number generator
-    pub fn random_byte() -> u8 {
+    fn random_byte() -> u8 {
         let num = SystemTime::now().duration_since(UNIX_EPOCH).expect("duration_since failed").subsec_nanos();
         num as u8
     }
@@ -176,7 +176,7 @@ impl ServerWebSocket {
     }
 
     pub fn create_upgrade_response(key: &str) -> String {
-        let to_hash = key.to_owned() + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        let to_hash = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
         let mut sha1 = Sha1::new();
         sha1.update(to_hash.as_bytes());
         let out_bytes = sha1.finalise();
@@ -371,5 +371,4 @@ impl Default for ServerWebSocket {
         Self::new()
     }
 }
-
 
