@@ -446,7 +446,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.init_ui_state(cx);
+        self.preset(cx,0,false);
         self.ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
