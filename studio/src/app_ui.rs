@@ -313,6 +313,22 @@ live_design!{
                         <ButtonFlat> { width: Fit, text: "Edit"}
                         <ButtonFlat> { width: Fit, text: "Search"}
                         <ButtonFlat> { width: Fit, text: "Debug"}
+                        <View> {
+                            width: Fit,
+                            flow: Right,
+                            spacing: 0.,
+                            <P> {
+                                width: Fit,
+                                text: "examples/ironfish/src/"
+                                draw_text: { color: (THEME_COLOR_D_4) }
+                                margin: { right: 3. }
+                            }
+                            <Pbold> {
+                                width: Fit,
+                                text: "app.rs"
+                                draw_text: { color: (THEME_COLOR_D_4) }
+                            }
+                        }
                         <Filler> {}
                         <ButtonFlat> { width: Fit, text: "Docs"}
                     }
