@@ -239,7 +239,7 @@ impl Cx {
         
         // send a mouse up when dragging starts
         
-        let mut paint_dirty = false;
+        //let mut paint_dirty = false;
         match &event {
             MacosEvent::MouseDown(_) |
             MacosEvent::MouseMove(_) |
@@ -282,7 +282,7 @@ impl Cx {
                         self.repaint_pass(main_pass_id);
                     }
                 }
-                paint_dirty = true;
+                //paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
             MacosEvent::AppLostFocus => {
@@ -421,11 +421,11 @@ impl Cx {
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
-            EventFlow::Poll
-        } else {
+       // if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        //    EventFlow::Poll
+        //} else {
             EventFlow::Wait
-        }
+        //}
     }
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {
