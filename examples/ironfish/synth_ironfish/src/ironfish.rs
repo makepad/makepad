@@ -227,6 +227,9 @@ pub struct DelaySettings {
     cross: f32a,
     #[live(0.5)]
     difference: f32a,
+    #[live(0.0)]
+    length: f32a,
+
 }
 
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
@@ -1659,6 +1662,7 @@ pub struct IronFishState {
     g: IronFishGlobalVoiceState,
     chorus: ChorusState,
     reverb: ReverbState,
+    actual_delay_length: f32
 }
 
 impl IronFishState {
@@ -1813,23 +1817,36 @@ impl IronFishState {
         let icross = self.settings.delay.cross.get();
         let cross = 1.0 - icross;
 
-        let leftoffs = (self.settings.delay.difference.get() * 15000.0) as usize;
+        let mut l = self.settings.delay.length.get();
+        let leftoffs = (self.settings.delay.difference.get() * 999.0 * self.settings.delay.length.get()) as i32;
+        
+        l = (l * l) *  (47000.0 - 15000.0) + 1000.0;
+        self.actual_delay_length += (l - self.actual_delay_length) * 0.3;
+        let delaylen: i32 = (self.actual_delay_length) as i32;  
+        
+        let mut delayreadposl:i32 = (self.delaywritepos as i32 - (delaylen - (leftoffs * (48000 - delaylen))).max(1).min(47500));
+        let mut delayreadposr:i32 = (self.delaywritepos as i32 - (delaylen + (leftoffs * (48000 - delaylen))).max(1).min(47500)) ; 
 
-        let mut delayreadposl = self.delaywritepos + (48000 - 15000) - leftoffs;
-        let mut delayreadposr = self.delaywritepos + (48000 - 15000) + leftoffs;
         while delayreadposl >= 48000 {
             delayreadposl -= 48000;
         }
         while delayreadposr >= 48000 {
             delayreadposr -= 48000;
         }
+        while delayreadposl < 0 {
+            delayreadposl += 48000;
+        }
+        while delayreadposr < 0 {
+            delayreadposr += 48000;
+        }
+
 
         let fb = self.settings.delay.delayfeedback.get() * 0.98;
         let send = self.settings.delay.delaysend.get();
 
         for i in 0..frame_count {
-            let rr = self.delaylineright[delayreadposr];
-            let ll = self.delaylineleft[delayreadposl];
+            let rr = self.delaylineright[delayreadposr as  usize];
+            let ll = self.delaylineleft[delayreadposl as usize];
 
             let mut r = ll * cross + rr * icross;
             let mut l = rr * cross + ll * icross;
@@ -2325,6 +2342,7 @@ impl AudioComponent for IronFish {
             g: Default::default(),
             chorus: Default::default(),
             reverb: Default::default(),
+            actual_delay_length: 1.0
         })
     }
 
