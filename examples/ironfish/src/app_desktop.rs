@@ -1981,7 +1981,7 @@ live_design! {
         }
     }
 
-    FishPanelSoundSources = <FishPanelContainer dx:-76.9 dy:1408.9 dw:400.0 dh:1144.3> {
+    FishPanelSoundSources = <FishPanelContainer dx:-76.9 dy:1409.1 dw:400.0 dh:1144.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2135,7 +2135,7 @@ live_design! {
 
 
     // TABS
-    FishPanelEnvelopes = <FishPanelContainer dx:362.2 dy:1421.0 dw:400.0 dh:555.7> {
+    FishPanelEnvelopes = <FishPanelContainer dx:371.8 dy:1409.7 dw:400.0 dh:555.7> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2428,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-470.2 dy:-267.2 dw:1388.9 dh:1522.3>{
+    AppDesktop = <View dx:-497.1 dy:-181.5 dw:1388.9 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
