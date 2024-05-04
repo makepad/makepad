@@ -9,6 +9,7 @@ use {
             CxPassParent
         },
         event::{
+            TimerEvent,
             DrawEvent,
             TriggerEvent,
             Event,
@@ -120,6 +121,7 @@ impl Cx {
             Cx::send_studio_message(AppToStudio::EventSample(EventSample{
                 event_u32: event.to_u32(),
                 start: start,
+                event_meta: if let Event::Timer(TimerEvent{timer_id,..}) = event{*timer_id}else{0},
                 end: end
             }))
         }
