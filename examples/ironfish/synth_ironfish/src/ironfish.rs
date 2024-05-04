@@ -312,7 +312,7 @@ pub struct IronFishSettings {
     sample_rate: f32a,
     #[live(0.5)]
     osc_balance: f32a,
-    #[live(0.5)]
+    #[live(0.1)]
     sub_osc: f32a,
     #[live(0.0)]
     noise: f32a,
