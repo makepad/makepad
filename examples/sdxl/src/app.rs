@@ -429,10 +429,8 @@ impl App {
         }
         /*
         */
-        self.update_textures(cx);
-                
-        
         self.current_image = Some(image_id);
+        self.update_textures(cx);
         let prompt_hash = self.prompt_hash_from_current_image();
         
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
@@ -468,6 +466,7 @@ impl App {
         self.ui.redraw(cx);
         if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
             self.set_current_image(cx, image_files[row.min(*image_count)].clone());
+            
             //self.last_flip = Instant::now();
         }
     }
@@ -1116,6 +1115,7 @@ impl MatchEvent for App {
                 }
             }
             if let Some(fd) = item.as_view().finger_down(&actions) {
+                
                 if fd.tap_count == 2 {
                     if let ImageListItem::Prompt {prompt_hash} = self.filtered.list[item_id as usize] {
                         self.load_inputs_from_prompt_hash(cx, prompt_hash);
