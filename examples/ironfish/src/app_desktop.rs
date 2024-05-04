@@ -1815,7 +1815,6 @@ live_design! {
         width: Fill,
         height: Fit
         flow: Down
-
             <View> {
             flow: Right
             width: Fill,
