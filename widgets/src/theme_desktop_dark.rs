@@ -2181,8 +2181,8 @@ live_design! {
     DockToolbar = <RectShadowView> {
         margin: { top: -1. }
         padding: <THEME_MSPACE_1> {}
-        width: Fill, height: 35.,
-        align: { x: 0., y: 0.5 }
+        width: Fill, height: 38.,
+        align: { x: 0., y: 1.0 }
         draw_bg: {
             border_width: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
@@ -4179,50 +4179,70 @@ live_design! {
             padding: 10
             inner = <BareStep>{}
         }
-        label = <Button>{
-            margin:{ top: -40., right: 0. }
-            padding: <THEME_MSPACE_1> {}
-            text:"Hello world"
+
+        widget_label = <RoundedShadowView>{
+            margin: { top: -35., right: 0. }
+            padding: 0.
+            width: Fit, height: Fit,
+            spacing: 0.,
+            align: { x: 1.0, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
 
             draw_bg: {
-                instance hover: 0.0
-                instance pressed: 0.0
-                uniform border_radius: (THEME_CORNER_RADIUS)
-                instance bodytop: (THEME_COLOR_FG_APP)
-                instance bodybottom: #f00
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let grad_top = 5.0;
-                    let grad_bot = 2.0;
-                    let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                border_width: 1.0
+                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                shadow_color: (THEME_COLOR_D_3)
+                shadow_radius: 5.0,
+                shadow_offset: vec2(0.0, 0.0)
+                radius: 2.5
+                color: (THEME_COLOR_FG_APP),
+            }
 
-                    let body_transp = vec4(body.xyz, 0.0);
-                    let top_gradient = mix(
-                        body_transp,
-                        mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
-                        max(0.0, grad_top - sdf.pos.y) / grad_top
-                    );
-                    let bot_gradient = mix(
-                        mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
-                        top_gradient,
-                        clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                    );
+            label = <Button> {
+                padding: <THEME_MSPACE_2> {}
+                text:"Hello world"
 
-                    sdf.box(
-                        1.,
-                        1.,
-                        self.rect_size.x - 2.0,
-                        self.rect_size.y - 2.0,
-                        self.border_radius
-                    )
-                    sdf.fill_keep(body)
+                draw_bg: {
+                    instance hover: 0.0
+                    instance pressed: 0.0
+                    uniform border_radius: (THEME_CORNER_RADIUS)
+                    instance bodytop: (THEME_COLOR_FG_APP)
+                    instance bodybottom: #f00
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                        let grad_top = 5.0;
+                        let grad_bot = 2.0;
+                        let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
 
-                    sdf.stroke(
-                        bot_gradient,
-                        THEME_BEVELING
-                    )
+                        let body_transp = vec4(body.xyz, 0.0);
+                        let top_gradient = mix(
+                            body_transp,
+                            mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                            max(0.0, grad_top - sdf.pos.y) / grad_top
+                        );
+                        let bot_gradient = mix(
+                            mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                            top_gradient,
+                            clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                        );
 
-                    return sdf.result
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x - 2.0,
+                            self.rect_size.y - 2.0,
+                            self.border_radius
+                        )
+                        sdf.fill_keep(body)
+
+                        sdf.stroke(
+                            bot_gradient,
+                            THEME_BEVELING
+                        )
+
+                        return sdf.result
+                    }
                 }
             }
         }
