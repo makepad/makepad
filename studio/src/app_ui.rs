@@ -144,12 +144,12 @@ live_design!{
                 RunFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 9,
+                        width: 13.,
                         margin: { top: 4. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_4)
-                        svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                        svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
                     }
                 }
                 RunListTab = <IconTab> {
