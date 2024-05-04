@@ -13,11 +13,7 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 makepad-futures = { path = "../libs/futures", version = "0.4.0" }
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.5.0" }
 makepad-http = { path = "../libs/http", version="0.4.0" }
-makepad-url = { path = "../libs/url" }
 smallvec = {version ="1.11.2"}
-
-[target.'cfg(target_os = "linux")'.dependencies]
-makepad-net = { path = "../libs/net" }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.4.0" }
