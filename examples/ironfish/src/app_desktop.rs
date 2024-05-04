@@ -487,6 +487,8 @@ live_design! {
     FishToggle = <ElementBox dx:-1290.3 dy:669.2 dw:227.0 dh:50.9> {
         padding: <SPACING_0> {}
         checkbox = <CheckBox> {
+            width: 40,
+            height: 30
             padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}
             text: "CutOff1"
             animator: {
