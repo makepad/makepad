@@ -2358,6 +2358,8 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
             instance pressed: 0.0
+            instance open: 0.0
+            
             uniform border_radius: (THEME_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_U_HIDDEN)
             instance bodybottom: (THEME_COLOR_CTRL_HOVER)
