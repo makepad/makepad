@@ -37,8 +37,8 @@ use {
 };
 
 impl Cx {
-    
-    pub fn event_loop(cx:Rc<RefCell<Cx>>) { 
+
+    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Ios;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
@@ -62,12 +62,12 @@ impl Cx {
             }
         }));
         // lets set our signal poll timer
-        
+
         // final bit of initflow
-        
+
         IosApp::event_loop();
     }
-    
+
     pub (crate) fn handle_repaint(&mut self, metal_cx: &mut MetalCx) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -97,16 +97,16 @@ impl Cx {
             self.call_event_handler(& Event::NetworkResponses(out))
         }
     }
-    
+
     #[allow(dead_code)]
     pub (crate) fn ios_load_dependencies(&mut self){
-        
+
         let bundle_path = unsafe{
             let main:ObjcId = msg_send![class!(NSBundle), mainBundle];
             let path:ObjcId = msg_send![main, resourcePath];
             nsstring_to_string(path)
         };
-        
+
         for (path,dep) in &mut self.dependencies{
             if let Ok(mut file_handle) = File::open(format!("{}/{}",bundle_path,path)) {
                 let mut buffer = Vec::<u8>::new();
@@ -122,17 +122,17 @@ impl Cx {
             }
         }
     }
-    
+
     fn ios_event_callback(
         &mut self,
         event: IosEvent,
         metal_cx: &mut MetalCx,
     ) -> EventFlow {
-        
+
         self.handle_platform_ops(metal_cx);
-         
+
         // send a mouse up when dragging starts
-        
+
         let mut paint_dirty = false;
         match &event {
             IosEvent::KeyDown(_) |
@@ -161,7 +161,7 @@ impl Cx {
             }
             _ => ()
         }
-        
+
         //self.process_desktop_pre_event(&mut event);
         match event {
             IosEvent::VirtualKeyboard(vk)=>{
@@ -178,7 +178,7 @@ impl Cx {
             }
             IosEvent::AppLostFocus => {
                 self.call_event_handler(&Event::AppLostFocus);
-            } 
+            }
             IosEvent::WindowGeomChange(re) => { // do this here because mac
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
@@ -186,7 +186,7 @@ impl Cx {
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
             }
-            IosEvent::Paint => { 
+            IosEvent::Paint => {
                 if self.new_next_frames.len() != 0 {
                     let time_now = get_ios_app_global().time_now();
                     self.call_next_frame_event(time_now);
@@ -210,7 +210,7 @@ impl Cx {
                     e.abs,
                     e.time
                 );
-                self.fingers.mouse_down(e.button);
+                self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
             IosEvent::MouseMove(e) => {
@@ -230,7 +230,7 @@ impl Cx {
             IosEvent::TextInput(e) => {
                 self.call_event_handler(&Event::TextInput(e))
             }
-           
+
             IosEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e))
@@ -249,14 +249,14 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
         }
-        
+
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
             EventFlow::Poll
         } else {
             EventFlow::Wait
         }
     }
-    
+
     fn handle_platform_ops(&mut self, _metal_cx: &MetalCx){
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -295,7 +295,7 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     IosApp::hide_keyboard();
                 },
-                CxOsOp::SetCursor(_cursor) => { 
+                CxOsOp::SetCursor(_cursor) => {
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
                     get_ios_app_global().start_timer(timer_id, interval, repeats);
@@ -329,55 +329,55 @@ impl Cx {
                 CxOsOp::SelectFileDialog(_) => todo!(),
                 CxOsOp::SaveFolderDialog(_) => todo!(),
                 CxOsOp::SelectFolderDialog(_) => todo!(),
-                
+
             }
         }
     }
 
-    
+
     /*
     let _ = self.live_file_change_sender.send(vec![LiveFileChange{
         file_name:file_name.to_string(),
         content
     }]);*/
-    
+
 }
 
 impl CxOsApi for Cx {
-    fn init_cx_os(&mut self) { 
+    fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
         #[cfg(not(apple_sim))]{
             self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         }
-        
+
         self.live_expand();
-        
+
         if !Self::has_studio_web_socket() {
             #[cfg(apple_sim)]
             self.start_disk_live_file_watcher(50);
         }
-            
+
         self.live_scan_dependencies();
         //#[cfg(target_feature="sim")]
         #[cfg(apple_sim)]
         self.native_load_dependencies();
-        
+
         #[cfg(not(apple_sim))]
         self.ios_load_dependencies();
     }
-    
+
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
-    
+
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
-    }    
+    }
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
     }
-    
+
     fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
         todo!()
     }*/
