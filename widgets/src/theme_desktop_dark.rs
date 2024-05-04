@@ -4181,7 +4181,7 @@ live_design! {
         }
 
         widget_label = <RoundedShadowView>{
-            margin: { top: -40., right: 0. }
+            margin: { top: -35., right: 0. }
             padding: 0.
             width: Fit, height: Fit,
             spacing: 0.,
