@@ -18,12 +18,13 @@ use {
         makepad_math::dvec2,
         makepad_live_id::*,
         thread::SignalToUI,
-        event::Event,
+        event::{Event, NetworkResponseChannel},
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
         os::cx_stdin::{PollTimers},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
+        url_session::make_http_request
     }
 };
 
@@ -204,6 +205,7 @@ impl Cx {
                 else{
                     self.call_event_handler(&Event::Timer(e))
                 }
+                self.handle_networking_events();
             }
         }
         
@@ -216,6 +218,13 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
+        let mut out = Vec::new();
+        while let Ok(event) = self.os.network_response.receiver.try_recv() {
+            out.push(event);
+        }
+        if out.len()>0 {
+            self.call_event_handler(&Event::NetworkResponses(out))
+        }        
     }
     
     pub (crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>) {
@@ -332,8 +341,9 @@ impl Cx {
                 },
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{request_id:_, request:_} => {
-                    todo!()
+                CxOsOp::HttpRequest {request_id, request} => {
+                    let sender = self.os.network_response.sender.clone();
+                    make_http_request(request_id, request, sender)
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
@@ -376,6 +386,7 @@ pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
     pub (crate) stdin_timers: PollTimers,
     pub (crate) start_time: Option<Instant>,
+    pub (crate) network_response: NetworkResponseChannel,
     // HACK(eddyb) generalize this to EGL, properly.
     pub(super) opengl_cx: Option<OpenglCx>,
 }
