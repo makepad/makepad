@@ -252,25 +252,25 @@ live_design!{
             }
 
             run_first = Tab {
-                name: "App"
+                name: "App >"
                 template: RunFirstTab,
                 kind: RunFirst
             }
 
             design_first = Tab {
-                name: "Designer"
+                name: "Design >"
                 template: DesignFirstTab,
                 kind: DesignFirst
             }
 
             edit_first = Tab {
-                name: "Editor"
+                name: "Code >"
                 template: EditFirstTab,
                 kind: EditFirst
             }
 
             outline_first = Tab {
-                name: "Outliner"
+                name: "Scene >"
                 template: OutlineFirstTab,
                 kind: OutlineFirst
             }
