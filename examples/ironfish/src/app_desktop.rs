@@ -466,7 +466,6 @@ live_design! {
                     1.
                 ); // Nub outline gradient
 
-
                 return sdf.result
             }
         }
@@ -537,6 +536,7 @@ live_design! {
                     return sdf.result
                 }
             }
+            
             draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
@@ -1508,7 +1508,7 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Send"
+                        text: "Send"
                     }
                 }
 
@@ -1517,7 +1517,7 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Feedback"
+                        text: "Feedback"
 
                     }
                 }
@@ -1535,7 +1535,7 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Stereo"
+                        text: "Stereo difference"
                     }
                 }
 
@@ -1544,12 +1544,28 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Cross"
+                        text: "Crossover"
                     }
                 }
-
             }
+            <View> {
+                flow: Right,
+                spacing: (SSPACING_1)
+                width: Fill,
+                height: Fit
 
+                delaylength = <InstrumentSlider> {
+                    
+
+                    slider = {
+                        draw_slider: {line_color: (COLOR_FX)}
+                        min: 0.0
+                        max: 1.0
+                        text: "Length"
+                    }
+                }
+                <View>{width: Fill}
+            }
         }
     }
 
@@ -1886,6 +1902,7 @@ live_design! {
                 }
             }
 
+
             hypersaw = <View> {
                 flow: Down
                 width: Fill,
@@ -2021,8 +2038,8 @@ live_design! {
                 osc1 = <OscPanel> {}
                 osc2 = <OscPanel> {}
             }
-            <BlurFXPanel> {}
-            <ShadowFXPanel> {}
+            //<BlurFXPanel> {}
+            //<ShadowFXPanel> {}
             <FillerV> {}
         }
     }
@@ -2206,7 +2223,6 @@ live_design! {
             <DelayFXPanel> {}
         }
     }
-
  
     PresetHeader = <View dx:-502.2 dy:1426.1 dw:400.0 dh:121.8> {
         width: Fill,
