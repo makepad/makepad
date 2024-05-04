@@ -573,8 +573,8 @@ impl App{
                 if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
                     let mut nodes = Vec::new();
                     nodes.from_cbor(&data).unwrap();
-                    nodes.debug_print(0,100);
                     ironfish.settings.apply_over(cx, &nodes);
+                    self.init_ui_state(cx);
                     //self.imgui.root_frame().bind_read(cx, &nodes);
                 }
                 else {
