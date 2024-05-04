@@ -61,6 +61,7 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
+            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
             icon_walk: {width: 13.}
             draw_icon: {
@@ -73,6 +74,7 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Designer"
+            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
             icon_walk: {width: 14.}
             draw_icon: {
@@ -85,6 +87,8 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Editor"
+            width: 13.
+            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
             icon_walk: {width: 7.}
             draw_icon: {
@@ -97,6 +101,7 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Scene"
+            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
             icon_walk: {width: 13.}
             draw_icon: {
