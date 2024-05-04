@@ -17,10 +17,10 @@ live_design!{
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
             fn get_color(self) -> vec4 {
-                return #xA
+                return (THEME_COLOR_D_1)
             }
         }
-        icon_walk: {width: 150.0, height: Fit}
+        icon_walk: {width: 250.0, height: Fit}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -57,7 +57,7 @@ live_design!{
         spacing: (THEME_SPACE_2)
         <Button> { text: "New File"}
         <Filler> {}
-        <Pbold> { width: Fit, text: "Default"}
+        <P> { width: Fit, text: "Default"}
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
@@ -398,7 +398,11 @@ live_design!{
                     align: { x: 0., y: 0. }
                     flow: Down
                     <DockToolbar> { content = <DockSettings> {} }
-                    // <Logo> {}
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                     // <H3> {
                     //     width: Fit,
                     //     text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
@@ -411,14 +415,22 @@ live_design!{
                     width: Fill, height: Fill,
                     align: { x: 0.5, y: 0.5 }
                     flow: Down
-                    <Logo> {}
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                 }
             }
             DesignFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill
                     flow: Down
-                    // <Logo> {}
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                     <DockToolbar> { content = <DockSettings> {} }
                 }
             }
@@ -427,7 +439,11 @@ live_design!{
                     width: Fill, height: Fill,
                     flow: Down
                     <DockToolbar> { content = <DockSettings> {} }
-                    // <Logo> {}
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                 }
             }
             RunList = <View> {
