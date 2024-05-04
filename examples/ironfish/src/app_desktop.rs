@@ -882,7 +882,7 @@ live_design! {
         }
     }
 
-    PresetFavorite = <CheckBox dx:-494.1 dy:1648.1 dw:390.1 dh:84.5> {
+    PresetFavorite = <CheckBox dx:-494.1 dy:1647.3 dw:390.1 dh:84.5> {
         height: Fit,
         width: Fit,
         margin: 0.0
@@ -2428,7 +2428,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-497.1 dy:-181.5 dw:1388.9 dh:1522.3>{
+    AppDesktop = <View dx:-498.8 dy:-180.3 dw:1388.9 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
