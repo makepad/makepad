@@ -214,7 +214,7 @@ pub struct SynthPreset {
     pub fav: bool,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct App {
     #[live]
     ui: WidgetRef,
@@ -237,7 +237,22 @@ impl LiveRegister for App {
     }
 }
 
+impl LiveHook for App{
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if apply.from.is_update_from_doc(){
+            self.init_ui_state(cx);
+        }
+    }
+}
+
 impl App {
+    pub fn init_ui_state(&mut self, cx:&mut Cx){
+        let ui = self.ui.clone();
+        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let db = DataBindingStore::from_nodes(ironfish.settings.live_read());
+        Self::data_bind(db.data_to_widgets(cx, &ui));
+    }
+    
     pub fn data_bind(mut db: DataBindingMap) {
         // sequencer
         db.bind(id!(sequencer.playing), ids!(playpause));
@@ -431,11 +446,8 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let ui = self.ui.clone();
-        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let db = DataBindingStore::from_nodes(ironfish.settings.live_read());
-        Self::data_bind(db.data_to_widgets(cx, &ui));
-        ui.piano(id!(piano)).set_key_focus(cx);
+        self.init_ui_state(cx);
+        self.ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
 

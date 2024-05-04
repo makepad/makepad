@@ -62,7 +62,8 @@ impl App {
             let dock = self.ui.dock(id!(dock));            
             let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
-            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(CodeEditor), "".to_string(), live_id!(CloseableTab));
+            let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+            dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(CodeEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
         }
     }
@@ -134,7 +135,8 @@ impl MatchEvent for App{
                         let tab_id = dock.unique_tab_id(file_id.0);
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
-                        dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab));
+                        let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+                        dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
                         // lets scan the entire doc for duplicates
                         self.data.file_system.ensure_unique_tab_names(cx, &dock)
                     }
@@ -145,7 +147,7 @@ impl MatchEvent for App{
                 let end = Position{line_index: ef.line as usize, byte_index:ef.column_end as usize};
                 if let Some(file_id) = self.data.file_system.path_to_file_node_id(&ef.file_name) {
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
-                        dock.select_tab(cx, tab_id);
+                        //dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
                             if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
@@ -257,7 +259,7 @@ impl MatchEvent for App{
                         let panel_id = build_id.add(window_id as u64);
                         if let Some(name) = self.data.build_manager.process_name(build_id){
                             
-                            let tab_bar_id = if kind_id == 0{
+                            let (tab_bar_id, pos) = if kind_id == 0{
                                 dock.find_tab_bar_of_tab(live_id!(run_first)).unwrap()
                             }
                             else if kind_id == 1{ 
@@ -270,7 +272,7 @@ impl MatchEvent for App{
                             
                             // we might already have it
                             
-                            let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), live_id!(CloseableTab)).unwrap();
+                            let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), live_id!(CloseableTab), Some(pos)).unwrap();
                             
                             if let Some(mut item) = item.as_run_view().borrow_mut(){
                                 item.window_id = window_id;
@@ -442,8 +444,9 @@ impl MatchEvent for App{
             // ok lets open the file
             let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
-            // lets add a file tab 'somewhere'
-            dock.create_and_select_tab(cx, live_id!(edit_tabs), tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab));
+            // lets add a file tab 'some
+            let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+            dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
                                         
             // lets scan the entire doc for duplicates
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
