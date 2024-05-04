@@ -178,7 +178,7 @@ impl DesignerView{
         }
         if self.reapply || is_new{
             cd.container.apply_over(cx, live!{
-                label = {text:(name)}
+                widget_label = { label = {text:(name)}}
             });
         }
         // ok so we're going to draw the container with the widget inside
