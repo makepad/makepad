@@ -312,6 +312,14 @@ impl<'a> Compile<'a> {
         self.max_stack_height = self.max_stack_height.max(stack_height);
     }
 
+    fn push_opd_and_emit_stack_offset_or_alloc_reg(&mut self, type_: impl Into<ValType>) {
+        if cfg!(windows) {
+            self.push_opd_and_emit_stack_offset(type_)
+        } else {
+            self.push_opd_and_alloc_reg(type_)
+        }
+    }
+
     fn push_opd_and_emit_stack_offset(&mut self, type_: impl Into<ValType>) {
         self.push_opd(type_);
         self.emit_stack_offset(self.opd_stack_idx(0));
@@ -830,7 +838,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.opd(0).kind(),
         ));
         self.pop_opd_and_emit();
-        self.push_opd_and_alloc_reg(ValType::I32);
+        self.push_opd_and_emit_stack_offset_or_alloc_reg(ValType::I32);
         Ok(())
     }
 
@@ -886,7 +894,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.pop_opd_and_emit();
         self.pop_opd_and_emit();
         self.pop_opd_and_emit();
-        self.push_opd_and_alloc_reg(type_);
+        self.push_opd_and_emit_stack_offset_or_alloc_reg(type_);
         Ok(())
     }
 
@@ -1268,7 +1276,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         });
         self.pop_opd_and_emit();
         if let Some(output_type) = info.output_type {
-            self.push_opd_and_alloc_reg(output_type);
+            self.push_opd_and_emit_stack_offset_or_alloc_reg(output_type);
         }
         Ok(())
     }
@@ -1316,7 +1324,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
         }
         if let Some(output_type) = info.output_type {
-            self.push_opd_and_alloc_reg(output_type);
+            self.push_opd_and_emit_stack_offset_or_alloc_reg(output_type);
         }
         Ok(())
     }

@@ -479,7 +479,7 @@ macro_rules! ref_is_null {
             let y = x.is_none() as u32;
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -502,7 +502,7 @@ macro_rules! ref_is_null {
             let y = x.is_none() as u32;
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -525,7 +525,7 @@ macro_rules! ref_is_null {
             let y = x.is_none() as u32;
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -583,7 +583,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -608,7 +608,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -633,7 +633,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -658,7 +658,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -683,7 +683,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -708,7 +708,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -733,7 +733,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -758,7 +758,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -783,7 +783,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -808,7 +808,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -833,7 +833,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -858,7 +858,7 @@ macro_rules! select {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -921,7 +921,7 @@ macro_rules! select_float {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -946,7 +946,7 @@ macro_rules! select_float {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -971,7 +971,7 @@ macro_rules! select_float {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -996,7 +996,7 @@ macro_rules! select_float {
             let y = if cond != 0 { x0 } else { x1 };
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -1106,8 +1106,8 @@ select!(
 // Variable instructions
 
 macro_rules! global_get {
-    ($global_get_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $global_get_t(
+    ($global_get:ident, $T:ty) => {
+        pub(crate) unsafe extern "C" fn $global_get(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1129,7 +1129,7 @@ macro_rules! global_get {
 
             // Write result
             let ip = write_stack(ip, sp, val);
-
+            
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
@@ -1267,7 +1267,7 @@ macro_rules! table_get {
 
             // Write result
             let ip = write_stack(ip, sp, val);
-
+            
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
@@ -1295,7 +1295,7 @@ macro_rules! table_get {
                 .ok_or(Trap::TableAccessOutOfBounds));
 
             // Write result
-            let ip = write_stack(ip, sp, val);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, val);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -1324,7 +1324,7 @@ macro_rules! table_get {
                 .ok_or(Trap::TableAccessOutOfBounds));
 
             // Write result
-            let ip = write_stack(ip, sp, val);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, val);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -1849,7 +1849,7 @@ macro_rules! load {
             let y = <$T>::from_le_bytes(bytes) as $U;
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -1879,7 +1879,7 @@ macro_rules! load {
             let y = <$T>::from_le_bytes(bytes) as $U;
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -1909,7 +1909,7 @@ macro_rules! load {
             let y = <$T>::from_le_bytes(bytes) as $U;
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2488,7 +2488,7 @@ macro_rules! un_op {
             let y = r#try!($f(x));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2511,7 +2511,7 @@ macro_rules! un_op {
             let y = r#try!($f(x));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2545,7 +2545,7 @@ macro_rules! bin_op {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2569,7 +2569,7 @@ macro_rules! bin_op {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2593,7 +2593,7 @@ macro_rules! bin_op {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2617,7 +2617,7 @@ macro_rules! bin_op {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2656,7 +2656,7 @@ macro_rules! bin_op_noncommutative {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2680,7 +2680,7 @@ macro_rules! bin_op_noncommutative {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -2704,7 +2704,7 @@ macro_rules! bin_op_noncommutative {
             let y = r#try!($f(x0, x1));
 
             // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+            let (ip, ix, sx, dx) = write_stack_or_reg(ip, sp, ix, sx, dx, y);
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -3824,10 +3824,24 @@ where
     (x, ip)
 }
 
+unsafe fn write_stack_or_reg<T>(ip: Ip, sp: Sp, ix: Ix, sx: Sx, dx: Dx, x: T) -> (Ip, Ix, Sx, Dx)
+where
+    T: Copy + WriteReg
+{
+    if cfg!(windows) {
+        panic!();
+        let ip = write_stack(ip, sp, x);
+        (ip, ix, sx, dx)
+    } else {
+        let (ix, sx, dx) = write_reg(ix, sx, dx, x);
+        (ip, ix, sx, dx)
+    }
+}
+
 /// Writes a value to the stack.
 unsafe fn write_stack<T>(ip: Ip, sp: Sp, x: T) -> Ip
 where
-    T: Copy + std::fmt::Debug,
+    T: Copy
 {
     let (offset, ip) = read_imm(ip);
     *sp.cast::<u8>().offset(offset).cast() = x;
