@@ -2181,8 +2181,8 @@ live_design! {
     DockToolbar = <RectShadowView> {
         margin: { top: -1. }
         padding: <THEME_MSPACE_1> {}
-        width: Fill, height: 35.,
-        align: { x: 0., y: 0.5 }
+        width: Fill, height: 38.,
+        align: { x: 0., y: 1.0 }
         draw_bg: {
             border_width: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
