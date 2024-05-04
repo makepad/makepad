@@ -4181,7 +4181,7 @@ live_design! {
         }
         label = <Button>{
             margin:{ top: -40., right: 0. }
-            padding: <THEME_MSPACE_1> {}
+            padding: <THEME_MSPACE_2> {}
             text:"Hello world"
 
             draw_bg: {
