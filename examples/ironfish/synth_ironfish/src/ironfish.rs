@@ -319,10 +319,10 @@ pub struct IronFishSettings {
     #[live(0.0)]
     portamento: f32a,
 
-    #[live]
-    blur: BlurSettings,
-    #[live]
-    shadow: ShadowSettings,
+//    #[live]
+//  blur: BlurSettings,
+//    #[live]
+//  shadow: ShadowSettings,
 }
 
 #[derive(Copy, Clone)]
