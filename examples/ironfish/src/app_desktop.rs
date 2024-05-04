@@ -401,7 +401,8 @@ live_design! {
 
     }
 
-    FishSlider = <Slider dx:392.3 dy:3472.9 dw:388.4 dh:92.6> {
+    FishSlider = <Slider dx:390.6 dy:3421.7 dw:398.1 dh:92.6> {
+        margin: 0
         height: 36
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
@@ -465,7 +466,6 @@ live_design! {
                     ),
                     1.
                 ); // Nub outline gradient
-
 
                 return sdf.result
             }
@@ -539,6 +539,7 @@ live_design! {
                     return sdf.result
                 }
             }
+            
             draw_text: {
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
@@ -884,7 +885,7 @@ live_design! {
         }
     }
 
-    PresetFavorite = <CheckBox dx:-494.1 dy:1647.3 dw:390.1 dh:84.5> {
+    PresetFavorite = <CheckBox dx:-499.1 dy:1718.6 dw:397.5 dh:84.5> {
         height: Fit,
         width: Fit,
         margin: 0.0
@@ -1182,7 +1183,7 @@ live_design! {
         }
     }
 
-    SequencerPanel = <RoundedView dx:1181.8 dy:1424.5 dw:400.0 dh:580.2> {
+    SequencerPanel = <RoundedView dx:1182.0 dy:1376.4 dw:400.0 dh:580.1> {
         flow: Down
         margin: <SPACING_0> {}
 
@@ -1309,7 +1310,7 @@ live_design! {
     }
 
 
-    BlurFXPanel = <View dx:-41.7 dy:3517.9 dw:400.0 dh:164.7> {
+    BlurFXPanel = <View dx:-51.6 dy:3225.7 dw:400.0 dh:176.7> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1365,7 +1366,7 @@ live_design! {
     }
 
 
-    ShadowFXPanel = <View dx:-47.9 dy:3725.5 dw:400.5 dh:219.2> {
+    ShadowFXPanel = <View dx:-51.6 dy:3462.1 dw:400.5 dh:231.9> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1510,7 +1511,7 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Send"
+                        text: "Send"
                     }
                 }
 
@@ -1519,7 +1520,7 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Feedback"
+                        text: "Feedback"
 
                     }
                 }
@@ -1537,7 +1538,7 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Stereo"
+                        text: "Stereo difference"
                     }
                 }
 
@@ -1546,16 +1547,32 @@ live_design! {
                         draw_slider: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
-                        text: "Delay Cross"
+                        text: "Crossover"
                     }
                 }
-
             }
+            <View> {
+                flow: Right,
+                spacing: (SSPACING_1)
+                width: Fill,
+                height: Fit
 
+                delaylength = <InstrumentSlider> {
+                    
+
+                    slider = {
+                        draw_slider: {line_color: (COLOR_FX)}
+                        min: 0.0
+                        max: 1.0
+                        text: "Length"
+                    }
+                }
+                <View>{width: Fill}
+            }
         }
     }
 
-    ChorusFXPanel = <FishPanelContainer dx:799.1 dy:2205.5 dw:329.5 dh:238.6> {
+    ChorusFXPanel = <FishPanelContainer dx:829.1 dy:2235.7 dw:329.5 dh:238.6> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1809,7 +1826,7 @@ live_design! {
                 }
             }
 
-            sync = <FishToggle> {checkbox = {text: "LFO Key sync"}}
+            sync = <FishToggle> { checkbox = {width: 200, text: "LFO Key sync"}}
         }
     }
 
@@ -1886,6 +1903,7 @@ live_design! {
                     }
                 }
             }
+
 
             hypersaw = <View> {
                 flow: Down
@@ -2022,8 +2040,8 @@ live_design! {
                 osc1 = <OscPanel> {}
                 osc2 = <OscPanel> {}
             }
-            <BlurFXPanel> {}
-            <ShadowFXPanel> {}
+            //<BlurFXPanel> {}
+            //<ShadowFXPanel> {}
             <FillerV> {}
         }
     }
@@ -2118,7 +2136,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel dx:-27.6 dy:3975.6 dw:1392.9 dh:143.2> {
+    Play = <FishPanel dx:-55.3 dy:3731.9 dw:1216.0 dh:143.2> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
@@ -2180,7 +2198,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer dx:796.8 dy:1414.2 dw:338.4 dh:644.1> {
+    FishPanelEffects = <FishPanelContainer dx:819.5 dy:1375.1 dw:338.4 dh:644.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2207,7 +2225,6 @@ live_design! {
             <DelayFXPanel> {}
         }
     }
-
  
     PresetHeader = <View dx:-502.2 dy:1426.1 dw:400.0 dh:121.8> {
         width: Fill,
@@ -2429,7 +2446,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-498.8 dy:-180.3 dw:1388.9 dh:1522.3>{
+    AppDesktop = <View dx:-37.2 dy:-285.5 dw:1613.1 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
