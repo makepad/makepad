@@ -17,17 +17,16 @@ live_design!{
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
             fn get_color(self) -> vec4 {
-                return #xffffff
+                return (THEME_COLOR_D_1)
             }
         }
-        icon_walk: {width: 300.0, height: Fit}
+        icon_walk: {width: 250.0, height: Fit}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 return sdf.result
             }
         }
-        margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0}
     }
 
     IconTab = <Tab> {
@@ -49,6 +48,68 @@ live_design!{
             width: (THEME_BEVELING), height: Fill,
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+        }
+    }
+
+    DockSettings = <View> {
+        align: { x: 0.0, y: 0. }
+        padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
+        spacing: (THEME_SPACE_2)
+        <Button> { text: "New File"}
+        <Filler> {}
+        <P> { width: Fit, text: "Open here"}
+        <CheckBoxCustom> {
+            text:""
+            // text:"Apps"
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 13.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_4),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
+            }
+        }
+        <CheckBoxCustom> {
+            text:""
+            // text:"Designer"
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 14.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_3),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
+            }
+        }
+        <CheckBoxCustom> {
+            text:""
+            // text:"Editor"
+            width: 13.
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 7.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_6),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+            }
+        }
+        <CheckBoxCustom> {
+            text:""
+            // text:"Scene"
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 13.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_1),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
+            }
         }
     }
 
@@ -299,6 +360,7 @@ live_design!{
                 kind: Profiler
             }
 
+
             StudioEditor = <View> {
                 flow: Down,
                 <DockToolbar> {
@@ -336,18 +398,21 @@ live_design!{
                 editor = <StudioEditor> {}
             }
             EditFirst = <RectView> {
-                draw_bg: {color: #052329}
                 <View> {
                     width: Fill, height: Fill,
-                    align: { x: 0.5, y: 0.5 }
+                    align: { x: 0., y: 0. }
                     flow: Down
-                    <Logo> {}
-
-                    <H3> {
-                        width: Fit,
-                        text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
-                        margin: {left: 185}
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
                     }
+                    // <H3> {
+                    //     width: Fit,
+                    //     text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
+                    //     margin: {left: 185}
+                    // }
                 }
             }
             OutlineFirst = <RectView> {
@@ -355,23 +420,36 @@ live_design!{
                     width: Fill, height: Fill,
                     align: { x: 0.5, y: 0.5 }
                     flow: Down
-                    <Logo> {}
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                 }
             }
             DesignFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill
                     flow: Down
-                    align: { x: 0.5, y: 0.5 }
-                    <Logo> {}
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                 }
             }
             RunFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,
                     flow: Down
-                    align: { x: 0.5, y: 0.5 }
-                    <Logo> {}
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
                 }
             }
             RunList = <View> {
@@ -535,7 +613,7 @@ live_design!{
                                 }
                             }
                         }
-                        <Vr> {}
+                        // <Vr> {}
                         <Filler> {}
                         <TextInput> {
                             width: 200.
