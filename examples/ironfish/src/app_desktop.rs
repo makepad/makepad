@@ -1483,7 +1483,7 @@ live_design! {
         }
     }
 
-    DelayFXPanel = <FishPanelContainer dx:803.5 dy:2626.9 dw:323.8 dh:182.3> {
+    DelayFXPanel = <FishPanelContainer dx:821.4 dy:2758.2 dw:323.8 dh:274.0> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {

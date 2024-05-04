@@ -83,7 +83,7 @@ struct ProfilerEventChart{
 }
 
 impl ProfilerEventChart{
-    fn draw_block(&mut self, cx: &mut Cx2d, rect:&Rect, sample_start:f64, sample_end: f64, label:&str){
+    fn draw_block(&mut self, cx: &mut Cx2d, rect:&Rect, sample_start:f64, sample_end: f64, label:&str, meta:u64){
         let scale = rect.size.x / self.time_range.len();
         let xpos = rect.pos.x + (sample_start - self.time_range.start) * scale;
         let xsize = ((sample_end - sample_start) * scale).max(2.0);
@@ -94,13 +94,23 @@ impl ProfilerEventChart{
                 
         self.draw_item.draw_abs(cx, rect);
         self.tmp_label.clear();
-        if sample_end - sample_start > 0.001{
-            write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
+        if meta >0{
+            if sample_end - sample_start > 0.001{
+                write!(&mut self.tmp_label, "{}({meta}) {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
+            }
+            else{
+                write!(&mut self.tmp_label, "{}({meta}) {:.0} µs", label, (sample_end-sample_start)*1000_000.0).unwrap();
+            }
         }
         else{
-            write!(&mut self.tmp_label, "{} {:.0} µs", label, (sample_end-sample_start)*1000_000.0).unwrap();
+            if sample_end - sample_start > 0.001{
+                write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
+            }
+            else{
+                write!(&mut self.tmp_label, "{} {:.0} µs", label, (sample_end-sample_start)*1000_000.0).unwrap();
+            }
         }
-        
+            
         // if xsize > 10.0 lets draw a clipped piece of text 
         if xsize > 10.0{
             cx.begin_turtle(Walk::abs_rect(rect), Layout::default());
@@ -149,7 +159,7 @@ impl Widget for ProfilerEventChart {
                     }
                     let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
                     self.draw_item.color = Vec4::from_u32(color);
-                    self.draw_block(cx, &rect, sample.start, sample.end, Event::name_from_u32(sample.event_u32));
+                    self.draw_block(cx, &rect, sample.start, sample.end, Event::name_from_u32(sample.event_u32), sample.event_meta);
                 }
             }
             
@@ -164,7 +174,7 @@ impl Widget for ProfilerEventChart {
                     self.draw_block(cx, &Rect{
                         pos:rect.pos + dvec2(0.0,25.0),
                         size:rect.size
-                    }, sample.start, sample.end, "GPU");
+                    }, sample.start, sample.end, "GPU", 0);
                 }
             }
         }
