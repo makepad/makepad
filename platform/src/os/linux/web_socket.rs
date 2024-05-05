@@ -41,14 +41,11 @@ impl OsWebSocket{
         // lets write the http request
         if stream.is_err(){
             rx_sender.send(WebSocketMessage::Error("Error connecting websocket tcpstream".into())).unwrap();
-            println!("ERROR CONNECTING");
             return OsWebSocket{sender:None}
         }
         let mut stream = stream.unwrap();
         if write_bytes_to_tcp_stream_no_error(&mut stream, http_request.as_bytes()){
             rx_sender.send(WebSocketMessage::Error("Error writing request to websocket".into())).unwrap();
-                        
-            println!("ERROR WRITING");
             return OsWebSocket{sender:None}
         }
         
@@ -61,14 +58,11 @@ impl OsWebSocket{
             while let Ok(msg) = receiver.recv(){
                 match msg{
                     WebSocketMessage::Binary(data)=>{
-                        println!("WRITING BINARY {}", request.url);
-                        
                         let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
                         if write_bytes_to_tcp_stream_no_error(&mut output_stream, header.as_slice()) ||
                         write_bytes_to_tcp_stream_no_error(&mut output_stream, &data){
                             break;
                         }
-                        println!("WRITING BINARY {}", request.url);
                     }
                     WebSocketMessage::String(data)=>{
                         let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
