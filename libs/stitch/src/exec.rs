@@ -461,7 +461,7 @@ pub(crate) unsafe extern "C" fn call_indirect(
 // Reference instructions
 
 macro_rules! ref_is_null {
-    ($ref_is_null_s:ident, $ref_is_null_r:ident, $ref_is_null_i:ident, $T:ty) => {
+    ($ref_is_null_s:ident, $ref_is_null_r:ident, $T:ty) => {
         pub(crate) unsafe extern "C" fn $ref_is_null_s(
             ip: Ip,
             sp: Sp,
@@ -507,42 +507,17 @@ macro_rules! ref_is_null {
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
-
-        pub(crate) unsafe extern "C" fn $ref_is_null_i(
-            ip: Ip,
-            sp: Sp,
-            md: Md,
-            ms: Ms,
-            ix: Ix,
-            sx: Sx,
-            dx: Dx,
-            cx: Cx,
-        ) -> ControlFlowBits {
-            // Read operands
-            let (x, ip): ($T, _) = read_imm(ip);
-
-            // Perform operation
-            let y = x.is_none() as u32;
-
-            // Write result
-            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
-
-            // Execute next instruction
-            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
     };
 }
 
 ref_is_null!(
     ref_is_null_func_ref_s,
     ref_is_null_func_ref_r,
-    ref_is_null_func_ref_i,
     UnguardedFuncRef
 );
 ref_is_null!(
     ref_is_null_extern_ref_s,
     ref_is_null_extern_ref_r,
-    ref_is_null_extern_ref_i,
     UnguardedExternRef
 );
 
