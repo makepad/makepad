@@ -159,8 +159,8 @@ live_design! {
                 }
             }
         }
-        ui:/* <Root>{
-            main_window = */<Window> {
+        ui: <Root>{
+            main_window = <Window> {
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 block_signal_event: true;
@@ -203,7 +203,7 @@ live_design! {
                     }
                 }*/
             }
-        //}
+        }
     }
 }
 app_main!(App);
