@@ -1,6 +1,7 @@
 use crate::makepad_live_id::*;
 use makepad_widgets::*;
-   
+use std::{env, io, str, time::Duration, thread};
+
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -24,15 +25,12 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust] llm_chat: Vec<(LLMMsg,String)>,
-    
-    #[rust] delay_timer: Timer,
+    #[rust] chat: Vec<(ChatMsg,String)>,
 }
 
-enum LLMMsg{
-    AI,
-    Human,
-    Progress
+enum ChatMsg{
+    Own,
+    Other(String)
 }
 
 impl LiveRegister for App{
@@ -43,12 +41,32 @@ impl LiveRegister for App{
 }
      
 impl App {
-   
+   fn connect_serial(&self){
+       let mut send_port = serialport::new("/dev/cu.usbmodem2101", 115_200)
+       .timeout(Duration::from_millis(1000000))
+       .open()
+       .unwrap();
+       let mut recv_port = send_port.try_clone().unwrap();
+       // Read from the serial port and print to the terminal
+       thread::spawn(move || {
+           loop {
+               let mut buf = [0; 256];
+               let len = recv_port.read(&mut buf).unwrap();
+               print!("{}", str::from_utf8(&buf[..len]).unwrap());
+           }
+       });
+       // Read from the terminal and send to the serial port
+       loop {
+           let message = "Hello world\n";
+           send_port.write_all(message.as_bytes()).unwrap();
+           std::thread::sleep(Duration::from_millis(1000));
+       }
+   }
 }
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, _cx:&mut Cx){
-        
+        self.connect_serial();
     }
     
     fn handle_signal(&mut self, _cx: &mut Cx){
@@ -56,22 +74,21 @@ impl MatchEvent for App {
     }
             
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
-        let llm_chat = self.ui.portal_list(id!(llm_chat));
+        let chat = self.ui.portal_list(id!(chat));
                 
         while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
-           if let Some(mut llm_chat) = llm_chat.has_widget(&next).borrow_mut() {
-                llm_chat.set_item_range(cx, 0, self.llm_chat.len());
-                while let Some(item_id) = llm_chat.next_visible_item(cx) {
-                    if item_id >= self.llm_chat.len(){
+           if let Some(mut chat) = chat.has_widget(&next).borrow_mut() {
+                chat.set_item_range(cx, 0, self.chat.len());
+                while let Some(item_id) = chat.next_visible_item(cx) {
+                    if item_id >= self.chat.len(){
                         continue
                     }
-                    let (is_llm, msg) = &self.llm_chat[item_id];
-                    let template = match is_llm{
-                        LLMMsg::AI=>live_id!(AI),
-                        LLMMsg::Human=>live_id!(Human),
-                        LLMMsg::Progress=>live_id!(AI)
+                    let (ty, msg) = &self.chat[item_id];
+                    let template = match ty{
+                        ChatMsg::Own=>live_id!(Own),
+                        ChatMsg::Other(_)=>live_id!(Other),
                     };
-                    let item = llm_chat.item(cx, item_id, template).unwrap();
+                    let item = chat.item(cx, item_id, template).unwrap();
                     item.set_text(msg);
                     item.draw_all(cx, &mut Scope::empty());
                 }
@@ -82,26 +99,21 @@ impl MatchEvent for App {
     
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
         
-        let chat = self.ui.text_input(id!(chat));
-        if let Some(val) = chat.returned(&actions){
-            chat.set_text_and_redraw(cx, "");
-            chat.set_cursor(0,0);
-            self.llm_chat.push((LLMMsg::Human, val));
-            self.llm_chat.push((LLMMsg::Progress, "... Thinking ...".into()));
-            self.ui.widget(id!(llm_chat)).redraw(cx);
+        let message = self.ui.text_input(id!(message));
+        if let Some(val) = message.returned(&actions){
+            message.set_text_and_redraw(cx, "");
+            message.set_cursor(0,0);
+            self.chat.push((ChatMsg::Own, val));
+            self.ui.widget(id!(chat)).redraw(cx);
         }
                   
-        if self.ui.button(id!(trim_button)).clicked(&actions) {
-            if self.llm_chat.len()>2{
-                let last = self.llm_chat.len().max(2)-1;
-                self.llm_chat.drain(2..last);
-                self.ui.widget(id!(llm_chat)).redraw(cx);
-            }
+        if self.ui.button(id!(send_button)).clicked(&actions) {
+            
         }
         
-        if self.ui.button(id!(clear_button)).clicked(&actions) {
-            self.llm_chat.clear();
-            self.ui.widget(id!(llm_chat)).redraw(cx);
+        if self.ui.button(id!(clear_button)).clicked(&actions){
+            self.chat.clear();
+            self.ui.widget(id!(chat)).redraw(cx);
         }    
     }
 }

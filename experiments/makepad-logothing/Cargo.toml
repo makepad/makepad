@@ -1,0 +1,77 @@
+[package]
+authors = ["makepad"]
+edition = "2018"
+name = "makepad-logothing"
+version = "0.1.0"
+resolver = "2"
+
+[workspace]
+
+[dependencies]
+#alloc-cortex-m = "*"
+cortex-m = "0.7.3"
+cortex-m-rt = "0.7.0"
+embedded-hal = { version = "0.2.5", features=["unproven"] }
+embedded-time = "0.12.0"
+
+#defmt = "0.3.0"
+#defmt-rtt = "0.3.0"
+#panic-probe = { version = "0.3.0", features = ["print-defmt"] }
+
+# We're using a Pico by default on this template
+rp-pico = "0.2.0"
+rp2040-st7789 = {version = "0.1.0", path = "./st7789_lib"}
+nano-leb128 = {version = "0.1.0", default-features = false}
+# cargo build/run
+[profile.dev] 
+codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
+opt-level = 3
+overflow-checks = true
+
+# cargo build/run --release
+[profile.release]
+strip = true
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = "z"
+overflow-checks = false
+#panic = "abort"
+
+# do not optimize proc-macro crates = faster builds from scratch
+[profile.dev.build-override]
+codegen-units = 8
+debug = false
+debug-assertions = false
+opt-level = 0
+overflow-checks = false
+
+[profile.release.build-override]
+codegen-units = 1
+debug = false
+debug-assertions = false
+opt-level = 'z'
+overflow-checks = false
+
+# cargo test
+[profile.test]
+codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
+opt-level = 3
+overflow-checks = true
+
+# cargo test --release
+[profile.bench]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 3
