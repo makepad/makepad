@@ -7,7 +7,7 @@ use crate::{
     table::{Table, TableType, UnguardedTable},
 };
 
-/// A WebAssembly entity that can be imported or exported.
+/// A Wasm entity that can be imported or exported.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExternVal {
     Func(Func),

@@ -245,13 +245,14 @@ impl Decode for Arc<str> {
     }
 }
 
-/// An error that can occur when decoding a module.
+/// An error that can occur when decoding a [`Module`](crate::Module).
 #[derive(Clone, Debug)]
 pub struct DecodeError {
     message: Box<str>,
 }
 
 impl DecodeError {
+    /// Creates a new [`DecodeError`] with the given message.
     pub fn new(message: impl Into<Box<str>>) -> Self {
         Self {
             message: message.into(),

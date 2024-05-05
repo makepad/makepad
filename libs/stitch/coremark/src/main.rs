@@ -8,10 +8,7 @@ fn clock_ms() -> u64 {
 }
 
 fn stitch(bytes: &[u8]) -> f32 {
-    use {
-        makepad_stitch::{Engine, Func, Linker, Module, Store, Val},
-        std::slice,
-    };
+    use makepad_stitch::*;
 
     let engine = Engine::new();
     let mut store = Store::new(engine);
@@ -21,10 +18,9 @@ fn stitch(bytes: &[u8]) -> f32 {
     linker.define("env", "clock_ms", clock_ms);
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let run = instance.exported_func("run").unwrap();
-    let mut result = Val::F32(0.0);
-    run.call(&mut store, &[], slice::from_mut(&mut result))
-        .unwrap();
-    result.to_f32().unwrap()
+    let mut results = [Val::F32(0.0)];
+    run.call(&mut store, &[], &mut results).unwrap();
+    results[0].to_f32().unwrap()
 }
 
 fn wasm3(bytes: &[u8]) -> f32 {
@@ -43,10 +39,7 @@ fn wasm3(bytes: &[u8]) -> f32 {
 }
 
 fn wasmi(bytes: &[u8]) -> f32 {
-    use {
-        std::slice,
-        wasmi::{core::F32, Config, Engine, Func, Linker, Module, Store, Value},
-    };
+    use wasmi::{core::F32, *};
 
     let config = Config::default();
     let engine = Engine::new(&config);
@@ -58,10 +51,27 @@ fn wasmi(bytes: &[u8]) -> f32 {
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let instance = instance.start(&mut store).unwrap();
     let run = instance.get_func(&store, "run").unwrap();
-    let mut result = Value::F32(F32::from_float(0.0));
-    run.call(&mut store, &[], slice::from_mut(&mut result))
+    let mut results = [Value::F32(F32::from_float(0.0))];
+    run.call(&mut store, &[], &mut results)
         .unwrap();
-    result.f32().unwrap().to_float()
+    results[0].f32().unwrap().to_float()
+}
+
+fn wasmtime(bytes: &[u8]) -> f32 {
+    use wasmtime::*;
+
+    let config = Config::default();
+    let engine = Engine::new(&config).unwrap();
+    let mut store = Store::new(&engine, ());
+    let module = Module::new(&engine, bytes).unwrap();
+    let mut linker = Linker::new(&engine);
+    let clock_ms = Func::wrap(&mut store, clock_ms);
+    linker.define(&mut store, "env", "clock_ms", clock_ms).unwrap();
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let run = instance.get_func(&mut store, "run").unwrap();
+    let mut results = [Val::F32(0)];
+    run.call(&mut store, &[], &mut results).unwrap();
+    results[0].f32().unwrap()
 }
 
 fn main() {
@@ -69,4 +79,5 @@ fn main() {
     println!("stitch {}", stitch(bytes));
     println!("wasm3 {}", wasm3(bytes));
     println!("wasmi {}", wasmi(bytes));
+    println!("wasmi {}", wasmtime(bytes));
 }
