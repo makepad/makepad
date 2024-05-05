@@ -1,10 +1,10 @@
 (module
     (memory (export "memory") 16)
     (func (export "fill") (param $idx i32) (param $val i32) (param $count i32) 
-        (block $exit
+        (block $break
             (loop $loop
                 (br_if
-                    $exit
+                    $break
                     (i32.eqz
                         (local.get $count)
                     )
