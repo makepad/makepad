@@ -79,5 +79,5 @@ fn main() {
     println!("stitch {}", stitch(bytes));
     println!("wasm3 {}", wasm3(bytes));
     println!("wasmi {}", wasmi(bytes));
-    println!("wasmi {}", wasmtime(bytes));
+    println!("wasmtime {}", wasmtime(bytes));
 }
