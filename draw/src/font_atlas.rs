@@ -23,7 +23,7 @@ pub use {
         makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
     },
-    rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
+    makepad_rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
@@ -439,7 +439,7 @@ impl ShapeCache {
             let (direction, string) = key;
             rustybuzz_buffer.set_direction(direction);
             rustybuzz_buffer.push_str(string);
-            let glyph_buffer = owned_font_face.with_ref( | face | rustybuzz::shape(face, &[], rustybuzz_buffer));
+            let glyph_buffer = owned_font_face.with_ref( | face | makepad_rustybuzz::shape(face, &[], rustybuzz_buffer));
             let glyph_ids: Vec<_> = glyph_buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize).collect();
             rustybuzz_buffer = glyph_buffer.clear();
 
