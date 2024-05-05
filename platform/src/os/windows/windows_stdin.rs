@@ -18,7 +18,7 @@ use {
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
-        pass::{CxPassParent, PassClearColor, CxPassColorTexture},
+        pass::{CxPassParent},
         cx_api::CxOsOp,
         cx::Cx,
         windows::Win32::Foundation::HANDLE,
@@ -62,7 +62,7 @@ impl Cx {
                             let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
-                                window_id: 0,
+                                window_id: window_id.id(),
                                 target_id: current_image.id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
                                 height: (pass_rect.size.y * dpi_factor) as u32,
