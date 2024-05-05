@@ -10,7 +10,7 @@ use {
     std::{error::Error, fmt},
 };
 
-/// A WebAssembly memory.
+/// A Wasm memory.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct Mem(pub(crate) Handle<MemEntity>);
