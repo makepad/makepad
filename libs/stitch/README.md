@@ -29,6 +29,13 @@ Stitch is very fast. On my MacBook Pro M2, it achieves a Coremark score of 3016,
 times better than Wasmi (785), and slightly better than Wasm3 (2907), which is the fastest
 Wasm interpreter that I’m aware of.
 
+| Coremark | Windows |
+| -------- | ------- |
+| stitch   | 4592    |
+| wasm3    | 3951    |
+| wasmi    | 1574    |
+| wasmtime | 34796   |
+
 ## Features
 
 Stitch supports all features in Release 2.0 (Draft 2024-04-28) of the Wasm Specificiation,

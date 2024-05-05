@@ -4262,6 +4262,14 @@ live_design! {
             }
         }
         <RoundedShadowView>{
+            width: 250., height: 350.,
+            abs_pos: vec2(25., 325.)
+            padding: <THEME_MSPACE_2> {}
+            spacing: (THEME_SPACE_1)
+            align: { x: 0.5, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
+
             draw_bg: {
                 border_width: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
@@ -4272,14 +4280,94 @@ live_design! {
                 color: (THEME_COLOR_FG_APP),
             }
             
-            abs_pos: vec2(25., 325.)
-            padding: 0.
-            width: 150., height: 150,
-            spacing: 0.,
-            align: { x: 0.5, y: 0.0 }
-            flow: Down,
-            clip_x: false, clip_y: false,
+            <View> {
+                flow: Right,
+                width: Fill, height: Fit, 
+                align: { x: 0.0, y: 0.5 }
+                <RoundedView> {
+                    margin: { left: (THEME_SPACE_2), right: (THEME_SPACE_1), top: 5. }
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (#f00),
+                        radius: 5.0
+                    }
+                }
+                <Pbold> { width: Fit, margin: {left: 3.}, text: "Canvas" }
+            }
+            <Hr> { margin: <THEME_MSPACE_1> {} }
             <ColorPicker>{}
+            <View> {
+                width: Fill, height: Fit, 
+                spacing: (THEME_SPACE_2)
+                align: { x: 0.5, y: 0.5 }
+                flow: Right,
+                <Pbold> { width: Fit, text: "RGBA" }
+                <P> { width: Fit, text: "0 / 255 / 0 / 255" }
+                <P> { width: Fit, text: "#83741AFF" }
+            }
+            <View> {
+                align: { x: 0.5, y: 0.5 }
+                width: Fill, height: Fit, 
+                flow: Right,
+                spacing: (THEME_SPACE_1),
+                margin: { bottom: 10. }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_1),
+                        radius: 5.0
+                    }
+                }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_2),
+                        radius: 5.0
+                    }
+                }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_3),
+                        radius: 5.0
+                    }
+                }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_4),
+                        radius: 5.0
+                    }
+                }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_5),
+                        radius: 5.0
+                    }
+                }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_6),
+                        radius: 5.0
+                    }
+                }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_7),
+                        radius: 5.0
+                    }
+                }
+            }
         }
     }
 
