@@ -165,6 +165,7 @@ impl Cx{
     }
     
     fn start_studio_websocket(&mut self, studio_http: &str) {
+        println!("GOT STUDIO HTTP {}", studio_http);
         if studio_http.len() == 0{
             return
         }
