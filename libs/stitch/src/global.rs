@@ -10,7 +10,7 @@ use {
     std::{error::Error, fmt},
 };
 
-/// A WebAssembly global.
+/// A Wasm global.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct Global(pub(crate) Handle<GlobalEntity>);
