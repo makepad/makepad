@@ -153,6 +153,7 @@ impl BuildManager {
         else{
              8001
         };
+        self.studio_http = format!("http://127.0.0.1:{}/$studio_web_socket", self.http_port);
         self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
@@ -552,7 +553,6 @@ impl BuildManager {
                                 let _ = studio_sender.send((*id,msg));
                             }
                         }
-                        //println!("GOT BINARY MESSAGE");
                         // new incombing message from client
                     }
                     HttpServerRequest::Get {headers, response_sender} => {

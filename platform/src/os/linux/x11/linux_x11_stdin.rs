@@ -93,7 +93,6 @@ impl Cx {
                     if let Ok(0) | Err(_) = reader.read_line(&mut line) {
                         break;
                     }
-
                     // alright lets put the line in a json parser
                     match HostToStdin::deserialize_json(&line) {
                         Ok(msg) => {
@@ -107,6 +106,7 @@ impl Cx {
                         }
                     }
                 }
+                println!("Terminating STDIN reader loop")
             });
         }
 
@@ -270,7 +270,6 @@ impl Cx {
                     //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    
                     let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
                 },
                 CxOsOp::SetCursor(cursor) => {
