@@ -1,0 +1,18 @@
+[package]
+authors = ["the rp-rs team"]
+edition = "2018"
+readme = "README.md"
+name = "rp2040-st7789"
+version = "0.1.0"
+resolver = "2"
+
+[lib]
+crate-type = ["lib"]
+doc = true
+path = "src/lib.rs"
+
+[dependencies]
+cortex-m = "0.7.3"
+embedded-hal = { version = "0.2.5", features=["unproven"] }
+rp-pico = "0.2.0"
+nano-leb128 = { version = "0.1.0", default-features = false }
