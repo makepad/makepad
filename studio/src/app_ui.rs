@@ -30,8 +30,8 @@ live_design!{
     }
 
     IconTab = <Tab> {
-        closeable:false
-        icon_walk:{width:15,height:15}
+        closeable: false
+        icon_walk: { width: 15., height: 15. }
     }
 
     Vr = <View> {
@@ -201,6 +201,17 @@ live_design!{
                         svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
                     }
                 }
+                FilesFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 10.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_2)
+                        svg_file: dep("crate://self/resources/icons/icon_file.svg"),
+                    }
+                }
                 RunFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
@@ -243,6 +254,17 @@ live_design!{
                     draw_icon: {
                         color: (STUDIO_PALETTE_7)
                         svg_file: dep("crate://self/resources/icons/icon_profiler.svg"),
+                    }
+                }
+                SearchFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 13.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_3)
+                        svg_file: dep("crate://self/resources/icons/icon_search.svg"),
                     }
                 }
             }
@@ -301,13 +323,13 @@ live_design!{
 
             file_tree_tab = Tab {
                 name: "Files",
-                template: PermanentTab,
+                template: FilesFirstTab,
                 kind: StudioFileTree
             }
 
             search = Tab {
                 name: "Search"
-                template: PermanentTab,
+                template: SearchFirstTab,
                 kind: Search
             }
 
