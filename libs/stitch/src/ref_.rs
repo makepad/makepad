@@ -5,7 +5,7 @@ use crate::{
     store::StoreId,
 };
 
-/// A WebAssembly reference.
+/// A Wasm reference.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Ref {
     FuncRef(FuncRef),

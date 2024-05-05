@@ -13,7 +13,7 @@ use {
     std::{error::Error, fmt},
 };
 
-/// A WebAssembly table.
+/// A Wasm table.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct Table(pub(crate) Handle<TableEntity>);

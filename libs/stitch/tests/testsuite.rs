@@ -239,7 +239,7 @@ impl WastRunner {
     fn invoke(&mut self, invoke: WastInvoke<'_>) -> Result<Vec<Val>, Error> {
         let name = invoke.module.map(|module| module.name());
         let instance = self.get_instance(name).unwrap();
-        let func = instance.export(invoke.name).unwrap().to_func().unwrap();
+        let func = instance.exported_val(invoke.name).unwrap().to_func().unwrap();
         let args: Vec<Val> = invoke
             .args
             .into_iter()

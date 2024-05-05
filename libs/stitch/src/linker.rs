@@ -5,7 +5,7 @@ use {
     std::{collections::HashMap, fmt, sync::Arc},
 };
 
-/// A linker for defining imports and instantiating modules.
+/// A linker for defining imports and instantiating [`Module`]s.
 #[derive(Clone, Debug)]
 pub struct Linker {
     strings: StringInterner,
