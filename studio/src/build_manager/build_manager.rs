@@ -153,6 +153,7 @@ impl BuildManager {
         else{
              8001
         };
+        self.studio_http = "http://127.0.0.1".into();
         self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
