@@ -12,6 +12,12 @@ pub struct History {
     redo_stack: Stack,
 }
 
+#[derive(Clone,Copy)]
+pub enum NewGroup{
+    Yes,
+    No
+}
+
 impl History {
     pub fn new() -> Self {
         Self::default()
@@ -109,6 +115,7 @@ pub enum EditKind {
     InsertSpace,
     Delete,
     Indent,
+    Group(u64),
     Outdent,
     Other,
 }

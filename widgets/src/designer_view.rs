@@ -127,6 +127,7 @@ pub struct DesignerView {
     #[rust] area:Area,
     #[rust] reapply: bool,
     #[rust(1.5)] zoom: f64,
+    #[rust] undo_group: u64,
     #[rust] pan: DVec2,
     #[live] clear_color: Vec4,
     #[rust] finger_move: Option<FingerMove>,
@@ -222,6 +223,7 @@ impl DesignerView{
                 Cx::send_studio_message(AppToStudio::PatchFile(PatchFile{
                     file_name: file_name.into(),
                     line: range.line,
+                    undo_group: self.undo_group,
                     column_start: range.start_column,
                     column_end: range.end_column,
                     replace
@@ -265,6 +267,7 @@ impl Widget for DesignerView {
             Hit::FingerHoverOut(_fh)=>{
             }
             Hit::FingerDown(fe) => {
+                self.undo_group += 1;
                 if !fe.modifiers.shift{
                     if fe.modifiers.control && fe.modifiers.alt{
                         let mut rects = BTreeMap::new();

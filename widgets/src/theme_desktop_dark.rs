@@ -2188,7 +2188,7 @@ live_design! {
             border_color: (THEME_COLOR_BEVEL_LIGHT)
             shadow_color: (THEME_COLOR_D_4)
             shadow_radius: 7.5
-            shadow_offset: vec2(10.0, 0.0)
+            shadow_offset: vec2(0.0, 0.0)
             color: (THEME_COLOR_FG_APP),
         }
         content = <View> {

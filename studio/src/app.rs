@@ -2,6 +2,7 @@ use crate::{
     makepad_code_editor::code_editor::*,
     makepad_code_editor::selection::Affinity,
     makepad_code_editor::session::SelectionMode,
+    makepad_code_editor::history::NewGroup,
     makepad_widgets::*,
     makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
@@ -155,13 +156,16 @@ impl MatchEvent for App{
                                 session.set_selection(
                                     start,
                                     Affinity::After,
-                                    SelectionMode::Simple
+                                    SelectionMode::Simple,
+                                    NewGroup::No
                                 );
                                 session.move_to(
                                     end,
                                     Affinity::Before,
+                                    NewGroup::No 
                                 );
-                                session.paste(ef.replace.into());
+                                println!("{:?}", ef.undo_group);
+                                session.paste_grouped(ef.replace.into(), ef.undo_group);
                             }
                             self.data.file_system.handle_sessions();
                             editor.redraw(cx);
@@ -183,11 +187,13 @@ impl MatchEvent for App{
                                 session.set_selection(
                                     start,
                                     Affinity::After,
-                                    SelectionMode::Simple
+                                    SelectionMode::Simple,
+                                    NewGroup::Yes
                                 );
                                 session.move_to(
                                     end,
                                     Affinity::Before,
+                                    NewGroup::Yes
                                 );
                                 session.paste(ef.replace.into());
                                 // lets serialise the session
