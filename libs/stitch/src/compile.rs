@@ -1,13 +1,16 @@
 use {
     crate::{
-        aliased_box::AliasableBox,
+        aliasable_box::AliasableBox,
         code,
-        code::{BinOpInfo, BlockType, InstrVisitor, LoadInfo, MemArg, StoreInfo, UnOpInfo},
+        code::{
+            BinOpInfo, BlockType, CodeSlot, CompiledCode, InstrVisitor, LoadInfo, MemArg,
+            StoreInfo, UnOpInfo, UncompiledCode,
+        },
         decode::DecodeError,
         exec,
         exec::ThreadedInstr,
         extern_ref::ExternRef,
-        func::{CodeSlot, CompiledCode, Func, FuncEntity, FuncType, UncompiledCode},
+        func::{Func, FuncEntity, FuncType},
         func_ref::FuncRef,
         instance::Instance,
         ref_::RefType,
@@ -73,7 +76,7 @@ impl Compiler {
             blocks: &mut self.blocks,
             opds: &mut self.opds,
             fixup_idxs: &mut self.fixup_idxs,
-            first_param_result_stack_idx: -(type_.callee_stack_slot_count() as isize),
+            first_param_result_stack_idx: -(type_.call_frame_size() as isize),
             first_temp_stack_idx: local_count,
             max_stack_height: local_count,
             regs: [None; 2],
@@ -110,9 +113,9 @@ impl Compiler {
         self.locals.clear();
         self.opds.clear();
         CompiledCode {
-            max_stack_slot_count,
+            max_stack_height: max_stack_slot_count,
             local_count,
-            slots: code,
+            code,
         }
     }
 }
@@ -762,7 +765,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
         self.emit(func.0.to_unguarded(self.store.id()));
         let first_callee_stack_idx = self.first_temp_stack_idx + self.opds.len();
-        let last_callee_stack_idx = first_callee_stack_idx + type_.callee_stack_slot_count();
+        let last_callee_stack_idx = first_callee_stack_idx + type_.call_frame_size();
         self.max_stack_height = self.max_stack_height.max(last_callee_stack_idx);
         self.emit_stack_offset(last_callee_stack_idx as isize);
         if let FuncEntity::Host(_) = func.0.as_ref(&self.store) {
@@ -800,7 +803,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.emit(table.0.to_unguarded(self.store.id()));
         self.emit(interned_type.to_unguarded(self.store.id()));
         let first_callee_stack_idx = self.first_temp_stack_idx + self.opds.len();
-        let last_callee_stack_idx = first_callee_stack_idx + type_.callee_stack_slot_count();
+        let last_callee_stack_idx = first_callee_stack_idx + type_.call_frame_size();
         self.max_stack_height = self.max_stack_height.max(last_callee_stack_idx as usize);
         self.emit_stack_offset(last_callee_stack_idx as isize);
         self.emit(

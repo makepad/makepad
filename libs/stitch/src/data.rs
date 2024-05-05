@@ -3,7 +3,7 @@ use {
     std::sync::Arc,
 };
 
-/// A WebAssembly data segment.
+/// A Wasm data segment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub(crate) struct Data(pub(crate) Handle<DataEntity>);

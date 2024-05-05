@@ -17,7 +17,7 @@ use {
     },
 };
 
-/// A WebAssembly module instance.
+/// A [`Module`](`crate::Module`) instance.
 #[derive(Clone, Debug)]
 pub struct Instance {
     store_id: StoreId,
@@ -26,7 +26,7 @@ pub struct Instance {
 
 impl Instance {
     /// Returns the [`ExternVal`] of the export with the given name in this [`Instance`], if it exists.
-    pub fn export(&self, name: &str) -> Option<ExternVal> {
+    pub fn exported_val(&self, name: &str) -> Option<ExternVal> {
         self.inner()
             .exports
             .get(name)
@@ -35,22 +35,22 @@ impl Instance {
 
     /// Returns the exported [`Func`] with the given name in this [`Instance`], if it exists.
     pub fn exported_func(&self, name: &str) -> Option<Func> {
-        self.export(name).and_then(|val| val.to_func())
+        self.exported_val(name).and_then(|val| val.to_func())
     }
 
     /// Returns the exported [`Table`] with the given name in this [`Instance`], if it exists.
     pub fn exported_table(&self, name: &str) -> Option<Table> {
-        self.export(name).and_then(|val| val.to_table())
+        self.exported_val(name).and_then(|val| val.to_table())
     }
 
     /// Returns the exported [`Mem`] with the given name in this [`Instance`], if it exists.
     pub fn exported_mem(&self, name: &str) -> Option<Mem> {
-        self.export(name).and_then(|val| val.to_mem())
+        self.exported_val(name).and_then(|val| val.to_mem())
     }
 
     /// Returns the exported [`Global`] with the given name in this [`Instance`], if it exists.
     pub fn exported_global(&self, name: &str) -> Option<Global> {
-        self.export(name).and_then(|val| val.to_global())
+        self.exported_val(name).and_then(|val| val.to_global())
     }
 
     /// Returns an iterator over the exports in this [`Instance`].

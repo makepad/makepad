@@ -1,5 +1,6 @@
 use {
     crate::{
+        code::UncompiledCode,
         config,
         const_expr::ConstExpr,
         data::Data,
@@ -8,7 +9,7 @@ use {
         engine::Engine,
         error::Error,
         extern_val::{ExternType, ExternTypeDesc, ExternVal, ExternValDesc},
-        func::{Func, FuncType, UncompiledCode},
+        func::{Func, FuncType},
         global::{Global, GlobalType},
         instance::{Instance, InstanceIniter},
         linker::{InstantiateError, Linker},
@@ -26,7 +27,7 @@ use {
     },
 };
 
-/// A Webassembly module.
+/// A Wasm module.
 #[derive(Debug)]
 pub struct Module {
     types: Arc<[FuncType]>,
@@ -48,6 +49,12 @@ pub struct Module {
 }
 
 impl Module {
+    /// Decodes and validates a new [`Module`] from the given byte slice.
+    /// 
+    /// # Errors
+    /// 
+    /// - If the [`Module`] is malformed.
+    /// - If the [`Module`] is invalid.
     pub fn new(engine: &Engine, bytes: &[u8]) -> Result<Module, DecodeError> {
         const MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D];
         const VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
@@ -220,6 +227,7 @@ impl Module {
             }
         }
         for (type_, code) in self.internal_funcs() {
+            let type_ = store.get_or_intern_type(type_);
             initer.push_func(Func::new_wasm(store, type_, instance.clone(), code.clone()));
         }
         let global_init_vals: Vec<_> = self
@@ -410,7 +418,7 @@ impl Module {
     }
 }
 
-/// An iterator over the imports in this [`Module`].
+/// An iterator over the imports in a [`Module`].
 #[derive(Clone, Debug)]
 pub struct ModuleImports<'a> {
     imports: slice::Iter<'a, ((Arc<str>, Arc<str>), ImportKind)>,
@@ -440,7 +448,7 @@ impl<'a> Iterator for ModuleImports<'a> {
     }
 }
 
-/// An iterator over the exports in this [`Module`].
+/// An iterator over the exports in a [`Module`].
 #[derive(Clone, Debug)]
 pub struct ModuleExports<'a> {
     module: &'a Module,
