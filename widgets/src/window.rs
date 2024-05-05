@@ -4,7 +4,7 @@ use crate::{
     performance_view::PerformanceView,
     makepad_draw::*,
     nav_control::NavControl,
-    button::*,
+    desktop_button::*,
     view::*,
     widget::*,
 };
@@ -84,6 +84,8 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
+                //self.view(id!(caption_bar)).set_visible(true);
+                //self.view(id!(windows_buttons)).set_visible(true);
                 //self.view(id!(caption_bar)).set_visible(true);
                 //self.view(id!(windows_buttons)).set_visible(true);
                 /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
@@ -263,10 +265,10 @@ impl Widget for Window {
         }
         
         if let Event::Actions(actions) = event{
-            if self.button(id!(min)).clicked(&actions) {
+            if self.desktop_button(id!(windows_buttons.min)).clicked(&actions) {
                 self.window.minimize(cx);
             }
-            if self.button(id!(max)).clicked(&actions) {
+            if self.desktop_button(id!(windows_buttons.max)).clicked(&actions) {
                 if self.window.is_fullscreen(cx) {
                     self.window.restore(cx);
                 }
@@ -274,10 +276,11 @@ impl Widget for Window {
                     self.window.maximize(cx);
                 }
             }
-            if self.button(id!(close)).clicked(&actions) {
+            if self.desktop_button(id!(windows_buttons.close)).clicked(&actions) {
+                println!("CLOSE");
                 self.window.close(cx);
             }
-            if self.button(id!(xr_on)).clicked(&actions) {
+            if self.desktop_button(id!(web_xr.xr_on)).clicked(&actions) {
                 cx.xr_start_presenting();
             }
         }
