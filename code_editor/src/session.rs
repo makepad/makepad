@@ -2,7 +2,7 @@ use {
     crate::{
         char::CharExt,
         document::Document,
-        history::EditKind,
+        history::{EditKind,NewGroup},
         layout::{BlockElement, Layout, WrappedElement},
         selection::{Affinity, Cursor, SelectionSet},
         str::StrExt,
@@ -191,7 +191,7 @@ impl Session {
         true
     }
 
-    pub fn set_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode) {
+    pub fn set_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode, new_group:NewGroup) {
         let selection = grow_selection(
             Selection::from(Cursor {
                 position,
@@ -209,7 +209,9 @@ impl Session {
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        self.document().force_new_group();
+        if let NewGroup::Yes = new_group{
+            self.document().force_new_group();
+        }
     }
 
     pub fn add_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode) {
@@ -233,7 +235,7 @@ impl Session {
         self.document().force_new_group();
     }
 
-    pub fn move_to(&self, position: Position, affinity: Affinity) {
+    pub fn move_to(&self, position: Position, affinity: Affinity, new_group:NewGroup) {
         let mut selection_state = self.selection_state.borrow_mut();
         let last_added_selection_index = selection_state.last_added_selection_index.unwrap();
         let mode = selection_state.mode;
@@ -256,7 +258,9 @@ impl Session {
         selection_state.injected_char_stack.clear();
         drop(selection_state);
         self.update_highlighted_delimiter_positions();
-        self.document().force_new_group();
+        if let NewGroup::Yes = new_group{
+            self.document().force_new_group();
+        }
     }
 
     pub fn move_left(&self, reset_anchor: bool) {
@@ -417,7 +421,26 @@ impl Session {
             },
         );
     }
-
+    
+    pub fn paste_grouped(&self, text: Text, group:u64) {
+        self.document.edit_selections(
+            self.id,
+            EditKind::Group(group),
+            &self.selection_state.borrow().selections,
+            &self.settings,
+            |mut editor, position, length| {
+                editor.apply_edit(Edit {
+                    change: Change::Delete(position, length),
+                    drift: Drift::Before,
+                });
+                editor.apply_edit(Edit {
+                    change: Change::Insert(position, text.clone()),
+                    drift: Drift::Before,
+                });
+            },
+        );
+    }
+    
     pub fn enter(&self) {
         self.selection_state
             .borrow_mut()

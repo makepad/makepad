@@ -4,6 +4,7 @@ use {
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
         session::{SelectionMode, Session},
+        history::{NewGroup},
         settings::Settings,
         str::StrExt,
         text::Position,
@@ -501,7 +502,7 @@ impl CodeEditor {
         pos: Position,
         session: &mut Session,
     ) {
-        session.set_selection(pos, Affinity::Before, SelectionMode::Simple);
+        session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
@@ -876,6 +877,7 @@ impl CodeEditor {
                             _ => SelectionMode::All,
                         }
                     },
+                    NewGroup::Yes
                 );
                 self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
@@ -932,7 +934,7 @@ impl CodeEditor {
                 }
                 cx.set_cursor(MouseCursor::Text);
                 let ((cursor, affinity), _) = self.pick(session, abs);
-                session.move_to(cursor, affinity);
+                session.move_to(cursor, affinity, NewGroup::Yes);
                 // alright how are we going to do scrolling
                 self.redraw(cx);
             }
@@ -947,7 +949,7 @@ impl CodeEditor {
                 *next = cx.new_next_frame();
                 let abs = *abs;
                 let ((cursor, affinity), _) = self.pick(session, abs);
-                session.move_to(cursor, affinity);
+                session.move_to(cursor, affinity, NewGroup::Yes);
                 self.redraw(cx);
             }
         }

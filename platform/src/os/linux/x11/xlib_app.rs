@@ -18,7 +18,6 @@ use {
         event::*,
         cursor::MouseCursor,
         os::cx_native::EventFlow,
-        x11::x11_sys::XEvent
     },
 };
 
