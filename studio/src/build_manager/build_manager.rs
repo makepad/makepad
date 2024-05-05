@@ -300,12 +300,12 @@ impl BuildManager {
             }
             Event::MouseMove(e) => {
                 // we send this one to what window exactly?
-                /*self.broadcast_to_stdin(HostToStdin::MouseMove(StdinMouseMove {
+                self.broadcast_to_stdin(HostToStdin::MouseMove(StdinMouseMove {
                     time: e.time,
                     x: e.abs.x,
                     y: e.abs.y,
                     modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
-                }));*/
+                }));
             }
             Event::MouseUp(e) => {
                 self.broadcast_to_stdin(HostToStdin::MouseUp(StdinMouseUp {
