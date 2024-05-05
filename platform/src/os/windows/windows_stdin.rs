@@ -193,6 +193,7 @@ impl Cx {
                             height: new_swapchain.alloc_height as usize,
                         };
                         let texture = Texture::new_with_format(self, format);
+                        println!("UPDATE FROM SHARED HANDLE {:?}", handle);
                         self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
                         texture
                     });
@@ -246,7 +247,6 @@ impl Cx {
                                 while !d3d11_cx.is_gpu_done() {
                                     std::thread::sleep(std::time::Duration::from_millis(3));
                                 }
-                                println!("FRAME DONE FOR WINDOW {}", index);
                                 let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
                                 window.new_frame_being_rendered = None;
                             }
