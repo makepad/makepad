@@ -24,27 +24,35 @@ use {
     }
 };
 
+#[derive(Default)]
+pub(crate) struct StdinWindow{
+    swapchain: Option<Swapchain<Texture>>,
+    present_index: usize
+}
+
+
 impl Cx {
     
     pub (crate) fn stdin_handle_repaint(
         &mut self,
         d3d11_cx: &mut D3d11Cx,
-        swapchain: Option<&Swapchain<Texture>>,
-        present_index: &mut usize,
+        windows: &mut Vec<StdinWindow>,
     ) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for &pass_id in &passes_todo {
             match self.passes[pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
+                CxPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
-                    if let Some(swapchain) = swapchain {
+                    let window = &mut windows[window_id.id()];
+                    if let Some(swapchain) = &window.swapchain {
                         
                         // and if GPU is not already rendering something else
                         if self.os.new_frame_being_rendered.is_none() {
-                            let current_image = &swapchain.presentable_images[*present_index];
-                            *present_index = (*present_index + 1) % swapchain.presentable_images.len();
+                            let current_image = &swapchain.presentable_images[window.present_index];
+                            
+                            window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
                             
                             // render to swapchain
                             self.draw_pass_to_texture(pass_id, d3d11_cx, current_image.image.texture_id());
@@ -108,9 +116,8 @@ impl Cx {
         
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         
-        let mut swapchain = None;
-        let mut present_index = 0;
-        
+        let mut stdin_windows:Vec<StdinWindow> = Vec::new();
+         
         self.call_event_handler(&Event::Startup);
 
         //let mut previous_tick_time_s: Option<f64> = None;
@@ -187,15 +194,15 @@ impl Cx {
                         self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
                         texture
                     });
-                    let swapchain = swapchain.insert(new_swapchain);
-                    
-                    // reset present_index
-                    present_index = 0;
+                    let window_id = new_swapchain.window_id;
+                    let stdin_window = &mut stdin_windows[window_id];
+                    stdin_window.swapchain = Some(new_swapchain);
+                    stdin_window.present_index = 0;
                     
                     self.redraw_all();
-                    self.stdin_handle_platform_ops(Some(swapchain), present_index);
+                    self.stdin_handle_platform_ops(&mut stdin_windows);
                 }
-                HostToStdin::Tick => if swapchain.is_some() {
+                HostToStdin::Tick =>  {
                     
                     // probe current time
                     //let start_time = ::std::time::SystemTime::now();
@@ -212,7 +219,7 @@ impl Cx {
                     }
                     self.handle_networking_events();
                     // we should poll our runloop
-                    self.stdin_handle_platform_ops(swapchain.as_ref(), present_index);
+                    self.stdin_handle_platform_ops(&mut stdin_windows);
 
                     // alright a tick.
                     // we should now run all the stuff.
@@ -226,7 +233,7 @@ impl Cx {
                     }
 
                     // repaint
-                    self.stdin_handle_repaint(d3d11_cx, swapchain.as_ref(), &mut present_index);
+                    self.stdin_handle_repaint(d3d11_cx, &mut stdin_windows);
 
                     // only allow rendering if it didn't take too much time last time
                     //if allow_rendering {
@@ -264,26 +271,28 @@ impl Cx {
     
     fn stdin_handle_platform_ops(
         &mut self,
-        swapchain: Option<&Swapchain<Texture >>,
-        present_index: usize,
+        stdin_windows:&mut Vec<StdinWindow>,
     ) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
-                    if window_id != CxWindowPool::id_zero() {
-                        panic!("ONLY ONE WINDOW SUPPORTED");
+                    while window_id.id() >= stdin_windows.len(){
+                        stdin_windows.push(StdinWindow::default());
                     }
-                    let window = &mut self.windows[CxWindowPool::id_zero()];
+                    //let stdin_window = &mut stdin_windows[window_id.id()];
+                    let window = &mut self.windows[window_id];
                     window.is_created = true;
+                    let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
+                     
                     // lets set up our render pass target
-                    let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                   /* let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     if let Some(swapchain) = swapchain {
                         pass.color_textures = vec![CxPassColorTexture {
                             clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
                             //clear_color: PassClearColor::ClearWith(pass.clear_color),
                             texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
-                    }
+                    }*/
                 },
                 CxOsOp::SetCursor(cursor) => {
                     let _ = io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
