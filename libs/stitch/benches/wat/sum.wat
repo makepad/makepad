@@ -2,10 +2,11 @@
     (memory (export "memory") 16)
     (func (export "sum") (param $idx i32) (param $count i32) (result i64)
         (local $acc i64)
-        (block $exit
-            (loop $loop
+
+        (block $break
+            (loop $continue
                 (br_if
-                    $exit
+                    $break
                     (i32.eqz
                         (local.get $count)
                     )
@@ -30,7 +31,7 @@
                         (i32.const 1)
                     )
                 )
-                (br $loop)
+                (br $continue)
             )
         )
         (return
