@@ -281,8 +281,9 @@ impl Cx {
                     }
                     //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
-                    
                     window.is_created = true;
+                    let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
+                     
                     // lets set up our render pass target
                    /* let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     if let Some(swapchain) = swapchain {
