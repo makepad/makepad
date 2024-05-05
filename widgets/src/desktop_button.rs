@@ -95,3 +95,13 @@ impl LiveHook for DesktopButton {
         self.walk = Walk::fixed_size(dvec2(w, h))
     }
 }
+
+impl DesktopButtonRef{
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let ButtonAction::Clicked(_) = actions.find_widget_action(self.widget_uid()).cast() {
+            true
+        } else {
+            false
+        }
+    }
+}
