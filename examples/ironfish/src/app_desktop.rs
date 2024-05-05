@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-38.6 dy:-300.8 dw:1613.1 dh:1522.3>{
+    AppDesktop = <View dx:-96.0 dy:-346.2 dw:1613.1 dh:1522.33>{
         flow: Right
         width: Fill,
         height: Fill
