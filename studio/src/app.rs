@@ -164,7 +164,6 @@ impl MatchEvent for App{
                                     Affinity::Before,
                                     NewGroup::No 
                                 );
-                                println!("{:?}", ef.undo_group);
                                 session.paste_grouped(ef.replace.into(), ef.undo_group);
                             }
                             self.data.file_system.handle_sessions();

@@ -815,6 +815,9 @@ impl CxOsDrawShader {
 fn get_gl_string(key: gl_sys::types::GLenum) -> String {
     unsafe {
         let string_ptr = gl_sys::GetString(key) as *const c_char;
+        if string_ptr == ptr::null(){
+            return String::new()
+        }
         CStr::from_ptr(string_ptr).to_string_lossy().into_owned()
     }
 }
