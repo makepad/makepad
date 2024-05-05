@@ -193,7 +193,6 @@ impl Cx {
                             height: new_swapchain.alloc_height as usize,
                         };
                         let texture = Texture::new_with_format(self, format);
-                        println!("UPDATE FROM SHARED HANDLE {:?}", handle);
                         self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);
                         texture
                     });
