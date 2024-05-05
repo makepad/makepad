@@ -1,7 +1,8 @@
 # from: https://github.com/rp-rs/rp2040-project-template
 
 # install thumbv6m toolchain for rp2040 compilation
-rustup target install thumbv6m-none-eabi
+//rustup target install thumbv6m-none-eabi
+rustup target add thumbv6m-none-eabi --toolchain nightly
 # install custom linker to generate embedded binaries
 cargo install flip-link
 
