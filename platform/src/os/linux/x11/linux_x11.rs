@@ -37,6 +37,9 @@ impl Cx {
 
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
         let is_stdin_loop = std::env::args().find(|v| v=="--stdin-loop").is_some();
+        if is_stdin_loop {
+            cx.borrow_mut().in_makepad_studio = true;
+        }
         init_xlib_app_global(Box::new({
             let cx = cx.clone();
             move | xlib_app,
@@ -58,6 +61,7 @@ impl Cx {
         });
         
         if is_stdin_loop {
+            cx.borrow_mut().in_makepad_studio = true;
             return cx.borrow_mut().stdin_event_loop();
         }
         
@@ -207,7 +211,7 @@ impl Cx {
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing() || paint_dirty {
             EventFlow::Poll
         } else {
             EventFlow::Wait

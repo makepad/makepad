@@ -433,7 +433,7 @@ pub trait MsgSender: Send {
                 cmd_id,
                 message:BuildClientMessage::LogItem(LogItem::Location(LogItemLocation {
                 level,
-                file_name,
+                file_name: file_name.replace("\\","/"),
                 start,
                 end,
                 message
