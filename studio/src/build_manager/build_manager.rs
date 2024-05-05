@@ -552,7 +552,6 @@ impl BuildManager {
                                 let _ = studio_sender.send((*id,msg));
                             }
                         }
-                        println!("GOT BINARY MESSAGE");
                         // new incombing message from client
                     }
                     HttpServerRequest::Get {headers, response_sender} => {
