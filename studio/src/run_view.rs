@@ -263,13 +263,10 @@ impl RunView {
                     // FIMXE(eddyb) this could be platform-agnostic if the serializer
                     // could drive the out-of-band UNIX domain socket messaging itself.
                     #[cfg(target_os = "linux")] {
-                        println!("SENDING SWAPCHAIN");
-                        let r = shared_swapchain.images_map(|pi| {
+                        shared_swapchain.images_map(|pi| {
                             pi.send_fds_to_aux_chan(v.aux_chan_host_endpoint.as_ref().unwrap())
                                 .map(|pi| pi.image)
-                        });
-                        println!("SENDING SWAPCHAIN DONE");
-                        r
+                        })
                     }
                     #[cfg(not(target_os = "linux"))] {
                         shared_swapchain.images_map(|pi| std::io::Result::Ok(pi.image))
