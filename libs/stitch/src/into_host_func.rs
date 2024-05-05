@@ -31,16 +31,21 @@ macro_rules! for_each_tuple {
     };
 }
 
-pub trait Wrap<T, U> {
+/// A trait for closures that can be wrapped by host functions.
+pub trait IntoHostFunc<T, U> {
+    // The parameters of the host function.
     type Params: HostValList;
+    
+    // The results of the host function.
     type Results: HostValList;
 
-    fn wrap(self) -> (FuncType, HostFuncTrampoline);
+    /// Converts this closure into a [`FuncType`] and a [`HostFuncTrampoline`].
+    fn into_host_func(self) -> (FuncType, HostFuncTrampoline);
 }
 
 macro_rules! impl_wrap {
     ($($Ti:ident,)* $N:literal) => {
-        impl<F, $($Ti,)* U> Wrap<($($Ti,)*), U> for F
+        impl<F, $($Ti,)* U> IntoHostFunc<($($Ti,)*), U> for F
         where
             F: Fn($($Ti,)*) -> U + Send + Sync + 'static,
             $($Ti: HostVal,)*
@@ -50,12 +55,12 @@ macro_rules! impl_wrap {
             type Results = <U as HostResult>::Results;
 
             #[allow(non_snake_case)]
-            fn wrap(self) -> (FuncType, HostFuncTrampoline) {
-                Wrap::wrap(move |_store: &mut Store, $($Ti,)*| self($($Ti,)*))
+            fn into_host_func(self) -> (FuncType, HostFuncTrampoline) {
+                IntoHostFunc::into_host_func(move |_store: &mut Store, $($Ti,)*| self($($Ti,)*))
             }
         }
 
-        impl<F, $($Ti,)* U> Wrap<(&mut Store, $($Ti,)*), U> for F
+        impl<F, $($Ti,)* U> IntoHostFunc<(&mut Store, $($Ti,)*), U> for F
         where
             F: Fn(&mut Store, $($Ti,)*) -> U + Send + Sync + 'static,
             $($Ti: HostVal,)*
@@ -65,24 +70,24 @@ macro_rules! impl_wrap {
             type Results = <U as HostResult>::Results;
 
             #[allow(non_snake_case)]
-            fn wrap(self) -> (FuncType, HostFuncTrampoline) {
+            fn into_host_func(self) -> (FuncType, HostFuncTrampoline) {
                 let type_ = FuncType::new(
                     Self::Params::types(),
                     Self::Results::types(),
                 );
-                let callee_stack_slot_count = type_.callee_stack_slot_count();
+                let call_frame_size = type_.call_frame_size();
                 (
                     type_,
                     HostFuncTrampoline::new(move |store, mut stack| -> Result<StackGuard, Error> {
                         let ($($Ti,)*) = unsafe {
-                            let mut ptr = stack.ptr().offset(-(callee_stack_slot_count as isize));
+                            let mut ptr = stack.ptr().offset(-(call_frame_size as isize));
                             Self::Params::read_from_stack(&mut ptr, store.id())
                         };
                         drop(stack);
                         let results = self(store, $($Ti,)*).into_result()?;
                         let mut stack = Stack::lock();
                         unsafe {
-                            let mut ptr = stack.ptr().offset(-(callee_stack_slot_count as isize));
+                            let mut ptr = stack.ptr().offset(-(call_frame_size as isize));
                             results.write_to_stack(&mut ptr, store.id())
                         }
                         Ok(stack)

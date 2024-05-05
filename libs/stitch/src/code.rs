@@ -1,9 +1,57 @@
-use crate::{
-    decode::{Decode, DecodeError, Decoder},
-    exec::{self, ThreadedInstr},
-    ref_::RefType,
-    val::ValType,
+use {
+    crate::{
+        aliasable_box::AliasableBox,
+        decode::{Decode, DecodeError, Decoder},
+        exec::{self, ThreadedInstr},
+        ref_::RefType,
+        val::ValType,
+    },
+    std::sync::Arc,
 };
+
+#[derive(Debug)]
+pub(crate) enum Code {
+    Uncompiled(UncompiledCode),
+    Compiling,
+    Compiled(CompiledCode),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UncompiledCode {
+    pub(crate) locals: Box<[ValType]>,
+    pub(crate) expr: Arc<[u8]>,
+}
+
+impl Decode for UncompiledCode {
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
+        use std::iter;
+
+        let mut code_decoder = decoder.decode_decoder()?;
+        Ok(Self {
+            locals: {
+                let mut locals = Vec::new();
+                for _ in 0u32..code_decoder.decode()? {
+                    let count = code_decoder.decode()?;
+                    if count > usize::try_from(u32::MAX).unwrap() - locals.len() {
+                        return Err(DecodeError::new("too many locals"));
+                    }
+                    locals.extend(iter::repeat(code_decoder.decode::<ValType>()?).take(count));
+                }
+                locals.into()
+            },
+            expr: code_decoder.read_bytes_until_end().into(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompiledCode {
+    pub(crate) max_stack_height: usize,
+    pub(crate) local_count: usize,
+    pub(crate) code: AliasableBox<[CodeSlot]>,
+}
+
+pub(crate) type CodeSlot = usize;
 
 pub(crate) trait InstrVisitor {
     type Error;

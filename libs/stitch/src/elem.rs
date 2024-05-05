@@ -6,7 +6,7 @@ use crate::{
     store::{Handle, Store, StoreId, UnguardedHandle},
 };
 
-/// A WebAssembly element segment.
+/// A Wasm element segment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub(crate) struct Elem(pub(crate) Handle<ElemEntity>);

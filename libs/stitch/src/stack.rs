@@ -1,5 +1,5 @@
 use {
-    crate::aliased_box::AliasableBox,
+    crate::aliasable_box::AliasableBox,
     std::{
         cell::Cell,
         mem::ManuallyDrop,

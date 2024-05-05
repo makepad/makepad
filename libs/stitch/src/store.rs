@@ -1,6 +1,6 @@
 use {
     crate::{
-        aliased_box::AliasableBox,
+        aliasable_box::AliasableBox,
         data::DataEntity,
         elem::ElemEntity,
         engine::Engine,
@@ -18,7 +18,7 @@ use {
     },
 };
 
-/// A WebAssembly store.
+/// A Wasm store.
 #[derive(Debug)]
 pub struct Store {
     engine: Engine,
