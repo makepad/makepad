@@ -4,11 +4,11 @@ use core::ops::BitOr;
 use rp_pico::hal as hal;
 
 use cortex_m::delay::Delay;
-use embedded_hal::digital::OutputPin;
-//use embedded_hal::prelude::_embedded_hal_blocking_spi_Write;
-use hal::gpio::{PinId};
-use hal::spi::{Enabled, SpiDevice, ValidSpiPinout};
-//use hal::typelevel::NoneT;
+use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::prelude::_embedded_hal_blocking_spi_Write;
+use hal::gpio::{Pin, PinId, PushPullOutput};
+use hal::spi::{Enabled, SpiDevice};
+use hal::typelevel::NoneT;
 use crate::font::Font;
 
 #[repr(u8)]
@@ -85,14 +85,13 @@ fn abs(x: i16) -> i16 {
 }
 
 /// OptionalOutputPin is used to implement some optional output pins.
-/*
 pub trait OptionalOutputPin {
     /// Set the output pin to the specified value.
     fn set(&mut self, value: bool);
     /// Return whether the output pin is none.
     fn is_none(&self) -> bool;
-}*/
-/*
+}
+
 impl<L: PinId> OptionalOutputPin for Pin<L, PushPullOutput> {
     fn set(&mut self, value: bool) {
         if value {
@@ -105,34 +104,33 @@ impl<L: PinId> OptionalOutputPin for Pin<L, PushPullOutput> {
     fn is_none(&self) -> bool {
         false
     }
-}*/
-/*
+}
+
 impl OptionalOutputPin for NoneT {
     fn set(&mut self, _: bool) {}
     fn is_none(&self) -> bool {
         true
     }
-}*/
+}
 
 /// The ST7789 display driver.
 pub struct ST7789Display<
-    K: OutputPin,
-    L: OutputPin,
-    M: OutputPin,
-    N: OutputPin,
-    S: SpiDevice,
-    T: ValidSpiPinout<S>
+    K: OptionalOutputPin,
+    L: PinId,
+    M: OptionalOutputPin,
+    N: OptionalOutputPin,
+    S: SpiDevice
 > {
     /// Reset
     reset_pin: K,
     /// Data/Command
-    dc_pin: L,
+    dc_pin: Pin<L, PushPullOutput>,
     /// Chip select
     cs_pin: M,
     /// Backlight
     bl_pin: N,
     /// SPI
-    spi: hal::spi::Spi<Enabled, S, T, 8>,
+    spi: hal::spi::Spi<Enabled, S, 8>,
     /// the width of the display in pixels
     width: u16,
     /// the height of the display in pixels
@@ -144,19 +142,19 @@ pub struct ST7789Display<
 const BUFFER_SIZE: u16 = 512;
 
 #[allow(dead_code)]
-impl<K: OutputPin, L: OutputPin, M: OutputPin, N: OutputPin, S: SpiDevice, T: ValidSpiPinout<S>> ST7789Display<K, L, M, N, S, T> {
+impl<K: OptionalOutputPin, L: PinId, M: OptionalOutputPin, N: OptionalOutputPin, S: SpiDevice> ST7789Display<K, L, M, N, S> {
     /// Creates a new display driver.
     pub fn new(
         // Reset
         reset_pin: K,
         // Data/Command
-        dc_pin: L,
+        dc_pin: Pin<L, PushPullOutput>,
         // Chip select
         cs_pin: M,
         // Backlight
         bl_pin: N,
         // SPI
-        spi: hal::spi::Spi<Enabled, S, T, 8>,
+        spi: hal::spi::Spi<Enabled, S, 8>,
         width: u16,
         height: u16,
         rotation: Rotation,
@@ -188,7 +186,7 @@ impl<K: OutputPin, L: OutputPin, M: OutputPin, N: OutputPin, S: SpiDevice, T: Va
         delay.delay_ms(10);
         i.send_command(Command::Noron);
         delay.delay_ms(10);
-        i.bl_pin.set_state(true.into());
+        i.bl_pin.set(true);
         i.fill(0);
         i.send_command(Command::Dispon);
         delay.delay_ms(500);
@@ -199,30 +197,33 @@ impl<K: OutputPin, L: OutputPin, M: OutputPin, N: OutputPin, S: SpiDevice, T: Va
     /// It will be called automatically when created.
     /// It is usually called before `soft_reset`.
     pub fn hard_reset(&mut self, delay: &mut Delay) {
-        self.cs_pin.set_state(false.into());
-        self.reset_pin.set_state(true.into());
+        if self.reset_pin.is_none() {
+            return;
+        }
+        self.cs_pin.set(false);
+        self.reset_pin.set(true);
         delay.delay_ms(50);
-        self.reset_pin.set_state(false.into());
+        self.reset_pin.set(false);
         delay.delay_ms(50);
-        self.reset_pin.set_state(true.into());
+        self.reset_pin.set(true);
         delay.delay_ms(150);
-        self.cs_pin.set_state(true.into());
+        self.cs_pin.set(true);
     }
 
     /// Write Spi command to the display.
     pub fn send_command(&mut self, command: Command) {
-        self.cs_pin.set_state(false.into());
+        self.cs_pin.set(false);
         self.dc_pin.set_low().unwrap();
         self.spi.write(&[command as u8]).unwrap();
-        self.cs_pin.set_state(true.into());
+        self.cs_pin.set(true);
     }
 
     /// Write Spi data to the display.
     pub fn send_data(&mut self, data: &[u8]) {
-        self.cs_pin.set_state(false.into());
+        self.cs_pin.set(false);
         self.dc_pin.set_high().unwrap();
         self.spi.write(data).unwrap();
-        self.cs_pin.set_state(true.into());
+        self.cs_pin.set(true);
     }
 
     /// Reset by sending a software reset command.

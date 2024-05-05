@@ -233,13 +233,15 @@ fn main() -> ! {
     display.draw_color_buf_raw(buf, 0, 0, 135, 240);
     delay.delay_ms(500);
 
+    let mut rbuf = [0u8;4096];
+    
     loop {
         showlog(buf, loglines);
-       
-        let mut rbuf = [0 as u8];
-        let _= uart.read_full_blocking(&mut rbuf);
-        loglines = add_char(&mut loglines, rbuf[0] as char, &mut line, &mut cur);        
-        display.draw_color_buf_raw(buf, 0, 0, 135, 240);
-        delay.delay_ms(0);
+        if let Ok(bytes) = uart.read_raw(&mut rbuf){
+            for i in 0..bytes{
+                loglines = add_char(&mut loglines, rbuf[i] as char, &mut line, &mut cur);
+            }
+            display.draw_color_buf_raw(buf, 0, 0, 135, 240);
+        }
     }
 }
