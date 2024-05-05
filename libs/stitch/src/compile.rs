@@ -96,7 +96,7 @@ impl Compiler {
             code::decode_instr(&mut decoder, &mut self.label_idxs, &mut compile).unwrap();
         }
         for (result_idx, result_type) in type_.clone().results().iter().copied().enumerate().rev() {
-            compile.emit(copy_stack(result_type));
+            compile.emit(select_copy_stack(result_type));
             compile.emit_stack_offset(compile.temp_stack_idx(result_idx));
             compile.emit_stack_offset(compile.param_result_stack_idx(result_idx));
         }
@@ -152,9 +152,9 @@ impl<'a> Compile<'a> {
 
     /// Constants
 
-    fn copy_const_to_opd(&mut self, opd_depth: usize) {
+    fn preserve_const(&mut self, opd_depth: usize) {
         let opd_idx = self.opds.len() - 1 - opd_depth;
-        self.emit(copy_imm_to_stack(self.opds[opd_idx].type_));
+        self.emit(select_copy_imm_to_stack(self.opds[opd_idx].type_));
         self.emit_val(self.opds[opd_idx].val.unwrap());
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
         self.opd_mut(opd_depth).val = None;
@@ -162,7 +162,7 @@ impl<'a> Compile<'a> {
 
     /// Locals
 
-    fn push_opd_onto_local(&mut self, local_idx: usize) {
+    fn push_local_opd(&mut self, local_idx: usize) {
         let opd_idx = self.opds.len() - 1;
         debug_assert!(self.opds[opd_idx].local_idx.is_none());
         self.opds[opd_idx].local_idx = Some(local_idx);
@@ -173,7 +173,7 @@ impl<'a> Compile<'a> {
         self.locals[local_idx].first_opd_idx = Some(opd_idx);
     }
 
-    fn pop_opd_from_local(&mut self, opd_idx: usize) {
+    fn pop_local_opd(&mut self, opd_idx: usize) {
         let local_idx = self.opds[opd_idx].local_idx.unwrap();
         if let Some(prev_opd_idx) = self.opds[opd_idx].prev_opd_idx {
             self.opds[prev_opd_idx].next_opd_idx = self.opds[opd_idx].next_opd_idx;
@@ -188,23 +188,23 @@ impl<'a> Compile<'a> {
         self.opds[opd_idx].next_opd_idx = None;
     }
 
-    fn copy_local_to_opd(&mut self, opd_idx: usize) {
+    fn preserve_local_opd(&mut self, opd_idx: usize) {
         let local_idx = self.opds[opd_idx].local_idx.unwrap();
-        self.emit(copy_stack(self.locals[local_idx].type_));
+        self.emit(select_copy_stack(self.locals[local_idx].type_));
         self.emit_stack_offset(self.local_stack_idx(local_idx));
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
-        self.pop_opd_from_local(opd_idx);
+        self.pop_local_opd(opd_idx);
     }
 
-    fn copy_local_to_all_opds(&mut self, local_idx: usize) {
+    fn preserve_all_local_opds(&mut self, local_idx: usize) {
         while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
-            self.copy_local_to_opd(opd_idx);
+            self.preserve_local_opd(opd_idx);
             self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
             self.opds[opd_idx].local_idx = None;
         }
     }
 
-    /// Blocks
+    // Blocks
 
     /// Returns a reference to the block with the given index.
     fn block(&self, idx: usize) -> &Block {
@@ -226,13 +226,13 @@ impl<'a> Compile<'a> {
     }
 
     /// Pushes the hole with the given index onto the block with the given index.
-    fn push_hole_onto_block(&mut self, block_idx: usize, hole_idx: usize) {
+    fn push_hole(&mut self, block_idx: usize, hole_idx: usize) {
         self.code[hole_idx] = self.block(block_idx).first_hole_idx.unwrap_or(usize::MAX);
         self.block_mut(block_idx).first_hole_idx = Some(hole_idx);
     }
 
     /// Pops a hole from the block with the given index.
-    fn pop_hole_from_block(&mut self, block_idx: usize) -> Option<usize> {
+    fn pop_hole(&mut self, block_idx: usize) -> Option<usize> {
         if let Some(hole_idx) = self.block(block_idx).first_hole_idx {
             self.block_mut(block_idx).first_hole_idx = if self.code[hole_idx] == usize::MAX {
                 None
@@ -271,30 +271,38 @@ impl<'a> Compile<'a> {
 
     // Operands
 
+    /// Returns a reference to the [`Opd`] at the given depth.
     fn opd(&self, depth: usize) -> &Opd {
         &self.opds[self.opds.len() - 1 - depth]
     }
 
+    /// Returns a mutable reference to the [`Opd`] at the given depth.
     fn opd_mut(&mut self, depth: usize) -> &mut Opd {
         let len = self.opds.len();
         &mut self.opds[len - 1 - depth]
     }
 
+    /// Ensures that the operand at the given depth is not a constant operand, by preserving the
+    /// constant on the stack if necessary.
     fn ensure_opd_not_const(&mut self, opd_depth: usize) {
         if self.opd(opd_depth).is_const() {
-            self.copy_const_to_opd(opd_depth);
+            self.preserve_const(opd_depth);
         }
     }
 
-    fn ensure_opd_not_in_local(&mut self, opd_depth: usize) {
-        if self.opd(opd_depth).is_in_local() {
-            self.copy_local_to_opd(self.opds.len() - 1 - opd_depth);
+    /// Ensures that the operand at the given depth is not a local operand, by preserving the local
+    /// on the stack if necessary.
+    fn ensure_opd_not_local(&mut self, opd_depth: usize) {
+        if self.opd(opd_depth).is_local() {
+            self.preserve_local_opd(self.opds.len() - 1 - opd_depth);
         }
     }
 
-    fn ensure_opd_not_in_reg(&mut self, opd_depth: usize) {
-        if self.opd(opd_depth).is_in_reg {
-            self.copy_reg_to_opd(self.opd(opd_depth).type_.reg_idx());
+    // Ensures that the operand at the given depth is not a register operand, by preserving the
+    // register on the stack if necessary.
+    fn ensure_opd_not_reg(&mut self, opd_depth: usize) {
+        if self.opd(opd_depth).is_reg {
+            self.preserve_reg(self.opd(opd_depth).type_.reg_idx());
         }
     }
 
@@ -306,7 +314,7 @@ impl<'a> Compile<'a> {
             local_idx: None,
             prev_opd_idx: None,
             next_opd_idx: None,
-            is_in_reg: false,
+            is_reg: false,
         });
         let stack_height = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
         self.max_stack_height = self.max_stack_height.max(stack_height);
@@ -324,7 +332,7 @@ impl<'a> Compile<'a> {
 
     /// Pops an operand from the stack.
     fn pop_opd(&mut self) -> ValType {
-        if self.opd(0).is_in_reg {
+        if self.opd(0).is_reg {
             self.dealloc_reg(self.opd(0).type_.reg_idx());
         }
         let opd_idx = self.opds.len() - 1;
@@ -372,40 +380,40 @@ impl<'a> Compile<'a> {
 
     /// Registers
 
-    /// Returns `true` if the register with the given index is used.
-    fn is_reg_used(&self, reg_idx: usize) -> bool {
+    /// Returns `true` if the register with the given index is occupied.
+    fn is_reg_occupied(&self, reg_idx: usize) -> bool {
         self.regs[reg_idx].is_some()
     }
 
     /// Allocates a register to the top operand.
     fn alloc_reg(&mut self) {
-        debug_assert!(!self.opd(0).is_in_reg);
+        debug_assert!(!self.opd(0).is_reg);
         let reg_idx = self.opd(0).type_.reg_idx();
-        debug_assert!(!self.is_reg_used(reg_idx));
+        debug_assert!(!self.is_reg_occupied(reg_idx));
         let opd_idx = self.opds.len() - 1;
-        self.opds[opd_idx].is_in_reg = true;
+        self.opds[opd_idx].is_reg = true;
         self.regs[reg_idx] = Some(opd_idx);
     }
 
     /// Deallocates the register with the given index.
     fn dealloc_reg(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
-        self.opds[opd_idx].is_in_reg = false;
+        self.opds[opd_idx].is_reg = false;
         self.regs[reg_idx] = None;
     }
 
-    fn copy_reg_to_opd(&mut self, reg_idx: usize) {
+    fn preserve_reg(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
         let opd_type = self.opds[opd_idx].type_;
-        self.emit(copy_reg_to_stack(opd_type));
+        self.emit(select_copy_reg_to_stack(opd_type));
         self.emit_stack_offset(self.temp_stack_idx(opd_idx));
         self.dealloc_reg(reg_idx);
     }
 
-    fn copy_all_regs_to_opd(&mut self) {
+    fn preserve_all_regs(&mut self) {
         for reg_idx in 0..self.regs.len() {
-            if self.is_reg_used(reg_idx) {
-                self.copy_reg_to_opd(reg_idx);
+            if self.is_reg_occupied(reg_idx) {
+                self.preserve_reg(reg_idx);
             }
         }
     }
@@ -419,7 +427,7 @@ impl<'a> Compile<'a> {
             .enumerate()
             .rev()
         {
-            self.emit(copy_stack(label_type));
+            self.emit(select_copy_stack(label_type));
             self.emit_stack_offset(self.opd_stack_idx(0));
             self.pop_opd();
             self.emit_stack_offset(
@@ -468,7 +476,7 @@ impl<'a> Compile<'a> {
         match self.block(block_idx).kind {
             BlockKind::Block => {
                 let hole_idx = self.emit_hole();
-                self.push_hole_onto_block(block_idx, hole_idx);
+                self.push_hole(block_idx, hole_idx);
             }
             BlockKind::Loop => {
                 self.emit_code_offset(self.block(block_idx).first_code_idx);
@@ -512,8 +520,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
                 self.ensure_opd_not_const(opd_depth);
-                self.ensure_opd_not_in_local(opd_depth);
-                self.ensure_opd_not_in_reg(opd_depth);
+                self.ensure_opd_not_local(opd_depth);
+                self.ensure_opd_not_reg(opd_depth);
             }
             for _ in 0..type_.params().len() {
                 self.pop_opd();
@@ -528,8 +536,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
                 self.ensure_opd_not_const(opd_depth);
-                self.ensure_opd_not_in_local(opd_depth);
-                self.ensure_opd_not_in_reg(opd_depth);
+                self.ensure_opd_not_local(opd_depth);
+                self.ensure_opd_not_reg(opd_depth);
             }
             for _ in 0..type_.params().len() {
                 self.pop_opd();
@@ -545,10 +553,10 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.ensure_opd_not_const(0);
             for opd_depth in 1..type_.params().len() + 1 {
                 self.ensure_opd_not_const(opd_depth);
-                self.ensure_opd_not_in_local(opd_depth);
-                self.ensure_opd_not_in_reg(opd_depth);
+                self.ensure_opd_not_local(opd_depth);
+                self.ensure_opd_not_reg(opd_depth);
             }
-            self.emit(br_if_z(self.opd(0).kind()));
+            self.emit(select_br_if_z(self.opd(0).kind()));
             self.pop_opd_and_emit();
             let else_hole_idx = self.emit_hole();
             for _ in 0..type_.params().len() {
@@ -567,12 +575,12 @@ impl<'a> InstrVisitor for Compile<'a> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..self.block(0).type_.results().len() {
                 self.ensure_opd_not_const(opd_depth);
-                self.ensure_opd_not_in_local(opd_depth);
-                self.ensure_opd_not_in_reg(opd_depth);
+                self.ensure_opd_not_local(opd_depth);
+                self.ensure_opd_not_reg(opd_depth);
             }
             self.emit(exec::br as ThreadedInstr);
             let hole_idx = self.emit_hole();
-            self.push_hole_onto_block(0, hole_idx);
+            self.push_hole(0, hole_idx);
         }
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
@@ -587,14 +595,14 @@ impl<'a> InstrVisitor for Compile<'a> {
         if !self.block(0).is_unreachable {
             for opd_depth in 0..self.block(0).type_.results().len() {
                 self.ensure_opd_not_const(opd_depth);
-                self.ensure_opd_not_in_local(opd_depth);
-                self.ensure_opd_not_in_reg(opd_depth);
+                self.ensure_opd_not_local(opd_depth);
+                self.ensure_opd_not_reg(opd_depth);
             }
         }
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
         }
-        while let Some(hole_idx) = self.pop_hole_from_block(0) {
+        while let Some(hole_idx) = self.pop_hole(0) {
             self.patch_hole(hole_idx);
         }
         let block = self.pop_block();
@@ -611,8 +619,8 @@ impl<'a> InstrVisitor for Compile<'a> {
         let label_idx = label_idx as usize;
         for opd_depth in 0..self.block(label_idx).label_types().len() {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_local(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_local(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
         self.resolve_label_vals(label_idx);
         self.emit(exec::br as ThreadedInstr);
@@ -629,15 +637,15 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.ensure_opd_not_const(0);
         for opd_depth in 1..self.block(label_idx).label_types().len() + 1 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_local(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_local(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
         if self.block(label_idx).label_types().is_empty() {
-            self.emit(br_if_nz(self.opd(0).kind()));
+            self.emit(select_br_if_nz(self.opd(0).kind()));
             self.pop_opd_and_emit();
             self.emit_label(label_idx);
         } else {
-            self.emit(br_if_z(self.opd(0).kind()));
+            self.emit(select_br_if_z(self.opd(0).kind()));
             self.pop_opd_and_emit();
             let hole_idx = self.emit_hole();
             self.resolve_label_vals(label_idx);
@@ -663,11 +671,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.ensure_opd_not_const(0);
         for opd_depth in 1..self.block(default_label_idx).label_types().len() + 1 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_local(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_local(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
         if self.block(default_label_idx).label_types().is_empty() {
-            self.emit(br_table(self.opd(0).kind()));
+            self.emit(select_br_table(self.opd(0).kind()));
             self.pop_opd_and_emit();
             self.emit(label_idxs.len() as u32);
             for label_idx in label_idxs.iter().copied() {
@@ -679,7 +687,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
             self.emit_label(default_label_idx);
         } else {
-            self.emit(br_table(self.opd(0).kind()));
+            self.emit(select_br_table(self.opd(0).kind()));
             self.pop_opd_and_emit();
             self.emit(label_idxs.len() as u32);
             let mut hole_idxs = Vec::new();
@@ -721,10 +729,10 @@ impl<'a> InstrVisitor for Compile<'a> {
             .rev()
         {
             self.ensure_opd_not_const(0);
-            self.emit(if self.opd(0).is_in_reg {
-                copy_reg_to_stack(result_type)
+            self.emit(if self.opd(0).is_reg {
+                select_copy_reg_to_stack(result_type)
             } else {
-                copy_stack(result_type)
+                select_copy_stack(result_type)
             });
             self.pop_opd_and_emit();
             self.emit_stack_offset(self.param_result_stack_idx(result_idx));
@@ -742,9 +750,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         let type_ = func.type_(&self.store).clone();
         for opd_depth in 0..type_.params().len() {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_local(opd_depth);
+            self.ensure_opd_not_local(opd_depth);
         }
-        self.copy_all_regs_to_opd();
+        self.preserve_all_regs();
         self.emit(match func.0.as_ref(&self.store) {
             FuncEntity::Wasm(_) => exec::compile as ThreadedInstr,
             FuncEntity::Host(_) => exec::call_host as ThreadedInstr,
@@ -780,9 +788,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.ensure_opd_not_const(0);
         for opd_depth in 1..type_.params().len() + 1 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_local(opd_depth);
+            self.ensure_opd_not_local(opd_depth);
         }
-        self.copy_all_regs_to_opd();
+        self.preserve_all_regs();
         self.emit(exec::call_indirect as ThreadedInstr);
         self.emit_stack_offset(self.opd_stack_idx(0));
         self.pop_opd();
@@ -811,7 +819,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.emit(ref_null(type_));
+        self.emit(select_ref_null(type_));
         match type_ {
             RefType::FuncRef => self.emit(FuncRef::null().to_unguarded(self.store.id())),
             RefType::ExternRef => self.emit(ExternRef::null().to_unguarded(self.store.id())),
@@ -825,7 +833,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             return Ok(());
         }
         self.ensure_opd_not_const(0);
-        self.emit(ref_is_null(
+        self.emit(select_ref_is_null(
             self.opd(0).type_.to_ref().unwrap(),
             self.opd(0).kind(),
         ));
@@ -850,6 +858,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     // Parametric instructions
+
     fn visit_drop(&mut self) -> Result<(), DecodeError> {
         if self.block(0).is_unreachable {
             return Ok(());
@@ -870,14 +879,14 @@ impl<'a> InstrVisitor for Compile<'a> {
         // the output register, unless one of its inputs is in the output register. Otherwise, the
         // operation will overwrite the output register while it's already used.
         let output_reg_idx = type_.reg_idx();
-        if self.is_reg_used(output_reg_idx)
-            && !self.opd(2).is_in_given_reg(output_reg_idx)
-            && !self.opd(1).is_in_given_reg(output_reg_idx)
-            && !self.opd(0).is_in_given_reg(output_reg_idx)
+        if self.is_reg_occupied(output_reg_idx)
+            && !self.opd(2).occupies_reg(output_reg_idx)
+            && !self.opd(1).occupies_reg(output_reg_idx)
+            && !self.opd(0).occupies_reg(output_reg_idx)
         {
-            self.copy_reg_to_opd(output_reg_idx);
+            self.preserve_reg(output_reg_idx);
         }
-        self.emit(select(
+        self.emit(select_select(
             type_,
             self.opd(2).kind(),
             self.opd(1).kind(),
@@ -891,418 +900,799 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     // Variable instructions
+
     fn visit_local_get(&mut self, local_idx: u32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
         let local_idx = local_idx as usize;
         self.push_opd(self.locals[local_idx].type_);
-        self.push_opd_onto_local(local_idx);
+        self.push_local_opd(local_idx);
         Ok(())
     }
 
     fn visit_local_set(&mut self, local_idx: u32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        let local_idx = local_idx as usize;
-        let local_type = self.locals[local_idx].type_;
-        self.copy_local_to_all_opds(local_idx);
-        self.emit(match self.opd(0).kind() {
-            OpdKind::Stack => copy_stack(local_type),
-            OpdKind::Reg => copy_reg_to_stack(local_type),
-            OpdKind::Imm => copy_imm_to_stack(local_type),
-        });
-        self.pop_opd_and_emit();
-        self.emit_stack_offset(self.local_stack_idx(local_idx));
+
+        // We compile local.set by delegating to the code for compiling local.tee. This works
+        // because local.set is identical to local.tee, except that it pops its input from the
+        // stack.
+        self.visit_local_tee(local_idx)?;
+
+        // Pop the input from the stack.
+        self.pop_opd();
+        
         Ok(())
     }
 
     fn visit_local_tee(&mut self, local_idx: u32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
         let local_idx = local_idx as usize;
+
+        // Obtain the type of the local.
         let local_type = self.locals[local_idx].type_;
-        self.ensure_opd_not_const(0);
-        self.copy_local_to_all_opds(local_idx);
-        self.emit(if self.opd(0).is_in_reg {
-            copy_reg_to_stack(local_type)
-        } else {
-            copy_stack(local_type)
-        });
-        if !self.opd(0).is_in_reg {
-            self.emit_stack_offset(self.opd_stack_idx(0));
-        }
+
+        self.preserve_all_local_opds(local_idx);
+
+        // Emit the instruction.
+        self.emit(selecy_copy_opd_to_stack(local_type, self.opd(0).kind()));
+
+        // Emit the input.
+        self.emit_opd(0);
+
+        // Emit the stack offset of the local.
         self.emit_stack_offset(self.local_stack_idx(local_idx));
+
         Ok(())
     }
 
+    /// Compiles a global.get instruction.
     fn visit_global_get(&mut self, global_idx: u32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Global`] for this instruction.
         let global = self.instance.global(global_idx).unwrap();
+
+        // Obtain the type of the [`Global`].
         let val_type = global.type_(&self.store).val;
-        self.emit(global_get(val_type));
+
+        // Emit the instruction.
+        self.emit(select_global_get(val_type));
+
+        // Emit an unguarded handle to the [`Global`].
         self.emit(global.to_unguarded(self.store.id()));
-        self.push_opd_and_emit_stack_offset(val_type);
+
+        // Push the output onto the stack, and emit its stack offset.
+        self.push_opd(val_type);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
+    /// Compiles a global.set instruction.
     fn visit_global_set(&mut self, global_idx: u32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Global`] for this instruction.
         let global = self.instance.global(global_idx).unwrap();
+
+        // Obtain the type of the [`Global`].
         let val_type = global.type_(&self.store).val;
-        self.ensure_opd_not_const(0);
-        self.emit(global_set(val_type, self.opd(0).kind()));
-        self.pop_opd_and_emit();
+        
+        // Emit the instruction.
+        self.emit(select_global_set(val_type, self.opd(0).kind()));
+
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Emit an unguarded handle to the [`Global`].
         self.emit(global.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
     // Table instructions
+
+    /// Compiles a table.get instruction.
     fn visit_table_get(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Table`] for this instruction.
         let table = self.instance.table(table_idx).unwrap();
+
+        // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
-        self.ensure_opd_not_const(0);
-        self.emit(table_get(elem_type, self.opd(0).kind()));
-        self.pop_opd_and_emit();
+
+        // Emit the instruction.
+        self.emit(select_table_get(elem_type, self.opd(0).kind()));
+
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
-        self.push_opd_and_emit_stack_offset(elem_type);
+
+        // Push the output onto the stack, and emit its stack offset.
+        self.push_opd(ValType::I32);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
+    /// Compiles a table.set instruction.
     fn visit_table_set(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Table`] for this instruction.
         let table = self.instance.table(table_idx).unwrap();
+
+        // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
-        for opd_depth in 0..2 {
-            self.ensure_opd_not_const(opd_depth);
+
+        // Emit the instruction.
+        self.emit(select_table_set(
+            elem_type,
+            self.opd(1).kind(),
+            self.opd(0).kind(),
+        ));
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..2 {
+            self.emit_opd(0);
+            self.pop_opd();
         }
-        self.emit(table_set(elem_type, self.opd(1).kind(), self.opd(0).kind()));
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles a table.size instruction.
     fn visit_table_size(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Table`] for this instruction.
         let table = self.instance.table(table_idx).unwrap();
+
+        // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
-        self.emit(table_size(elem_type));
+
+        // Emit the instruction.
+        self.emit(select_table_size(elem_type));
+
+        // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
-        self.push_opd_and_emit_stack_offset(ValType::I32);
+
+        // Push the output onto the stack, and emit its stack offset.
+        self.push_opd(ValType::I32);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
+    /// Compiles a table.grow instruction.
     fn visit_table_grow(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Table`] for this instruction.
         let table = self.instance.table(table_idx).unwrap();
+
+        // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..2 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
-        self.emit(table_grow(elem_type));
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the instruction.
+        self.emit(select_table_grow(elem_type));
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..2 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+        
+        // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
-        self.push_opd_and_emit_stack_offset(ValType::I32);
+
+        // Push the output onto the stack, and emit its stack offset.
+        self.push_opd(ValType::I32);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
     fn visit_table_fill(&mut self, table_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Table`] for this instruction.
         let table = self.instance.table(table_idx).unwrap();
+
+        // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
+
+        // This instruction has only one variant for each type , which reads all its operands from
+        // the stack, so we need to ensure that all operands are neither constants nor stored in a
+        // register.
         for opd_depth in 0..3 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
-        self.emit(table_fill(elem_type));
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the instruction.
+        self.emit(select_table_fill(elem_type));
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+
+        // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles a table.copy instruction.
     fn visit_table_copy(
         &mut self,
         dst_table_idx: u32,
         src_table_idx: u32,
     ) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+        
+        // Obtain the destination and source [`Table`] for this instruction.
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_table = self.instance.table(src_table_idx).unwrap();
+
+        // Obtain the type of the elements in the destination [`Table`].
         let elem_type = dst_table.type_(&self.store).elem;
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
-        self.emit(table_copy(elem_type));
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the instruction.
+        self.emit(select_table_copy(elem_type));
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+        
+        // Emit unguarded handles to the destination and source [`Table`].
         self.emit(dst_table.to_unguarded(self.store.id()));
         self.emit(src_table.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles a table.init instruction.
     fn visit_table_init(
         &mut self,
         dst_table_idx: u32,
         src_elem_idx: u32,
     ) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the destination [`Table`] and source [`Elem`] for this instruction.
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_elem = self.instance.elem(src_elem_idx).unwrap();
+
+        // Obtain the type of the elements in the destination [`Table`].
         let elem_type = dst_table.type_(&self.store).elem;
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
-        self.emit(table_init(elem_type));
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the instruction.
+        self.emit(select_table_init(elem_type));
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+
+        // Emit unguarded handles to the destination [`Table`] and source [`Elem`].
         self.emit(dst_table.0.to_unguarded(self.store.id()));
         self.emit(src_elem.0.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles an elem.drop instruction.
     fn visit_elem_drop(&mut self, elem_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Elem`] for this instruction.
         let elem = self.instance.elem(elem_idx).unwrap();
+
+        // Obtain the type of the elements in the [`Elem`].
         let elem_type = elem.type_(&self.store);
-        self.emit(elem_drop(elem_type));
+
+        // Emit the instruction.
+        self.emit(select_elem_drop(elem_type));
+
+        // Emit an unguarded handle to the [`Elem`].
         self.emit(elem.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
     // Memory instructions
+
+    /// Compiles a load instruction.
     fn visit_load(&mut self, arg: MemArg, info: LoadInfo) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // We compile load instructions by delegating to the code for compiling unary operations.
+        // This works because load instructions are essentially unary operations with an extra
+        // immediate operand.
         self.visit_un_op(info.op)?;
+
+        // Emit the static offset.
         self.emit(arg.offset);
+
         Ok(())
     }
 
+    /// Compiles a store instruction.
     fn visit_store(&mut self, arg: MemArg, info: StoreInfo) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // We compile store instructions by delegating to the code for compiling binary operations.
+        // This works because store instructions are essentially binary operations with an extra
+        // immediate operand.
         self.visit_bin_op(info.op)?;
+
+        // Emit the static offset.
         self.emit(arg.offset);
+
         Ok(())
     }
 
+    /// Compiles a memory.fill instruction.
     fn visit_memory_size(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Mem`] for this instruction.
         let mem = self.instance.mem(0).unwrap();
+
+        // Emit the instruction.
+        //
+        // The cast to [`ThreadedInstr`] is necessary here, because otherwise we would emit a
+        // function item instead of a function pointer.
         self.emit(exec::memory_size as ThreadedInstr);
+
+        // Emit an unguarded handle to the [`Mem`].
         self.emit(mem.to_unguarded(self.store.id()));
-        self.push_opd_and_emit_stack_offset(ValType::I32);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::I32);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
+    /// Compiles a memory.grow instruction.
     fn visit_memory_grow(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Mem`] for this instruction.
         let mem = self.instance.mem(0).unwrap();
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         self.ensure_opd_not_const(0);
-        self.ensure_opd_not_in_reg(0);
+        self.ensure_opd_not_reg(0);
+
+        // Emit the instruction.
+        //
+        // The cast to [`ThreadedInstr`] is necessary here, because otherwise we would emit a
+        // function item instead of a function pointer.
         self.emit(exec::memory_grow as ThreadedInstr);
+
+        // Emit the input and pop it from the stack.
         self.pop_opd_and_emit();
+
+        // Emit an unguarded handle to the memory instance.
         self.emit(mem.to_unguarded(self.store.id()));
-        self.push_opd_and_emit_stack_offset(ValType::I32);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::I32);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
+    /// Compiles a memory.fill instruction.
     fn visit_memory_fill(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Mem`] for this instruction.
         let mem = self.instance.mem(0).unwrap();
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
+
+        // Emit the instruction.
+        //
+        // The cast to [`ThreadedInstr`] is necessary here, because otherwise we would emit a
+        // function item instead of a function pointer.
         self.emit(exec::memory_fill as ThreadedInstr);
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+
+        // Emit an unguarded handle to the [`Mem`].
         self.emit(mem.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles a memory.copy instruction.
     fn visit_memory_copy(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Mem`] for this instruction.
         let mem = self.instance.mem(0).unwrap();
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
+
+        // Emit the instruction.
+        //
+        // The cast to [`ThreadedInstr`] is necessary here, because otherwise we would emit a
+        // function item instead of a function pointer.
         self.emit(exec::memory_copy as ThreadedInstr);
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+
+        // Emit an unguarded handle to the [`Mem`].
         self.emit(mem.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles a memory.init instruction.
     fn visit_memory_init(&mut self, data_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the destination [`Mem`] and source [`Data`] for this instruction.
         let dst_mem = self.instance.mem(0).unwrap();
         let src_data = self.instance.data(data_idx).unwrap();
+
+        // This instruction has only one variant, which reads all its operands from the stack, so we
+        // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
             self.ensure_opd_not_const(opd_depth);
-            self.ensure_opd_not_in_reg(opd_depth);
+            self.ensure_opd_not_reg(opd_depth);
         }
+
+        // Emit the instruction.
+        //
+        // The cast to [`ThreadedInstr`] is necessary here, because otherwise we would emit a
+        // function item instead of a function pointer.
         self.emit(exec::memory_init as ThreadedInstr);
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+
+        // Emit unguarded handles to the destination [`Mem`] and source [`Data`] instance.
         self.emit(dst_mem.to_unguarded(self.store.id()));
         self.emit(src_data.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
+    /// Compiles a data.drop instruction.
     fn visit_data_drop(&mut self, data_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Data`] for this instruction.
         let data = self.instance.data(data_idx).unwrap();
+
+        // Emit the instruction.
         self.emit(exec::data_drop as ThreadedInstr);
+
+        // Emit an unguarded handle to the [`Data`].
         self.emit(data.to_unguarded(self.store.id()));
+
         Ok(())
     }
 
     // Numeric instructions
+    
+    /// Compiles an i32.const instruction.
     fn visit_i32_const(&mut self, val: i32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Push the output onto the stack and set its value.
+        //
+        // Setting its value will mark the operand as a constant.
         self.push_opd(ValType::I32);
         self.opd_mut(0).val = Some(UnguardedVal::I32(val));
         Ok(())
     }
 
+    /// Compiles an i64.const instruction.
     fn visit_i64_const(&mut self, val: i64) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Push the output onto the stack and set its value.
+        //
+        // Setting its value will mark the operand as a constant.
         self.push_opd(ValType::I64);
         self.opd_mut(0).val = Some(UnguardedVal::I64(val));
+
         Ok(())
     }
 
+    /// Compiles an f32.const instruction.
     fn visit_f32_const(&mut self, val: f32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Push the output onto the stack and set its value.
+        //
+        // Setting its value will mark the operand as a constant.
         self.push_opd(ValType::F32);
         self.opd_mut(0).val = Some(UnguardedVal::F32(val));
+
         Ok(())
     }
 
+    /// Compiles a f64.const instruction.
     fn visit_f64_const(&mut self, val: f64) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Push the output onto the stack and set its value.
+        //
+        // Setting its value will mark the operand as a constant.
         self.push_opd(ValType::F64);
         self.opd_mut(0).val = Some(UnguardedVal::F64(val));
+
         Ok(())
     }
 
+    /// Compiles a unary operation.
     fn visit_un_op(&mut self, info: UnOpInfo) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        if self.opd(0).is_const() && info.instr_i == exec::unreachable {
+
+        // Not all unary operation have an _i variant.
+        //
+        // For instance, the following sequence of instructions:
+        //
+        // i32.const 21
+        // i32.neg
+        //
+        // will likely be constant folded by most Wasm compilers, so we expect it to occur very
+        // rarely in real Wasm code. Therefore, we do not implement an i32_neg_i instruction.
+        //
+        // Conversely, the following sequence of instructions:
+        // i32.const 1
+        // i32.load
+        // 
+        // cannot be constant folded, since i32.load has side effects. Therefore, we do implement
+        // an i32_load_i instruction.
+        //
+        // However, sequences like the first one above are still valid Wasm code, so we need to
+        // handle them. In the rare case that the operand is a constant, but the operation does not
+        // have an _i variant, we ensure that the operand is not a constant, so we can use the _s
+        // variant instead (which is always available).
+        if self.opd(0).is_const() && info.instr_i.is_none() {
             self.ensure_opd_not_const(0);
         }
-        // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless one of its inputs is in the output register. Otherwise, the
-        // operation will overwrite the output register while it's already used.
+
+        // Unary operations always write their output to a register, so we need to ensure that the
+        // output register is available for the operation to use.
+        //
+        // If this operation has an output, and the output register is already occupied, then we
+        // need to preserve the output register on the stack. Otherwise, the operation will
+        // overwrite the output register while it's already occupied.
+        //
+        // The only exception is if the input occupies the output register. In that case, the
+        // operation can safely overwrite the output register, since the input will be consumed
+        // by the operation anyway.
         if let Some(output_type) = info.output_type {
             let output_reg_idx = output_type.reg_idx();
-            if self.is_reg_used(output_reg_idx) && !self.opd(0).is_in_given_reg(output_reg_idx) {
-                self.copy_reg_to_opd(output_reg_idx);
+            if self.is_reg_occupied(output_reg_idx) && !self.opd(0).occupies_reg(output_reg_idx) {
+                self.preserve_reg(output_reg_idx);
             }
         }
-        self.emit(match self.opd(0).kind() {
-            OpdKind::Stack => info.instr_s,
-            OpdKind::Reg => info.instr_r,
-            OpdKind::Imm => info.instr_i,
-        });
-        self.pop_opd_and_emit();
+
+        // Emit the instruction.
+        self.emit(select_un_op(info, self.opd(0).kind()));
+
+        // Emit and pop the inputs from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // If the operation has an output, push the output onto the stack, and allocate a register
+        // for it.
         if let Some(output_type) = info.output_type {
-            self.push_opd_and_alloc_reg(output_type);
+            self.push_opd(output_type);
+            self.alloc_reg();
         }
+
         Ok(())
     }
 
+    /// Compiles a binary operation
     fn visit_bin_op(&mut self, info: BinOpInfo) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        if self.opd(0).is_const() && self.opd(1).is_const() && info.instr_ii == exec::unreachable {
+
+        // Not all binary operations have an _ii variant.
+        //
+        // For instance, the following sequence of instructions:
+        // i32.const 1
+        // i32.const 2
+        // i32.add
+        //
+        // will likely be constant folded by most Wasm compilers, so we expect it to occur very
+        // rarely in real Wasm code. Therefore, we do not implement an i32_add_ii instruction.
+        //
+        // Conversely, the following sequence of instructions:
+        // i32.const 1
+        // i32.const 2
+        // i32.store
+        //
+        // cannot be constant folded, since i32.store has side effects. Therefore, we do implement
+        // an i32_store_ii instruction.
+        //
+        // However, sequences like the first one above are still valid Wasm code, so we need to
+        // handle them. In the rare case that both operands are constants, but the operation does
+        // not have an _ii variant, we ensure that the second operand is not a constant, so we can
+        // use the _is variant instead (which is always available).
+        if self.opd(0).is_const() && self.opd(1).is_const() && info.instr_ii.is_none() {
             self.ensure_opd_not_const(0);
         }
-        // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless one of its inputs is in the output register. Otherwise, the
-        // operation will overwrite the output register while it's already used.
+
+        // Binary operations always write their output to a register, so we need to ensure that the
+        // output register is available for the operation to use.
+        //
+        // If this operation has an output, and the output register is already occupied, then we
+        // need to preserve the output register on the stack. Otherwise, the operation will
+        // overwrite the output register while it's already in occupied.
+        //
+        // The only exception is if one of the inputs occupies the output register. In that case,
+        // the operation can safely overwrite the output register, since the input will be consumed
+        // by the operation anyway.
         if let Some(output_type) = info.output_type {
             let output_reg_idx = output_type.reg_idx();
-            if self.is_reg_used(output_reg_idx)
-                && !self.opd(1).is_in_given_reg(output_reg_idx)
-                && !self.opd(0).is_in_given_reg(output_reg_idx)
+            if self.is_reg_occupied(output_reg_idx)
+                && !self.opd(1).occupies_reg(output_reg_idx)
+                && !self.opd(0).occupies_reg(output_reg_idx)
             {
-                self.copy_reg_to_opd(output_reg_idx);
+                self.preserve_reg(output_reg_idx);
             }
         }
-        self.emit(match (self.opd(1).kind(), self.opd(0).kind()) {
-            (OpdKind::Stack, OpdKind::Stack) => info.instr_ss,
-            (OpdKind::Reg, OpdKind::Stack) => info.instr_rs,
-            (OpdKind::Imm, OpdKind::Stack) => info.instr_is,
-            (OpdKind::Stack, OpdKind::Reg) => info.instr_sr,
-            (OpdKind::Reg, OpdKind::Reg) => info.instr_rr,
-            (OpdKind::Imm, OpdKind::Reg) => info.instr_ir,
-            (OpdKind::Stack, OpdKind::Imm) => info.instr_si,
-            (OpdKind::Reg, OpdKind::Imm) => info.instr_ri,
-            (OpdKind::Imm, OpdKind::Imm) => info.instr_ii,
-        });
+
+        // Emit the instruction.
+        self.emit(select_bin_op(info, self.opd(1).kind(), self.opd(0).kind()));
+
+        // Emit the inputs and pop them from the stack.
+        //
+        // Commutative binary operations do not have an _sr, _si, or _ri variant. Since the order
+        // of the operands does not matter for these operations, we can implement these variants
+        // by swapping the operands, and forwarding to the _rs, _is, or _ir variant, respectively
+        // (which are always available).
+        //
+        // We only need to swap the order in which the operands are emitted for the _si variant,
+        // since we never emit anything for register operands.
         match (self.opd(1).kind(), self.opd(0).kind()) {
             (OpdKind::Stack, OpdKind::Imm) if info.instr_is == info.instr_si => {
                 self.emit_opd(1);
@@ -1311,13 +1701,20 @@ impl<'a> InstrVisitor for Compile<'a> {
                 self.pop_opd();
             }
             _ => {
-                self.pop_opd_and_emit();
-                self.pop_opd_and_emit();
+                self.emit_opd(0);
+                self.pop_opd();
+                self.emit_opd(0);
+                self.pop_opd();
             }
         }
+
+        // If the operation has an output, push the output onto the stack, and allocate a register
+        // for it.
         if let Some(output_type) = info.output_type {
-            self.push_opd_and_alloc_reg(output_type);
+            self.push_opd(output_type);
+            self.alloc_reg();
         }
+
         Ok(())
     }
 }
@@ -1373,31 +1770,36 @@ impl Deref for LabelTypes {
 
 #[derive(Clone, Copy, Debug)]
 struct Opd {
+    // The type of this operand.
     type_: ValType,
     val: Option<UnguardedVal>,
     local_idx: Option<usize>,
     prev_opd_idx: Option<usize>,
     next_opd_idx: Option<usize>,
-    is_in_reg: bool,
+    is_reg: bool,
 }
 
 impl Opd {
+    /// Returns `true` if this operand is a constant operand.
     fn is_const(&self) -> bool {
         self.val.is_some()
     }
 
-    fn is_in_local(&self) -> bool {
+    /// Returns `true` if this operand is a local operand.
+    fn is_local(&self) -> bool {
         self.local_idx.is_some()
     }
 
-    fn is_in_given_reg(&self, reg_idx: usize) -> bool {
-        self.is_in_reg && self.type_.reg_idx() == reg_idx
+    /// Returns `true` if this operand occupies the register with the given index.
+    fn occupies_reg(&self, reg_idx: usize) -> bool {
+        self.is_reg && self.type_.reg_idx() == reg_idx
     }
 
+    /// Returns the kind of this operand (see [`OpdKind`]).
     fn kind(&self) -> OpdKind {
         if self.is_const() {
             OpdKind::Imm
-        } else if self.is_in_reg {
+        } else if self.is_reg {
             OpdKind::Reg
         } else {
             OpdKind::Stack
@@ -1405,6 +1807,8 @@ impl Opd {
     }
 }
 
+/// The kind of an operand indicates whether it is stored as an immediate, on the stack, or in a
+/// register.
 #[derive(Clone, Copy, Debug)]
 enum OpdKind {
     Stack,
@@ -1412,50 +1816,65 @@ enum OpdKind {
     Imm,
 }
 
-fn br_if_z(kind: OpdKind) -> ThreadedInstr {
+// Instruction selection
+// 
+// Most instructions come in multiple variants, depending on the types of their operands, and
+// whether their operands are stored as an immediate, on the stack, or in a register. These
+// functions are used to select the appropriate variant of an instruction based on the types and
+// kinds of its operands.
+
+fn select_br_if_z(kind: OpdKind) -> ThreadedInstr {
     match kind {
         OpdKind::Stack => exec::br_if_z_s,
         OpdKind::Reg => exec::br_if_z_r,
-        OpdKind::Imm => exec::unreachable,
+
+        OpdKind::Imm => panic!("no suitable instruction found"),
     }
 }
 
-fn br_if_nz(kind: OpdKind) -> ThreadedInstr {
+fn select_br_if_nz(kind: OpdKind) -> ThreadedInstr {
     match kind {
         OpdKind::Stack => exec::br_if_nz_s,
         OpdKind::Reg => exec::br_if_nz_r,
-        OpdKind::Imm => exec::unreachable,
+
+        OpdKind::Imm => panic!("no suitable instruction found"),
     }
 }
 
-fn br_table(kind: OpdKind) -> ThreadedInstr {
+fn select_br_table(kind: OpdKind) -> ThreadedInstr {
     match kind {
         OpdKind::Stack => exec::br_table_s,
         OpdKind::Reg => exec::br_table_r,
-        OpdKind::Imm => exec::unreachable,
+
+        OpdKind::Imm => panic!("no suitable instruction found"),
     }
 }
 
-fn ref_null(type_: RefType) -> ThreadedInstr {
+fn select_ref_null(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::copy_imm_to_stack_func_ref,
         RefType::ExternRef => exec::copy_imm_to_stack_extern_ref,
     }
 }
 
-fn ref_is_null(type_: RefType, kind: OpdKind) -> ThreadedInstr {
+fn select_ref_is_null(type_: RefType, kind: OpdKind) -> ThreadedInstr {
     match (type_, kind) {
         (RefType::FuncRef, OpdKind::Stack) => exec::ref_is_null_func_ref_s,
         (RefType::FuncRef, OpdKind::Reg) => exec::ref_is_null_func_ref_r,
-
+        
         (RefType::ExternRef, OpdKind::Stack) => exec::ref_is_null_extern_ref_s,
         (RefType::ExternRef, OpdKind::Reg) => exec::ref_is_null_extern_ref_r,
 
-        (_, OpdKind::Imm) => exec::unreachable,
+        (_, OpdKind::Imm) => panic!("no suitable instruction found"),
     }
 }
 
-fn select(type_: ValType, kind_0: OpdKind, kind_1: OpdKind, kind_2: OpdKind) -> ThreadedInstr {
+fn select_select(
+    type_: ValType,
+    kind_0: OpdKind,
+    kind_1: OpdKind,
+    kind_2: OpdKind,
+) -> ThreadedInstr {
     match (type_, kind_0, kind_1, kind_2) {
         (ValType::I32, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_sss,
         (ValType::I32, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_rss,
@@ -1469,8 +1888,6 @@ fn select(type_: ValType, kind_0: OpdKind, kind_1: OpdKind, kind_2: OpdKind) -> 
         (ValType::I32, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_i32_isr,
         (ValType::I32, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_i32_sir,
         (ValType::I32, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_i32_iir,
-        (ValType::I32, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
-        (ValType::I32, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
 
         (ValType::I64, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_i64_sss,
         (ValType::I64, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_i64_rss,
@@ -1484,8 +1901,6 @@ fn select(type_: ValType, kind_0: OpdKind, kind_1: OpdKind, kind_2: OpdKind) -> 
         (ValType::I64, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_i64_isr,
         (ValType::I64, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_i64_sir,
         (ValType::I64, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_i64_iir,
-        (ValType::I64, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
-        (ValType::I64, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
 
         (ValType::F32, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_f32_sss,
         (ValType::F32, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_f32_rss,
@@ -1545,8 +1960,6 @@ fn select(type_: ValType, kind_0: OpdKind, kind_1: OpdKind, kind_2: OpdKind) -> 
         (ValType::FuncRef, OpdKind::Imm, OpdKind::Stack, OpdKind::Reg) => exec::select_func_ref_isr,
         (ValType::FuncRef, OpdKind::Stack, OpdKind::Imm, OpdKind::Reg) => exec::select_func_ref_sir,
         (ValType::FuncRef, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => exec::select_func_ref_iir,
-        (ValType::FuncRef, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
-        (ValType::FuncRef, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
 
         (ValType::ExternRef, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => {
             exec::select_extern_ref_sss
@@ -1584,15 +1997,31 @@ fn select(type_: ValType, kind_0: OpdKind, kind_1: OpdKind, kind_2: OpdKind) -> 
         (ValType::ExternRef, OpdKind::Imm, OpdKind::Imm, OpdKind::Reg) => {
             exec::select_extern_ref_iir
         }
-        (ValType::ExternRef, OpdKind::Reg, _, OpdKind::Reg) => exec::unreachable,
-        (ValType::ExternRef, _, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
 
-        (_, OpdKind::Reg, OpdKind::Reg, _) => exec::unreachable,
-        (_, _, _, OpdKind::Imm) => exec::unreachable,
+        // The first operand is an integer or a reference, and the third operand is an integer,
+        // both of which are stored in a register. Since we only have one integer register
+        // available, there is no variant of this instruction that can handle this case.
+        (
+            ValType::I32 | ValType::I64 | ValType::FuncRef | ValType::ExternRef,
+            OpdKind::Reg,
+            _,
+            OpdKind::Reg,
+        )
+        | (
+            ValType::I32 | ValType::I64 | ValType::FuncRef | ValType::ExternRef,
+            _,
+            OpdKind::Reg,
+            OpdKind::Reg,
+        )
+        // The first and the second operand have the same type, which means they are stored in the
+        // same register. Since we only have one register available for every type, there is no
+        // variant of this instruction that can handle this case.
+        | (_, OpdKind::Reg, OpdKind::Reg, _)
+        | (_, _, _, OpdKind::Imm) => panic!("no suitable instruction found"),
     }
 }
 
-fn global_get(type_: ValType) -> ThreadedInstr {
+fn select_global_get(type_: ValType) -> ThreadedInstr {
     match type_ {
         ValType::I32 => exec::global_get_i32,
         ValType::I64 => exec::global_get_i64,
@@ -1603,7 +2032,7 @@ fn global_get(type_: ValType) -> ThreadedInstr {
     }
 }
 
-fn global_set(type_: ValType, kind: OpdKind) -> ThreadedInstr {
+fn select_global_set(type_: ValType, kind: OpdKind) -> ThreadedInstr {
     match (type_, kind) {
         (ValType::I32, OpdKind::Stack) => exec::global_set_i32_s,
         (ValType::I32, OpdKind::Reg) => exec::global_set_i32_r,
@@ -1626,7 +2055,7 @@ fn global_set(type_: ValType, kind: OpdKind) -> ThreadedInstr {
     }
 }
 
-fn table_get(type_: RefType, kind: OpdKind) -> ThreadedInstr {
+fn select_table_get(type_: RefType, kind: OpdKind) -> ThreadedInstr {
     match (type_, kind) {
         (RefType::FuncRef, OpdKind::Stack) => exec::table_get_func_ref_s,
         (RefType::FuncRef, OpdKind::Reg) => exec::table_get_func_ref_r,
@@ -1638,7 +2067,7 @@ fn table_get(type_: RefType, kind: OpdKind) -> ThreadedInstr {
     }
 }
 
-fn table_set(type_: RefType, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr {
+fn select_table_set(type_: RefType, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr {
     match (type_, kind_0, kind_1) {
         (RefType::FuncRef, OpdKind::Stack, OpdKind::Stack) => exec::table_set_func_ref_ss,
         (RefType::FuncRef, OpdKind::Reg, OpdKind::Stack) => exec::table_set_func_ref_rs,
@@ -1648,7 +2077,6 @@ fn table_set(type_: RefType, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr 
         (RefType::FuncRef, OpdKind::Stack, OpdKind::Reg) => exec::table_set_func_ref_sr,
         (RefType::FuncRef, OpdKind::Stack, OpdKind::Imm) => exec::table_set_func_ref_si,
         (RefType::FuncRef, OpdKind::Reg, OpdKind::Imm) => exec::table_set_func_ref_ri,
-        (RefType::FuncRef, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
 
         (RefType::ExternRef, OpdKind::Stack, OpdKind::Stack) => exec::table_set_extern_ref_ss,
         (RefType::ExternRef, OpdKind::Reg, OpdKind::Stack) => exec::table_set_extern_ref_rs,
@@ -1658,53 +2086,89 @@ fn table_set(type_: RefType, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr 
         (RefType::ExternRef, OpdKind::Stack, OpdKind::Reg) => exec::table_set_extern_ref_sr,
         (RefType::ExternRef, OpdKind::Stack, OpdKind::Imm) => exec::table_set_extern_ref_si,
         (RefType::ExternRef, OpdKind::Reg, OpdKind::Imm) => exec::table_set_extern_ref_ri,
-        (RefType::ExternRef, OpdKind::Reg, OpdKind::Reg) => exec::unreachable,
+
+        // The first operand is an integer, and the second operand is a reference, both of which
+        // are stored in an integer register. Since we only have one integer register available,
+        // there is no variant of table_set that can handle this case.
+        (RefType::FuncRef | RefType::ExternRef, OpdKind::Reg, OpdKind::Reg) => {
+            panic!("no suitable instruction found")
+        }
     }
 }
 
-fn table_size(type_: RefType) -> ThreadedInstr {
+fn select_table_size(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_size_func_ref,
         RefType::ExternRef => exec::table_size_extern_ref,
     }
 }
 
-fn table_grow(type_: RefType) -> ThreadedInstr {
+fn select_table_grow(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_grow_func_ref,
         RefType::ExternRef => exec::table_grow_extern_ref,
     }
 }
 
-fn table_fill(type_: RefType) -> ThreadedInstr {
+fn select_table_fill(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_fill_func_ref,
         RefType::ExternRef => exec::table_fill_extern_ref,
     }
 }
 
-fn table_copy(type_: RefType) -> ThreadedInstr {
+fn select_table_copy(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_copy_func_ref,
         RefType::ExternRef => exec::table_copy_extern_ref,
     }
 }
 
-fn table_init(type_: RefType) -> ThreadedInstr {
+fn select_table_init(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::table_init_func_ref,
         RefType::ExternRef => exec::table_init_extern_ref,
     }
 }
 
-fn elem_drop(type_: RefType) -> ThreadedInstr {
+fn select_elem_drop(type_: RefType) -> ThreadedInstr {
     match type_ {
         RefType::FuncRef => exec::elem_drop_func_ref,
         RefType::ExternRef => exec::elem_drop_extern_ref,
     }
 }
 
-fn copy_imm_to_stack(type_: ValType) -> ThreadedInstr {
+fn select_un_op(info: UnOpInfo, kind: OpdKind) -> ThreadedInstr {
+    match kind {
+        OpdKind::Stack => Some(info.instr_s),
+        OpdKind::Reg => Some(info.instr_r),
+        OpdKind::Imm => info.instr_i,
+    }.expect("no suitable instruction found")
+}
+
+fn select_bin_op(info: BinOpInfo, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr {
+    match (kind_0, kind_1) {
+        (OpdKind::Stack, OpdKind::Stack) => Some(info.instr_ss),
+        (OpdKind::Reg, OpdKind::Stack) => Some(info.instr_rs),
+        (OpdKind::Imm, OpdKind::Stack) => Some(info.instr_is),
+        (OpdKind::Stack, OpdKind::Reg) => Some(info.instr_sr),
+        (OpdKind::Reg, OpdKind::Reg) => info.instr_rr,
+        (OpdKind::Imm, OpdKind::Reg) => Some(info.instr_ir),
+        (OpdKind::Stack, OpdKind::Imm) => Some(info.instr_si),
+        (OpdKind::Reg, OpdKind::Imm) => Some(info.instr_ri),
+        (OpdKind::Imm, OpdKind::Imm) => info.instr_ii,
+    }.expect("no suitable instruction found")
+}
+
+fn selecy_copy_opd_to_stack(type_: ValType, kind: OpdKind) -> ThreadedInstr {
+    match kind {
+        OpdKind::Stack => select_copy_stack(type_),
+        OpdKind::Reg => select_copy_reg_to_stack(type_),
+        OpdKind::Imm => select_copy_imm_to_stack(type_),
+    }
+}
+
+fn select_copy_imm_to_stack(type_: ValType) -> ThreadedInstr {
     match type_ {
         ValType::I32 => exec::copy_imm_to_stack_i32,
         ValType::I64 => exec::copy_imm_to_stack_i64,
@@ -1715,7 +2179,7 @@ fn copy_imm_to_stack(type_: ValType) -> ThreadedInstr {
     }
 }
 
-fn copy_stack(type_: ValType) -> ThreadedInstr {
+fn select_copy_stack(type_: ValType) -> ThreadedInstr {
     match type_.into() {
         ValType::I32 => exec::copy_stack_i32,
         ValType::I64 => exec::copy_stack_i64,
@@ -1726,7 +2190,7 @@ fn copy_stack(type_: ValType) -> ThreadedInstr {
     }
 }
 
-fn copy_reg_to_stack(type_: ValType) -> ThreadedInstr {
+fn select_copy_reg_to_stack(type_: ValType) -> ThreadedInstr {
     match type_ {
         ValType::I32 => exec::copy_reg_to_stack_i32,
         ValType::I64 => exec::copy_reg_to_stack_i64,
