@@ -62,7 +62,7 @@ impl Cx {
                             let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
-                                window_id: 0,
+                                window_id: window_id.id(),
                                 target_id: current_image.id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
                                 height: (pass_rect.size.y * dpi_factor) as u32,
@@ -241,7 +241,7 @@ impl Cx {
                     //if allow_rendering {
 
                         // check if GPU is ready to flip frames
-                        for (index,window) in stdin_windows.iter_mut().enumerate(){
+                        for window in &mut stdin_windows{
                             if let Some(presentable_draw) = window.new_frame_being_rendered {
                                 while !d3d11_cx.is_gpu_done() {
                                     std::thread::sleep(std::time::Duration::from_millis(3));
