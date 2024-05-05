@@ -29,7 +29,6 @@ impl OsWebSocket{
         // strip off any hashes
         // alright we have proto, host, port and hash now
         // lets open a tcpstream
-        println!("{:?}", split);
         let stream = TcpStream::connect(format!("{}:{}", split.host, split.port));
         // alright lets construct a http request
         // lets join the headers
