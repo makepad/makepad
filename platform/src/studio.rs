@@ -41,6 +41,7 @@ pub struct PatchFile{
     pub line: u32,
     pub column_start: u32,
     pub column_end: u32,
+    pub undo_group: u64,
     pub replace: String
 }
 
