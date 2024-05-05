@@ -4,9 +4,7 @@ use {
     wast::{parser, parser::ParseBuffer, Wat},
 };
 
-fn new_store_and_instance(
-    input: &str,
-) -> (makepad_stitch::Store, makepad_stitch::Instance) {
+fn new_store_and_instance(input: &str) -> (makepad_stitch::Store, makepad_stitch::Instance) {
     let engine = Engine::new();
     let mut store = Store::new(engine);
     let buffer = ParseBuffer::new(input).unwrap();
@@ -26,7 +24,7 @@ fn fac_iter(c: &mut Criterion) {
             fac_iter
                 .call(
                     black_box(&mut store),
-                    black_box(&[Val::I64(32)]),
+                    black_box(&[Val::I64(1_048_576)]),
                     black_box(&mut [Val::I64(0)]),
                 )
                 .unwrap();
@@ -58,12 +56,13 @@ fn fib_iter(c: &mut Criterion) {
 
         b.iter(|| {
             let mut results = [Val::I64(0)];
-            fib_iter.call(
-                black_box(&mut store),
-                black_box(&[Val::I64(1_048_576)]),
-                black_box(&mut results),
-            )
-            .unwrap();
+            fib_iter
+                .call(
+                    black_box(&mut store),
+                    black_box(&[Val::I64(1_048_576)]),
+                    black_box(&mut results),
+                )
+                .unwrap();
         })
     });
 }
@@ -75,12 +74,13 @@ fn fib_rec(c: &mut Criterion) {
 
         b.iter(|| {
             let mut results = [Val::I64(0)];
-            fib_rec.call(
-                black_box(&mut store),
-                black_box(&[Val::I64(32)]),
-                black_box(&mut results),
-            )
-            .unwrap();
+            fib_rec
+                .call(
+                    black_box(&mut store),
+                    black_box(&[Val::I64(32)]),
+                    black_box(&mut results),
+                )
+                .unwrap();
         })
     });
 }
@@ -93,11 +93,7 @@ fn fill(c: &mut Criterion) {
         b.iter(|| {
             fill.call(
                 black_box(&mut store),
-                black_box(&[
-                    Val::I32(0),
-                    Val::I32(42),
-                    Val::I32(1_048_576),
-                ]),
+                black_box(&[Val::I32(0), Val::I32(42), Val::I32(1_048_576)]),
                 black_box(&mut []),
             )
             .unwrap();
@@ -113,7 +109,10 @@ fn sum(c: &mut Criterion) {
 
         let idx = 0;
         let count = 1_048_576;
-        for (idx, byte) in &mut memory.bytes_mut(&mut store)[idx..][..count].iter_mut().enumerate() {
+        for (idx, byte) in &mut memory.bytes_mut(&mut store)[idx..][..count]
+            .iter_mut()
+            .enumerate()
+        {
             let val = (idx % 256) as u8;
             *byte = val;
         }
