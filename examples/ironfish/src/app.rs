@@ -538,6 +538,7 @@ impl MatchEvent for App {
 
     fn handle_signal(&mut self, cx: &mut Cx) {
         let piano = self.ui.piano_set(ids!(piano));
+        return;
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
