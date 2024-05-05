@@ -54,6 +54,7 @@ fn main() -> ! {
     let mut serial1 = Uart::new_with_config(peripherals.UART1, config, Some(pins), &clocks);
     let mut counter:i32 = 1;
     serial1.write('\n' as u8).ok();
+    writeln!(serial1, "Started").unwrap();
     loop {
         /*delay.delay_ms(500 as u32);
         serial1.write('M' as u8).ok();
@@ -67,8 +68,8 @@ fn main() -> ! {
         serial1.write('\n' as u8).ok();
         */
         //serial1.write("haha".as_bytes()).ok();
-        writeln!(serial1, "Loop {}", counter).unwrap();
-        delay.delay_ms(100 as u32);
+       
+        delay.delay_ms(50 as u32);
         // serial1.flush();
         //delay.delay_ms(500 as u32);
 
@@ -84,18 +85,16 @@ fn main() -> ! {
         if let Some(pos) = bytes[..len].iter().position(|b| *b == b'\n') {
             if !discard {
                 let msg = &bytes[..pos + 1];
-                serial1.write_str("Sending: ");
+                serial1.write_str(">");
                 for i in 0..msg.len(){
                     serial1.write(msg[i]);
                 }
-                serial1.write_str("\n");
-                
+                //serial1.write_str("\n");
                 esp_now
                     .send(&esp_now::BROADCAST_ADDRESS, &bytes[..pos + 1])
                     .unwrap()
                     .wait()
                     .unwrap();
-                delay.delay_ms(500 as u32);
             }
             // Copy the remaining bytes to the start of the buffer.
             bytes.copy_within(pos + 1..len, 0);
@@ -110,9 +109,15 @@ fn main() -> ! {
             discard = true;
         }
         // Read bytes from the ESP-NOW interface, and write them to the USB Serial JTAG interface.
-        if let Some(data) = esp_now.receive() {
+        if let Some(msg) = esp_now.receive() {
+            serial1.write_str("<");
+            let data = &msg.data[..msg.len as usize];
+            for i in 0..data.len(){
+                serial1.write(data[i]);
+            }
+            //serial1.write_str("\n");
             UsbSerialJtag::with(|usb_serial_jtag| {
-                usb_serial_jtag.write_bytes(&data.data[..data.len as usize]);
+                usb_serial_jtag.write_bytes(data);
             })
         }
     }
