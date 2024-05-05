@@ -264,6 +264,7 @@ impl Cx {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
+                    println!("HANDLING CREATE WINDOW");
                     while window_id.id() >= stdin_windows.len(){
                         stdin_windows.push(StdinWindow::default());
                     }
