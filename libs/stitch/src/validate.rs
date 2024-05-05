@@ -1,9 +1,12 @@
 use {
     crate::{
         code,
-        code::{BinOpInfo, BlockType, InstrVisitor, LoadInfo, MemArg, StoreInfo, UnOpInfo},
+        code::{
+            BinOpInfo, BlockType, InstrVisitor, LoadInfo, MemArg, StoreInfo, UnOpInfo,
+            UncompiledCode,
+        },
         decode::DecodeError,
-        func::{FuncType, UncompiledCode},
+        func::FuncType,
         global::Mut,
         module::ModuleBuilder,
         ref_::RefType,

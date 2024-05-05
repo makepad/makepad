@@ -6,6 +6,7 @@ use {
     std::{error, fmt},
 };
 
+/// An error that can occur when operating on a [`Module`](crate::Module) or [`Func`](crate::Func).
 #[derive(Debug)]
 pub enum Error {
     Decode(DecodeError),

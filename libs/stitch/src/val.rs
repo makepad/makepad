@@ -10,7 +10,7 @@ use {
     std::fmt,
 };
 
-/// A WebAssembly value.
+/// A Wasm value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Val {
     I32(i32),
@@ -138,7 +138,7 @@ impl Val {
         }
     }
 
-    /// Converts the given [`UnguardedValue`] to a [`Val`].
+    /// Converts the given [`UnguardedVal`] to a [`Val`].
     ///
     /// # Safety
     ///
@@ -154,7 +154,7 @@ impl Val {
         }
     }
 
-    /// Converts this [`Val`] to an [`UnguardedValue`].
+    /// Converts this [`Val`] to an [`UnguardedVal`].
     ///
     /// # Panics
     ///
