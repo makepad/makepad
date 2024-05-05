@@ -42,7 +42,7 @@ impl LiveRegister for App{
      
 impl App {
    fn connect_serial(&self){
-       let mut send_port = serialport::new("/dev/cu.usbmodem2101", 115_200)
+       let mut send_port = serialport::new("/dev/cu.usbmodem1101", 115_200)
        .timeout(Duration::from_millis(1000000))
        .open()
        .unwrap();

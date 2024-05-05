@@ -19,3 +19,4 @@ rustup toolchain install nightly
 cd makepad-logothing
 cargo build --release
 probe-rs run target/thumbv6m-none-eabi/release/makepad-logothing --chip RP2040 
+probe-rs run target/thumbv6m-none-eabi/release/makepad-logothing --chip RP2040 --probe 2e8a:000C
