@@ -925,7 +925,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Pop the input from the stack.
         self.pop_opd();
-        
+
         Ok(())
     }
 
@@ -992,7 +992,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Obtain the type of the [`Global`].
         let val_type = global.type_(&self.store).val;
-        
+
         // Emit the instruction.
         self.emit(select_global_set(val_type, self.opd(0).kind()));
 
@@ -1123,7 +1123,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.emit_opd(0);
             self.pop_opd();
         }
-        
+
         // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
 
@@ -1179,7 +1179,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        
+
         // Obtain the destination and source [`Table`] for this instruction.
         let dst_table = self.instance.table(dst_table_idx).unwrap();
         let src_table = self.instance.table(src_table_idx).unwrap();
@@ -1202,7 +1202,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.emit_opd(0);
             self.pop_opd();
         }
-        
+
         // Emit unguarded handles to the destination and source [`Table`].
         self.emit(dst_table.to_unguarded(self.store.id()));
         self.emit(src_table.to_unguarded(self.store.id()));
@@ -1498,7 +1498,7 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     // Numeric instructions
-    
+
     /// Compiles an i32.const instruction.
     fn visit_i32_const(&mut self, val: i32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
@@ -1582,7 +1582,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Conversely, the following sequence of instructions:
         // i32.const 1
         // i32.load
-        // 
+        //
         // cannot be constant folded, since i32.load has side effects. Therefore, we do implement
         // an i32_load_i instruction.
         //
@@ -1817,7 +1817,7 @@ enum OpdKind {
 }
 
 // Instruction selection
-// 
+//
 // Most instructions come in multiple variants, depending on the types of their operands, and
 // whether their operands are stored as an immediate, on the stack, or in a register. These
 // functions are used to select the appropriate variant of an instruction based on the types and
@@ -1861,7 +1861,7 @@ fn select_ref_is_null(type_: RefType, kind: OpdKind) -> ThreadedInstr {
     match (type_, kind) {
         (RefType::FuncRef, OpdKind::Stack) => exec::ref_is_null_func_ref_s,
         (RefType::FuncRef, OpdKind::Reg) => exec::ref_is_null_func_ref_r,
-        
+
         (RefType::ExternRef, OpdKind::Stack) => exec::ref_is_null_extern_ref_s,
         (RefType::ExternRef, OpdKind::Reg) => exec::ref_is_null_extern_ref_r,
 
@@ -2143,7 +2143,8 @@ fn select_un_op(info: UnOpInfo, kind: OpdKind) -> ThreadedInstr {
         OpdKind::Stack => Some(info.instr_s),
         OpdKind::Reg => Some(info.instr_r),
         OpdKind::Imm => info.instr_i,
-    }.expect("no suitable instruction found")
+    }
+    .expect("no suitable instruction found")
 }
 
 fn select_bin_op(info: BinOpInfo, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedInstr {
@@ -2157,7 +2158,8 @@ fn select_bin_op(info: BinOpInfo, kind_0: OpdKind, kind_1: OpdKind) -> ThreadedI
         (OpdKind::Stack, OpdKind::Imm) => Some(info.instr_si),
         (OpdKind::Reg, OpdKind::Imm) => Some(info.instr_ri),
         (OpdKind::Imm, OpdKind::Imm) => info.instr_ii,
-    }.expect("no suitable instruction found")
+    }
+    .expect("no suitable instruction found")
 }
 
 fn selecy_copy_opd_to_stack(type_: ValType, kind: OpdKind) -> ThreadedInstr {
