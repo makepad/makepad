@@ -30,8 +30,8 @@ live_design!{
     }
 
     IconTab = <Tab> {
-        closeable:false
-        icon_walk:{width:15,height:15}
+        closeable: false
+        icon_walk: { width: 15., height: 15. }
     }
 
     Vr = <View> {
@@ -55,7 +55,6 @@ live_design!{
         align: { x: 0.0, y: 0. }
         padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
         spacing: (THEME_SPACE_2)
-        <Button> { text: "New File"}
         <Filler> {}
         <P> { width: Fit, text: "Open here"}
         <CheckBoxCustom> {
@@ -202,6 +201,17 @@ live_design!{
                         svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
                     }
                 }
+                FilesFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 10.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_2)
+                        svg_file: dep("crate://self/resources/icons/icon_file.svg"),
+                    }
+                }
                 RunFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
@@ -244,6 +254,17 @@ live_design!{
                     draw_icon: {
                         color: (STUDIO_PALETTE_7)
                         svg_file: dep("crate://self/resources/icons/icon_profiler.svg"),
+                    }
+                }
+                SearchFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 13.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_3)
+                        svg_file: dep("crate://self/resources/icons/icon_search.svg"),
                     }
                 }
             }
@@ -302,13 +323,13 @@ live_design!{
 
             file_tree_tab = Tab {
                 name: "Files",
-                template: PermanentTab,
+                template: FilesFirstTab,
                 kind: StudioFileTree
             }
 
             search = Tab {
                 name: "Search"
-                template: PermanentTab,
+                template: SearchFirstTab,
                 kind: Search
             }
 
@@ -482,7 +503,7 @@ live_design!{
                             draw_check: { check_type: None }
                             icon_walk: {width: 14.}
                             draw_icon: {
-                                color: (THEME_COLOR_U_3),
+                                color: (THEME_COLOR_D_3),
                                 color_active: (THEME_COLOR_U_5),
                                 svg_file: dep("crate://self/resources/icons/icon_search_case_sensitive.svg"),
                             }
@@ -492,7 +513,7 @@ live_design!{
                             draw_check: { check_type: None }
                             icon_walk: {width: 16.}
                             draw_icon: {
-                                color: (THEME_COLOR_U_3),
+                                color: (THEME_COLOR_D_3),
                                 color_active: (THEME_COLOR_U_5),
                                 svg_file: dep("crate://self/resources/icons/icon_search_full_word.svg"),
                             }
@@ -502,7 +523,7 @@ live_design!{
                             draw_check: { check_type: None }
                             icon_walk: {width: 12.}
                             draw_icon: {
-                                color: (THEME_COLOR_U_3),
+                                color: (THEME_COLOR_D_3),
                                 color_active: (THEME_COLOR_U_5),
                                 svg_file: dep("crate://self/resources/icons/icon_search_regex.svg"),
                             }
@@ -528,6 +549,7 @@ live_design!{
                             flow: Right,
                             spacing: 0.,
                             <ButtonFlat> {
+                                width: 32.
                                 text: ""
                                 icon_walk: { width: 14. }
                                 draw_icon: {
@@ -535,6 +557,7 @@ live_design!{
                                 }
                             }
                             <ButtonFlat> {
+                                width: 32.
                                 text: ""
                                 icon_walk: { width: 11. }
                                 draw_icon: {
