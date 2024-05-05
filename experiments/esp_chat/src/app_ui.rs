@@ -12,7 +12,7 @@ live_design!{
     }
     COLOR_DOWN_2 = #x00000022
 
-    AppUI = <View dx:232.8 dy:218.8 dw:397.1 dh:300.0> {  
+    AppUI = <View dx:237.8 dy:166.5 dw:397.1 dh:300.0> {  
         flow: Overlay,
                             
                             
@@ -32,17 +32,17 @@ live_design!{
                 padding: 2
                 width: Fill,
                 height: Fill
-                llm_chat = <PortalList>{  
+                chat = <PortalList>{  
                     auto_tail:true,
                     width: Fill,
                     height: Fill,
                     margin: {top: 0},
-                    AI = <TextInput> {
+                    Own = <TextInput> {
                         ascii_only: true,
                         width: Fill,
                         height: Fill,
-                        margin: {top: 0.0, left: 20.0, bottom: 5.0, right: 0.0},
-                        text: "LLM Output"
+                        margin: {top: 10.0, left: 50.0, bottom: .0, right: 0.0},
+                        text: ""
                         draw_text: {
                             text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
                         }
@@ -50,12 +50,12 @@ live_design!{
                             color: (#335)
                         }
                     }
-                    Human = <TextInput> {
+                    Other = <TextInput> {
                         ascii_only: true,
                         width: Fill,
                         height: Fill,
                         margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 0.0},
-                        text: "LLM Output"
+                        text: ""
                         draw_text: {
                             text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
                         }
@@ -74,7 +74,7 @@ live_design!{
                     margin: {bottom: 0}
                     empty_message: "Name"
                 }
-                chat = <TextInput> {
+                message = <TextInput> {
                     height: Fit,
                     width: Fill,
                     margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
@@ -86,6 +86,9 @@ live_design!{
                 }
                 clear_button = <Button> {
                     text: "Clear"
+                }
+                connect_serial = <Button> {
+                    text: "Serial"
                 }
             }
                 
