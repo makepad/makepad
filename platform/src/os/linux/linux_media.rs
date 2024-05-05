@@ -19,7 +19,6 @@ use {
 
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
-        return;
         if self.os.media.audio_change.check_and_clear() {
             // alright so. if we 'failed' opening a device here
             // what do we do. we could flag our device as 'failed' on the desc
