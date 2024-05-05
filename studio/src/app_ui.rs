@@ -481,7 +481,7 @@ live_design!{
                             draw_check: { check_type: None }
                             icon_walk: {width: 14.}
                             draw_icon: {
-                                color: (THEME_COLOR_U_3),
+                                color: (THEME_COLOR_D_3),
                                 color_active: (THEME_COLOR_U_5),
                                 svg_file: dep("crate://self/resources/icons/icon_search_case_sensitive.svg"),
                             }
@@ -491,7 +491,7 @@ live_design!{
                             draw_check: { check_type: None }
                             icon_walk: {width: 16.}
                             draw_icon: {
-                                color: (THEME_COLOR_U_3),
+                                color: (THEME_COLOR_D_3),
                                 color_active: (THEME_COLOR_U_5),
                                 svg_file: dep("crate://self/resources/icons/icon_search_full_word.svg"),
                             }
@@ -501,7 +501,7 @@ live_design!{
                             draw_check: { check_type: None }
                             icon_walk: {width: 12.}
                             draw_icon: {
-                                color: (THEME_COLOR_U_3),
+                                color: (THEME_COLOR_D_3),
                                 color_active: (THEME_COLOR_U_5),
                                 svg_file: dep("crate://self/resources/icons/icon_search_regex.svg"),
                             }
