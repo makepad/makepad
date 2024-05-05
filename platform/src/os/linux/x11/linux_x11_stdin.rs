@@ -270,7 +270,6 @@ impl Cx {
                     //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    println!("CREATE WINDOW {}", window_id.id());
                     let _ = io::stdout().write_all(StdinToHost::CreateWindow{window_id:window_id.id(),kind_id:window.kind_id}.to_json().as_bytes());
                 },
                 CxOsOp::SetCursor(cursor) => {
