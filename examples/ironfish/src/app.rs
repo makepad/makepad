@@ -446,7 +446,6 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        return;
         self.preset(cx,0,false);
         self.ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
@@ -527,18 +526,15 @@ impl MatchEvent for App {
     }
 
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
-        return;
         cx.use_midi_inputs(&ports.all_inputs());
     }
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
-        return;
         cx.use_audio_outputs(&devices.default_output());
     }
 
     fn handle_signal(&mut self, cx: &mut Cx) {
         let piano = self.ui.piano_set(ids!(piano));
-        return;
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
