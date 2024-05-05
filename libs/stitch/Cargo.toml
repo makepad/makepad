@@ -15,4 +15,4 @@ name = "benches"
 harness = false
 
 [workspace]
-members = ["coremark"]
+members = ["coremark", "fuzz"]
