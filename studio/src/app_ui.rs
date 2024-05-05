@@ -55,7 +55,6 @@ live_design!{
         align: { x: 0.0, y: 0. }
         padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
         spacing: (THEME_SPACE_2)
-        <Button> { text: "New File"}
         <Filler> {}
         <P> { width: Fit, text: "Open here"}
         <CheckBoxCustom> {
@@ -528,6 +527,7 @@ live_design!{
                             flow: Right,
                             spacing: 0.,
                             <ButtonFlat> {
+                                width: 32.
                                 text: ""
                                 icon_walk: { width: 14. }
                                 draw_icon: {
@@ -535,6 +535,7 @@ live_design!{
                                 }
                             }
                             <ButtonFlat> {
+                                width: 32.
                                 text: ""
                                 icon_walk: { width: 11. }
                                 draw_icon: {
