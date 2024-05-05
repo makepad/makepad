@@ -108,6 +108,7 @@ impl Cx {
                         }
                     }
                 }
+                println!("LOOP TERMINATED");
             });
         }
 
