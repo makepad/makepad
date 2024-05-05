@@ -563,7 +563,7 @@ live_design! {
         }
     }
 
-    GraphPaper = <RoundedView dx:389.6 dy:2860.4 dw:390.0 dh:137.4> {
+    GraphPaper = <RoundedView dx:395.5 dy:2853.7 dw:390.0 dh:137.4> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -933,7 +933,7 @@ live_design! {
 
 
     // PANELS
-    EnvelopePanel = <RoundedView dx:385.7 dy:2604.3 dw:392.2 dh:197.0> {
+    EnvelopePanel = <RoundedView dx:385.7 dy:2603.2 dw:392.2 dh:197.0> {
         flow: Down,
         padding: <SPACING_0> {}
         width: Fill,
@@ -1003,7 +1003,7 @@ live_design! {
         }
     }
 
-    ModEnvelopePanel = <View dx:381.1 dy:1985.9 dw:397.1 dh:299.0> {
+    ModEnvelopePanel = <View dx:380.0 dy:1985.9 dw:397.1 dh:299.0> {
         width: Fill,
         height: Fit
         flow: Down
