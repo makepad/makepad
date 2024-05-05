@@ -29,12 +29,12 @@ impl OsWebSocket{
         // strip off any hashes
         // alright we have proto, host, port and hash now
         // lets open a tcpstream
-        println!("OPENING SOCKET {}", request.url);
+        println!("{:?}", split);
         let stream = TcpStream::connect(format!("{}:{}", split.host, split.port));
         // alright lets construct a http request
         // lets join the headers
         
-        let mut http_request = format!("GET / HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n", split.host);
+        let mut http_request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n", split.file, split.host);
         http_request.push_str(&request.get_headers_string());
         http_request.push_str("\r\n"); 
         

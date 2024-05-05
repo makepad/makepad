@@ -60,11 +60,12 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
+#[derive(Debug)]
 pub struct SplitUrl<'a>{
     pub proto: &'a str,
     pub host: &'a str,
     pub port: &'a str,
-    pub url: &'a str,
+    pub file: &'a str,
     pub hash: &'a str,
 }
 
@@ -94,12 +95,12 @@ impl HttpRequest {
                 _=>"80"
             },rest)
         };
-        let (url, hash) = rest.split_once("#").unwrap_or((rest, ""));
+        let (file, hash) = rest.split_once("#").unwrap_or((rest, ""));
         return SplitUrl{
             proto,
             host,
             port,
-            url, 
+            file, 
             hash
         }
     }
