@@ -421,7 +421,7 @@ impl DrawText {
         let zbias_step = 0.00001;
         let mut char_depth = self.draw_depth;
         
-        let mut rustybuzz_buffer = rustybuzz::UnicodeBuffer::new();
+        let mut rustybuzz_buffer = makepad_rustybuzz::UnicodeBuffer::new();
         
         // This relies on the UBA ("Unicode Bidirectional Algorithm")
         // (see http://www.unicode.org/reports/tr9/#Basic_Display_Algorithm),
@@ -447,9 +447,9 @@ impl DrawText {
                     .get_or_compute_glyph_ids(
                     (
                             if run_level.is_rtl() {
-                                rustybuzz::Direction::RightToLeft
+                                makepad_rustybuzz::Direction::RightToLeft
                             } else {
-                                rustybuzz::Direction::LeftToRight
+                                makepad_rustybuzz::Direction::LeftToRight
                             },
                             &bidi_info.text[run_range]
                         ),
