@@ -241,11 +241,12 @@ impl Cx {
                     //if allow_rendering {
 
                         // check if GPU is ready to flip frames
-                        for window in &mut stdin_windows{
+                        for (index,window) in stdin_windows.iter_mut().enumerate(){
                             if let Some(presentable_draw) = window.new_frame_being_rendered {
                                 while !d3d11_cx.is_gpu_done() {
                                     std::thread::sleep(std::time::Duration::from_millis(3));
                                 }
+                                println!("FRAME DONE FOR WINDOW {}", index);
                                 let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
                                 window.new_frame_being_rendered = None;
                             }
