@@ -4030,13 +4030,131 @@ live_design! {
 
     DesignerOutline = <DesignerOutlineBase>{ }
 
+    Vr = <View> {
+        width: Fit, height: 27.,
+        flow: Right,
+        spacing: 0.,
+        margin: <THEME_MSPACE_V_2> {}
+        <View> {
+            width: (THEME_BEVELING * 2.0), height: Fill
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+        }
+        <View> {
+            width: (THEME_BEVELING), height: Fill,
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+        }
+    }
+
     DesignerToolbox = <DesignerToolboxBase>{
         width: Fill,
         height: Fill
         show_bg: false
 
         <DockToolbar> {
-
+            content = {
+                align: { x: 0., y: 0.5 }
+                spacing: (THEME_SPACE_3)
+                <ButtonFlat> {
+                    width: 32.
+                    text: ""
+                    margin: { right: -10. }
+                    icon_walk: { width: 11. }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_typography.svg"),
+                    }
+                }
+                <Vr> {}
+                <View> {
+                    width: Fit,
+                    flow: Right,
+                    spacing: (THEME_SPACE_1)
+                    <Pbold> { width: Fit, text: "Font" }
+                    <P> { width: Fit, text: "Noto Sans" }
+                }
+                <View> {
+                    width: Fit,
+                    spacing: (THEME_SPACE_1)
+                    flow: Right,
+                    <Pbold> { width: Fit, text: "Weight" }
+                    <P> { width: Fit, text: "Bold" }
+                }
+                <View> {
+                    width: Fit,
+                    spacing: (THEME_SPACE_1)
+                    flow: Right,
+                    <Pbold> { width: Fit, text: "Size" }
+                    <P> { width: Fit, text: "11 pt" }
+                } 
+                <View> {
+                    width: Fit,
+                    spacing: (THEME_SPACE_1)
+                    flow: Right,
+                    <Pbold> { width: Fit, text: "Line height" }
+                    <P> { width: Fit, text: "1.2" }
+                } 
+                <Vr> {}
+                <View> {
+                    width: Fit,
+                    flow: Right,
+                    spacing: 0,
+                    <ButtonFlat> {
+                        width: 25.
+                        text: ""
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            svg_file: dep("crate://self/resources/icons/icon_text_align_left.svg"),
+                        }
+                    }
+                    <ButtonFlat> {
+                        width: 25.
+                        text: ""
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            color: (THEME_COLOR_D_3),
+                            svg_file: dep("crate://self/resources/icons/icon_text_align_justify.svg"),
+                        }
+                    }
+                    <ButtonFlat> {
+                        width: 25.
+                        text: ""
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            color: (THEME_COLOR_D_3),
+                            svg_file: dep("crate://self/resources/icons/icon_text_align_right.svg"),
+                        }
+                    }
+                }
+                <Vr> {}
+                <P> { width: Fit, text: "Stroke" }
+                <RoundedView> {
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_5),
+                        radius: 5.0
+                    }
+                }
+                <P> { width: Fit, text: "Fill" }
+                <RoundedView> {
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_2),
+                        radius: 5.0
+                    }
+                }
+                <Filler> {}
+                <Vr> {}
+                <P> { width: Fit, text: "Canvas" }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (THEME_COLOR_D_3),
+                        radius: 5.0
+                    }
+                }
+            }
         }
 
         <RoundedShadowView>{
