@@ -18,7 +18,7 @@ use {
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
-        pass::{CxPassParent, PassClearColor, CxPassColorTexture},
+        pass::{CxPassParent},
         cx_api::CxOsOp,
         cx::Cx,
         windows::Win32::Foundation::HANDLE,

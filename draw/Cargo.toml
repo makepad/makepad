@@ -17,7 +17,7 @@ makepad-html ={ path = "../libs/html", version = "0.4.0" }
 
 # HACK(eddyb) only a git dep until https://github.com/RazrFalcon/rustybuzz/pull/71
 # ends up being published in a release (only affects build times, not behavior).
-rustybuzz = { version = "0.8.0", git = "https://github.com/RazrFalcon/rustybuzz", rev = "a0b8aa3" }
+makepad-rustybuzz = { version = "0.8.0", path = "../libs/rustybuzz" }
 unicode-bidi = "0.3"
 ab_glyph_rasterizer = "0.1.8"
 sdfer = "0.2.1"

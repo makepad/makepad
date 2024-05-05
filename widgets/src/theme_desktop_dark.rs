@@ -1541,20 +1541,20 @@ live_design! {
                 // WindowsMin
                 match self.button_type {
                     DesktopButtonType::WindowsMin => {
-                        sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover));
                         sdf.move_to(c.x - sz, c.y);
                         sdf.line_to(c.x + sz, c.y);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMax => {
-                        sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover));
                         sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMaxToggled => {
-                        let clear = mix(#3, mix(#6, #9, self.pressed), self.hover);
+                        let clear = mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover);
                         sdf.clear(clear);
                         let sz = 3.5;
                         sdf.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
@@ -1565,7 +1565,7 @@ live_design! {
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsClose => {
-                        sdf.clear(mix(#3, mix(#e00, #c00, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#e00, #c00, self.pressed), self.hover));
                         sdf.move_to(c.x - sz, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.move_to(c.x - sz, c.y + sz);
@@ -1574,7 +1574,7 @@ live_design! {
                         return sdf.result;
                     }
                     DesktopButtonType::XRMode => {
-                        sdf.clear(mix(#3, mix(#0aa, #077, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#0aa, #077, self.pressed), self.hover));
                         let w = 12.;
                         let h = 8.;
                         sdf.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
@@ -4030,13 +4030,131 @@ live_design! {
 
     DesignerOutline = <DesignerOutlineBase>{ }
 
+    Vr = <View> {
+        width: Fit, height: 27.,
+        flow: Right,
+        spacing: 0.,
+        margin: <THEME_MSPACE_V_2> {}
+        <View> {
+            width: (THEME_BEVELING * 2.0), height: Fill
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+        }
+        <View> {
+            width: (THEME_BEVELING), height: Fill,
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+        }
+    }
+
     DesignerToolbox = <DesignerToolboxBase>{
         width: Fill,
         height: Fill
         show_bg: false
 
         <DockToolbar> {
-
+            content = {
+                align: { x: 0., y: 0.5 }
+                spacing: (THEME_SPACE_3)
+                <ButtonFlat> {
+                    width: 32.
+                    text: ""
+                    margin: { right: -10. }
+                    icon_walk: { width: 11. }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_typography.svg"),
+                    }
+                }
+                <Vr> {}
+                <View> {
+                    width: Fit,
+                    flow: Right,
+                    spacing: (THEME_SPACE_1)
+                    <Pbold> { width: Fit, text: "Font" }
+                    <P> { width: Fit, text: "Noto Sans" }
+                }
+                <View> {
+                    width: Fit,
+                    spacing: (THEME_SPACE_1)
+                    flow: Right,
+                    <Pbold> { width: Fit, text: "Weight" }
+                    <P> { width: Fit, text: "Bold" }
+                }
+                <View> {
+                    width: Fit,
+                    spacing: (THEME_SPACE_1)
+                    flow: Right,
+                    <Pbold> { width: Fit, text: "Size" }
+                    <P> { width: Fit, text: "11 pt" }
+                } 
+                <View> {
+                    width: Fit,
+                    spacing: (THEME_SPACE_1)
+                    flow: Right,
+                    <Pbold> { width: Fit, text: "Line height" }
+                    <P> { width: Fit, text: "1.2" }
+                } 
+                <Vr> {}
+                <View> {
+                    width: Fit,
+                    flow: Right,
+                    spacing: 0,
+                    <ButtonFlat> {
+                        width: 25.
+                        text: ""
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            svg_file: dep("crate://self/resources/icons/icon_text_align_left.svg"),
+                        }
+                    }
+                    <ButtonFlat> {
+                        width: 25.
+                        text: ""
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            color: (THEME_COLOR_D_3),
+                            svg_file: dep("crate://self/resources/icons/icon_text_align_justify.svg"),
+                        }
+                    }
+                    <ButtonFlat> {
+                        width: 25.
+                        text: ""
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            color: (THEME_COLOR_D_3),
+                            svg_file: dep("crate://self/resources/icons/icon_text_align_right.svg"),
+                        }
+                    }
+                }
+                <Vr> {}
+                <P> { width: Fit, text: "Stroke" }
+                <RoundedView> {
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_5),
+                        radius: 5.0
+                    }
+                }
+                <P> { width: Fit, text: "Fill" }
+                <RoundedView> {
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (STUDIO_PALETTE_2),
+                        radius: 5.0
+                    }
+                }
+                <Filler> {}
+                <Vr> {}
+                <P> { width: Fit, text: "Canvas" }
+                <RoundedView> {
+                    margin: { right: (THEME_SPACE_1)}
+                    width: 15., height: 15.,
+                    draw_bg: {
+                        color: (THEME_COLOR_D_3),
+                        radius: 5.0
+                    }
+                }
+            }
         }
 
         <RoundedShadowView>{
@@ -4142,6 +4260,26 @@ live_design! {
                     text: ""
                 }
             }
+        }
+        <RoundedShadowView>{
+            draw_bg: {
+                border_width: 1.0
+                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                shadow_color: (THEME_COLOR_D_4)
+                shadow_radius: 10.0,
+                shadow_offset: vec2(0.0, 5.0)
+                radius: 2.5
+                color: (THEME_COLOR_FG_APP),
+            }
+            
+            abs_pos: vec2(25., 325.)
+            padding: 0.
+            width: 150., height: 150,
+            spacing: 0.,
+            align: { x: 0.5, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
+            <ColorPicker>{}
         }
     }
 
@@ -4268,7 +4406,6 @@ live_design! {
             }
         }
         container: <DesignerContainer>{
-
         }
     }
 
@@ -4277,6 +4414,68 @@ live_design! {
             window: { kind_id: 2 }
             body = <View> {
                 designer_outline = <DesignerOutline> {
+                    flow: Down,
+                    <DockToolbar> {
+                        content = {
+                            align: { x: 0., y: 0.0 }
+                            spacing: (THEME_SPACE_3)
+                            <Pbold> {
+                                width: Fit,
+                                margin: {left: (THEME_SPACE_1) },
+                                text: "Filter"
+                            }
+                            <View> {
+                                width: Fit
+                                flow: Right,
+                                spacing: (THEME_SPACE_2)
+                                <CheckBoxCustom> {
+                                    margin: {left: (THEME_SPACE_1)}
+                                    text: ""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 13.5 }
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_2),
+                                        svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
+                                    }
+                                }
+                                <CheckBoxCustom> {
+                                    text: ""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 12.}
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_6),
+                                        svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
+                                    }
+                                }
+                                <CheckBoxCustom> {
+                                    text: ""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 10.5}
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_1),
+                                        svg_file: dep("crate://self/resources/icons/icon_text.svg"),
+                                    }
+                                }
+                                <CheckBoxCustom> {
+                                    text:""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 13.}
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_5),
+                                        svg_file: dep("crate://self/resources/icons/icon_image.svg"),
+                                    }
+                                }
+                            }
+                            <TextInput> {
+                                width: Fill,
+                                empty_message: "Filter",
+                            }
+                        }
+                    }
                     outline_tree = <DesignerOutlineTree>{
 
                     }
