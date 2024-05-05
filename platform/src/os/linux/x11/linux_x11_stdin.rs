@@ -106,6 +106,7 @@ impl Cx {
                         }
                     }
                 }
+                println!("Terminating STDIN reader loop")
             });
         }
 
