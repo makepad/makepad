@@ -19,6 +19,19 @@ use {
     std::{hint, mem, ptr},
 };
 
+#[cfg(windows)]
+pub(crate) type ThreadedInstr = unsafe extern "sysv64" fn(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits;
+
+#[cfg(not(windows))]
 pub(crate) type ThreadedInstr = unsafe extern "C" fn(
     ip: Ip,
     sp: Sp,
@@ -156,6 +169,56 @@ pub(crate) fn exec(
     Ok(())
 }
 
+#[cfg(windows)]
+macro_rules! instr {
+    ($name:ident(
+        $ip:ident: Ip,
+        $sp:ident: Sp,
+        $md:ident: Md,
+        $ms:ident: Ms,
+        $ix:ident: Ix,
+        $sx:ident: Sx,
+        $dx:ident: Dx,
+        $cx:ident: Cx,
+    ) -> ControlFlowBits $body:block) => {
+        pub(crate) unsafe extern "sysv64" fn $name(
+            $ip: Ip,
+            $sp: Sp,
+            $md: Md,
+            $ms: Ms,
+            $ix: Ix,
+            $sx: Sx,
+            $dx: Dx,
+            $cx: Cx,
+        ) -> ControlFlowBits $body
+    };
+}
+
+#[cfg(not(windows))]
+macro_rules! instr {
+    ($name:ident(
+        $ip:ident: Ip,
+        $sp:ident: Sp,
+        $md:ident: Md,
+        $ms:ident: Ms,
+        $ix:ident: Ix,
+        $sx:ident: Sx,
+        $dx:ident: Dx,
+        $cx:ident: Cx,
+    ) -> ControlFlowBits $body:block) => {
+        pub(crate) unsafe extern "C" fn $name(
+            $ip: Ip,
+            $sp: Sp,
+            $md: Md,
+            $ms: Ms,
+            $ix: Ix,
+            $sx: Sx,
+            $dx: Dx,
+            $cx: Cx,
+        ) -> ControlFlowBits $body
+    };
+}
+
 macro_rules! r#try {
     ($expr:expr) => {
         match $expr {
@@ -167,7 +230,7 @@ macro_rules! r#try {
 
 // Control instructions
 
-pub(crate) unsafe extern "C" fn unreachable(
+instr!(unreachable(
     _ip: Ip,
     _sp: Sp,
     _md: Md,
@@ -178,9 +241,9 @@ pub(crate) unsafe extern "C" fn unreachable(
     _cx: Cx,
 ) -> ControlFlowBits {
     ControlFlow::Trap(Trap::Unreachable).to_bits()
-}
+});
 
-pub(crate) unsafe extern "C" fn br(
+instr!(br(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -193,9 +256,9 @@ pub(crate) unsafe extern "C" fn br(
     let target = *ip.cast();
     let ip = target;
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn br_if_z_s(
+instr!(br_if_z_s(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -209,9 +272,9 @@ pub(crate) unsafe extern "C" fn br_if_z_s(
     let (target, ip) = read_imm(ip);
     let ip = if cond == 0 { target } else { ip };
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn br_if_z_r(
+instr!(br_if_z_r(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -225,9 +288,9 @@ pub(crate) unsafe extern "C" fn br_if_z_r(
     let (target, ip) = read_imm(ip);
     let ip = if cond == 0 { target } else { ip };
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn br_if_nz_s(
+instr!(br_if_nz_s(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -241,9 +304,9 @@ pub(crate) unsafe extern "C" fn br_if_nz_s(
     let (target, ip) = read_imm(ip);
     let ip = if cond != 0 { target } else { ip };
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn br_if_nz_r(
+instr!(br_if_nz_r(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -257,9 +320,9 @@ pub(crate) unsafe extern "C" fn br_if_nz_r(
     let (target, ip) = read_imm(ip);
     let ip = if cond != 0 { target } else { ip };
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn br_table_s(
+instr!(br_table_s(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -274,9 +337,9 @@ pub(crate) unsafe extern "C" fn br_table_s(
     let targets: *mut Ip = ip.cast();
     let ip = *targets.add(target_idx.min(target_count) as usize);
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn br_table_r(
+instr!(br_table_r(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -291,9 +354,9 @@ pub(crate) unsafe extern "C" fn br_table_r(
     let targets: *mut Ip = ip.cast();
     let ip = *targets.add(target_idx.min(target_count) as usize);
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn return_(
+instr!(return_(
     _ip: Ip,
     sp: Sp,
     _md: Md,
@@ -309,9 +372,9 @@ pub(crate) unsafe extern "C" fn return_(
     let md = *old_sp.offset(-2).cast();
     let ms = *old_sp.offset(-1).cast();
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn call(
+instr!(call(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -331,9 +394,9 @@ pub(crate) unsafe extern "C" fn call(
     let ip = target;
     let sp = new_sp;
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn call_host(
+instr!(call_host(
     ip: Ip,
     sp: Sp,
     _md: Md,
@@ -377,9 +440,9 @@ pub(crate) unsafe extern "C" fn call_host(
         ms = 0;
     }
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn call_indirect(
+instr!(call_indirect(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -456,13 +519,13 @@ pub(crate) unsafe extern "C" fn call_indirect(
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
     }
-}
+});
 
 // Reference instructions
 
 macro_rules! ref_is_null {
     ($ref_is_null_s:ident, $ref_is_null_r:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $ref_is_null_s(
+        instr!($ref_is_null_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -483,9 +546,9 @@ macro_rules! ref_is_null {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $ref_is_null_r(
+        instr!($ref_is_null_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -506,7 +569,7 @@ macro_rules! ref_is_null {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -539,7 +602,7 @@ macro_rules! select {
         $select_iir:ident,
         $T:ty
     ) => {
-        pub(crate) unsafe extern "C" fn $select_sss(
+        instr!($select_sss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -562,9 +625,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_rss(
+        instr!($select_rss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -587,9 +650,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_iss(
+        instr!($select_iss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -612,9 +675,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_srs(
+        instr!($select_srs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -637,9 +700,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_irs(
+        instr!($select_irs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -662,9 +725,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_sis(
+        instr!($select_sis(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -687,9 +750,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_ris(
+        instr!($select_ris(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -712,9 +775,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_iis(
+        instr!($select_iis(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -737,9 +800,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_ssr(
+        instr!($select_ssr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -762,9 +825,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_isr(
+        instr!($select_isr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -787,9 +850,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_sir(
+        instr!($select_sir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -812,9 +875,9 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_iir(
+        instr!($select_iir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -837,7 +900,7 @@ macro_rules! select {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -877,7 +940,7 @@ macro_rules! select_float {
             $T
         );
 
-        pub(crate) unsafe extern "C" fn $select_rsr(
+        instr!($select_rsr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -900,9 +963,9 @@ macro_rules! select_float {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_srr(
+        instr!($select_srr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -925,9 +988,9 @@ macro_rules! select_float {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_irr(
+        instr!($select_irr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -950,9 +1013,9 @@ macro_rules! select_float {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $select_rir(
+        instr!($select_rir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -975,7 +1038,7 @@ macro_rules! select_float {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1081,8 +1144,8 @@ select!(
 // Variable instructions
 
 macro_rules! global_get {
-    ($global_get_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $global_get_t(
+    ($global_get:ident, $T:ty) => {
+        instr!($global_get(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1107,7 +1170,7 @@ macro_rules! global_get {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1120,7 +1183,7 @@ global_get!(global_get_extern_ref, UnguardedExternRef);
 
 macro_rules! global_set {
     ($global_set_s:ident, $global_set_r:ident, $global_set_i:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $global_set_s(
+        instr!($global_set_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1143,9 +1206,9 @@ macro_rules! global_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $global_set_r(
+        instr!($global_set_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1168,9 +1231,9 @@ macro_rules! global_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $global_set_i(
+        instr!($global_set_i(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1193,7 +1256,7 @@ macro_rules! global_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1218,7 +1281,7 @@ global_set!(
 
 macro_rules! table_get {
     ($table_get_s:ident, $table_get_r:ident, $table_get_i:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_get_s(
+        instr!($table_get_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1245,9 +1308,9 @@ macro_rules! table_get {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_get_r(
+        instr!($table_get_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1274,9 +1337,9 @@ macro_rules! table_get {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_get_i(
+        instr!($table_get_i(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1303,7 +1366,7 @@ macro_rules! table_get {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1332,7 +1395,7 @@ macro_rules! table_set {
         $table_set_ri:ident,
         $T:ty
     ) => {
-        pub(crate) unsafe extern "C" fn $table_set_ss(
+        instr!($table_set_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1357,9 +1420,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_rs(
+        instr!($table_set_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1384,9 +1447,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_is(
+        instr!($table_set_is(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1411,9 +1474,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_ir(
+        instr!($table_set_ir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1438,9 +1501,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_ii(
+        instr!($table_set_ii(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1465,9 +1528,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_sr(
+        instr!($table_set_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1492,9 +1555,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_si(
+        instr!($table_set_si(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1519,9 +1582,9 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $table_set_ri(
+        instr!($table_set_ri(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1546,7 +1609,7 @@ macro_rules! table_set {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1574,8 +1637,8 @@ table_set!(
 );
 
 macro_rules! table_size {
-    ($table_size_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_size_t(
+    ($table_size:ident, $T:ty) => {
+        instr!($table_size(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1600,7 +1663,7 @@ macro_rules! table_size {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1608,8 +1671,8 @@ table_size!(table_size_func_ref, UnguardedFuncRef);
 table_size!(table_size_extern_ref, UnguardedExternRef);
 
 macro_rules! table_grow {
-    ($table_grow_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_grow_t(
+    ($table_grow:ident, $T:ty) => {
+        instr!($table_grow(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1639,7 +1702,7 @@ macro_rules! table_grow {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1647,8 +1710,8 @@ table_grow!(table_grow_func_ref, UnguardedFuncRef);
 table_grow!(table_grow_extern_ref, UnguardedExternRef);
 
 macro_rules! table_fill {
-    ($table_fill_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_fill_t(
+    ($table_fill:ident, $T:ty) => {
+        instr!($table_fill(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1673,7 +1736,7 @@ macro_rules! table_fill {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1681,8 +1744,8 @@ table_fill!(table_fill_func_ref, UnguardedFuncRef);
 table_fill!(table_fill_extern_ref, UnguardedExternRef);
 
 macro_rules! table_copy {
-    ($table_copy_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_copy_t(
+    ($table_copy:ident, $T:ty) => {
+        instr!($table_copy(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1721,7 +1784,7 @@ macro_rules! table_copy {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1729,8 +1792,8 @@ table_copy!(table_copy_func_ref, UnguardedFuncRef);
 table_copy!(table_copy_extern_ref, UnguardedExternRef);
 
 macro_rules! table_init {
-    ($table_init_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $table_init_t(
+    ($table_init:ident, $T:ty) => {
+        instr!($table_init(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1759,7 +1822,7 @@ macro_rules! table_init {
                     count
                 ));
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1767,8 +1830,8 @@ table_init!(table_init_func_ref, UnguardedFuncRef);
 table_init!(table_init_extern_ref, UnguardedExternRef);
 
 macro_rules! elem_drop {
-    ($elem_drop_t:ident, $T:ty) => {
-        pub(crate) unsafe extern "C" fn $elem_drop_t(
+    ($elem_drop:ident, $T:ty) => {
+        instr!($elem_drop(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1789,7 +1852,7 @@ macro_rules! elem_drop {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1800,7 +1863,7 @@ elem_drop!(elem_drop_extern_ref, UnguardedExternRef);
 
 macro_rules! load {
     ($load_s:ident, $load_r:ident, $load_i:ident, $T:ty, $U:ty) => {
-        pub(crate) unsafe extern "C" fn $load_s(
+        instr!($load_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1828,9 +1891,9 @@ macro_rules! load {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $load_r(
+        instr!($load_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1858,9 +1921,9 @@ macro_rules! load {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $load_i(
+        instr!($load_i(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1888,7 +1951,7 @@ macro_rules! load {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -1905,7 +1968,7 @@ macro_rules! store {
         $T:ty,
         $U:ty
     ) => {
-        pub(crate) unsafe extern "C" fn $store_ss(
+        instr!($store_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1930,9 +1993,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_rs(
+        instr!($store_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1957,9 +2020,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_is(
+        instr!($store_is(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1984,9 +2047,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_ir(
+        instr!($store_ir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2011,9 +2074,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_ii(
+        instr!($store_ii(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2038,9 +2101,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_sr(
+        instr!($store_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2065,9 +2128,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_si(
+        instr!($store_si(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2092,9 +2155,9 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $store_ri(
+        instr!($store_ri(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2119,7 +2182,7 @@ macro_rules! store {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -2142,7 +2205,7 @@ macro_rules! store_float {
             $T, $U
         );
 
-        pub(crate) unsafe extern "C" fn $store_rr(
+        instr!($store_rr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2167,7 +2230,7 @@ macro_rules! store_float {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -2296,7 +2359,7 @@ store!(
     u32
 );
 
-pub(crate) unsafe extern "C" fn memory_size(
+instr!(memory_size(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2317,9 +2380,9 @@ pub(crate) unsafe extern "C" fn memory_size(
 
     // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn memory_grow(
+instr!(memory_grow(
     ip: Ip,
     sp: Sp,
     _md: Md,
@@ -2348,9 +2411,9 @@ pub(crate) unsafe extern "C" fn memory_grow(
 
     // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn memory_fill(
+instr!(memory_fill(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2371,9 +2434,9 @@ pub(crate) unsafe extern "C" fn memory_fill(
 
     // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn memory_copy(
+instr!(memory_copy(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2394,9 +2457,9 @@ pub(crate) unsafe extern "C" fn memory_copy(
 
     // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn memory_init(
+instr!(memory_init(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2420,9 +2483,9 @@ pub(crate) unsafe extern "C" fn memory_init(
 
     // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn data_drop(
+instr!(data_drop(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2440,13 +2503,13 @@ pub(crate) unsafe extern "C" fn data_drop(
 
     // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
 // Numeric instructions
 
 macro_rules! un_op {
     ($un_op_s:ident, $un_op_r:ident, $f:expr) => {
-        pub(crate) unsafe extern "C" fn $un_op_s(
+        instr!($un_op_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2467,9 +2530,9 @@ macro_rules! un_op {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $un_op_r(
+        instr!($un_op_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2490,7 +2553,7 @@ macro_rules! un_op {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -2502,7 +2565,7 @@ macro_rules! bin_op {
         $bin_op_ir:ident,
         $f:expr
     ) => {
-        pub(crate) unsafe extern "C" fn $bin_op_ss(
+        instr!($bin_op_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2524,9 +2587,9 @@ macro_rules! bin_op {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $bin_op_rs(
+        instr!($bin_op_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2548,9 +2611,9 @@ macro_rules! bin_op {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $bin_op_is(
+        instr!($bin_op_is(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2572,9 +2635,9 @@ macro_rules! bin_op {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $bin_op_ir(
+        instr!($bin_op_ir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2596,7 +2659,7 @@ macro_rules! bin_op {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -2613,7 +2676,7 @@ macro_rules! bin_op_noncommutative {
     ) => {
         bin_op!($bin_op_ss, $bin_op_rs, $bin_op_is, $bin_op_ir, $f);
 
-        pub(crate) unsafe extern "C" fn $bin_op_sr(
+        instr!($bin_op_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2635,9 +2698,9 @@ macro_rules! bin_op_noncommutative {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $bin_op_si(
+        instr!($bin_op_si(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2659,9 +2722,9 @@ macro_rules! bin_op_noncommutative {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
 
-        pub(crate) unsafe extern "C" fn $bin_op_ri(
+        instr!($bin_op_ri(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2683,7 +2746,7 @@ macro_rules! bin_op_noncommutative {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -3592,9 +3655,8 @@ un_op!(
 // Miscellaneous instructions
 
 macro_rules! copy_imm_to_stack {
-    ($copy_imm_to_stack_t:ident, $T:ty) => {
-        /// Copies an immediate value to the stack.
-        pub(crate) unsafe extern "C" fn $copy_imm_to_stack_t(
+    ($copy_imm_to_stack:ident, $T:ty) => {
+        instr!($copy_imm_to_stack(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3612,7 +3674,7 @@ macro_rules! copy_imm_to_stack {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -3625,8 +3687,7 @@ copy_imm_to_stack!(copy_imm_to_stack_extern_ref, UnguardedExternRef);
 
 macro_rules! copy_stack {
     ($copy_stack_t:ident, $T:ty) => {
-        /// Copies a value within the stack.
-        pub(crate) unsafe extern "C" fn $copy_stack_t(
+        instr!($copy_stack_t(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3644,7 +3705,7 @@ macro_rules! copy_stack {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -3657,8 +3718,7 @@ copy_stack!(copy_stack_extern_ref, UnguardedExternRef);
 
 macro_rules! copy_reg_to_stack {
     ($copy_reg_to_stack_t:ident, $T:ty) => {
-        /// Copies a value from a register to the stack.
-        pub(crate) unsafe extern "C" fn $copy_reg_to_stack_t(
+        instr!($copy_reg_to_stack_t(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3676,7 +3736,7 @@ macro_rules! copy_reg_to_stack {
 
             // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-        }
+        });
     };
 }
 
@@ -3687,7 +3747,7 @@ copy_reg_to_stack!(copy_reg_to_stack_f64, f64);
 copy_reg_to_stack!(copy_reg_to_stack_func_ref, UnguardedFuncRef);
 copy_reg_to_stack!(copy_reg_to_stack_extern_ref, UnguardedExternRef);
 
-pub(crate) unsafe extern "C" fn stop(
+instr!(stop(
     _ip: Ip,
     _sp: Sp,
     _md: Md,
@@ -3698,9 +3758,9 @@ pub(crate) unsafe extern "C" fn stop(
     _cx: Cx,
 ) -> ControlFlowBits {
     ControlFlow::Stop.to_bits()
-}
+});
 
-pub(crate) unsafe extern "C" fn compile(
+instr!(compile(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -3722,9 +3782,9 @@ pub(crate) unsafe extern "C" fn compile(
     let ip = ip.offset(-1);
     *ip.cast() = call as ThreadedInstr;
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
-pub(crate) unsafe extern "C" fn enter(
+instr!(enter(
     ip: Ip,
     sp: Sp,
     _md: Md,
@@ -3760,7 +3820,7 @@ pub(crate) unsafe extern "C" fn enter(
         ms = 0;
     }
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
-}
+});
 
 // Helper functions
 

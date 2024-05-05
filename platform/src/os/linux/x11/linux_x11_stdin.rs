@@ -9,6 +9,7 @@ use {
         makepad_math::*,
         makepad_micro_serde::*,
         event::Event,
+        CxOsApi,
         window::CxWindowPool,
         event::WindowGeom,
         texture::{Texture, TextureFormat},
@@ -242,7 +243,7 @@ impl Cx {
                     // alright a tick.
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(0.0);
+                        self.call_next_frame_event(self.seconds_since_app_start());
                     }
                     
                     if self.need_redrawing() {

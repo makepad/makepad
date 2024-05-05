@@ -1541,20 +1541,20 @@ live_design! {
                 // WindowsMin
                 match self.button_type {
                     DesktopButtonType::WindowsMin => {
-                        sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover));
                         sdf.move_to(c.x - sz, c.y);
                         sdf.line_to(c.x + sz, c.y);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMax => {
-                        sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover));
                         sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMaxToggled => {
-                        let clear = mix(#3, mix(#6, #9, self.pressed), self.hover);
+                        let clear = mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover);
                         sdf.clear(clear);
                         let sz = 3.5;
                         sdf.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
@@ -1565,7 +1565,7 @@ live_design! {
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsClose => {
-                        sdf.clear(mix(#3, mix(#e00, #c00, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#e00, #c00, self.pressed), self.hover));
                         sdf.move_to(c.x - sz, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.move_to(c.x - sz, c.y + sz);
@@ -1574,7 +1574,7 @@ live_design! {
                         return sdf.result;
                     }
                     DesktopButtonType::XRMode => {
-                        sdf.clear(mix(#3, mix(#0aa, #077, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#0aa, #077, self.pressed), self.hover));
                         let w = 12.;
                         let h = 8.;
                         sdf.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
