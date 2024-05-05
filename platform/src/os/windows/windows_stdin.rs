@@ -27,7 +27,8 @@ use {
 #[derive(Default)]
 pub(crate) struct StdinWindow{
     swapchain: Option<Swapchain<Texture>>,
-    present_index: usize
+    present_index: usize,
+    new_frame_being_rendered: Option<PresentableDraw>
 }
 
 
@@ -49,7 +50,7 @@ impl Cx {
                     if let Some(swapchain) = &window.swapchain {
                         
                         // and if GPU is not already rendering something else
-                        if self.os.new_frame_being_rendered.is_none() {
+                        if window.new_frame_being_rendered.is_none() {
                             let current_image = &swapchain.presentable_images[window.present_index];
                             
                             window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
@@ -70,7 +71,7 @@ impl Cx {
                             d3d11_cx.start_querying();
                             
                             // and inform event_loop to go poll GPU readiness
-                            self.os.new_frame_being_rendered = Some(future_presentable_draw);
+                            window.new_frame_being_rendered = Some(future_presentable_draw);
                         }
                     }
                 }
@@ -239,14 +240,16 @@ impl Cx {
                     //if allow_rendering {
 
                         // check if GPU is ready to flip frames
-                        if let Some(presentable_draw) = self.os.new_frame_being_rendered {
-                            while !d3d11_cx.is_gpu_done() {
-                                std::thread::sleep(std::time::Duration::from_millis(3));
+                        for window in &mut stdin_windows{
+                            if let Some(presentable_draw) = window.new_frame_being_rendered {
+                                while !d3d11_cx.is_gpu_done() {
+                                    std::thread::sleep(std::time::Duration::from_millis(3));
+                                }
+                                let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
+                                window.new_frame_being_rendered = None;
                             }
-                            let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
-                            self.os.new_frame_being_rendered = None;
                         }
-                    //}
+                        //}
 
                     // probe how long this took
                     /*
