@@ -4261,6 +4261,26 @@ live_design! {
                 }
             }
         }
+        <RoundedShadowView>{
+            draw_bg: {
+                border_width: 1.0
+                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                shadow_color: (THEME_COLOR_D_4)
+                shadow_radius: 10.0,
+                shadow_offset: vec2(0.0, 5.0)
+                radius: 2.5
+                color: (THEME_COLOR_FG_APP),
+            }
+            
+            abs_pos: vec2(25., 325.)
+            padding: 0.
+            width: 150., height: 150,
+            spacing: 0.,
+            align: { x: 0.5, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
+            <ColorPicker>{}
+        }
     }
 
     DesignerContainer = <DesignerContainerBase>{
@@ -4386,7 +4406,6 @@ live_design! {
             }
         }
         container: <DesignerContainer>{
-
         }
     }
 
