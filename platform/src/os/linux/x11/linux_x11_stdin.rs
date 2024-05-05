@@ -93,7 +93,6 @@ impl Cx {
                     if let Ok(0) | Err(_) = reader.read_line(&mut line) {
                         break;
                     }
-                    println!("GOT HOST MSG {:?}", line);
                     // alright lets put the line in a json parser
                     match HostToStdin::deserialize_json(&line) {
                         Ok(msg) => {
@@ -107,7 +106,6 @@ impl Cx {
                         }
                     }
                 }
-                println!("LOOP TERMINATED");
             });
         }
 
