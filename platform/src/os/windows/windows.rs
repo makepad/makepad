@@ -426,5 +426,5 @@ pub struct CxOs {
     pub (crate) start_time: Option<Instant>,
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-    pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
+   //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }
