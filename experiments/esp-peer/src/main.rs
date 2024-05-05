@@ -32,7 +32,7 @@ fn main() -> ! {
     .unwrap();
     let mut esp_now = EspNow::new(&inited, peripherals.WIFI).unwrap();
 
-    let mut bytes = [0; 250];
+    let mut bytes = [0; 1024];
     let mut len = 0;
     let mut discard = false;
 
@@ -55,7 +55,7 @@ fn main() -> ! {
     let mut counter:i32 = 1;
     serial1.write('\n' as u8).ok();
     loop {
-        delay.delay_ms(500 as u32);
+        /*delay.delay_ms(500 as u32);
         serial1.write('M' as u8).ok();
         serial1.write('a' as u8).ok();
         serial1.write('k' as u8).ok();
@@ -65,11 +65,12 @@ fn main() -> ! {
         serial1.write('a' as u8).ok();
         serial1.write('d' as u8).ok();
         serial1.write('\n' as u8).ok();
-        
-        // serial1.write("haha".as_bytes()).ok();
-        writeln!(serial1, "haha {}", counter).unwrap();
+        */
+        //serial1.write("haha".as_bytes()).ok();
+        writeln!(serial1, "Loop {}", counter).unwrap();
+        delay.delay_ms(100 as u32);
         // serial1.flush();
-        delay.delay_ms(500 as u32);
+        //delay.delay_ms(500 as u32);
 
         counter = counter + 1;
 
@@ -82,11 +83,19 @@ fn main() -> ! {
         // flag was set below.
         if let Some(pos) = bytes[..len].iter().position(|b| *b == b'\n') {
             if !discard {
+                let msg = &bytes[..pos + 1];
+                serial1.write_str("Sending: ");
+                for i in 0..msg.len(){
+                    serial1.write(msg[i]);
+                }
+                serial1.write_str("\n");
+                
                 esp_now
                     .send(&esp_now::BROADCAST_ADDRESS, &bytes[..pos + 1])
                     .unwrap()
                     .wait()
                     .unwrap();
+                delay.delay_ms(500 as u32);
             }
             // Copy the remaining bytes to the start of the buffer.
             bytes.copy_within(pos + 1..len, 0);

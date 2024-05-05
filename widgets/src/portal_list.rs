@@ -273,7 +273,7 @@ impl PortalList {
             }
         }
         else {
-            log!("Draw state not at end in listview, please review your next_visible_item loop")
+            //log!("Draw state not at end in listview, please review your next_visible_item loop")
         }
         let rect = cx.turtle().rect();
         if self.at_end || self.view_window == 0 || self.view_window > visible_items{
