@@ -114,8 +114,9 @@ impl ChildProcess {
                 while let Ok(line) = stdin_receiver.recv() {
                     match line {
                         ChildStdIn::Send(line) => {
-                            if let Err(_) = stdin.write_all(line.as_bytes()){
-                                //println!("Stdin send error {}", e);
+                            println!("SEND STDIN {}", line);
+                            if let Err(e) = stdin.write_all(line.as_bytes()){
+                                println!("Stdin send error {}",e);
                             }
                             let _ = stdin.flush();
                         }
