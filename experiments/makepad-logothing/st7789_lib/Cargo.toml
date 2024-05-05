@@ -12,7 +12,7 @@ doc = true
 path = "src/lib.rs"
 
 [dependencies]
-cortex-m = "0.7.3"
-embedded-hal = { version = "0.2.5", features=["unproven"] }
-rp-pico = "0.2.0"
+cortex-m = "0.7.7"
+embedded-hal = { version = "1.0.0" }
+rp-pico = "0.9.0"
 nano-leb128 = { version = "0.1.0", default-features = false }
