@@ -4,14 +4,15 @@
         (local.set $acc
             (i64.const 1)
         )
-        (block $exit
-            (br_if $exit
+        
+        (block $break
+            (br_if $break
                 (i64.lt_u
                     (local.get $n)
                     (i64.const 2)
                 )
             )
-            (loop $loop
+            (loop $continue
                 (local.set
                     $acc
                     (i64.mul
@@ -25,7 +26,7 @@
                         (i64.const 1)
                     )
                 )
-                (br_if $loop
+                (br_if $continue
                     (i64.gt_s
                         (local.get $n)
                         (i64.const 1)
