@@ -1,11 +1,12 @@
 use {
     crate::{
+        code::{Code, CodeSlot},
         data::UnguardedData,
         elem::UnguardedElem,
         error::Error,
         extern_::UnguardedExtern,
         extern_ref::UnguardedExternRef,
-        func::{Code, CodeSlot, Func, FuncEntity, UnguardedFunc},
+        func::{Func, FuncEntity, UnguardedFunc},
         func_ref::UnguardedFuncRef,
         global::UnguardedGlobal,
         mem::UnguardedMem,
@@ -111,8 +112,8 @@ pub(crate) fn exec(
             };
             let mut trampoline = [
                 call as CodeSlot,
-                state.slots.as_mut_ptr() as CodeSlot,
-                type_.callee_stack_slot_count() * mem::size_of::<StackSlot>(),
+                state.code.as_mut_ptr() as CodeSlot,
+                type_.call_frame_size() * mem::size_of::<StackSlot>(),
                 stop as CodeSlot,
             ];
             let ptr = stack.ptr();
@@ -152,7 +153,7 @@ pub(crate) fn exec(
         }
         FuncEntity::Host(func) => {
             let ptr = stack.ptr();
-            stack.set_ptr(unsafe { ptr.add(type_.callee_stack_slot_count()) });
+            stack.set_ptr(unsafe { ptr.add(type_.call_frame_size()) });
             stack = func.trampoline().clone().call(store, stack)?;
             stack.set_ptr(ptr);
         }
@@ -466,7 +467,7 @@ instr!(call_indirect(
     let mut func = r#try!(func.ok_or(Trap::ElemUninited));
     if func
         .as_ref()
-        .interned_type()
+        .type_()
         .to_unguarded((*(*cx).store).id())
         != type_
     {
@@ -478,7 +479,7 @@ instr!(call_indirect(
             let Code::Compiled(state) = func.code_mut() else {
                 hint::unreachable_unchecked();
             };
-            let target = state.slots.as_mut_ptr();
+            let target = state.code.as_mut_ptr();
             let new_sp: Sp = sp.cast::<u8>().add(stack_offset).cast();
             *new_sp.offset(-4).cast() = ip;
             *new_sp.offset(-3).cast() = sp;
@@ -3778,7 +3779,7 @@ instr!(compile(
     let Code::Compiled(state) = func.code_mut() else {
         hint::unreachable_unchecked();
     };
-    *ip.cast() = state.slots.as_mut_ptr();
+    *ip.cast() = state.code.as_mut_ptr();
     let ip = ip.offset(-1);
     *ip.cast() = call as ThreadedInstr;
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
@@ -3805,7 +3806,7 @@ instr!(enter(
     let stack_height =
         usize::try_from(sp.offset_from((*cx).stack.as_mut().unwrap_unchecked().base_ptr()))
             .unwrap_unchecked();
-    if state.max_stack_slot_count > Stack::SIZE - stack_height {
+    if state.max_stack_height > Stack::SIZE - stack_height {
         return ControlFlow::Trap(Trap::StackOverflow).to_bits();
     }
     ptr::write_bytes(sp, 0, state.local_count);

@@ -1,8 +1,9 @@
 use {
     crate::{
+        code::{CompiledCode, UncompiledCode},
         compile::Compiler,
         decode::DecodeError,
-        func::{CompiledCode, Func, FuncType, UncompiledCode},
+        func::{Func, FuncType},
         instance::Instance,
         module::ModuleBuilder,
         store::Store,
@@ -11,7 +12,7 @@ use {
     std::sync::{Arc, Mutex},
 };
 
-/// The Stitch interpreter.
+/// A Wasm engine.
 #[derive(Clone, Debug)]
 pub struct Engine {
     inner: Arc<EngineInner>,
