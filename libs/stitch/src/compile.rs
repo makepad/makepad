@@ -3,7 +3,7 @@ use {
         aliasable_box::AliasableBox,
         code,
         code::{
-            BinOpInfo, BlockType, CodeSlot, CompiledCode, InstrVisitor, LoadInfo, MemArg,
+            BinOpInfo, BlockType, InstrSlot, CompiledCode, InstrVisitor, LoadInfo, MemArg,
             StoreInfo, UnOpInfo, UncompiledCode,
         },
         decode::DecodeError,
@@ -106,7 +106,7 @@ impl Compiler {
         compile.emit(exec::return_ as ThreadedInstr);
         compile.opds.clear();
         let max_stack_slot_count = compile.max_stack_height;
-        let mut code: AliasableBox<[CodeSlot]> = AliasableBox::from_box(Box::from(compile.code));
+        let mut code: AliasableBox<[InstrSlot]> = AliasableBox::from_box(Box::from(compile.code));
         for fixup_idx in compile.fixup_idxs.drain(..) {
             code[fixup_idx] += code.as_ptr() as usize;
         }
@@ -139,7 +139,7 @@ struct Compile<'a> {
     first_temp_stack_idx: usize,
     max_stack_height: usize,
     regs: [Option<usize>; 2],
-    code: Vec<CodeSlot>,
+    code: Vec<InstrSlot>,
 }
 
 impl<'a> Compile<'a> {
@@ -153,18 +153,10 @@ impl<'a> Compile<'a> {
         }
     }
 
-    /// Constants
-
-    fn preserve_const(&mut self, opd_depth: usize) {
-        let opd_idx = self.opds.len() - 1 - opd_depth;
-        self.emit(select_copy_imm_to_stack(self.opds[opd_idx].type_));
-        self.emit_val(self.opds[opd_idx].val.unwrap());
-        self.emit_stack_offset(self.temp_stack_idx(opd_idx));
-        self.opd_mut(opd_depth).val = None;
-    }
-
     /// Locals
 
+    /// Appends the top operand on the list of operands that refer to the local with the given
+    /// index.
     fn push_local_opd(&mut self, local_idx: usize) {
         let opd_idx = self.opds.len() - 1;
         debug_assert!(self.opds[opd_idx].local_idx.is_none());
@@ -176,7 +168,9 @@ impl<'a> Compile<'a> {
         self.locals[local_idx].first_opd_idx = Some(opd_idx);
     }
 
-    fn pop_local_opd(&mut self, opd_idx: usize) {
+    /// Removes the operand with the given index from the list of operands that refer to the local
+    /// with the given index.
+    fn remove_local_opd(&mut self, opd_idx: usize) {
         let local_idx = self.opds[opd_idx].local_idx.unwrap();
         if let Some(prev_opd_idx) = self.opds[opd_idx].prev_opd_idx {
             self.opds[prev_opd_idx].next_opd_idx = self.opds[opd_idx].next_opd_idx;
@@ -189,14 +183,6 @@ impl<'a> Compile<'a> {
         self.opds[opd_idx].local_idx = None;
         self.opds[opd_idx].prev_opd_idx = None;
         self.opds[opd_idx].next_opd_idx = None;
-    }
-
-    fn preserve_local_opd(&mut self, opd_idx: usize) {
-        let local_idx = self.opds[opd_idx].local_idx.unwrap();
-        self.emit(select_copy_stack(self.locals[local_idx].type_));
-        self.emit_stack_offset(self.local_stack_idx(local_idx));
-        self.emit_stack_offset(self.temp_stack_idx(opd_idx));
-        self.pop_local_opd(opd_idx);
     }
 
     fn preserve_all_local_opds(&mut self, local_idx: usize) {
@@ -289,7 +275,7 @@ impl<'a> Compile<'a> {
     /// constant on the stack if necessary.
     fn ensure_opd_not_const(&mut self, opd_depth: usize) {
         if self.opd(opd_depth).is_const() {
-            self.preserve_const(opd_depth);
+            self.preserve_const_opd(opd_depth);
         }
     }
 
@@ -309,6 +295,22 @@ impl<'a> Compile<'a> {
         }
     }
 
+    fn preserve_const_opd(&mut self, opd_depth: usize) {
+        let opd_idx = self.opds.len() - 1 - opd_depth;
+        self.emit(select_copy_imm_to_stack(self.opds[opd_idx].type_));
+        self.emit_val(self.opds[opd_idx].val.unwrap());
+        self.emit_stack_offset(self.temp_stack_idx(opd_idx));
+        self.opd_mut(opd_depth).val = None;
+    }
+
+    fn preserve_local_opd(&mut self, opd_idx: usize) {
+        let local_idx = self.opds[opd_idx].local_idx.unwrap();
+        self.emit(select_copy_stack(self.locals[local_idx].type_));
+        self.emit_stack_offset(self.local_stack_idx(local_idx));
+        self.emit_stack_offset(self.temp_stack_idx(opd_idx));
+        self.remove_local_opd(opd_idx);
+    }
+
     /// Pushes an operand of the given type on the stack.
     fn push_opd(&mut self, type_: impl Into<ValType>) {
         self.opds.push(Opd {
@@ -321,16 +323,6 @@ impl<'a> Compile<'a> {
         });
         let stack_height = self.first_temp_stack_idx as usize + (self.opds.len() - 1);
         self.max_stack_height = self.max_stack_height.max(stack_height);
-    }
-
-    fn push_opd_and_emit_stack_offset(&mut self, type_: impl Into<ValType>) {
-        self.push_opd(type_);
-        self.emit_stack_offset(self.opd_stack_idx(0));
-    }
-
-    fn push_opd_and_alloc_reg(&mut self, type_: impl Into<ValType>) {
-        self.push_opd(type_);
-        self.alloc_reg();
     }
 
     /// Pops an operand from the stack.
@@ -439,14 +431,14 @@ impl<'a> Compile<'a> {
         }
     }
 
-    /// Emitting
+    // Emitting
 
     fn emit<T>(&mut self, val: T)
     where
         T: Copy,
     {
-        debug_assert!(mem::size_of::<T>() <= mem::size_of::<CodeSlot>());
-        self.code.push(CodeSlot::default());
+        debug_assert!(mem::size_of::<T>() <= mem::size_of::<InstrSlot>());
+        self.code.push(InstrSlot::default());
         unsafe { *(self.code.last_mut().unwrap() as *mut _ as *mut T) = val };
     }
 
@@ -500,7 +492,7 @@ impl<'a> Compile<'a> {
 
     fn emit_code_offset(&mut self, code_idx: usize) {
         self.fixup_idxs.push(self.code.len());
-        self.emit(code_idx * mem::size_of::<CodeSlot>());
+        self.emit(code_idx * mem::size_of::<InstrSlot>());
     }
 }
 
@@ -818,69 +810,136 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 
     // Reference instructions
+
+    /// Compiles a ref.null instruction.
     fn visit_ref_null(&mut self, type_: RefType) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Emit the instruction.
         self.emit(select_ref_null(type_));
+        
         match type_ {
             RefType::FuncRef => self.emit(FuncRef::null().to_unguarded(self.store.id())),
             RefType::ExternRef => self.emit(ExternRef::null().to_unguarded(self.store.id())),
         };
-        self.push_opd_and_emit_stack_offset(type_);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::FuncRef);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+        
         Ok(())
     }
 
+    /// Compiles a ref.is_null instruction.
     fn visit_ref_is_null(&mut self) -> Result<(), DecodeError> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        self.ensure_opd_not_const(0);
+
+        // Emit the instruction.
         self.emit(select_ref_is_null(
             self.opd(0).type_.to_ref().unwrap(),
             self.opd(0).kind(),
         ));
-        self.pop_opd_and_emit();
-        self.push_opd_and_alloc_reg(ValType::I32);
+        
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+        
+        // Push the output onto the stack and allocate a register for it.
+        self.push_opd(ValType::I32);
+        self.alloc_reg();
+        
         Ok(())
     }
 
+    /// Compiles a ref.func instruction.
     fn visit_ref_func(&mut self, func_idx: u32) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Func`] for this instruction.
+        let func = self.instance.func(func_idx).unwrap();
+
+        // Emit the instruction.
         self.emit(exec::copy_imm_to_stack_func_ref as ThreadedInstr);
-        self.emit(
-            self.instance
-                .func(func_idx)
-                .unwrap()
-                .to_unguarded(self.store.id()),
-        );
-        self.push_opd_and_emit_stack_offset(ValType::FuncRef);
+
+        // Emit an unguarded handle to the [`Func`].
+        self.emit(func.to_unguarded(self.store.id()));
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::FuncRef);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
         Ok(())
     }
 
     // Parametric instructions
 
+    /// Compiles a drop instruction
     fn visit_drop(&mut self) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Pop the input from the stack.
         self.pop_opd();
+
         Ok(())
     }
 
+    /// Compiles a select instruction.
     fn visit_select(&mut self, type_: Option<ValType>) -> Result<(), DecodeError> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
         let type_ = type_.unwrap_or_else(|| self.opd(1).type_);
-        for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+
+        // The select instruction does not have any _{sri}{sri}i variants.
+        //
+        // For instance, the following sequence of instructions:
+        // local.get 0
+        // local.get 1
+        // i32.const 1
+        //
+        // will likely be constant folded by most Wasm compilers, so we expect it to occur very
+        // rarely in real Wasm code. Therefore, we do not implement a select_i32_ssi instruction.
+        //
+        // Conversely, the following sequence of instructions:
+        //
+        // local.get 0
+        // local.get 1
+        // local.get 2
+        //
+        // cannot be constant folded, since the value of the condition cannot be known at compile
+        // time. Therefore, we do implement a select_sss instruction.
+        //
+        // However, sequences like the first one above are still valid Wasm code, so we need to
+        // handle them. In the rare case that the last operand is a constant, we ensure that the
+        // last operand is not a constant, so we can use the _{sri}{sri}s variant (which is always
+        // available).
+        if self.opd(0).is_const() {
+            self.ensure_opd_not_const(0);
         }
-        // If this operation has an output, and the output register is used, then we need to save
-        // the output register, unless one of its inputs is in the output register. Otherwise, the
-        // operation will overwrite the output register while it's already used.
+
+        // The select instruction writes it output to a register, so we need to ensure that the
+        // register is available for the instruction to use.
+        //
+        // If the output register is already occupied, then we need to preserve the register on
+        // the stack. Otherwise, the instruction will overwrite the register while it's already
+        // occupied.
+        //
+        // The only exception is if one of the inputs occupies the output register. In that case,
+        // the select instruction can safely overwrite the register, since the input will be
+        // consumed by the instruction anyway.
         let output_reg_idx = type_.reg_idx();
         if self.is_reg_occupied(output_reg_idx)
             && !self.opd(2).occupies_reg(output_reg_idx)
@@ -889,32 +948,51 @@ impl<'a> InstrVisitor for Compile<'a> {
         {
             self.preserve_reg(output_reg_idx);
         }
+
+        // Emit the instruction.
         self.emit(select_select(
             type_,
             self.opd(2).kind(),
             self.opd(1).kind(),
             self.opd(0).kind(),
         ));
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.pop_opd_and_emit();
-        self.push_opd_and_alloc_reg(type_);
+
+        // Emit the inputs and pop them from the stack.
+        for _ in 0..3 {
+            self.emit_opd(0);
+            self.pop_opd();
+        }
+
+        // Push the output onto the stack and allocate a register for it.
+        self.push_opd(type_);
+        self.alloc_reg();
+
         Ok(())
     }
 
     // Variable instructions
 
+    /// Compiles a local.get instruction.
     fn visit_local_get(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Wasm uses `u32` indices for locals, but we use `usize` indices.
         let local_idx = local_idx as usize;
+
+        // Push the output onto the stack and append it to the list of operands that refer to this
+        // local.
+        //
+        // Appending the operand to the list of operands for the local marks it as a local operand.
         self.push_opd(self.locals[local_idx].type_);
         self.push_local_opd(local_idx);
+
         Ok(())
     }
 
+    /// Compiles a local.set instruction.
     fn visit_local_set(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -932,17 +1010,21 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
+    /// Compiles a local.tee instruction.
     fn visit_local_tee(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
 
+        // Wasm uses `u32` indices for locals, but we use `usize` indices.
         let local_idx = local_idx as usize;
 
         // Obtain the type of the local.
         let local_type = self.locals[local_idx].type_;
 
+        // The local.tee instruction overwrites the local, so we need to preserve all operands that
+        // refer to the local on the stack.
         self.preserve_all_local_opds(local_idx);
 
         // Emit the instruction.
@@ -976,7 +1058,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Emit an unguarded handle to the [`Global`].
         self.emit(global.to_unguarded(self.store.id()));
 
-        // Push the output onto the stack, and emit its stack offset.
+        // Push the output onto the stack and emit its stack offset.
         self.push_opd(val_type);
         self.emit_stack_offset(self.opd_stack_idx(0));
 
@@ -1034,7 +1116,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
 
-        // Push the output onto the stack, and emit its stack offset.
+        // Push the output onto the stack and emit its stack offset.
         self.push_opd(ValType::I32);
         self.emit_stack_offset(self.opd_stack_idx(0));
 
@@ -1091,7 +1173,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
 
-        // Push the output onto the stack, and emit its stack offset.
+        // Push the output onto the stack and emit its stack offset.
         self.push_opd(ValType::I32);
         self.emit_stack_offset(self.opd_stack_idx(0));
 
@@ -1130,7 +1212,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Emit an unguarded handle to the [`Table`].
         self.emit(table.to_unguarded(self.store.id()));
 
-        // Push the output onto the stack, and emit its stack offset.
+        // Push the output onto the stack and emit its stack offset.
         self.push_opd(ValType::I32);
         self.emit_stack_offset(self.opd_stack_idx(0));
 
@@ -1511,7 +1593,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and set its value.
         //
-        // Setting its value will mark the operand as a constant.
+        // Setting its value will mark the operand as a constant operand.
         self.push_opd(ValType::I32);
         self.opd_mut(0).val = Some(UnguardedVal::I32(val));
         Ok(())
@@ -1526,7 +1608,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and set its value.
         //
-        // Setting its value will mark the operand as a constant.
+        // Setting its value will mark the operand as a constant operand.
         self.push_opd(ValType::I64);
         self.opd_mut(0).val = Some(UnguardedVal::I64(val));
 
@@ -1542,7 +1624,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and set its value.
         //
-        // Setting its value will mark the operand as a constant.
+        // Setting its value will mark the operand as a constant operand.
         self.push_opd(ValType::F32);
         self.opd_mut(0).val = Some(UnguardedVal::F32(val));
 
@@ -1597,16 +1679,16 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.ensure_opd_not_const(0);
         }
 
-        // Unary operations always write their output to a register, so we need to ensure that the
-        // output register is available for the operation to use.
+        // Unary operations write their output to a register, so we need to ensure that the output
+        // register is available for the operation to use.
         //
         // If this operation has an output, and the output register is already occupied, then we
-        // need to preserve the output register on the stack. Otherwise, the operation will
-        // overwrite the output register while it's already occupied.
+        // need to preserve the register on the stack. Otherwise, the operation will overwrite the
+        // register while it's already occupied.
         //
         // The only exception is if the input occupies the output register. In that case, the
-        // operation can safely overwrite the output register, since the input will be consumed
-        // by the operation anyway.
+        // operation can safely overwrite the register, since the input will be consumed by the
+        // operation anyway.
         if let Some(output_type) = info.output_type {
             let output_reg_idx = output_type.reg_idx();
             if self.is_reg_occupied(output_reg_idx) && !self.opd(0).occupies_reg(output_reg_idx) {
@@ -1621,7 +1703,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.emit_opd(0);
         self.pop_opd();
 
-        // If the operation has an output, push the output onto the stack, and allocate a register
+        // If the operation has an output, push the output onto the stack and allocate a register
         // for it.
         if let Some(output_type) = info.output_type {
             self.push_opd(output_type);
@@ -1664,16 +1746,16 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.ensure_opd_not_const(0);
         }
 
-        // Binary operations always write their output to a register, so we need to ensure that the
-        // output register is available for the operation to use.
+        // Binary operations write their output to a register, so we need to ensure that the output
+        // register is available for the operation to use.
         //
         // If this operation has an output, and the output register is already occupied, then we
-        // need to preserve the output register on the stack. Otherwise, the operation will
-        // overwrite the output register while it's already in occupied.
+        // need to preserve the register on the stack. Otherwise, the operation will the register
+        // while it's already occupied.
         //
         // The only exception is if one of the inputs occupies the output register. In that case,
-        // the operation can safely overwrite the output register, since the input will be consumed
-        // by the operation anyway.
+        // the operation can safely overwrite the register, since the input will be consumed by the
+        // operation anyway.
         if let Some(output_type) = info.output_type {
             let output_reg_idx = output_type.reg_idx();
             if self.is_reg_occupied(output_reg_idx)
@@ -1711,7 +1793,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
         }
 
-        // If the operation has an output, push the output onto the stack, and allocate a register
+        // If the operation has an output, push the output onto the stack and allocate a register
         // for it.
         if let Some(output_type) = info.output_type {
             self.push_opd(output_type);
@@ -1878,6 +1960,7 @@ fn select_select(
     kind_1: OpdKind,
     kind_2: OpdKind,
 ) -> ThreadedInstr {
+    println!("PENIS {:?} {:?} {:?} {:?}", type_, kind_0, kind_1, kind_2);
     match (type_, kind_0, kind_1, kind_2) {
         (ValType::I32, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_sss,
         (ValType::I32, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_rss,
