@@ -48,10 +48,10 @@ impl Decode for UncompiledCode {
 pub(crate) struct CompiledCode {
     pub(crate) max_stack_height: usize,
     pub(crate) local_count: usize,
-    pub(crate) code: AliasableBox<[CodeSlot]>,
+    pub(crate) code: AliasableBox<[InstrSlot]>,
 }
 
-pub(crate) type CodeSlot = usize;
+pub(crate) type InstrSlot = usize;
 
 pub(crate) trait InstrVisitor {
     type Error;

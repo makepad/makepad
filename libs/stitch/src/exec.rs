@@ -1,6 +1,6 @@
 use {
     crate::{
-        code::{Code, CodeSlot},
+        code::{Code, InstrSlot},
         data::UnguardedData,
         elem::UnguardedElem,
         error::Error,
@@ -44,15 +44,24 @@ pub(crate) type ThreadedInstr = unsafe extern "C" fn(
     cx: Cx,
 ) -> ControlFlowBits;
 
-pub(crate) type Ip = *mut CodeSlot;
+/// The instruction pointer register (`Ip`) stores a pointer to the current [`InstrSlot`].
+pub(crate) type Ip = *mut InstrSlot;
+/// The stack pointer register (`Sp`) stores a pointer to the end of the current call frame.
 pub(crate) type Sp = *mut StackSlot;
+/// The memory data register (`Md`) stores a pointer to the start of the current [`Memory`].
 pub(crate) type Md = *mut u8;
+/// The memory size register (`Ms`) stores the size of the current [`Memory`].
 pub(crate) type Ms = u32;
+/// The integer register (`Ix`) stores temporary values of integral type.
 pub(crate) type Ix = u64;
+/// The single precision floating-point register (`Sx`) stores temporary values of type `f32`.
 pub(crate) type Sx = f32;
+/// The double precision floating-point register (`Dx`) stores temporary values of type `f64`.
 pub(crate) type Dx = f64;
+/// The context register stores a pointer to a [`Context`].
 pub(crate) type Cx<'a> = *mut Context<'a>;
 
+/// An execution context.
 #[derive(Debug)]
 pub(crate) struct Context<'a> {
     pub(crate) store: &'a mut Store,
@@ -111,10 +120,10 @@ pub(crate) fn exec(
                 panic!();
             };
             let mut trampoline = [
-                call as CodeSlot,
-                state.code.as_mut_ptr() as CodeSlot,
+                call as InstrSlot,
+                state.code.as_mut_ptr() as InstrSlot,
                 type_.call_frame_size() * mem::size_of::<StackSlot>(),
-                stop as CodeSlot,
+                stop as InstrSlot,
             ];
             let ptr = stack.ptr();
             let mut context = Context {
