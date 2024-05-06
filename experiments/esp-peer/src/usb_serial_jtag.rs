@@ -34,7 +34,7 @@ impl<'a> UsbSerialJtag<'a> {
     }
 
     /// Acquires a mutable reference to the USB Serial JTAG interface.
-    /// 
+    ///
     /// This will disable interrupts for the duration of this call.
     pub fn with(f: impl FnOnce(&mut UsbSerialJtag)) {
         critical_section::with(|cs| f(USB_SERIAL_JTAG.borrow_ref_mut(cs).as_mut().unwrap()));
