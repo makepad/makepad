@@ -1707,7 +1707,7 @@ live_design! {
                 title = {
                     width: Fit
                     label = {
-                        text: "Filter",
+                        text: "Hello",
                     },
                 }
 
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:57.5 dy:-246.9 dw:1613.1 dh:1522.3>{
+    AppDesktop = <View dx:51.2 dy:-253.2 dw:1613.1 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
