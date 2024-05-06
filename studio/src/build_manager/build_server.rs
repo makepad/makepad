@@ -304,10 +304,15 @@ impl BuildConnection {
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
         // it will definitely arrive before C->H ReadyToStart triggers anything).
-        msg_sender.send_message(BuildClientMessageWrap{
-            cmd_id,
-            message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
-        });
+        match &what.target {
+            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio=>{
+                msg_sender.send_message(BuildClientMessageWrap{
+                    cmd_id,
+                    message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
+                });
+            }
+            _=>()
+        }
 
        // let mut stderr_state = StdErrState::First;
         //let stdin_sender = process.stdin_sender.clone();
