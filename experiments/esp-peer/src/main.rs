@@ -50,25 +50,12 @@ fn main() -> ! {
     );
     let mut delay = Delay::new(&clocks);
 
-
     let mut serial1 = Uart::new_with_config(peripherals.UART1, config, Some(pins), &clocks);
     let mut counter:i32 = 1;
     serial1.write('\n' as u8).ok();
     writeln!(serial1, "Started").unwrap();
     loop {
-        /*delay.delay_ms(500 as u32);
-        serial1.write('M' as u8).ok();
-        serial1.write('a' as u8).ok();
-        serial1.write('k' as u8).ok();
-        serial1.write('e' as u8).ok();
-        delay.delay_ms(500 as u32);
-        serial1.write('p' as u8).ok();
-        serial1.write('a' as u8).ok();
-        serial1.write('d' as u8).ok();
-        serial1.write('\n' as u8).ok();
-        */
-        //serial1.write("haha".as_bytes()).ok();
-       
+
         delay.delay_ms(50 as u32);
         // serial1.flush();
         //delay.delay_ms(500 as u32);
@@ -85,9 +72,9 @@ fn main() -> ! {
         if let Some(pos) = bytes[..len].iter().position(|b| *b == b'\n') {
             if !discard {
                 let msg = &bytes[..pos + 1];
-                serial1.write_str(">");
+                serial1.write_str(">").ok();
                 for i in 0..msg.len(){
-                    serial1.write(msg[i]);
+                    serial1.write(msg[i]).ok();
                 }
                 //serial1.write_str("\n");
                 esp_now
@@ -110,10 +97,10 @@ fn main() -> ! {
         }
         // Read bytes from the ESP-NOW interface, and write them to the USB Serial JTAG interface.
         if let Some(msg) = esp_now.receive() {
-            serial1.write_str("<");
+            serial1.write_str("<").ok();
             let data = &msg.data[..msg.len as usize];
             for i in 0..data.len(){
-                serial1.write(data[i]);
+                serial1.write(data[i]).ok();
             }
             //serial1.write_str("\n");
             UsbSerialJtag::with(|usb_serial_jtag| {
