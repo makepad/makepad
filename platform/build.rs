@@ -10,10 +10,9 @@ fn main() {
     let cwd = std::env::current_dir().unwrap();
     let mut file = File::create(path.join("makepad-platform.path")).unwrap();
     file.write_all(&format!("{}", cwd.display()).as_bytes()).unwrap();
-     
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
-    
+    println!("cargo:rustc-check-cfg=cfg(lines)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     if let Ok(configs) = env::var("MAKEPAD"){
         for config in configs.split('+'){
