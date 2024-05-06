@@ -35,7 +35,7 @@ macro_rules! for_each_tuple {
 pub trait IntoHostFunc<T, U> {
     // The parameters of the host function.
     type Params: HostValList;
-    
+
     // The results of the host function.
     type Results: HostValList;
 
