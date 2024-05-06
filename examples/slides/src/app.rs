@@ -15,7 +15,7 @@ live_design!{
                 <SlidesView> {
                     //current_slide:2.0
                     <Slide> {
-                        title = {text: " Hello RustNL!"},
+                        title = {text: "Hello RustNL!"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
@@ -24,61 +24,35 @@ live_design!{
                     }
                     <Slide> {
                         title = {text:"Makepad"},
-                        <SlideBody> {text: "- Reimagining VB/Delphi\n- Hybrid code/design mixed tooling"}
-                    }                    
+                        <SlideBody> {text: "- Reimagining VB/Delphi\n- A new IDE and designtool"}
+                    }
+                    <Slide> {
+                        title = {text:"Why"},
+                        <SlideBody> {text: "- I love to have fun with code\n- Sound, Graphics, Robots"}
+                    }
                     <Slide> {
                         title = {text: "Lets use the side screens!"},
-                        <SlideBody> {text: "- 100 lines makepad app on tvOS"}
+                        <SlideBody> {text: "- Simple app on appleTV"}
                     }
                     <Slide> {
-                        title = {text: ""},
-                        <SlideBody> {text: "- september 2023\n- 2 months later: 6x faster"}
+                        title = {text: "AI SDXL"},
+                        <SlideBody> {text: "- Fun with GenAI\n- Server IO test"}
                     }
                     <Slide> {
-                        title = {text: "Large Language Models"},
-                        <SlideBody> {text: "- text input, text output\n- GPT 3.5, LLama, Mistral"}
+                        title = {text: "Lets add a camera"},
+                        <SlideBody> {text: "- RC Car with ESP32 and Rust"}
                     }
                     <Slide> {
-                        title = {text: "Diffuser models"},
-                        <SlideBody> {text: "- text input, image output\n- Midjourney, Stable Diffusion, Dall-E"}
+                        title = {text: "Makepad Studio"},
+                        <SlideBody> {text: "- Hybrid code and design"}
                     }
                     <Slide> {
-                        title = {text: "Multi modal"},
-                        <SlideBody> {text: "- Can use image/audio as inputs"}
+                        title = {text: "UI Framework"},
+                        <SlideBody> {text: "- Shader based DSL\n- High performance\n- Query based model"}
                     }
                     <Slide> {
-                        title = {text: "Lets build!"},
-                        <SlideBody> {text: "- a generative image explorer\n- conversational input\n- image output"}
-                    }
-                    <Slide> {
-                        title = {text: "Lets go local"},
-                        <SlideBody> {text: "- Fun, it's your own computer\n- Can be faster\n- Privacy"}
-                    }
-                    <Slide> {
-                        title = {text: "Language model"},
-                        <SlideBody> {text: "- Mixtral 8x7b\n- Very close to chatGPT"}
-                    }
-                    <Slide> {
-                        title = {text: "Image model"},
-                        <SlideBody> {text: "- SDXL Turbo\n- Fast and good"}
-                    }
-                    <Slide> {
-                        title = {text: "How much compute"},
-                        <SlideBody> {text: "- GPU 1: NVidia 4090 for SDXL\n- 86 TFLOP\n- GPU 2: Apple M3 max for Mixtral\n- 28 TFLOP: 114\n- 2005 2nd BGW Blue gene\n- 448KW, 41000 cores"}
-                    }
-                    <Slide> {
-                        title = {text: "Lets try it"},
-                        <SlideBody> {text: "- Pure prompt\n- Conversation\n- Camera input"}
-                    }
-                    <Slide> {
-                        title = {text: "Demo ComfyUI"},
-                    }
-                    <Slide> {
-                        title = {text: "Llama CPP"},
-                    }
-                    <Slide> {
-                        title = {text: "Future"},
-                        <SlideBody> {text: "- Hold on to your hats\n- Integrate LLM in code editor"}
+                        title = {text: "Extensions"},
+                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Brueë"}
                     }
                     <Slide> {
                         title = {text: "Links"}, 
