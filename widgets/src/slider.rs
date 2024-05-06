@@ -244,6 +244,13 @@ impl Widget for Slider {
 }
 
 impl SliderRef{
+    pub fn value(&self)->Option<f64>{
+        if let Some(inner) = self.borrow(){
+            return Some(inner.to_external())
+        }
+        return None
+    }
+    
     pub fn slided(&self, actions:&Actions)->Option<f64>{
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast(){
