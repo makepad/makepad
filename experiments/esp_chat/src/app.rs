@@ -91,7 +91,7 @@ impl App {
                    rest = line.last().unwrap().to_string();
                    // now send the middle chunks
                    
-                   for i in 1..s.len() - 1{
+                   for i in 1..line.len() - 1{
                        sender.send(line[i].into()).ok();
                    }
                }
