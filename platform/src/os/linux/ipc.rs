@@ -56,7 +56,7 @@ impl<TX, RX> Clone for Channel<TX, RX> {
 // of the API, as per https://github.com/rust-lang/rust/issues/76915
 // comments (also, note that this cfg has no exposed way of turning
 // it on, short of passing it to `rustc` via `RUSTFLAGS=--cfg=...`).
-#[cfg(use_unstable_unix_socket_ancillary_data_2021)]
+//#[cfg(use_unstable_unix_socket_ancillary_data_2021)]
 mod sys {
     use super::*;
     use std::os::fd::FromRawFd;
