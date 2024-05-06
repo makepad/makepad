@@ -7,14 +7,13 @@ use bsp::hal::{
     sio::Sio,
     watchdog::Watchdog,
     gpio::FunctionUart, 
-    uart::{self, UartPeripheral},
+    uart::{self},
     
 };
 use cortex_m_rt::entry;
 use core::panic::PanicInfo;
 use embedded_time::fixed_point::FixedPoint;
 use embedded_time::rate::Extensions;
-use nano_leb128::ULEB128;
 use rp_pico as bsp;
 use rp_pico::hal;
 
@@ -73,7 +72,7 @@ fn showlog(buf: &mut[u8;135*240*2],loglines: [[char;16];16]){
                 let mut i = 0;
                 for iy in (0 as usize)..( height as usize) {                   
                     for ix in (0 as usize)..(w as usize ) {
-                        let mut buf_index: usize = (ix + x + (iy + y) * 135)*2;
+                        let buf_index: usize = (ix + x + (iy + y) * 135)*2;
                         if bbuf[i >> 3] & (0x80 >> (i & 7)) != 0 {
                             buf[buf_index] = (font_color >> 8) as u8;
                             buf[buf_index + 1] = (font_color & 0xff) as u8;
@@ -94,7 +93,7 @@ fn showlog(buf: &mut[u8;135*240*2],loglines: [[char;16];16]){
 fn add_char(loglines: &mut [[char;16];16], c: char,  line: &mut usize, cur:&mut usize) ->[[char;16];16]{
 
     let mut new_loglines = *loglines; 
-   let mut newline = *line;
+    let mut newline = *line;
     let mut newcur = *cur ;
     if newcur > 15 || c == '\n'
     {
@@ -124,23 +123,14 @@ fn add_char(loglines: &mut [[char;16];16], c: char,  line: &mut usize, cur:&mut 
 }
 
 
-fn add_string(loglines: &mut [[char;16];16], s: &str,  line: &mut usize, cur:&mut usize) ->[[char;16];16]{
-    let mut new_loglines = *loglines; 
-    for c in s.chars(){
-        new_loglines = add_char(&mut new_loglines, c, line, cur);
-    }
-    new_loglines
-}
-
 #[entry]
 fn main() -> ! {
 
     let mut loglines: [[char;16];16] = 
     [
-        ['W','e','l','c','o','m','e',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
-
-        ['t','o',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
-        ['M','a','k','e','p','a','d','!',' ',' ',' ',' ',' ',' ',' ',' '],     
+        ['M','a','k','e','p','a','d',' ','l','o','g',' ',' ',' ',' ',' '],     
+        [' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
+        [' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
         [' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
         [' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
         [' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '],     
@@ -156,12 +146,8 @@ fn main() -> ! {
         [' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ']
 
     ];
-
-    let mut line:usize = 4;
+    let mut line:usize = 1;
     let mut cur:usize = 0;
-
-  
-    
 
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
@@ -236,12 +222,13 @@ fn main() -> ! {
     let mut rbuf = [0u8;4096];
     
     loop {
-        showlog(buf, loglines);
         if let Ok(bytes) = uart.read_raw(&mut rbuf){
             for i in 0..bytes{
                 loglines = add_char(&mut loglines, rbuf[i] as char, &mut line, &mut cur);
             }
+            showlog(buf, loglines);
             display.draw_color_buf_raw(buf, 0, 0, 135, 240);
         }
+        delay.delay_ms(10);
     }
 }
