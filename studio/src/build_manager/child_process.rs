@@ -50,7 +50,7 @@ impl ChildProcess {
                 cmd_build.env(key, value);
             }
                         
-            let mut child = cmd_build.spawn()?;
+            let child = cmd_build.spawn()?;
             drop(aux_chan_client_endpoint_inheritable);
             (child, Some(aux_chan_host_endpoint))        
         }
