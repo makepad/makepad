@@ -25,10 +25,10 @@ live_design!{
                 hide_caption_on_fullscreen: true,
                 body = <AppUI>{}
             }
-            <Window> {
+            /*<Window> {
                 window: {inner_size: vec2(960, 540)},
                 body = <AppWindow>{}
-            }
+            }*/
         }
     }
 }
