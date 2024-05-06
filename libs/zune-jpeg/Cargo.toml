@@ -13,11 +13,13 @@ description = "A fast, correct and safe jpeg decoder"
 [lib]
 # crate-type = ["cdylib", "rlib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
 [features]
 x86 = []
 neon = []
 std = ["makepad-zune-core/std"]
 default = [ "std"]
+fuzzing = []
 
 [dependencies]
 #log = "0.4.11" # logging facilities
@@ -26,3 +28,4 @@ makepad-zune-core = { path = "../zune-core", version = "0.2" }
 
 #[dev-dependencies]
 #zune-ppm = { path = "../zune-ppm" }
+

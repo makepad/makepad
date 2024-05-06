@@ -10,5 +10,6 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "DD8beuXQT2OYg1L2G2zXXT12OsA="
 
 [features] 
+with-alloc = []
 
 [dependencies]
