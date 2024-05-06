@@ -58,6 +58,17 @@ fn main() -> ! {
     // Write a start message to the UART interface.
     writeln!(uart, "ESP-32 started").unwrap();
 
+    // Set up the ESP-NOW interface.
+    let inited = esp_wifi::initialize(
+        EspWifiInitFor::Wifi,
+        SystemTimer::new(peripherals.SYSTIMER).alarm0,
+        Rng::new(peripherals.RNG),
+        system.radio_clock_control,
+        &clocks,
+    )
+    .unwrap();
+    let mut esp_now = EspNow::new(&inited, peripherals.WIFI).unwrap();
+
     let mut bytes = [0; 1024];
     let mut len = 0;
     let mut discard = false;
@@ -78,11 +89,18 @@ fn main() -> ! {
             if !discard {
                 let message = &bytes[..pos + 1];
 
-                // Write the messageto the UART interface.
+                // Write the message to the UART interface.
                 uart.write_str(">").ok();
                 for &b in message {
                     uart.write(b).ok();
                 }
+
+                // Write the message to the ESP-NOW interface.
+                esp_now
+                    .send(&esp_now::BROADCAST_ADDRESS, message)
+                    .unwrap()
+                    .wait()
+                    .unwrap();
             }
 
             // Copy the remaining bytes to the start of the buffer.
@@ -97,6 +115,22 @@ fn main() -> ! {
         if len == bytes.len() {
             len = 0;
             discard = true;
+        }
+
+        // Read a message from the ESP-NOW interface.
+        if let Some(data) = esp_now.receive() {
+            let message = &data.data[..data.len as usize];
+
+            // Write the received message to the UART interface.
+            uart.write_str("<").ok();
+            for &b in message {
+                uart.write(b).ok();
+            }
+
+            // Write the received message to the USB Serial JTAG interface.
+            UsbSerialJtag::with(|usb_serial_jtag| {
+                usb_serial_jtag.write_bytes(message);
+            })
         }
     }
 }
