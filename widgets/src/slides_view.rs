@@ -17,7 +17,7 @@ pub struct SlidesView {
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,
     #[rust] next_frame: NextFrame,
-    #[live] current_slide: f64,
+    #[rust] current_slide: f64,
     #[live] goal_slide: f64,
     #[live] anim_speed: f64,
     #[rust] draw_state: DrawStateWrap<DrawState>,
