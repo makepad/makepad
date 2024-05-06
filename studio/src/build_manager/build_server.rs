@@ -290,7 +290,7 @@ impl BuildConnection {
         ];
 
         let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
-        
+        let target = what.target.clone();
         shared.write().unwrap().processes.insert(
             what,
             BuildServerProcess {
@@ -304,7 +304,7 @@ impl BuildConnection {
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
         // it will definitely arrive before C->H ReadyToStart triggers anything).
-        match &what.target {
+        match target {
             BuildTarget::ReleaseStudio | BuildTarget::DebugStudio=>{
                 msg_sender.send_message(BuildClientMessageWrap{
                     cmd_id,
