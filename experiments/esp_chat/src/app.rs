@@ -84,12 +84,13 @@ impl App {
                // always append the first part
                rest.push_str(line[0]);
                // if there is more than one part, we have a newline
-               if s.len() != 1{
+               if line.len() > 1{
                    // send the rest first
                    sender.send(rest).ok();
                    // store the last bit in the rest
                    rest = line.last().unwrap().to_string();
                    // now send the middle chunks
+                   
                    for i in 1..s.len() - 1{
                        sender.send(line[i].into()).ok();
                    }
