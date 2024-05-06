@@ -1,6 +1,7 @@
 use crate::makepad_live_id::*;
 use makepad_widgets::*;
 use std::{env, io, str, time::Duration, thread};
+use serialport::SerialPort;
 
 live_design!{
     import makepad_widgets::base::*;
@@ -26,6 +27,7 @@ app_main!(App);
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] chat: Vec<(ChatMsg,String)>,
+    #[rust] send_port: Option<Box<dyn SerialPort>>
 }
 
 enum ChatMsg{
@@ -41,12 +43,13 @@ impl LiveRegister for App{
 }
      
 impl App {
-   fn connect_serial(&self){
-       let mut send_port = serialport::new("/dev/cu.usbmodem1101", 115_200)
+   fn connect_serial(&mut self){
+       let mut send_port = serialport::new("/dev/cu.usbmodem2101", 115_200)
        .timeout(Duration::from_millis(1000000))
        .open()
        .unwrap();
        let mut recv_port = send_port.try_clone().unwrap();
+       self.send_port = Some(send_port);
        // Read from the serial port and print to the terminal
        thread::spawn(move || {
            loop {
@@ -59,11 +62,11 @@ impl App {
            }
        });
        // Read from the terminal and send to the serial port
-       loop {
-           let message = "Holdup!\n";
-           send_port.write_all(message.as_bytes()).unwrap();
-           std::thread::sleep(Duration::from_millis(1000));
-       }
+       //loop {
+       //    let message = "Holdup!\n";
+       //    send_port.write_all(message.as_bytes()).unwrap();
+       //    std::thread::sleep(Duration::from_millis(1000));
+      // }
    }
 }
 

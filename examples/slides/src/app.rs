@@ -28,10 +28,10 @@ live_design!{
                     }                    
                     <Slide> {
                         title = {text: "Lets use the side screens!"},
-                        <SlideBody> {text: "- 50loc makepad app on tvOS"}
+                        <SlideBody> {text: "- 100 lines makepad app on tvOS"}
                     }
                     <Slide> {
-                        title = {text: "AI moves incredibly fast"},
+                        title = {text: ""},
                         <SlideBody> {text: "- september 2023\n- 2 months later: 6x faster"}
                     }
                     <Slide> {
