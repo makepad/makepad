@@ -50,9 +50,9 @@ pub struct Module {
 
 impl Module {
     /// Decodes and validates a new [`Module`] from the given byte slice.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// - If the [`Module`] is malformed.
     /// - If the [`Module`] is invalid.
     pub fn new(engine: &Engine, bytes: &[u8]) -> Result<Module, DecodeError> {
