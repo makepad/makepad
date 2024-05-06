@@ -1,5 +1,7 @@
 #![no_main]
 #![no_std]
+#![allow(dead_code)]
+#![allow(unused_imports)]
 
 mod usb_serial_jtag;
 
@@ -24,14 +26,18 @@ use {
 
 #[entry]
 fn main() -> ! {
-    let peripherals = Peripherals::take();
-    let system = peripherals.SYSTEM.split();
-    let clocks = ClockControl::max(system.clock_control).freeze();
-
     // Set up the USB Serial JTAG interface.
+    let peripherals = Peripherals::take();
     UsbSerialJtag::init(peripherals.USB_DEVICE);
 
+    // Write a start message to the serial USB JTAG interface.
+    UsbSerialJtag::with(|usb_serial_jtag| {
+        writeln!(usb_serial_jtag, "ESP-32 started").unwrap();
+    });
+
     // Set up the UART interface.
+    let system = peripherals.SYSTEM.split();
+    let clocks = ClockControl::max(system.clock_control).freeze();
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
     let pins = TxRxPins::new_tx_rx(
         io.pins.gpio7.into_push_pull_output(),
@@ -49,6 +55,9 @@ fn main() -> ! {
         &clocks,
     );
 
+    // Write a start message to the UART interface.
+    writeln!(uart, "ESP-32 started").unwrap();
+
     // Set up the ESP-NOW interface.
     let inited = esp_wifi::initialize(
         EspWifiInitFor::Wifi,
@@ -59,9 +68,6 @@ fn main() -> ! {
     )
     .unwrap();
     let mut esp_now = EspNow::new(&inited, peripherals.WIFI).unwrap();
-
-    uart.write(b'\n').ok();
-    writeln!(uart, "Started").unwrap();
 
     let mut bytes = [0; 1024];
     let mut len = 0;
