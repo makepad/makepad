@@ -41,7 +41,7 @@ live_design!{
                         ascii_only: true,
                         width: Fill,
                         height: Fill,
-                        margin: {top: 10.0, left: 50.0, bottom: .0, right: 0.0},
+                        margin: {top: 5.0, left: 50.0, bottom: .0, right: 0.0},
                         text: ""
                         draw_text: {
                             text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
@@ -54,7 +54,7 @@ live_design!{
                         ascii_only: true,
                         width: Fill,
                         height: Fill,
-                        margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 0.0},
+                        margin: {top: 5.0, left: 5.0, bottom: 5.0, right: 0.0},
                         text: ""
                         draw_text: {
                             text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
