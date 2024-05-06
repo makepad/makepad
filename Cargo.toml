@@ -8,6 +8,7 @@ workspace.members = [
     "experiments/esp-peer-1",
     "experiments/esp-peer-2",
     "experiments/esp-peer-3",
+    "experiments/esp-peer-4",
     "experiments/esp-term",
     "experiments/esp_chat",
     "experiments/esp_car",
