@@ -13,21 +13,22 @@ live_design!{
             height: Fill
             body = {
                 <SlidesView> {
+                    //current_slide:2.0
                     <Slide> {
-                        title = {text: " Hello Exec(ut)"},
+                        title = {text: " Hello RustNL!"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "Playing with local AI"},
+                        title = {text: "Visual application design\nin Rust"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
                         title = {text:"Makepad"},
-                        <SlideBody> {text: "- Rebuilding VB/Delphi\n   in Rust"}
+                        <SlideBody> {text: "- Reimagining VB/Delphi\n- Hybrid code/design mixed tooling"}
                     }                    
                     <Slide> {
-                        title = {text: "10 years is a long time"},
-                        <SlideBody> {text: "- Whole stack from scratch"}
+                        title = {text: "Lets use the side screens!"},
+                        <SlideBody> {text: "- 50loc makepad app on tvOS"}
                     }
                     <Slide> {
                         title = {text: "AI moves incredibly fast"},
