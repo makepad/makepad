@@ -3,13 +3,13 @@
 
 use makepad_easy_esp::*;
 
-const FRONT_CENTER: f32 = 950.0;
-const FRONT_RANGE: f32 = 600.0;
+const FRONT_CENTER: f32 = 1000.0;
+const FRONT_RANGE: f32 = 550.0;
 const REAR_CENTER: f32 = 1300.0;
 const REAR_RANGE: f32 = 600.0;
 const THROTTLE_CENTER: f32 = 1250.0;
 const THROTTLE_RANGE: f32 = 600.0;
-const IMU_TARGET_IP: IpAddress = IpAddress::v4(10,0,0,109);
+const IMU_TARGET_IP: IpAddress = IpAddress::v4(10,0,0,105);
 
 fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket){
     let mut i2c = I2C::new_with_timeout(
@@ -29,14 +29,22 @@ fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket
     
     init_bno055(&mut i2c, &mut delay);
     
+        
     socket.bind(44441).unwrap();
     let mut wrap_counter = 0;
     loop {
         let mut buffer = [0u8; 3];
         while let Ok(_len) = socket.receive(&mut buffer) {
-            front_wheel.set_duty_hw((REAR_CENTER - REAR_RANGE * 0.5 + (REAR_RANGE * buffer[0] as f32 / 255.0) ) as u32);
+            let front_duty = (FRONT_CENTER - FRONT_RANGE * 0.5 + (FRONT_RANGE * buffer[0] as f32 / 255.0) ) as u32;
+            front_wheel.set_duty_hw(front_duty);
+            let rear_duty = (REAR_CENTER - REAR_RANGE * 0.5 + (REAR_RANGE * buffer[1] as f32 / 255.0)) as u32;
+            rear_wheel.set_duty_hw(rear_duty);
+            let throttle_duty = (THROTTLE_CENTER - THROTTLE_RANGE * 0.5 + (THROTTLE_RANGE * buffer[2] as f32 / 255.0)) as u32;
+            println!("{}", throttle_duty);
+            throttle.set_duty_hw(throttle_duty); 
+            /*
             rear_wheel.set_duty_hw((FRONT_CENTER - FRONT_RANGE * 0.5 + (FRONT_RANGE * buffer[1] as f32 / 255.0)) as u32);
-            throttle.set_duty_hw((THROTTLE_CENTER - THROTTLE_RANGE * 0.5 + (THROTTLE_RANGE * buffer[2] as f32 / 255.0)) as u32);
+            throttle.set_duty_hw((THROTTLE_CENTER - THROTTLE_RANGE * 0.5 + (THROTTLE_RANGE * buffer[2] as f32 / 255.0)) as u32);*/
         }
         
         if !check_bno055(&mut i2c){
@@ -45,7 +53,7 @@ fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket
         else{
             let data = get_bno055_data(&mut i2c, wrap_counter);
             // alright lets send out a udp packet with the data
-            println!("SENDING DATA {:?}", data);
+            //println!("SENDING DATA {:?}", data);
             let _ = socket.send(IMU_TARGET_IP, 44442, &data);
             wrap_counter = wrap_counter.wrapping_add(1);
         }
