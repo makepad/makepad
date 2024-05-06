@@ -127,7 +127,7 @@ impl Cx {
                 live_id!(ToWasmMouseDown) => {
                     let e: MouseDownEvent = ToWasmMouseDown::read_to_wasm(&mut to_wasm).into();
                     self.fingers.process_tap_count(e.abs, e.time);
-                    self.fingers.mouse_down(e.button);
+                    self.fingers.mouse_down(e.button, e.window_id);
                     self.call_event_handler(&Event::MouseDown(e))
                 }
                 
