@@ -288,9 +288,14 @@ impl BuildConnection {
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
+        
+        let is_in_studio = match what.target {
+            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio=>true,
+            _=>false
+        };
 
-        let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
-        let target = what.target.clone();
+        let process = ChildProcess::start("rustup", &args, path, &env, is_in_studio).expect("Cannot start process");
+        
         shared.write().unwrap().processes.insert(
             what,
             BuildServerProcess {
@@ -303,15 +308,12 @@ impl BuildConnection {
         // HACK(eddyb) do this first, as there is no way to actually send the
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
-        // it will definitely arrive before C->H ReadyToStart triggers anything).
-        match target {
-            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio=>{
-                msg_sender.send_message(BuildClientMessageWrap{
-                    cmd_id,
-                    message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
-                });
-            }
-            _=>()
+        // it will definitely arrive before C->H ReadyToStart triggers anything)
+        if is_in_studio{
+            msg_sender.send_message(BuildClientMessageWrap{
+                cmd_id,
+                message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone().unwrap()),
+            });
         }
 
        // let mut stderr_state = StdErrState::First;
