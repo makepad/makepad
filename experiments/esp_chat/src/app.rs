@@ -52,12 +52,15 @@ impl App {
            loop {
                let mut buf = [0; 256];
                let len = recv_port.read(&mut buf).unwrap();
+               // alright we now have to chunk this by newline
+               // and then send it on a channel to the UI
+               
                print!("{}", str::from_utf8(&buf[..len]).unwrap());
            }
        });
        // Read from the terminal and send to the serial port
        loop {
-           let message = "Hello world\n";
+           let message = "Holdup!\n";
            send_port.write_all(message.as_bytes()).unwrap();
            std::thread::sleep(Duration::from_millis(1000));
        }
