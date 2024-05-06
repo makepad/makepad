@@ -1,7 +1,9 @@
 use crate::makepad_live_id::*;
 use makepad_widgets::*;
-use std::{env, io, str, time::Duration, thread};
+use std::{env, str, time::Duration, thread};
 use serialport::SerialPort;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc;
 
 live_design!{
     import makepad_widgets::base::*;
@@ -21,18 +23,18 @@ live_design!{
 }
 
 app_main!(App);
-
  
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] chat: Vec<(ChatMsg,String)>,
-    #[rust] send_port: Option<Box<dyn SerialPort>>
+    #[rust] send_port: Option<Box<dyn SerialPort>>,
+    #[rust] receiver: ToUIReceiver<String>
 }
 
 enum ChatMsg{
     Own,
-    Other(String)
+    Other
 }
 
 impl LiveRegister for App{
@@ -43,30 +45,57 @@ impl LiveRegister for App{
 }
      
 impl App {
-   fn connect_serial(&mut self){
-       let mut send_port = serialport::new("/dev/cu.usbmodem2101", 115_200)
+    fn send_message(&mut self, cx:&mut Cx){
+        let message_input = self.ui.text_input(id!(message_input));
+        let name_input = self.ui.text_input(id!(name_input));
+        let message = message_input.text();
+        let name = name_input.text();
+        message_input.set_text_and_redraw(cx, "");
+        message_input.set_cursor(0,0);
+        // lets send it on the serial port
+        if let Some(send_port) = &mut self.send_port{
+            let msg = format!("{}:{}\n", name, message);
+            send_port.write_all(msg.as_bytes()).unwrap();
+        }
+        // push it in
+        self.chat.push((ChatMsg::Own, message));
+        self.ui.widget(id!(chat)).redraw(cx);
+    }
+    
+    fn connect_serial(&mut self){
+       let send_port = serialport::new("/dev/cu.usbmodem2101", 115_200)
        .timeout(Duration::from_millis(1000000))
        .open()
        .unwrap();
+       
        let mut recv_port = send_port.try_clone().unwrap();
        self.send_port = Some(send_port);
+       let sender = self.receiver.sender();
        // Read from the serial port and print to the terminal
        thread::spawn(move || {
+           // rest
+           let mut rest = String::new();
            loop {
-               let mut buf = [0; 256];
+               let mut buf = [0; 1024];
                let len = recv_port.read(&mut buf).unwrap();
-               // alright we now have to chunk this by newline
-               // and then send it on a channel to the UI
-               
-               print!("{}", str::from_utf8(&buf[..len]).unwrap());
+               // properly group by newlines
+               let s = str::from_utf8(&buf[..len]).unwrap();
+               let line:Vec<&str> = s.split("\n").collect();
+               // always append the first part
+               rest.push_str(line[0]);
+               // if there is more than one part, we have a newline
+               if s.len() != 1{
+                   // send the rest first
+                   sender.send(rest).ok();
+                   // store the last bit in the rest
+                   rest = line.last().unwrap().to_string();
+                   // now send the middle chunks
+                   for i in 1..s.len() - 1{
+                       sender.send(line[i].into()).ok();
+                   }
+               }
            }
        });
-       // Read from the terminal and send to the serial port
-       //loop {
-       //    let message = "Holdup!\n";
-       //    send_port.write_all(message.as_bytes()).unwrap();
-       //    std::thread::sleep(Duration::from_millis(1000));
-      // }
    }
 }
 
@@ -75,8 +104,11 @@ impl MatchEvent for App {
         self.connect_serial();
     }
     
-    fn handle_signal(&mut self, _cx: &mut Cx){
-        
+    fn handle_signal(&mut self, cx: &mut Cx){
+        while let Ok(line) = self.receiver.try_recv(){
+            self.chat.push((ChatMsg::Other, line));
+            self.ui.portal_list(id!(chat)).redraw(cx);
+        }
     }
             
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
@@ -92,7 +124,7 @@ impl MatchEvent for App {
                     let (ty, msg) = &self.chat[item_id];
                     let template = match ty{
                         ChatMsg::Own=>live_id!(Own),
-                        ChatMsg::Other(_)=>live_id!(Other),
+                        ChatMsg::Other=>live_id!(Other),
                     };
                     let item = chat.item(cx, item_id, template).unwrap();
                     item.set_text(msg);
@@ -104,17 +136,13 @@ impl MatchEvent for App {
     
     
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
-        
-        let message = self.ui.text_input(id!(message));
-        if let Some(val) = message.returned(&actions){
-            message.set_text_and_redraw(cx, "");
-            message.set_cursor(0,0);
-            self.chat.push((ChatMsg::Own, val));
-            self.ui.widget(id!(chat)).redraw(cx);
+        let message_input = self.ui.text_input(id!(message_input));
+        if  message_input.returned(&actions).is_some(){
+            self.send_message(cx);
         }
                   
         if self.ui.button(id!(send_button)).clicked(&actions) {
-            
+            self.send_message(cx);
         }
         
         if self.ui.button(id!(clear_button)).clicked(&actions){

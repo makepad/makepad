@@ -12,7 +12,7 @@ live_design!{
     }
     COLOR_DOWN_2 = #x00000022
 
-    AppUI = <View dx:237.8 dy:166.5 dw:397.1 dh:300.0> {  
+    AppUI = <View dx:311.8 dy:124.8 dw:397.1 dh:300.0> {  
         flow: Overlay,
                             
                             
@@ -67,14 +67,14 @@ live_design!{
             }
             <View>{
                 height: Fit
-                name = <TextInput> {
+                name_input = <TextInput> {
                     height: Fit,
                     width: 100,
                     margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
                     margin: {bottom: 0}
                     empty_message: "Name"
                 }
-                message = <TextInput> {
+                message_input = <TextInput> {
                     height: Fit,
                     width: Fill,
                     margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
