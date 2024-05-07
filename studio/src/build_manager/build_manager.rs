@@ -153,6 +153,7 @@ impl BuildManager {
         else{
              8001
         };
+        //self.studio_http = format!("http://172.20.10.4:{}/$studio_web_socket", self.http_port);
         self.studio_http = format!("http://127.0.0.1:{}/$studio_web_socket", self.http_port);
         self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
@@ -490,7 +491,6 @@ impl BuildManager {
     pub fn start_http_server(&mut self) {
         let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
-        
         //log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
         start_http_server(HttpServer {
             listen_address: addr,
@@ -536,6 +536,7 @@ impl BuildManager {
                 // only store last change, fix later
                 match message {
                     HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender,headers} => {
+                        println!("CONNECT MSG");
                         if let Some(id) = headers.path.rsplit("/").next(){
                             if let Ok(id) = id.parse::<u64>(){
                                 socket_id_to_build_id.insert(web_socket_id, LiveId(id));
