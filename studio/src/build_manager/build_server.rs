@@ -288,7 +288,7 @@ impl BuildConnection {
         
         let http = format!("{}/{}", http, cmd_id.0);
         let env = [
-            ("RUST_BACKTRACE","1"),
+           // ("RUST_BACKTRACE","1"),
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
