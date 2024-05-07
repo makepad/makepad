@@ -35,7 +35,7 @@ live_design!{
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 2560,
+        max_iter: 256,
     }
 }
 

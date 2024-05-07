@@ -51,9 +51,13 @@ live_design!{
                         <SlideBody> {text: "- Shader based DSL\n- High performance\n- Query based model"}
                     }
                     <Slide> {
-                        title = {text: "Extensions"},
-                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Brueë"}
+                        title = {text: "IDE Extensions"},
+                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Bruël"}
                     }
+                    <Slide> {
+                        title = {text: "IDE Extensions"},
+                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Bruël"}
+                    }                   
                     <Slide> {
                         title = {text: "Links"}, 
                         <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl\n- twitter @rikarends"}
