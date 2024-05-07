@@ -165,13 +165,25 @@ impl Cx{
     }
     
     fn start_studio_websocket(&mut self, studio_http: &str) {
-        
         if studio_http.len() == 0{
             return
         }
-        // lets open a websocket
+        self.studio_http = studio_http.into();
+        
+        #[cfg(not(target_os="tvos"))]{
+
+            // lets open a websocket
+            HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
+            let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
+            self.studio_web_socket = Some(WebSocket::open(request));
+        }
+        
+    }
+    
+    #[cfg(target_os="tvos")]
+    pub fn start_studio_websocket_tvos(&mut self) {
         HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
-        let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
+        let request = HttpRequest::new(self.studio_http.clone(), HttpMethod::GET);
         self.studio_web_socket = Some(WebSocket::open(request));
     }
      

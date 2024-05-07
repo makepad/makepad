@@ -107,7 +107,7 @@ impl MatchEvent for App{
                 
         self.data.file_system.init(cx, &root_path);
         self.data.build_manager.init(cx, &root_path);
-        self.data.build_manager.discover_external_ip(cx);
+        //self.data.build_manager.discover_external_ip(cx);
         self.data.build_manager.start_http_server();
     }
     
