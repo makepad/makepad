@@ -26,6 +26,7 @@ macro_rules!app_main {
                 <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
             cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+            //cx.borrow_mut().init_websockets("");
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();
             Cx::event_loop(cx);

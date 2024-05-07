@@ -107,7 +107,7 @@ impl AppMain for App {
 
 impl App{
     fn open_websocket(&mut self, _cx:&mut Cx){
-        let request = HttpRequest::new("http://127.0.0.1:8009".into(), HttpMethod::GET);
+        let request = HttpRequest::new("http://172.20.10.4:8009".into(), HttpMethod::GET);
         self.web_socket = Some(WebSocket::open(request));
     }
 }
