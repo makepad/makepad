@@ -82,6 +82,13 @@ pub const EnterWindowMask: u32 = 16;
 pub const LeaveWindowMask: u32 = 32;
 pub const XBufferOverflow: i32 = -1;
 
+// Added, from https://community.khronos.org/t/list-for-xevent-structures-type-component/70768
+pub const VisibilityNotify: u32 = 15;
+// Added, from https://tronche.com/gui/x/xlib/events/window-state-change/visibility.html
+pub const VisibilityUnobscured: i32 = 0;
+pub const VisibilityPartiallyObscured: i32 = 1;
+pub const VisibilityFullyObscured: i32 = 2;
+
 pub const XIMPreeditNothing: u32 = 8;
 pub const XIMStatusNothing: u32 = 1024;
 
