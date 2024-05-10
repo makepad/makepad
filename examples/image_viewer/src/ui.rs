@@ -19,7 +19,7 @@ live_design!(
         body = <View> { width: 0, height: 0 }
         img_list = <PortalList> {
             img_btn = <Button> {
-                width: Full
+                width: Fill
                 text: "no name"
             }
         }
