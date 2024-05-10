@@ -1,4 +1,4 @@
-use crate::state::{self, State};
+use crate::state::State;
 use makepad_widgets::*;
 
 live_design!(
@@ -20,7 +20,6 @@ live_design!(
         img_list = <PortalList> {
             img_btn = <Button> {
                 width: Fill
-                text: "no name"
             }
         }
         img = <Image> {
@@ -45,19 +44,19 @@ impl Widget for Ui {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let state = scope.data.get::<State>().unwrap();
+        let img = self.deref.image(id!(img));
+
+        // the size check is a workaround to know if the img has a texture loaded
+        if img.size_in_pixels(cx).is_none() && !state.images.is_empty() {
+            img.load_image_file_by_path(cx, state.images[0].to_str().unwrap())
+                .unwrap();
+        }
+
         let filenames = state
             .images
             .iter()
             .map(|i| i.file_name().unwrap().to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        let img = self.deref.image(id!(img));
-        if let Some(path) = &state.selected_image {
-            if let Some(path) = path.to_str() {
-                if let Err(err) = img.load_image_file_by_path(cx, path) {
-                    eprintln!("Error loading image: {:?}", err);
-                }
-            }
-        }
 
         let range_end = state.images.len();
         while let Some(widget) = self.deref.draw_walk(cx, scope, walk).step() {
@@ -94,8 +93,13 @@ impl WidgetMatchEvent for Ui {
         });
 
         if let Some((_index, widget)) = img_clicked {
-            state.select_image(state.root.join(widget.text()));
-            widget.redraw(cx);
+            let img = self.deref.image(id!(img));
+            img.load_image_file_by_path(
+                cx,
+                state.root().unwrap().join(widget.text()).to_str().unwrap(),
+            )
+            .unwrap();
+            img.redraw(cx);
         }
     }
 }
