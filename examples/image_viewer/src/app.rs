@@ -23,13 +23,11 @@ struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, _cx: &mut Cx) {
-        let state = &mut self.state;
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .expect("home not found");
 
-        state.load_images(Path::new("/Users/wyeworks/Downloads"));
-
-        if let Some(image) = state.images.first() {
-            state.select_image(image.clone());
-        }
+        self.state.load_images(&Path::new(&home).join("Downloads"));
     }
 }
 
