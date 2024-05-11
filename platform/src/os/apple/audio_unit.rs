@@ -301,11 +301,11 @@ impl AudioUnitAccess {
                         });
                         running.audio_unit = Some(audio_unit);
                     }
-                    Err(err) => {
+                    Err(_err) => {
                         failed_devices.lock().unwrap().insert(device_id);
                         change_signal.set();
                         audio_outputs.retain( | v | v.device_id != device_id);
-                        crate::error!("spawn_audio_output Error {:?}", err)
+                        //crate::error!("spawn_audio_output Error {:?}", err)
                     }
                 }
             })

@@ -2654,7 +2654,7 @@ live_design! {
             }
         }
     }
-
+ 
     FileTree = <FileTreeBase> {
         flow: Down,
 
@@ -4261,6 +4261,7 @@ live_design! {
                 }
             }
         }
+        
         <RoundedShadowView>{
             width: 250., height: 350.,
             abs_pos: vec2(25., 325.)

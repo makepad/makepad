@@ -66,7 +66,7 @@ pub struct RadioButton {
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] label: String,
+    #[live] text: String,
     
     #[live] bind: String,
 }
@@ -98,7 +98,16 @@ impl RadioButton {
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_radio.end(cx);
     }
-
+    
+        
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
+    }
+    
+    fn set_text(&mut self, v: &str) {
+        self.text.as_mut_empty().push_str(v);
+    }
+    
 }
 
 impl Widget for RadioButtonGroup {

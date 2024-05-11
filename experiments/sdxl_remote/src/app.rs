@@ -27,7 +27,7 @@ live_design!{
                             return (#8)
                         }
                     }
-                    icon_walk: {width: 450.0, height: Fit}
+                    icon_walk: {margin:{left:200,bottom:100},width: 850.0, height: Fit}
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             return #0000
