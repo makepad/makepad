@@ -731,10 +731,10 @@ live_design!{
                             radios_demo = <View> {
                                 spacing: (THEME_SPACE_2)
                                 width: Fit, height: Fit,
-                                radio1 = <RadioButton> { label: "Option 1" }
-                                radio2 = <RadioButton> { label: "Option 2" }
-                                radio3 = <RadioButton> { label: "Option 3" }
-                                radio4 = <RadioButton> { label: "Option 4" }
+                                radio1 = <RadioButton> { text: "Option 1" }
+                                radio2 = <RadioButton> { text: "Option 2" }
+                                radio3 = <RadioButton> { text: "Option 3" }
+                                radio4 = <RadioButton> { text: "Option 4" }
                             }
                         }
 
@@ -749,7 +749,7 @@ live_design!{
                                 flow: Down,
 
                                 radio1 = <RadioButtonCustom> {
-                                    label: "Option 1"
+                                    text: "Option 1"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
                                     }
@@ -758,7 +758,7 @@ live_design!{
                                     }
                                 }
                                 radio2 = <RadioButtonCustom> {
-                                    label: "Option 2"
+                                    text: "Option 2"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
                                     }
@@ -768,7 +768,7 @@ live_design!{
                                     }
                                 }
                                 radio3 = <RadioButtonCustom> {
-                                    label: "Option 3"
+                                    text: "Option 3"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
                                     }
@@ -778,7 +778,7 @@ live_design!{
                                     }
                                 }
                                 radio4 = <RadioButtonCustom> {
-                                    label: "Option 4"
+                                    text: "Option 4"
                                     icon_walk: {
                                         width: 12.5, height: Fit,
                                     }
@@ -799,10 +799,10 @@ live_design!{
                                 width: Fit, height: Fit,
                                 flow: Right,
                                 spacing: (THEME_SPACE_2)
-                                radio1 = <RadioButtonTextual> { label: "Option 1" }
-                                radio2 = <RadioButtonTextual> { label: "Option 2" }
-                                radio3 = <RadioButtonTextual> { label: "Option 3" }
-                                radio4 = <RadioButtonTextual> { label: "Option 4" }
+                                radio1 = <RadioButtonTextual> { text: "Option 1" }
+                                radio2 = <RadioButtonTextual> { text: "Option 2" }
+                                radio3 = <RadioButtonTextual> { text: "Option 3" }
+                                radio4 = <RadioButtonTextual> { text: "Option 4" }
                             }
                         }
 
@@ -814,10 +814,10 @@ live_design!{
                             align: { x: 0.0, y: 0.5 }
                             radiotabs_demo = <View> {
                                 width: Fit, height: Fit,
-                                radio1 = <RadioButtonTab> { label: "Option 1" }
-                                radio2 = <RadioButtonTab> { label: "Option 2" }
-                                radio3 = <RadioButtonTab> { label: "Option 3" }
-                                radio4 = <RadioButtonTab> { label: "Option 4" }
+                                radio1 = <RadioButtonTab> { text: "Option 1" }
+                                radio2 = <RadioButtonTab> { text: "Option 2" }
+                                radio3 = <RadioButtonTab> { text: "Option 3" }
+                                radio4 = <RadioButtonTab> { text: "Option 4" }
                             }
                         }
 
