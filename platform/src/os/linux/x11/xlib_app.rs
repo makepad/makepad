@@ -538,6 +538,16 @@ impl XlibApp {
                     (glx.glXSwapBuffers)(display, window);
                     */
                 },
+                x11_sys::VisibilityNotify => {
+                    let event = event.xvisibility;
+                    if event.state != x11_sys::VisibilityFullyObscured {
+                        if let Some(window_ptr) = self.window_map.get(&event.window) {
+                            let window = &mut (**window_ptr);
+                            window.send_focus_event();
+                        }
+                    }
+                }
+
                 _ => {}
             }
         }
