@@ -48,7 +48,7 @@ live_design!{
 
                             let i = 0;
                             for _i in 0..4 { // you cannot refer to _i inside the for loop; use i instead
-                                uv = fract(uv * 1.5) - 0.5;
+                                uv = fract(uv * 2.5) - 0.5;
                                 let d = length(uv) * exp(-length(uv0));
                                 let col = Pal::iq2(length(uv0) + float(i) * .4 + self.time * .4);
                                 d = sin(d*8. + self.time) / 8.;
@@ -73,7 +73,7 @@ app_main!(App);
 pub struct App {
     #[live] ui: WidgetRef,
 }
-
+     
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);

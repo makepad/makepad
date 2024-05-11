@@ -253,7 +253,7 @@ impl App {
     #[cfg(not(target_os = "windows"))]
     fn send_query_to_llm(&mut self, cx: &mut Cx) {
         // alright we have a query. now what
-        let url = format!("http://localhost:8080/completion");
+        let url = format!("http://127.0.0.1:8080/completion");
         let mut request = HttpRequest::new(url, HttpMethod::POST);
         let mut prompt = String::new();
         

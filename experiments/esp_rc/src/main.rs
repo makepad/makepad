@@ -9,7 +9,7 @@ const REAR_CENTER: f32 = 1300.0;
 const REAR_RANGE: f32 = 600.0;
 const THROTTLE_CENTER: f32 = 1250.0;
 const THROTTLE_RANGE: f32 = 600.0;
-const IMU_TARGET_IP: IpAddress = IpAddress::v4(10,0,0,105);
+const IMU_TARGET_IP: IpAddress = IpAddress::v4(172,20,10,4);
 
 fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket){
     let mut i2c = I2C::new_with_timeout(
@@ -69,11 +69,11 @@ fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket
 fn main() -> ! {
     // System inputs/clocks/etc
     wifi_and_udp_socket(
-        WifiConfig::StaticIp{
+        WifiConfig::DynamicIp{
             ssid: "x",
             password: "x",
-            ip: IpAddress::v4(10,0,0,201),
-            gateway: IpAddress::v4(10,0,0,1)
+            //ip: IpAddress::v4(172,20,10,250),
+            //gateway: IpAddress::v4(172,20,10,1)
         },
         main_wifi
     );
