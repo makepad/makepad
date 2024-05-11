@@ -911,37 +911,37 @@ live_design!{
 
                                     tab_a = Tab {
                                         name: "Tab A"
-                                        closable: true,
+                                        template: PermanentTab,
                                         kind: Container_A
                                     }
 
                                     tab_b = Tab {
                                         name: "Tab B"
-                                        closable: false,
+                                        template: PermanentTab,
                                         kind: Container_B
                                     }
 
                                     tab_c = Tab {
                                         name: "Tab C"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_C
                                     }
 
                                     tab_d = Tab {
                                         name: "Tab D"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_D
                                     }
 
                                     tab_e = Tab {
                                         name: "Tab E"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_E
                                     }
 
                                     tab_f = Tab {
                                         name: "Tab F"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_F
                                     }
 
@@ -1018,37 +1018,37 @@ live_design!{
 
                                     tab_a = Tab {
                                         name: "Tab A"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_A
                                     }
 
                                     tab_b = Tab {
                                         name: "Tab B"
-                                        closable: false,
+                                        template: PermanentTab,
                                         kind: Container_B
                                     }
 
                                     tab_c = Tab {
                                         name: "Tab C"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_C
                                     }
 
                                     tab_d = Tab {
                                         name: "Tab D"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_D
                                     }
 
                                     tab_e = Tab {
                                         name: "Tab E"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_E
                                     }
 
                                     tab_f = Tab {
                                         name: "Tab F"
-                                        closable: true,
+                                        template: CloseableTab,
                                         kind: Container_F
                                     }
 
