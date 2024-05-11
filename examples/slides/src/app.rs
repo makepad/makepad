@@ -31,6 +31,10 @@ live_design!{
                         <SlideBody> {text: "- I love to have fun with code\n- Sound, Graphics, Robots"}
                     }
                     <Slide> {
+                        title = {text:"Rust"},
+                        <SlideBody> {text: "- Fast, reliable\n- Focus on compiletime"}
+                    }
+                    <Slide> {
                         title = {text: "Lets use the side screens!"},
                         <SlideBody> {text: "- Simple app on appleTV"}
                     }
@@ -40,7 +44,11 @@ live_design!{
                     }
                     <Slide> {
                         title = {text: "Lets add a camera"},
-                        <SlideBody> {text: "- RC Car with ESP32 and Rust"}
+                        <SlideBody> {text: "- Smile :)"}
+                    }
+                    <Slide> {
+                        title = {text: "Team"},
+                        <SlideBody> {text: "- Design: Sebastian Michailidis\n- Hard things: Eddy Bruël\n- Cheerleader: Rik Arends"}
                     }
                     <Slide> {
                         title = {text: "Makepad Studio"},
@@ -51,13 +59,21 @@ live_design!{
                         <SlideBody> {text: "- Shader based DSL\n- High performance\n- Query based model"}
                     }
                     <Slide> {
-                        title = {text: "IDE Extensions"},
-                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Bruël"}
+                        title = {text: "Future"},
+                        <SlideBody> {text: "- Tool assisted instancing"}
                     }
                     <Slide> {
                         title = {text: "IDE Extensions"},
                         <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Bruël"}
-                    }                   
+                    }
+                    <Slide> {                        
+                        title = {text: "Embedded Rust"},
+                        <SlideBody> {text: "- Lets drive"}
+                    }
+                    <Slide> {
+                        title = {text: "Embedded and UI workshop!"},
+                        <SlideBody> {text: "- Today! 14:00 - 17:30"}
+                    }
                     <Slide> {
                         title = {text: "Links"}, 
                         <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl\n- twitter @rikarends"}
