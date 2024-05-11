@@ -32,7 +32,7 @@ live_design!{
         ui: <AppUI> {}
     }
 }
-
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,

@@ -2,8 +2,6 @@ use crate::makepad_live_id::*;
 use makepad_widgets::*;
 use std::{env, str, time::Duration, thread};
 use serialport::SerialPort;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc;
 
 live_design!{
     import makepad_widgets::base::*;
@@ -63,7 +61,8 @@ impl App {
     }
     
     fn connect_serial(&mut self){
-       let send_port = serialport::new("/dev/cu.usbmodem2101", 115_200)
+        return;
+       let send_port = serialport::new("/dev/cu.usbmodem101", 115_200)
        .timeout(Duration::from_millis(1000000))
        .open()
        .unwrap();

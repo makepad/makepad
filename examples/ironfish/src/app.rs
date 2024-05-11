@@ -2,8 +2,7 @@ use crate::{
     makepad_audio_graph::*, makepad_audio_widgets::display_audio::*,
     makepad_audio_widgets::piano::*, makepad_synth_ironfish::ironfish::*, makepad_widgets::*,
     sequencer::*,
-}; 
-  
+};
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design! {
@@ -295,7 +294,7 @@ impl App {
         db.bind(id!(lfo.rate), ids!(rate.slider));
         db.bind(id!(filter1.lfo_amount), ids!(lfoamount.slider));
         db.bind(id!(lfo.synconkey), ids!(sync.checkbox));
-
+        
         //Volume Envelope
         db.bind(id!(volume_envelope.a), ids!(vol_env.attack.slider));
         db.bind(id!(volume_envelope.h), ids!(vol_env.hold.slider));
@@ -452,6 +451,7 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        
         let ui = self.ui.clone();
         let piano = ui.piano(id!(piano));
 

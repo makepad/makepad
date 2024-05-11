@@ -11,7 +11,21 @@ live_design!{
         font: {path: dep("crate://makepad-widgets/resources/LiberationMono-Regular.ttf")}
     }
     COLOR_DOWN_2 = #x00000022
-
+    
+    Bubble =<TextInput> {
+        ascii_only: true,
+        width: Fill,
+        height: Fill,
+        margin: {top: 5.0, left: 50.0, bottom: .0, right: 0.0},
+        text: ""
+        draw_text: {
+            text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
+        }
+        draw_bg: {
+            color: (#335)
+        }
+    }
+    
     AppUI = <View dx:311.8 dy:124.8 dw:397.1 dh:300.0> {  
         flow: Overlay,
                             
@@ -37,32 +51,8 @@ live_design!{
                     width: Fill,
                     height: Fill,
                     margin: {top: 0},
-                    Own = <TextInput> {
-                        ascii_only: true,
-                        width: Fill,
-                        height: Fill,
-                        margin: {top: 5.0, left: 50.0, bottom: .0, right: 0.0},
-                        text: ""
-                        draw_text: {
-                            text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
-                        }
-                        draw_bg: {
-                            color: (#335)
-                        }
-                    }
-                    Other = <TextInput> {
-                        ascii_only: true,
-                        width: Fill,
-                        height: Fill,
-                        margin: {top: 5.0, left: 5.0, bottom: 5.0, right: 0.0},
-                        text: ""
-                        draw_text: {
-                            text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
-                        }
-                        draw_bg: {
-                            color: (#353)
-                        }
-                    }
+                    Own = <Bubble>{margin:{left:0}}
+                    Other = <Bubble>{margin:{left:100}}
                 }
             }
             <View>{
