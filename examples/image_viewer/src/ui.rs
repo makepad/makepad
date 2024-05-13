@@ -46,8 +46,7 @@ impl Widget for Ui {
         let state = scope.data.get::<State>().unwrap();
         let img = self.deref.image(id!(img));
 
-        // the size check is a workaround to know if the img has a texture loaded
-        if img.size_in_pixels(cx).is_none() && !state.images.is_empty() {
+        if !img.has_texture() && !state.images.is_empty() {
             img.load_image_file_by_path(cx, state.images[0].to_str().unwrap())
                 .unwrap();
         }
