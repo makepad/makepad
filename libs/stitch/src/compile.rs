@@ -271,11 +271,11 @@ impl<'a> Compile<'a> {
         &mut self.opds[len - 1 - depth]
     }
 
-    /// Ensures that the operand at the given depth is not a constant operand, by preserving the
+    /// Ensures that the operand at the given depth is not a immediate operand, by preserving the
     /// constant on the stack if necessary.
     fn ensure_opd_not_const(&mut self, opd_depth: usize) {
-        if self.opd(opd_depth).is_const() {
-            self.preserve_const_opd(opd_depth);
+        if self.opd(opd_depth).is_imm() {
+            self.preserve_imm_opd(opd_depth);
         }
     }
 
@@ -295,7 +295,8 @@ impl<'a> Compile<'a> {
         }
     }
 
-    fn preserve_const_opd(&mut self, opd_depth: usize) {
+    /// Preserves an immediate operand by copying its value to the stack, if necessary.
+    fn preserve_imm_opd(&mut self, opd_depth: usize) {
         let opd_idx = self.opds.len() - 1 - opd_depth;
         self.emit(select_copy_imm_to_stack(self.opds[opd_idx].type_));
         self.emit_val(self.opds[opd_idx].val.unwrap());
@@ -303,6 +304,7 @@ impl<'a> Compile<'a> {
         self.opd_mut(opd_depth).val = None;
     }
 
+    /// Preserve a local operand by copying the local it refers to to the stack, if necessary.
     fn preserve_local_opd(&mut self, opd_idx: usize) {
         let local_idx = self.opds[opd_idx].local_idx.unwrap();
         self.emit(select_copy_stack(self.locals[local_idx].type_));
@@ -926,7 +928,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // handle them. In the rare case that the last operand is a constant, we ensure that the
         // last operand is not a constant, so we can use the _{sri}{sri}s variant (which is always
         // available).
-        if self.opd(0).is_const() {
+        if self.opd(0).is_imm() {
             self.ensure_opd_not_const(0);
         }
 
@@ -1593,7 +1595,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and set its value.
         //
-        // Setting its value will mark the operand as a constant operand.
+        // Setting its value will mark the operand as a immediate operand.
         self.push_opd(ValType::I32);
         self.opd_mut(0).val = Some(UnguardedVal::I32(val));
         Ok(())
@@ -1608,7 +1610,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and set its value.
         //
-        // Setting its value will mark the operand as a constant operand.
+        // Setting its value will mark the operand as a immediate operand.
         self.push_opd(ValType::I64);
         self.opd_mut(0).val = Some(UnguardedVal::I64(val));
 
@@ -1624,7 +1626,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and set its value.
         //
-        // Setting its value will mark the operand as a constant operand.
+        // Setting its value will mark the operand as a immediate operand.
         self.push_opd(ValType::F32);
         self.opd_mut(0).val = Some(UnguardedVal::F32(val));
 
@@ -1675,7 +1677,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // handle them. In the rare case that the operand is a constant, but the operation does not
         // have an _i variant, we ensure that the operand is not a constant, so we can use the _s
         // variant instead (which is always available).
-        if self.opd(0).is_const() && info.instr_i.is_none() {
+        if self.opd(0).is_imm() && info.instr_i.is_none() {
             self.ensure_opd_not_const(0);
         }
 
@@ -1742,7 +1744,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // handle them. In the rare case that both operands are constants, but the operation does
         // not have an _ii variant, we ensure that the second operand is not a constant, so we can
         // use the _is variant instead (which is always available).
-        if self.opd(0).is_const() && self.opd(1).is_const() && info.instr_ii.is_none() {
+        if self.opd(0).is_imm() && self.opd(1).is_imm() && info.instr_ii.is_none() {
             self.ensure_opd_not_const(0);
         }
 
@@ -1853,20 +1855,66 @@ impl Deref for LabelTypes {
     }
 }
 
+/// An operand on the virtual stack.
+/// 
+/// Every operand carries:
+/// - Its type
+/// - An implicit stack index
+/// - An implicit register index
+/// 
+/// The stack index is the index of the stack slot to be used for the operand, if it is stored on
+/// the stack. It is determined by the position of the operand on the operand stack. Note that we
+/// reserve a stack slot for an operand even if it is not stored on the stack.
+/// 
+/// The register index is the index of the register to be used for the operand, if it is stored in a
+/// register. It is determined by the type of the operand. Note that an operand has a register index
+/// even if it is not stored in a register.
+/// 
+/// An operand can be either:
+/// 
+/// - A local operand
+///   These operands are created by instructions that write their output to a register, such as
+///   i32.add. They are not stored on the stack, but instead carry the index of the local they refer
+///   to.
+/// 
+///   When a local is overwritten, all local operands that refer to it should be preserved on the
+///   stack. To keep track of which operands refer to a given local, we maintain a linked list of
+///   operands for each local. Each local operand carries the index of the previous and next operand
+///   in the list.
+/// 
+/// - A register operand
+///   These operands are created by instructions that write their output to a register, such as
+///   i32.add.
+/// 
+/// - A immediate operand
+///   These operands are created by constant instructions, such as i32.const. They are not stored
+///   on the stack, but instead carry their value with them.
+/// 
+/// - A stack operand
+///   These operands are neither immediate, local, nor register operands. They are created by
+///   instructions that write their output to the stack, or when an immediate, local, or register
+///   operand is preserved on the stack.
 #[derive(Clone, Copy, Debug)]
 struct Opd {
     // The type of this operand.
     type_: ValType,
+    // The value of this operand, if it is a immediate operand.
     val: Option<UnguardedVal>,
+    // The index of the local this operand refers to, if it is a local operand.
     local_idx: Option<usize>,
+    // The index of the previous operand in the list of operands for the local that this operand
+    // refers to, if it is a local operand.
     prev_opd_idx: Option<usize>,
+    // The index of the next operand in the list of operands for the local this this operand refers
+    // to, if it is a local operand.
     next_opd_idx: Option<usize>,
+    // Whether this operand is stored in a register.
     is_reg: bool,
 }
 
 impl Opd {
-    /// Returns `true` if this operand is a constant operand.
-    fn is_const(&self) -> bool {
+    /// Returns `true` if this operand is a immediate operand.
+    fn is_imm(&self) -> bool {
         self.val.is_some()
     }
 
@@ -1882,7 +1930,7 @@ impl Opd {
 
     /// Returns the kind of this operand (see [`OpdKind`]).
     fn kind(&self) -> OpdKind {
-        if self.is_const() {
+        if self.is_imm() {
             OpdKind::Imm
         } else if self.is_reg {
             OpdKind::Reg
@@ -1892,8 +1940,12 @@ impl Opd {
     }
 }
 
-/// The kind of an operand indicates whether it is stored as an immediate, on the stack, or in a
-/// register.
+/// The kind of an operand indicates whether its value can be read from the stack, a register, or
+/// as an immediate.
+/// 
+/// Note that local operands are considered to be of kind `OpdKind::Stack`. This is because even
+/// though they are not stored on the stack, the locals they refer to are, so their value can still
+/// be read from the stack.
 #[derive(Clone, Copy, Debug)]
 enum OpdKind {
     Stack,
@@ -1905,14 +1957,13 @@ enum OpdKind {
 //
 // Most instructions come in multiple variants, depending on the types of their operands, and
 // whether their operands are stored as an immediate, on the stack, or in a register. These
-// functions are used to select the appropriate variant of an instruction based on the types and
+// functions are used to select a suitable variant of an instruction based on the types and
 // kinds of its operands.
 
 fn select_br_if_z(kind: OpdKind) -> ThreadedInstr {
     match kind {
         OpdKind::Stack => exec::br_if_z_s,
         OpdKind::Reg => exec::br_if_z_r,
-
         OpdKind::Imm => panic!("no suitable instruction found"),
     }
 }
@@ -1921,7 +1972,6 @@ fn select_br_if_nz(kind: OpdKind) -> ThreadedInstr {
     match kind {
         OpdKind::Stack => exec::br_if_nz_s,
         OpdKind::Reg => exec::br_if_nz_r,
-
         OpdKind::Imm => panic!("no suitable instruction found"),
     }
 }
@@ -1930,7 +1980,6 @@ fn select_br_table(kind: OpdKind) -> ThreadedInstr {
     match kind {
         OpdKind::Stack => exec::br_table_s,
         OpdKind::Reg => exec::br_table_r,
-
         OpdKind::Imm => panic!("no suitable instruction found"),
     }
 }
