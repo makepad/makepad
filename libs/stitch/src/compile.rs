@@ -54,6 +54,7 @@ impl Compiler {
         self.blocks.clear();
         self.opds.clear();
         self.fixup_idxs.clear();
+
         let type_ = func.type_(store);
         let locals = &mut self.locals;
         for type_ in type_
@@ -68,6 +69,7 @@ impl Compiler {
             });
         }
         let local_count = locals.len() - type_.params().len();
+        
         let mut compile = Compile {
             store,
             type_: type_.clone(),
@@ -86,6 +88,7 @@ impl Compiler {
             BlockKind::Block,
             FuncType::new([], type_.results().iter().copied()),
         );
+
         compile.emit(exec::enter as ThreadedInstr);
         compile.emit(func.to_unguarded(store.id()));
         compile.emit(
@@ -94,26 +97,26 @@ impl Compiler {
                 .mem(0)
                 .map(|mem| mem.to_unguarded(store.id())),
         );
+
         let mut decoder = Decoder::new(&code.expr);
         while !compile.blocks.is_empty() {
             code::decode_instr(&mut decoder, &mut self.label_idxs, &mut compile).unwrap();
         }
+
         for (result_idx, result_type) in type_.clone().results().iter().copied().enumerate().rev() {
             compile.emit(select_copy_stack(result_type));
             compile.emit_stack_offset(compile.temp_stack_idx(result_idx));
             compile.emit_stack_offset(compile.param_result_stack_idx(result_idx));
         }
         compile.emit(exec::return_ as ThreadedInstr);
-        compile.opds.clear();
-        let max_stack_slot_count = compile.max_stack_height;
+
         let mut code: AliasableBox<[InstrSlot]> = AliasableBox::from_box(Box::from(compile.code));
         for fixup_idx in compile.fixup_idxs.drain(..) {
             code[fixup_idx] += code.as_ptr() as usize;
         }
-        self.locals.clear();
-        self.opds.clear();
+
         CompiledCode {
-            max_stack_height: max_stack_slot_count,
+            max_stack_height: compile.max_stack_height,
             local_count,
             code,
         }
@@ -143,6 +146,9 @@ struct Compile<'a> {
 }
 
 impl<'a> Compile<'a> {
+    // Methods for operating on types.
+
+    /// Resolves a [`BlockType`] to its corresponding [`FuncType`].
     fn resolve_block_type(&self, type_: BlockType) -> FuncType {
         match type_ {
             BlockType::TypeIdx(idx) => self
@@ -153,18 +159,22 @@ impl<'a> Compile<'a> {
         }
     }
 
-    /// Locals
+    // Methods for operating on locals.
 
-    /// Appends the top operand on the list of operands that refer to the local with the given
+    /// Appends the top operand to the list of operands that refer to the local with the given
     /// index.
+    /// 
+    /// This marks the operand as a local operand.
     fn push_local_opd(&mut self, local_idx: usize) {
         let opd_idx = self.opds.len() - 1;
+
         debug_assert!(self.opds[opd_idx].local_idx.is_none());
         self.opds[opd_idx].local_idx = Some(local_idx);
         self.opds[opd_idx].next_opd_idx = self.locals[local_idx].first_opd_idx;
         if let Some(first_opd_idx) = self.locals[local_idx].first_opd_idx {
             self.opds[first_opd_idx].prev_opd_idx = Some(opd_idx);
         }
+
         self.locals[local_idx].first_opd_idx = Some(opd_idx);
     }
 
@@ -172,6 +182,7 @@ impl<'a> Compile<'a> {
     /// with the given index.
     fn remove_local_opd(&mut self, opd_idx: usize) {
         let local_idx = self.opds[opd_idx].local_idx.unwrap();
+
         if let Some(prev_opd_idx) = self.opds[opd_idx].prev_opd_idx {
             self.opds[prev_opd_idx].next_opd_idx = self.opds[opd_idx].next_opd_idx;
         } else {
@@ -180,12 +191,14 @@ impl<'a> Compile<'a> {
         if let Some(next_opd_idx) = self.opds[opd_idx].next_opd_idx {
             self.opds[next_opd_idx].prev_opd_idx = self.opds[opd_idx].prev_opd_idx;
         }
+
         self.opds[opd_idx].local_idx = None;
         self.opds[opd_idx].prev_opd_idx = None;
         self.opds[opd_idx].next_opd_idx = None;
     }
 
-    fn preserve_all_local_opds(&mut self, local_idx: usize) {
+    /// Preserve the local with the given index by preserving every local operand that refers to it.
+    fn preserve_local(&mut self, local_idx: usize) {
         while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
             self.preserve_local_opd(opd_idx);
             self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
@@ -193,7 +206,7 @@ impl<'a> Compile<'a> {
         }
     }
 
-    // Blocks
+    // Methods for operating on blocks.
 
     /// Returns a reference to the block with the given index.
     fn block(&self, idx: usize) -> &Block {
@@ -208,6 +221,7 @@ impl<'a> Compile<'a> {
 
     /// Marks the current block as unreachable.
     fn set_unreachable(&mut self) {
+        // Unwind the operand stack to the height of the current block.
         while self.opds.len() > self.block(0).height {
             self.pop_opd();
         }
@@ -216,6 +230,8 @@ impl<'a> Compile<'a> {
 
     /// Pushes the hole with the given index onto the block with the given index.
     fn push_hole(&mut self, block_idx: usize, hole_idx: usize) {
+        // We use the hole itself to store the index of the next hole. The value `usize::MAX` is
+        // used to indicate the absence of a next hole.
         self.code[hole_idx] = self.block(block_idx).first_hole_idx.unwrap_or(usize::MAX);
         self.block_mut(block_idx).first_hole_idx = Some(hole_idx);
     }
@@ -223,6 +239,8 @@ impl<'a> Compile<'a> {
     /// Pops a hole from the block with the given index.
     fn pop_hole(&mut self, block_idx: usize) -> Option<usize> {
         if let Some(hole_idx) = self.block(block_idx).first_hole_idx {
+            // We use the hole itself to store the index of the next hole. The value `usize::MAX` is
+            // used to indicate the absence of a next hole.
             self.block_mut(block_idx).first_hole_idx = if self.code[hole_idx] == usize::MAX {
                 None
             } else {
@@ -241,10 +259,12 @@ impl<'a> Compile<'a> {
             type_,
             is_unreachable: false,
             height: self.opds.len(),
-            first_code_idx: self.code.len(),
+            first_instr_idx: self.code.len(),
             first_hole_idx: None,
             else_hole_idx: None,
         });
+
+        // Push the inputs of the block on the stack.
         for input_type in self.block(0).type_.clone().params().iter().copied() {
             self.push_opd(input_type);
         }
@@ -252,13 +272,15 @@ impl<'a> Compile<'a> {
 
     /// Pops a block from the stack.
     fn pop_block(&mut self) -> Block {
+        // Unwind the operand stack to the height of the block.
         while self.opds.len() > self.block(0).height {
             self.pop_opd();
         }
+        
         self.blocks.pop().unwrap()
     }
 
-    // Operands
+    // Methods for operating on operands.
 
     /// Returns a reference to the [`Opd`] at the given depth.
     fn opd(&self, depth: usize) -> &Opd {
@@ -273,7 +295,7 @@ impl<'a> Compile<'a> {
 
     /// Ensures that the operand at the given depth is not a immediate operand, by preserving the
     /// constant on the stack if necessary.
-    fn ensure_opd_not_const(&mut self, opd_depth: usize) {
+    fn ensure_opd_not_imm(&mut self, opd_depth: usize) {
         if self.opd(opd_depth).is_imm() {
             self.preserve_imm_opd(opd_depth);
         }
@@ -339,12 +361,13 @@ impl<'a> Compile<'a> {
         self.opds.pop().unwrap().type_
     }
 
-    fn pop_opd_and_emit(&mut self) {
+    /// Emits an operand and then pops it from the stack.
+    fn emit_and_pop_opd(&mut self) {
         self.emit_opd(0);
         self.pop_opd();
     }
 
-    /// Stack
+    // Methods for operating on the stack.
 
     /// Returns the stack index of the parameter/result with the given index.
     fn param_result_stack_idx(&self, param_result_idx: usize) -> isize {
@@ -375,7 +398,7 @@ impl<'a> Compile<'a> {
         }
     }
 
-    /// Registers
+    // Methods for operating on registers.
 
     /// Returns `true` if the register with the given index is occupied.
     fn is_reg_occupied(&self, reg_idx: usize) -> bool {
@@ -399,6 +422,8 @@ impl<'a> Compile<'a> {
         self.regs[reg_idx] = None;
     }
 
+    /// Preserves the register with the given index by preserving the register operand that occupies
+    /// it.
     fn preserve_reg(&mut self, reg_idx: usize) {
         let opd_idx = self.regs[reg_idx].unwrap();
         let opd_type = self.opds[opd_idx].type_;
@@ -407,6 +432,7 @@ impl<'a> Compile<'a> {
         self.dealloc_reg(reg_idx);
     }
 
+    /// Preserves all registers by preserving the register operands that occupy them.
     fn preserve_all_regs(&mut self) {
         for reg_idx in 0..self.regs.len() {
             if self.is_reg_occupied(reg_idx) {
@@ -415,6 +441,8 @@ impl<'a> Compile<'a> {
         }
     }
 
+    /// Copies the values for the label with the given index to their expected locations
+    /// on the stack, and pop them from the stack.
     fn resolve_label_vals(&mut self, label_idx: usize) {
         for (label_val_idx, label_type) in self
             .block(label_idx)
@@ -433,8 +461,9 @@ impl<'a> Compile<'a> {
         }
     }
 
-    // Emitting
+    // Methods for emitting code.
 
+    // Emits the given value.
     fn emit<T>(&mut self, val: T)
     where
         T: Copy,
@@ -444,16 +473,22 @@ impl<'a> Compile<'a> {
         unsafe { *(self.code.last_mut().unwrap() as *mut _ as *mut T) = val };
     }
 
+    // Emits an operand.
+    //
+    // For local and temporary operands, which can be read from the stack, this emits the offset of
+    // the stack slot for the operand. For immediate operands, which carry their own value, this
+    // emits the value of the operand. For register operands, we don't need to anything.
     fn emit_opd(&mut self, opd_depth: usize) {
         match self.opd(opd_depth).kind() {
             OpdKind::Stack => self.emit_stack_offset(self.opd_stack_idx(opd_depth)),
-            OpdKind::Reg => {}
             OpdKind::Imm => {
                 self.emit_val(self.opd(opd_depth).val.unwrap());
             }
+            OpdKind::Reg => {}
         }
     }
 
+    // Emits an immediate value.
     fn emit_val(&mut self, val: UnguardedVal) {
         match val {
             UnguardedVal::I32(val) => self.emit(val),
@@ -465,10 +500,16 @@ impl<'a> Compile<'a> {
         }
     }
 
+    /// Emits the offset of the stack slot with the given index.
     fn emit_stack_offset(&mut self, stack_idx: isize) {
         self.emit(stack_idx * mem::size_of::<StackSlot>() as isize);
     }
 
+    /// Emits the label for the block with the given index.
+    /// 
+    /// If the block is of kind [`BlockKind::Loop`], this emits the offset of the first instruction
+    /// in the block. [`BlockKind::Block`], we don't yet know where the first instruction after the
+    /// end of the block is, so we emit a hole instead.
     fn emit_label(&mut self, block_idx: usize) {
         match self.block(block_idx).kind {
             BlockKind::Block => {
@@ -476,25 +517,30 @@ impl<'a> Compile<'a> {
                 self.push_hole(block_idx, hole_idx);
             }
             BlockKind::Loop => {
-                self.emit_code_offset(self.block(block_idx).first_code_idx);
+                self.emit_instr_offset(self.block(block_idx).first_instr_idx);
             }
         }
     }
 
+    /// Emits a hole and returns its index.
+    /// 
+    /// A hole is a placeholder for an instruction offset that is not yet known.
     fn emit_hole(&mut self) -> usize {
         let hole_idx = self.code.len();
         self.code.push(0);
         hole_idx
     }
 
+    /// Patches the hole with the given index with the offset of the current instruction.
     fn patch_hole(&mut self, hole_idx: usize) {
         self.fixup_idxs.push(hole_idx);
         self.code[hole_idx] = self.code.len() * mem::size_of::<usize>();
     }
 
-    fn emit_code_offset(&mut self, code_idx: usize) {
+    /// Emits the offset of the instruction with the given index.
+    fn emit_instr_offset(&mut self, instr_idx: usize) {
         self.fixup_idxs.push(self.code.len());
-        self.emit(code_idx * mem::size_of::<InstrSlot>());
+        self.emit(instr_idx * mem::size_of::<InstrSlot>());
     }
 }
 
@@ -502,178 +548,346 @@ impl<'a> InstrVisitor for Compile<'a> {
     type Error = DecodeError;
 
     // Control instructions
+
+    /// Compiles a `nop` instruction.
     fn visit_nop(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
+    /// Compiles an `unreachable` instruction.
     fn visit_unreachable(&mut self) -> Result<(), Self::Error> {
+        // Emit the instruction.
+
         self.emit(exec::unreachable as ThreadedInstr);
         self.set_unreachable();
         Ok(())
     }
 
+    /// Compiles a `block` instruction.
     fn visit_block(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
+
+        // Skip this instruction if it is unreachable.
         if !self.block(0).is_unreachable {
             for opd_depth in 0..type_.params().len() {
-                self.ensure_opd_not_const(opd_depth);
+                self.ensure_opd_not_imm(opd_depth);
                 self.ensure_opd_not_local(opd_depth);
                 self.ensure_opd_not_reg(opd_depth);
             }
+
+            // Pop the inputs of the block from the stack.
             for _ in 0..type_.params().len() {
                 self.pop_opd();
             }
         }
+
         self.push_block(BlockKind::Block, type_);
+
         Ok(())
     }
 
+    /// Compiles a `loop` instruction.
     fn visit_loop(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
+
+        // Skip this instruction if it is unreachable.
         if !self.block(0).is_unreachable {
+            // This is a branch target. We need to ensure that each block input is stored in a
+            // known location here, so that if we encounter a branch to this target elsewhere, we
+            // can ensure that each block input is stored in the location expected by the target
+            // before the branch is taken.
+            //
+            // We do this by ensuring that each block input is a temporary operand, which is stored
+            // in a known location on the stack.
             for opd_depth in 0..type_.params().len() {
-                self.ensure_opd_not_const(opd_depth);
+                self.ensure_opd_not_imm(opd_depth);
                 self.ensure_opd_not_local(opd_depth);
                 self.ensure_opd_not_reg(opd_depth);
             }
+            
+            // Pop the inputs of the block from the stack.
             for _ in 0..type_.params().len() {
                 self.pop_opd();
             }
         }
+
         self.push_block(BlockKind::Loop, type_);
+
         Ok(())
     }
 
+    /// Compiles an `if` instruction.
     fn visit_if(&mut self, type_: BlockType) -> Result<(), Self::Error> {
         let type_ = self.resolve_block_type(type_);
         let else_hole_idx = if !self.block(0).is_unreachable {
-            self.ensure_opd_not_const(0);
+            // The `br_if_z` instruction does not have an _i variant.
+            //
+            // For instance, the following sequence of instructions:
+            // i32.const 0
+            // if 0
+            //
+            // will likely be constant folded by most Wasm compilers, so we expect it to occur very
+            // rarely in real Wasm code. Therefore, we do not implement an br_if_z_i instruction.
+            //
+            // Conversely, the following sequence of instructions:
+            //
+            // local.get 0
+            // if 0
+            //
+            // cannot be constant folded, since the value of the condition cannot be known at
+            // compile time. Therefore, we do implement a br_if_z_s instruction.
+            //
+            // However, sequences like the first one above are still valid Wasm code, so we need to
+            // handle them. In the rare case that the condition is a constant, we ensure that the
+            // condition is not a constant, so we can use the _{sri}{sri}s variant (which is always
+            // available).
+            self.ensure_opd_not_imm(0);
+    
+            // This is a branch. We need to ensure that each block input is stored in the location
+            // expected by the target before the branch is taken.
+            //
+            // We do this by ensuring that each block input is a temporary operand, which is stored
+            // in a known location on the stack. We don't need to copy the block inputs to their
+            // expected locations, because they are already in the correct locations.
             for opd_depth in 1..type_.params().len() + 1 {
-                self.ensure_opd_not_const(opd_depth);
+                self.ensure_opd_not_imm(opd_depth);
                 self.ensure_opd_not_local(opd_depth);
                 self.ensure_opd_not_reg(opd_depth);
             }
+
+            // Emit the instruction.
             self.emit(select_br_if_z(self.opd(0).kind()));
-            self.pop_opd_and_emit();
+
+            // Emit the condition and pop it from the stack.
+            self.emit_and_pop_opd();
+
+            // We don't yet know where the start of the `else` block is, so we emit a hole instead.
             let else_hole_idx = self.emit_hole();
+
+            // Pop the inputs of the block from the stack
             for _ in 0..type_.params().len() {
                 self.pop_opd();
             }
+
             Some(else_hole_idx)
         } else {
             None
         };
+
         self.push_block(BlockKind::Block, type_);
+
+        // Store the hole for the `else` block with the `if` block so we can patch it when we reach
+        // the start of the `else` block.
         self.block_mut(0).else_hole_idx = else_hole_idx;
+
         Ok(())
     }
 
+    /// Compiles an `else` instruction.
     fn visit_else(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if !self.block(0).is_unreachable {
+            // This is a branch target. We need to ensure that each block input is stored in a
+            // known location here, so that if we encounter a branch to this target elsewhere, we
+            // can ensure that each block input is stored in the location expected by the target
+            // before the branch is taken.
+            //
+            // We do this by ensuring that each block input is a temporary operand, which is stored
+            // in a known location on the stack.
             for opd_depth in 0..self.block(0).type_.results().len() {
-                self.ensure_opd_not_const(opd_depth);
+                self.ensure_opd_not_imm(opd_depth);
                 self.ensure_opd_not_local(opd_depth);
                 self.ensure_opd_not_reg(opd_depth);
             }
+
+            // We are now at the end of the `if` block, so we want to branch to the first
+            // instruction after the end of the `else` block. We don't know where that is yet, so
+            // we emit a hole instead, and append it to the list of holes for the `if` block.
             self.emit(exec::br as ThreadedInstr);
             let hole_idx = self.emit_hole();
             self.push_hole(0, hole_idx);
         }
+
+        // We are now at the start of the `else` block, so we can patch the hole for the `else`
+        // block, if the `if` block has one. This will only be the case if the `if` block was
+        // created in reachable code.
+        //
+        // Even if the rest of the `if` block is unreachable, we still need to patch the hole for
+        // the the `else` block, because that could have been emitted before rest of the `if` block
+        // became unreachable.
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
         }
+
+        // Pop the `if` block from the stack.
         let block = self.pop_block();
+
+        // Push the `else` block on the stack.
         self.push_block(BlockKind::Block, block.type_);
+
+        // Copy the list of holes for the `if` block to that of the `else` block, so that they will
+        // be patched when we reach the first instruction after the end of the `else` block.
         self.block_mut(0).first_hole_idx = block.first_hole_idx;
+
         Ok(())
     }
 
+    /// Compiles an `end` instruction.
     fn visit_end(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if !self.block(0).is_unreachable {
+            // This is a branch target. We need to ensure that each block input is stored in a
+            // known location here, so that if we encounter a branch to this target elsewhere, we
+            // can ensure that each block input is stored in the location expected by the target
+            // before the branch is taken.
+            //
+            // We do this by ensuring that each block input is a temporary operand, which is stored
+            // in a known location on the stack.
             for opd_depth in 0..self.block(0).type_.results().len() {
-                self.ensure_opd_not_const(opd_depth);
+                self.ensure_opd_not_imm(opd_depth);
                 self.ensure_opd_not_local(opd_depth);
                 self.ensure_opd_not_reg(opd_depth);
             }
         }
+
         if let Some(else_hole_idx) = self.block_mut(0).else_hole_idx.take() {
             self.patch_hole(else_hole_idx);
         }
+
+        // We are now at the first instruction after the end of the block, so we can patch the list
+        // of holes for the block.
         while let Some(hole_idx) = self.pop_hole(0) {
             self.patch_hole(hole_idx);
         }
+
+        // Pop the block from the stack.
         let block = self.pop_block();
+
+        // Push the outputs of the block onto the stack.
         for result_type in block.type_.results().iter().copied() {
             self.push_opd(result_type);
         }
+
         Ok(())
     }
 
+    /// Compiles a `br` instruction.
     fn visit_br(&mut self, label_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Wasm uses `u32` indices for labels, but we use `usize` indices.
         let label_idx = label_idx as usize;
+
+        // This is a branch. We need to ensure that each block input is stored in the location
+        // expected by the target before the branch is taken.
+        //
+        // We do this by ensuring that each block input is a temporary operand, which is stored
+        // in a known location on the stack, and then copying them to their expected locations in
+        // the code emitted below.
         for opd_depth in 0..self.block(label_idx).label_types().len() {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_local(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
+
         self.resolve_label_vals(label_idx);
         self.emit(exec::br as ThreadedInstr);
         self.emit_label(label_idx);
         self.set_unreachable();
+
         Ok(())
     }
 
+    /// Compiles a `br_if` instruction.
     fn visit_br_if(&mut self, label_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+        
+        // Wasm uses `u32` indices for labels, but we use `usize` indices.
         let label_idx = label_idx as usize;
-        self.ensure_opd_not_const(0);
+
+        // The `bf_if` instruction does not have any _{sri}{sri}i variants.
+        self.ensure_opd_not_imm(0);
+
+        // This is a branch. We need to ensure that each block input is stored in the location
+        // expected by the target before the branch is taken.
+        //
+        // We do this by ensuring that each block input is a temporary operand, which is stored
+        // in a known location on the stack, and then copying them to their expected locations in
+        // the code emitted below.
         for opd_depth in 1..self.block(label_idx).label_types().len() + 1 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_local(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
+ 
         if self.block(label_idx).label_types().is_empty() {
+            // If the branch target has an empty type, we don't need to copy any block inputs to
+            // their expected locations, so we can generate more efficient code.
             self.emit(select_br_if_nz(self.opd(0).kind()));
-            self.pop_opd_and_emit();
+            self.emit_and_pop_opd();
             self.emit_label(label_idx);
         } else {
+            // If the branch target has a non-empty type, we need to copy all block inputs to their
+            // expected locations.
+            //
+            // This is more expensive, because we cannot branch to the target directly. Instead, we
+            // have to branch to code that first copies the block inputs to their expected
+            // locations, and then branches to the target.
             self.emit(select_br_if_z(self.opd(0).kind()));
-            self.pop_opd_and_emit();
+            self.emit_and_pop_opd();
             let hole_idx = self.emit_hole();
             self.resolve_label_vals(label_idx);
             self.emit(exec::br as ThreadedInstr);
             self.emit_label(label_idx);
             self.patch_hole(hole_idx);
         }
+
         for label_type in self.block(label_idx).label_types().iter().copied() {
             self.push_opd(label_type);
         }
+
         Ok(())
     }
 
+    /// Compiles a `br_table` instruction.
     fn visit_br_table(
         &mut self,
         label_idxs: &[u32],
         default_label_idx: u32,
     ) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Wasm uses `u32` indices for labels, but we use `usize` indices.
         let default_label_idx = default_label_idx as usize;
-        self.ensure_opd_not_const(0);
+
+        self.ensure_opd_not_imm(0);
+
+        // This is a branch. We need to ensure that each block input is stored in the location
+        // expected by the target before the branch is taken.
+        //
+        // We do this by ensuring that each block input is a temporary operand, which is stored
+        // in a known location on the stack, and then copying them to their expected locations in
+        // the code emitted below.
         for opd_depth in 1..self.block(default_label_idx).label_types().len() + 1 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_local(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
+
         if self.block(default_label_idx).label_types().is_empty() {
+            // If the branch target has an empty type, we don't need to copy any block inputs to
+            // their expected locations, so we can generate more efficient code.
             self.emit(select_br_table(self.opd(0).kind()));
-            self.pop_opd_and_emit();
+            self.emit_and_pop_opd();
             self.emit(label_idxs.len() as u32);
             for label_idx in label_idxs.iter().copied() {
                 let label_idx = label_idx as usize;
@@ -684,8 +898,14 @@ impl<'a> InstrVisitor for Compile<'a> {
             }
             self.emit_label(default_label_idx);
         } else {
+            // If the branch target has a non-empty type, we need to copy all block inputs to their
+            // expected locations.
+            //
+            // This is more expensive, because we cannot branch to each target directly. Instead, for
+            // each target, we have to branch to code that first copies the block inputs to their
+            // expected locations, and then branches to the target.
             self.emit(select_br_table(self.opd(0).kind()));
-            self.pop_opd_and_emit();
+            self.emit_and_pop_opd();
             self.emit(label_idxs.len() as u32);
             let mut hole_idxs = Vec::new();
             for _ in 0..label_idxs.len() {
@@ -708,14 +928,19 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.emit(exec::br as ThreadedInstr);
             self.emit_label(default_label_idx);
         }
+
         self.set_unreachable();
+
         Ok(())
     }
 
+    /// Compiles a `return` instruction.
     fn visit_return(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
         for (result_idx, result_type) in self
             .type_
             .clone()
@@ -725,31 +950,42 @@ impl<'a> InstrVisitor for Compile<'a> {
             .enumerate()
             .rev()
         {
-            self.ensure_opd_not_const(0);
+            self.ensure_opd_not_imm(0);
             self.emit(if self.opd(0).is_reg {
                 select_copy_reg_to_stack(result_type)
             } else {
                 select_copy_stack(result_type)
             });
-            self.pop_opd_and_emit();
+            self.emit_and_pop_opd();
             self.emit_stack_offset(self.param_result_stack_idx(result_idx));
         }
         self.emit(exec::return_ as ThreadedInstr);
+
         self.set_unreachable();
+
         Ok(())
     }
 
+    /// Compiles a `call` instruction.
     fn visit_call(&mut self, func_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Func`] for this instruction.
         let func = self.instance.func(func_idx).unwrap();
+
+        // Obtian the type of the [`Func`].
         let type_ = func.type_(&self.store).clone();
+
+        // This is a branch point.
         for opd_depth in 0..type_.params().len() {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_local(opd_depth);
         }
         self.preserve_all_regs();
+
         self.emit(match func.0.as_ref(&self.store) {
             FuncEntity::Wasm(_) => exec::compile as ThreadedInstr,
             FuncEntity::Host(_) => exec::call_host as ThreadedInstr,
@@ -775,19 +1011,29 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
+    /// Compiles a `call_indirect` instruction.
     fn visit_call_indirect(&mut self, table_idx: u32, type_idx: u32) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
             return Ok(());
         }
+
+        // Obtain the [`Table`] for this instruction.
         let table = self.instance.table(table_idx).unwrap();
+
+        // Obtain the (interned) type of the elements in the [`Table`].
         let interned_type = self.instance.type_(type_idx).unwrap();
         let type_ = self.store.resolve_type(interned_type).clone();
-        self.ensure_opd_not_const(0);
+
+        self.ensure_opd_not_imm(0);
+
+        // This is a branch point.
         for opd_depth in 1..type_.params().len() + 1 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_local(opd_depth);
         }
         self.preserve_all_regs();
+
         self.emit(exec::call_indirect as ThreadedInstr);
         self.emit_stack_offset(self.opd_stack_idx(0));
         self.pop_opd();
@@ -813,7 +1059,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Reference instructions
 
-    /// Compiles a ref.null instruction.
+    /// Compiles a `ref.null` instruction.
     fn visit_ref_null(&mut self, type_: RefType) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -835,7 +1081,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a ref.is_null instruction.
+    /// Compiles a `ref.is_null` instruction.
     fn visit_ref_is_null(&mut self) -> Result<(), DecodeError> {
         if self.block(0).is_unreachable {
             return Ok(());
@@ -858,7 +1104,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a ref.func instruction.
+    /// Compiles a `ref.func` instruction.
     fn visit_ref_func(&mut self, func_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -883,7 +1129,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Parametric instructions
 
-    /// Compiles a drop instruction
+    /// Compiles a `drop` instruction
     fn visit_drop(&mut self) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -896,7 +1142,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a select instruction.
+    /// Compiles a `select` instruction.
     fn visit_select(&mut self, type_: Option<ValType>) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -905,7 +1151,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         let type_ = type_.unwrap_or_else(|| self.opd(1).type_);
 
-        // The select instruction does not have any _{sri}{sri}i variants.
+        // The `select` instruction does not have any _{sri}{sri}i variants.
         //
         // For instance, the following sequence of instructions:
         // local.get 0
@@ -925,12 +1171,9 @@ impl<'a> InstrVisitor for Compile<'a> {
         // time. Therefore, we do implement a select_sss instruction.
         //
         // However, sequences like the first one above are still valid Wasm code, so we need to
-        // handle them. In the rare case that the last operand is a constant, we ensure that the
-        // last operand is not a constant, so we can use the _{sri}{sri}s variant (which is always
-        // available).
-        if self.opd(0).is_imm() {
-            self.ensure_opd_not_const(0);
-        }
+        // handle them. We ensure that the condition is not an immediate operand, so that we can
+        // use the _{sri}{sri}s variant instead (which is always available).
+        self.ensure_opd_not_imm(0);
 
         // The select instruction writes it output to a register, so we need to ensure that the
         // register is available for the instruction to use.
@@ -974,7 +1217,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Variable instructions
 
-    /// Compiles a local.get instruction.
+    /// Compiles a `local.get` instruction.
     fn visit_local_get(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -986,15 +1229,13 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Push the output onto the stack and append it to the list of operands that refer to this
         // local.
-        //
-        // Appending the operand to the list of operands for the local marks it as a local operand.
         self.push_opd(self.locals[local_idx].type_);
         self.push_local_opd(local_idx);
 
         Ok(())
     }
 
-    /// Compiles a local.set instruction.
+    /// Compiles a `local.set` instruction.
     fn visit_local_set(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1012,7 +1253,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a local.tee instruction.
+    /// Compiles a `local.tee` instruction.
     fn visit_local_tee(&mut self, local_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1027,7 +1268,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // The local.tee instruction overwrites the local, so we need to preserve all operands that
         // refer to the local on the stack.
-        self.preserve_all_local_opds(local_idx);
+        self.preserve_local(local_idx);
 
         // Emit the instruction.
         self.emit(selecy_copy_opd_to_stack(local_type, self.opd(0).kind()));
@@ -1041,7 +1282,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a global.get instruction.
+    /// Compiles a `global.get` instruction.
     fn visit_global_get(&mut self, global_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1067,7 +1308,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a global.set instruction.
+    /// Compiles a `global.set` instruction.
     fn visit_global_set(&mut self, global_idx: u32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1095,7 +1336,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Table instructions
 
-    /// Compiles a table.get instruction.
+    /// Compiles a `table.get` instruction.
     fn visit_table_get(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1125,7 +1366,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a table.set instruction.
+    /// Compiles a `table.set` instruction.
     fn visit_table_set(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         if self.block(0).is_unreachable {
             return Ok(());
@@ -1156,7 +1397,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a table.size instruction.
+    /// Compiles a `table.size` instruction.
     fn visit_table_size(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1182,7 +1423,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a table.grow instruction.
+    /// Compiles a `table.grow` instruction.
     fn visit_table_grow(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1195,10 +1436,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
 
-        // This instruction has only one variant, which reads all its operands from the stack, so we
-        // need to ensure that all operands are neither constant nor register operands.
+        // This instruction has only one variant for each type, which reads all its operands from
+        // the stack, so we need to ensure that all operands are neither constant nor register
+        // operands.
         for opd_depth in 0..2 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1221,6 +1463,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
+    /// Compiles a `table.fill` instruction.
     fn visit_table_fill(&mut self, table_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1233,11 +1476,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Obtain the type of the elements in the [`Table`].
         let elem_type = table.type_(&self.store).elem;
 
-        // This instruction has only one variant for each type , which reads all its operands from
+        // This instruction has only one variant for each type, which reads all its operands from
         // the stack, so we need to ensure that all operands are neither constants nor stored in a
         // register.
         for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1256,7 +1499,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a table.copy instruction.
+    /// Compiles a `table.copy` instruction.
     fn visit_table_copy(
         &mut self,
         dst_table_idx: u32,
@@ -1274,10 +1517,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Obtain the type of the elements in the destination [`Table`].
         let elem_type = dst_table.type_(&self.store).elem;
 
-        // This instruction has only one variant, which reads all its operands from the stack, so we
-        // need to ensure that all operands are neither constant nor register operands.
+        // This instruction has only one variant for each type, which reads all its operands from
+        // the stack, so we need to ensure that all operands are neither constant nor register
+        // operands.
         for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1297,7 +1541,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a table.init instruction.
+    /// Compiles a `table.init` instruction.
     fn visit_table_init(
         &mut self,
         dst_table_idx: u32,
@@ -1315,10 +1559,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Obtain the type of the elements in the destination [`Table`].
         let elem_type = dst_table.type_(&self.store).elem;
 
-        // This instruction has only one variant, which reads all its operands from the stack, so we
-        // need to ensure that all operands are neither constant nor register operands.
+        // This instruction has only one variant for each type, which reads all its operands from
+        // the stack, so we need to ensure that all operands are neither constant nor register
+        // operands.
         for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1338,7 +1583,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles an elem.drop instruction.
+    /// Compiles an `elem.drop` instruction.
     fn visit_elem_drop(&mut self, elem_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1398,7 +1643,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a memory.fill instruction.
+    /// Compiles a `memory.fill` instruction.
     fn visit_memory_size(&mut self) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1424,7 +1669,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a memory.grow instruction.
+    /// Compiles a `memory.grow` instruction.
     fn visit_memory_grow(&mut self) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1436,7 +1681,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // This instruction has only one variant, which reads all its operands from the stack, so we
         // need to ensure that all operands are neither constant nor register operands.
-        self.ensure_opd_not_const(0);
+        self.ensure_opd_not_imm(0);
         self.ensure_opd_not_reg(0);
 
         // Emit the instruction.
@@ -1446,7 +1691,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         self.emit(exec::memory_grow as ThreadedInstr);
 
         // Emit the input and pop it from the stack.
-        self.pop_opd_and_emit();
+        self.emit_and_pop_opd();
 
         // Emit an unguarded handle to the memory instance.
         self.emit(mem.to_unguarded(self.store.id()));
@@ -1458,7 +1703,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a memory.fill instruction.
+    /// Compiles a `memory.fill` instruction.
     fn visit_memory_fill(&mut self) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1471,7 +1716,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // This instruction has only one variant, which reads all its operands from the stack, so we
         // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1493,7 +1738,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a memory.copy instruction.
+    /// Compiles a `memory.copy` instruction.
     fn visit_memory_copy(&mut self) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1506,7 +1751,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // This instruction has only one variant, which reads all its operands from the stack, so we
         // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1528,7 +1773,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a memory.init instruction.
+    /// Compiles a `memory.init` instruction.
     fn visit_memory_init(&mut self, data_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1542,7 +1787,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // This instruction has only one variant, which reads all its operands from the stack, so we
         // need to ensure that all operands are neither constant nor register operands.
         for opd_depth in 0..3 {
-            self.ensure_opd_not_const(opd_depth);
+            self.ensure_opd_not_imm(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
 
@@ -1565,7 +1810,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a data.drop instruction.
+    /// Compiles a `data.drop` instruction.
     fn visit_data_drop(&mut self, data_idx: u32) -> Result<(), Self::Error> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1586,7 +1831,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
     // Numeric instructions
 
-    /// Compiles an i32.const instruction.
+    /// Compiles an `i32.const` instruction.
     fn visit_i32_const(&mut self, val: i32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1601,7 +1846,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles an i64.const instruction.
+    /// Compiles an `i64.const` instruction.
     fn visit_i64_const(&mut self, val: i64) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1617,7 +1862,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles an f32.const instruction.
+    /// Compiles an `f32.const` instruction.
     fn visit_f32_const(&mut self, val: f32) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1633,7 +1878,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         Ok(())
     }
 
-    /// Compiles a f64.const instruction.
+    /// Compiles a `f64.const` instruction.
     fn visit_f64_const(&mut self, val: f64) -> Result<(), DecodeError> {
         // Skip this instruction if it is unreachable.
         if self.block(0).is_unreachable {
@@ -1674,11 +1919,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         // an i32_load_i instruction.
         //
         // However, sequences like the first one above are still valid Wasm code, so we need to
-        // handle them. In the rare case that the operand is a constant, but the operation does not
-        // have an _i variant, we ensure that the operand is not a constant, so we can use the _s
-        // variant instead (which is always available).
-        if self.opd(0).is_imm() && info.instr_i.is_none() {
-            self.ensure_opd_not_const(0);
+        // handle them. If the operation does not have an _i variant, we ensure that the operand is
+        // not an immediate operand, so that we can use the _s variant instead (which is always
+        // available).
+        if  info.instr_i.is_none() {
+            self.ensure_opd_not_imm(0);
         }
 
         // Unary operations write their output to a register, so we need to ensure that the output
@@ -1741,11 +1986,11 @@ impl<'a> InstrVisitor for Compile<'a> {
         // an i32_store_ii instruction.
         //
         // However, sequences like the first one above are still valid Wasm code, so we need to
-        // handle them. In the rare case that both operands are constants, but the operation does
-        // not have an _ii variant, we ensure that the second operand is not a constant, so we can
-        // use the _is variant instead (which is always available).
-        if self.opd(0).is_imm() && self.opd(1).is_imm() && info.instr_ii.is_none() {
-            self.ensure_opd_not_const(0);
+        // handle them. If the first operand is an immediate operand, and the operation does not
+        // have an _ii variant, we ensure that the second operand is not an immediate operand, so
+        // that we can use the _is variant instead (which is always available).
+        if self.opd(1).is_imm() && info.instr_ii.is_none() {
+            self.ensure_opd_not_imm(0);
         }
 
         // Binary operations write their output to a register, so we need to ensure that the output
@@ -1806,24 +2051,36 @@ impl<'a> InstrVisitor for Compile<'a> {
     }
 }
 
+/// A local on the stack.
 #[derive(Clone, Copy, Debug)]
 struct Local {
+    // The type of this local.
     type_: ValType,
+    // The index of the first operand in the list of operands for this local.
     first_opd_idx: Option<usize>,
 }
 
+/// A block on the stack.
 #[derive(Clone, Debug)]
 struct Block {
+    // The [`BlockKind`] of this block.
     kind: BlockKind,
+    // The type of this block.
     type_: FuncType,
+    // Whether the rest of this block is unreachable.
     is_unreachable: bool,
+    // The height of the operand stack at the start of this block.
     height: usize,
-    first_code_idx: usize,
+    // The index of the first instruction for this block.
+    first_instr_idx: usize,
+    // The index of the hole for the `else` block. This is only used for `if` blocks.
     else_hole_idx: Option<usize>,
+    // The index of the first hole for this block.
     first_hole_idx: Option<usize>,
 }
 
 impl Block {
+    /// Returns the type of the label of this [`Block`].
     fn label_types(&self) -> LabelTypes {
         LabelTypes {
             kind: self.kind,
@@ -1832,12 +2089,26 @@ impl Block {
     }
 }
 
+/// The kind of a [`Block`].
+/// 
+/// This determines whether the label of the [`Block`] is at the start or the end.
+/// 
+/// Blocks introduced by a `block``, `if``, or `else`` instruction are considered to be of kind
+/// [`BlockKind::Block`], since their label is at the start of the block, and there there is no
+/// need to otherwise distinguish between them.
+///  
+/// Blocks introduced by a `loop` instruction are considered to be of kind [`BlockKind::Loop`],
+/// since their label is at the end of the block.
 #[derive(Clone, Copy, Debug)]
 enum BlockKind {
     Block,
     Loop,
 }
 
+/// The type of the label of a [`Block`].
+/// 
+/// This is either the type of the inputs of the block, or the type of the outputs of the block,
+/// depending on the [`BlockKind`] of the block.
 #[derive(Clone, Debug)]
 struct LabelTypes {
     kind: BlockKind,
@@ -1855,20 +2126,20 @@ impl Deref for LabelTypes {
     }
 }
 
-/// An operand on the virtual stack.
+/// An operand on the stack.
 /// 
 /// Every operand carries:
 /// - Its type
+/// 
 /// - An implicit stack index
+///   This is the index of the stack slot to be used for the operand, if it is stored on the stack.
+///   It is determined by the position of the operand on the operand stack. Note that we reserve a
+///   stack slot for an operand even if it is not stored on the stack.
+/// 
 /// - An implicit register index
-/// 
-/// The stack index is the index of the stack slot to be used for the operand, if it is stored on
-/// the stack. It is determined by the position of the operand on the operand stack. Note that we
-/// reserve a stack slot for an operand even if it is not stored on the stack.
-/// 
-/// The register index is the index of the register to be used for the operand, if it is stored in a
-/// register. It is determined by the type of the operand. Note that an operand has a register index
-/// even if it is not stored in a register.
+///   This is the index of the register to be used for the operand, if it is stored in a register.
+///   It is determined by the type of the operand. Note that an operand has a register index even
+///   if it is not stored in a register.
 /// 
 /// An operand can be either:
 /// 
@@ -1890,7 +2161,7 @@ impl Deref for LabelTypes {
 ///   These operands are created by constant instructions, such as i32.const. They are not stored
 ///   on the stack, but instead carry their value with them.
 /// 
-/// - A stack operand
+/// - A temporary operand
 ///   These operands are neither immediate, local, nor register operands. They are created by
 ///   instructions that write their output to the stack, or when an immediate, local, or register
 ///   operand is preserved on the stack.
@@ -1940,12 +2211,14 @@ impl Opd {
     }
 }
 
-/// The kind of an operand indicates whether its value can be read from the stack, a register, or
-/// as an immediate.
+/// The kind of an [`Opd`].
 /// 
-/// Note that local operands are considered to be of kind `OpdKind::Stack`. This is because even
-/// though they are not stored on the stack, the locals they refer to are, so their value can still
-/// be read from the stack.
+/// This indicates whether the value of the operand can be read from the stack, a register, or as
+/// an immediate.
+/// 
+/// Local operands are considered to be of kind [`OpdKind::Stack`], since even though they are not
+/// stored on the stack, the locals they refer to are, so their value can still be read from the
+/// stack.
 #[derive(Clone, Copy, Debug)]
 enum OpdKind {
     Stack,
