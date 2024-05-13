@@ -56,6 +56,11 @@ impl Image {
             .and_then(|t| t.get_format(cx).vec_width_height())
     }
 
+    /// True if a texture has been set on this `Image`.
+    pub fn has_texture(&self) -> bool {
+        self.texture.is_some()
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
         // alright we get a walk. depending on our aspect ratio
         // we change either nothing, or width or height
@@ -166,6 +171,15 @@ impl ImageRef {
             inner.size_in_pixels(cx)
         } else {
             None
+        }
+    }
+
+    /// See [`Image::has_texture()`].
+    pub fn has_texture(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.has_texture()
+        } else {
+            false
         }
     }
 }
