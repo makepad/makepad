@@ -32,7 +32,7 @@ impl Func {
         store.resolve_type(self.0.as_ref(store).type_())
     }
 
-    /// Calls this [`Func`] with the given parameters.
+    /// Calls this [`Func`] with the given arguments.
     ///
     /// The results are written to the `results` slice.
     ///
