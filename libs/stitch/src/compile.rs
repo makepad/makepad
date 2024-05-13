@@ -2009,7 +2009,6 @@ fn select_select(
     kind_1: OpdKind,
     kind_2: OpdKind,
 ) -> ThreadedInstr {
-    println!("PENIS {:?} {:?} {:?} {:?}", type_, kind_0, kind_1, kind_2);
     match (type_, kind_0, kind_1, kind_2) {
         (ValType::I32, OpdKind::Stack, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_sss,
         (ValType::I32, OpdKind::Reg, OpdKind::Stack, OpdKind::Stack) => exec::select_i32_rss,
