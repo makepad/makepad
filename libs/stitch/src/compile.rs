@@ -3,7 +3,7 @@ use {
         aliasable_box::AliasableBox,
         code,
         code::{
-            BinOpInfo, BlockType, InstrSlot, CompiledCode, InstrVisitor, LoadInfo, MemArg,
+            BinOpInfo, BlockType, CompiledCode, InstrSlot, InstrVisitor, LoadInfo, MemArg,
             StoreInfo, UnOpInfo, UncompiledCode,
         },
         decode::DecodeError,
@@ -69,7 +69,7 @@ impl Compiler {
             });
         }
         let local_count = locals.len() - type_.params().len();
-        
+
         let mut compile = Compile {
             store,
             type_: type_.clone(),
@@ -163,7 +163,7 @@ impl<'a> Compile<'a> {
 
     /// Appends the top operand to the list of operands that refer to the local with the given
     /// index.
-    /// 
+    ///
     /// This marks the operand as a local operand.
     fn push_local_opd(&mut self, local_idx: usize) {
         let opd_idx = self.opds.len() - 1;
@@ -276,7 +276,7 @@ impl<'a> Compile<'a> {
         while self.opds.len() > self.block(0).height {
             self.pop_opd();
         }
-        
+
         self.blocks.pop().unwrap()
     }
 
@@ -506,7 +506,7 @@ impl<'a> Compile<'a> {
     }
 
     /// Emits the label for the block with the given index.
-    /// 
+    ///
     /// If the block is of kind [`BlockKind::Loop`], this emits the offset of the first instruction
     /// in the block. [`BlockKind::Block`], we don't yet know where the first instruction after the
     /// end of the block is, so we emit a hole instead.
@@ -523,7 +523,7 @@ impl<'a> Compile<'a> {
     }
 
     /// Emits a hole and returns its index.
-    /// 
+    ///
     /// A hole is a placeholder for an instruction offset that is not yet known.
     fn emit_hole(&mut self) -> usize {
         let hole_idx = self.code.len();
@@ -604,7 +604,7 @@ impl<'a> InstrVisitor for Compile<'a> {
                 self.ensure_opd_not_local(opd_depth);
                 self.ensure_opd_not_reg(opd_depth);
             }
-            
+
             // Pop the inputs of the block from the stack.
             for _ in 0..type_.params().len() {
                 self.pop_opd();
@@ -642,7 +642,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             // condition is not a constant, so we can use the _{sri}{sri}s variant (which is always
             // available).
             self.ensure_opd_not_imm(0);
-    
+
             // This is a branch. We need to ensure that each block input is stored in the location
             // expected by the target before the branch is taken.
             //
@@ -807,7 +807,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         if self.block(0).is_unreachable {
             return Ok(());
         }
-        
+
         // Wasm uses `u32` indices for labels, but we use `usize` indices.
         let label_idx = label_idx as usize;
 
@@ -825,7 +825,7 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.ensure_opd_not_local(opd_depth);
             self.ensure_opd_not_reg(opd_depth);
         }
- 
+
         if self.block(label_idx).label_types().is_empty() {
             // If the branch target has an empty type, we don't need to copy any block inputs to
             // their expected locations, so we can generate more efficient code.
@@ -1068,7 +1068,7 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         // Emit the instruction.
         self.emit(select_ref_null(type_));
-        
+
         match type_ {
             RefType::FuncRef => self.emit(FuncRef::null().to_unguarded(self.store.id())),
             RefType::ExternRef => self.emit(ExternRef::null().to_unguarded(self.store.id())),
@@ -1077,7 +1077,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // Push the output onto the stack and emit its stack offset.
         self.push_opd(ValType::FuncRef);
         self.emit_stack_offset(self.opd_stack_idx(0));
-        
+
         Ok(())
     }
 
@@ -1092,15 +1092,15 @@ impl<'a> InstrVisitor for Compile<'a> {
             self.opd(0).type_.to_ref().unwrap(),
             self.opd(0).kind(),
         ));
-        
+
         // Emit the input and pop it from the stack.
         self.emit_opd(0);
         self.pop_opd();
-        
+
         // Push the output onto the stack and allocate a register for it.
         self.push_opd(ValType::I32);
         self.alloc_reg();
-        
+
         Ok(())
     }
 
@@ -1922,7 +1922,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // handle them. If the operation does not have an _i variant, we ensure that the operand is
         // not an immediate operand, so that we can use the _s variant instead (which is always
         // available).
-        if  info.instr_i.is_none() {
+        if info.instr_i.is_none() {
             self.ensure_opd_not_imm(0);
         }
 
@@ -2090,9 +2090,9 @@ impl Block {
 }
 
 /// The kind of a [`Block`].
-/// 
+///
 /// This determines whether the label of the [`Block`] is at the start or the end.
-/// 
+///
 /// Blocks introduced by a `block``, `if``, or `else`` instruction are considered to be of kind
 /// [`BlockKind::Block`], since their label is at the start of the block, and there there is no
 /// need to otherwise distinguish between them.
@@ -2106,7 +2106,7 @@ enum BlockKind {
 }
 
 /// The type of the label of a [`Block`].
-/// 
+///
 /// This is either the type of the inputs of the block, or the type of the outputs of the block,
 /// depending on the [`BlockKind`] of the block.
 #[derive(Clone, Debug)]
@@ -2127,40 +2127,40 @@ impl Deref for LabelTypes {
 }
 
 /// An operand on the stack.
-/// 
+///
 /// Every operand carries:
 /// - Its type
-/// 
+///
 /// - An implicit stack index
 ///   This is the index of the stack slot to be used for the operand, if it is stored on the stack.
 ///   It is determined by the position of the operand on the operand stack. Note that we reserve a
 ///   stack slot for an operand even if it is not stored on the stack.
-/// 
+///
 /// - An implicit register index
 ///   This is the index of the register to be used for the operand, if it is stored in a register.
 ///   It is determined by the type of the operand. Note that an operand has a register index even
 ///   if it is not stored in a register.
-/// 
+///
 /// An operand can be either:
-/// 
+///
 /// - A local operand
 ///   These operands are created by instructions that write their output to a register, such as
 ///   i32.add. They are not stored on the stack, but instead carry the index of the local they refer
 ///   to.
-/// 
+///
 ///   When a local is overwritten, all local operands that refer to it should be preserved on the
 ///   stack. To keep track of which operands refer to a given local, we maintain a linked list of
 ///   operands for each local. Each local operand carries the index of the previous and next operand
 ///   in the list.
-/// 
+///
 /// - A register operand
 ///   These operands are created by instructions that write their output to a register, such as
 ///   i32.add.
-/// 
+///
 /// - A immediate operand
 ///   These operands are created by constant instructions, such as i32.const. They are not stored
 ///   on the stack, but instead carry their value with them.
-/// 
+///
 /// - A temporary operand
 ///   These operands are neither immediate, local, nor register operands. They are created by
 ///   instructions that write their output to the stack, or when an immediate, local, or register
@@ -2212,10 +2212,10 @@ impl Opd {
 }
 
 /// The kind of an [`Opd`].
-/// 
+///
 /// This indicates whether the value of the operand can be read from the stack, a register, or as
 /// an immediate.
-/// 
+///
 /// Local operands are considered to be of kind [`OpdKind::Stack`], since even though they are not
 /// stored on the stack, the locals they refer to are, so their value can still be read from the
 /// stack.

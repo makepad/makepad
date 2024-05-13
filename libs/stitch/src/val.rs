@@ -228,9 +228,8 @@ pub(crate) enum UnguardedVal {
 }
 
 impl UnguardedVal {
-    /// Reads an [`UnguardedVal`] of the given [`ValType`] from the stack, and increments the stack
-    /// pointer.
-    pub(crate) unsafe fn read_from_stack(ptr: &mut *mut StackSlot, type_: ValType) -> Self {
+    /// Reads an [`UnguardedVal`] of the given [`ValType`] from the given stack slot.
+    pub(crate) unsafe fn read_from_stack(ptr: *const StackSlot, type_: ValType) -> Self {
         let val = match type_ {
             ValType::I32 => (*ptr.cast::<i32>()).into(),
             ValType::I64 => (*ptr.cast::<i64>()).into(),
@@ -239,12 +238,11 @@ impl UnguardedVal {
             ValType::FuncRef => (*ptr.cast::<UnguardedFuncRef>()).into(),
             ValType::ExternRef => (*ptr.cast::<UnguardedExternRef>()).into(),
         };
-        *ptr = ptr.add(1);
         val
     }
 
-    /// Writes this [`UnguardedVal`] to the stack, and increments the stack pointer.
-    pub(crate) unsafe fn write_to_stack(self, ptr: &mut *mut StackSlot) {
+    /// Writes this [`UnguardedVal`] to the given stack slot.
+    pub(crate) unsafe fn write_to_stack(self, ptr: *mut StackSlot) {
         match self {
             UnguardedVal::I32(val) => *ptr.cast() = val,
             UnguardedVal::I64(val) => *ptr.cast() = val,
@@ -253,7 +251,6 @@ impl UnguardedVal {
             UnguardedVal::FuncRef(val) => *ptr.cast() = val,
             UnguardedVal::ExternRef(val) => *ptr.cast() = val,
         }
-        *ptr = ptr.add(1);
     }
 }
 
