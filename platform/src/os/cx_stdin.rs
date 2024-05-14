@@ -6,10 +6,11 @@ use {
         cx::Cx,
         cursor::MouseCursor,
         makepad_micro_serde::*,
-        makepad_math::dvec2,
-        window::CxWindowPool,
+        makepad_math::{dvec2,DVec2},
+        window::{WindowId},
         area::Area,
         event::{
+            KeyModifiers,
             Event,
             TextInputEvent,
             TimerEvent,
@@ -51,18 +52,19 @@ pub struct Swapchain<I>
     // HACK(eddyb) hint `{Ser,De}{Bin,Json}` derivers to add their own bounds.
     where I: Sized
 {
+    pub window_id: usize,
     pub alloc_width: u32,
     pub alloc_height: u32,
     pub presentable_images: [PresentableImage<I>; SWAPCHAIN_IMAGE_COUNT],
 }
 
 impl Swapchain<()> {
-    pub fn new(alloc_width: u32, alloc_height: u32) -> Self {
+    pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
         let presentable_images = [(); SWAPCHAIN_IMAGE_COUNT].map(|()| PresentableImage {
             id: PresentableImageId::alloc(),
             image: (),
         });
-        Self { alloc_width, alloc_height, presentable_images }
+        Self { window_id, alloc_width, alloc_height, presentable_images }
     }
 }
 
@@ -71,16 +73,16 @@ impl<I> Swapchain<I> {
         self.presentable_images.iter().find(|pi| pi.id == id)
     }
     pub fn images_as_ref(&self) -> Swapchain<&I> {
-        let Swapchain { alloc_width, alloc_height, ref presentable_images } = *self;
+        let Swapchain { window_id, alloc_width, alloc_height, ref presentable_images } = *self;
         let presentable_images = ref_array_to_array_of_refs(presentable_images)
             .map(|&PresentableImage { id, ref image }| PresentableImage { id, image });
-        Swapchain { alloc_width, alloc_height, presentable_images }
+        Swapchain { window_id, alloc_width, alloc_height, presentable_images }
     }
     pub fn images_map<I2>(self, mut f: impl FnMut(PresentableImage<I>) -> I2) -> Swapchain<I2> {
-        let Swapchain { alloc_width, alloc_height, presentable_images } = self;
+        let Swapchain { window_id, alloc_width, alloc_height, presentable_images } = self;
         let presentable_images = presentable_images
             .map(|pi| PresentableImage { id: pi.id, image: f(pi) });
-        Swapchain { alloc_width, alloc_height, presentable_images }
+        Swapchain { window_id, alloc_width, alloc_height, presentable_images }
     }
 }
 
@@ -304,22 +306,52 @@ pub mod aux_chan {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct StdinKeyModifiers{
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub logo: bool
+}
+
+impl StdinKeyModifiers{
+    pub fn into_key_modifiers(&self)->KeyModifiers{
+        KeyModifiers{
+            shift: self.shift,
+            control: self.control,
+            alt: self.alt,
+            logo: self.logo,
+        }
+    }
+    pub fn from_key_modifiers(km:&KeyModifiers)->Self{
+        Self{
+            shift: km.shift,
+            control: km.control,
+            alt: km.alt,
+            logo: km.logo,
+        }
+    }
+}
+
+
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinMouseDown{
    pub button: usize,
    pub x: f64,
    pub y: f64,
    pub time: f64,
+   pub modifiers: StdinKeyModifiers
 }
 
-impl From<StdinMouseDown> for MouseDownEvent {
-    fn from(v: StdinMouseDown) -> Self {
-        Self{
-            abs: dvec2(v.x, v.y),
-            button: v.button,
-            window_id: CxWindowPool::id_zero(),
-            modifiers: Default::default(),
-            time: v.time,
+impl StdinMouseDown {
+    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseDownEvent {
+        MouseDownEvent{
+            abs: dvec2(self.x - pos.x, self.y - pos.y),
+            button: self.button,
+            window_id: window_id,
+            modifiers: self.modifiers.into_key_modifiers(),
+            time: self.time,
             handled: Cell::new(Area::Empty),
         }
     }
@@ -329,16 +361,17 @@ impl From<StdinMouseDown> for MouseDownEvent {
 pub struct StdinMouseMove{
    pub time: f64,
    pub x: f64,
-   pub y: f64
+   pub y: f64,
+   pub modifiers: StdinKeyModifiers
 }
 
-impl From<StdinMouseMove> for MouseMoveEvent {
-    fn from(v: StdinMouseMove) -> Self {
-        Self{
-            abs: dvec2(v.x, v.y),
-            window_id: CxWindowPool::id_zero(),
-            modifiers: Default::default(),
-            time: v.time,
+impl StdinMouseMove {
+    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseMoveEvent {
+        MouseMoveEvent{
+            abs: dvec2(self.x - pos.x, self.y - pos.y),
+            window_id: window_id,
+            modifiers: self.modifiers.into_key_modifiers(),
+            time: self.time,
             handled: Cell::new(Area::Empty),
         }
     }
@@ -349,25 +382,27 @@ pub struct StdinMouseUp{
    pub time: f64,
    pub button: usize,
    pub x: f64,
-   pub y: f64
+   pub y: f64,
+   pub modifiers: StdinKeyModifiers
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinTextInput{
     pub time: f64,
+    pub window_id: usize,
     pub button: usize,
     pub x: f64,
     pub y: f64
 }
 
-impl From<StdinMouseUp> for MouseUpEvent {
-    fn from(v: StdinMouseUp) -> Self {
-        Self{
-            abs: dvec2(v.x, v.y),
-            button: v.button,
-            window_id: CxWindowPool::id_zero(),
-            modifiers: Default::default(),
-            time: v.time,
+impl StdinMouseUp {
+   pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseUpEvent {
+        MouseUpEvent{
+            abs: dvec2(self.x - pos.x, self.y - pos.y),
+            button: self.button,
+            window_id: window_id,
+            modifiers: self.modifiers.into_key_modifiers(),
+            time: self.time,
         }
     }
 }
@@ -381,19 +416,20 @@ pub struct StdinScroll{
    pub x: f64,
    pub y: f64,
    pub is_mouse: bool,
+   pub modifiers: StdinKeyModifiers
 }
 
-impl From<StdinScroll> for ScrollEvent {
-    fn from(v: StdinScroll) -> Self {
-        Self{
-            abs: dvec2(v.x, v.y),
-            scroll: dvec2(v.sx, v.sy),
-            window_id: CxWindowPool::id_zero(),
-            modifiers: Default::default(),
+impl StdinScroll {
+    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> ScrollEvent {
+        ScrollEvent{
+            abs: dvec2(self.x - pos.x, self.y - pos.y),
+            scroll: dvec2(self.sx, self.sy),
+            window_id,
+            modifiers: self.modifiers.into_key_modifiers(),
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
-            is_mouse: v.is_mouse,
-            time: v.time,
+            is_mouse: self.is_mouse,
+            time: self.time,
         }
     }
 }
@@ -403,16 +439,23 @@ pub enum HostToStdin{
     Swapchain(SharedSwapchain),
     WindowGeomChange {
         dpi_factor: f64,
+        window_id: usize,
         // HACK(eddyb) `DVec` (like `WindowGeom`'s `inner_size` field) can't
         // be used here due to it not implementing (de)serialization traits.
-        inner_width: f64,
-        inner_height: f64,
+        left: f64,
+        top: f64,
+        width: f64,
+        height: f64,
     },
+    Tick,
+    /*
     Tick{
         buffer_id: u64,
         frame: u64,
         time: f64,
     },
+    */
+    
     MouseDown(StdinMouseDown),
     MouseUp(StdinMouseUp),
     MouseMove(StdinMouseMove),
@@ -420,10 +463,10 @@ pub enum HostToStdin{
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     Scroll(StdinScroll),
-    ReloadFile{
+    /*ReloadFile{
         file:String,
         contents:String
-    },
+    },*/
 }
 
 /// After a successful client-side draw, all the host needs to know, so it can
@@ -432,13 +475,33 @@ pub enum HostToStdin{
 /// whole allocated area rarely used, except just before needing a new swapchain).
 #[derive(Copy, Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct PresentableDraw {
+    pub window_id: usize,
     pub target_id: PresentableImageId,
     pub width: u32,
     pub height: u32,
 }
 
+#[repr(usize)]
+pub enum WindowKindId{
+    Main = 0,
+    Design = 1,
+    Outline = 2
+}
+
+impl WindowKindId{
+    pub fn from_usize(d:usize)->Self{
+        match d{
+            0=>Self::Main,
+            1=>Self::Design,
+            2=>Self::Outline,
+            _=>panic!()
+        }
+    }
+}
+
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum StdinToHost {
+    CreateWindow{window_id: usize, kind_id:usize},
     ReadyToStart,
     SetCursor(MouseCursor),
     // the client is done drawing, and the texture is completely updated

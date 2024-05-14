@@ -22,13 +22,15 @@ live_design!{
             let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter * 18.0) - .01 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 18) - .01 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq2(index - self.color_cycle*-10.0),1);
+            //return mix(#f00,#ff0,self.pos.y);
+            return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
+            
         }
     }
     
@@ -515,6 +517,14 @@ impl Widget for Mandelbrot {
                 if KeyCode::Space == k.key_code{
                     self.space.zoom = 0.5;
                     self.space.center = dvec2(-0.5,0.0);
+                }
+                if KeyCode::KeyW == k.key_code{
+                    self.max_iter += 10;
+                                        
+                }
+                if KeyCode::KeyE == k.key_code{
+                    self.max_iter -= 10;
+                                        
                 }
             }
             Hit::FingerMove(fe) => {

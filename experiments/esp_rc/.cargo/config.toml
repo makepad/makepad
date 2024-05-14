@@ -1,5 +1,5 @@
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --flash-freq 80mhz --baud 921600 --port /dev/cu.usbmodem2101 --monitor"
+runner = "espflash flash --flash-freq 80mhz --baud 921600 --monitor"
 
 [build]
 rustflags = [

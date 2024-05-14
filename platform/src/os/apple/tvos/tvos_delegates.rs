@@ -1,7 +1,6 @@
 use {
     crate::{
         //makepad_math::*,
-        makepad_objc_sys::runtime::{ObjcId},
         //event::{TouchState, VirtualKeyboardEvent},
         //animator::Ease,
         os::{
@@ -79,7 +78,7 @@ pub fn define_mtk_view_delegate() -> *const Class {
     return decl.register();
 }
 
-pub fn define_ios_timer_delegate() -> *const Class {
+pub fn define_tvos_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
         TvosApp::send_timer_received(nstimer);

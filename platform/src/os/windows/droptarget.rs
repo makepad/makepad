@@ -3,7 +3,6 @@
 #![allow(non_camel_case_types)]
 use {
     std::cell::RefCell,
-    std::boxed::Box,
     crate::{
         log,
         implement_com,

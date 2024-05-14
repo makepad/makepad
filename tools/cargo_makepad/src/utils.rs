@@ -1,10 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 use crate::makepad_shell::*;
 
-pub fn extract_dependency_info(line: &str) -> Option<(String, String)> {
+pub fn extract_dependency_paths(line: &str) -> Option<(String, Option<PathBuf>)> {
     let dependency_output_start = line.find(|c: char| c.is_alphanumeric())?;
     let dependency_output = &line[dependency_output_start..];
 
@@ -16,9 +16,13 @@ pub fn extract_dependency_info(line: &str) -> Option<(String, String)> {
             }
             if token.starts_with('(') {
                 let path = token[1..token.len() - 1].to_owned();
-                return Some((name.to_string(), path))
+                let path = Path::new(&path);
+                if path.is_dir(){
+                    return Some((name.to_string(), Some(path.into())))
+                }
             }
         }
+        return Some((name.to_string(), None))
     }
     None
 }
@@ -43,15 +47,21 @@ pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
     }
 }
 
-pub fn get_crate_resources(build_crate: &str) -> HashSet<(String, PathBuf)> {
-    let mut dependencies = HashSet::new();
+pub fn get_crate_dep_dirs(build_crate: &str, build_dir:&Path, target:&str) -> HashMap<String, PathBuf> {
+    let mut dependencies = HashMap::new();
     let cwd = std::env::current_dir().unwrap();
-    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate]) {
+    let target = format!("--target={target}");
+    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate, &target]) {
         for line in cargo_tree_output.lines().skip(1) {
-            if let Some((name, path)) = extract_dependency_info(line) {
-                let resources_path = Path::new(&path).join("resources");
-                if resources_path.is_dir() {
-                    dependencies.insert((name.replace('-', "_"), resources_path));
+            if let Some((name, path)) = extract_dependency_paths(line) {
+                if let Some(path) = path{
+                    dependencies.insert(name, path);
+                }
+                else { // check in the build dir for .path files, used to find the crate dir of a crates.io crate
+                    let dir_file = build_dir.join(format!("{}.path", name));
+                    if let Ok(path) = std::fs::read_to_string(&dir_file){
+                        dependencies.insert(name, Path::new(&path).into());
+                    }
                 }
             }
         }

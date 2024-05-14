@@ -23,7 +23,7 @@ pub use {
         makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
     },
-    rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
+    makepad_rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
@@ -143,7 +143,7 @@ impl CxFontsAtlasAlloc {
     }
 }
 
-#[derive(Clone, Live, LiveRegister)]
+#[derive(Debug, Clone, Live, LiveRegister)]
 pub struct Font {
     #[rust] pub font_id: Option<usize>,
     #[live] pub path: LiveDependency
@@ -161,7 +161,7 @@ impl LiveHook for Font {
 }
 
 impl CxFontsAtlas {
-    pub fn get_font_by_path(&mut self, cx: &Cx, path: &str) -> usize {
+    pub fn get_font_by_path(&mut self, cx: &mut Cx, path: &str) -> usize {
         if path.len() == 0{
             return 0
         }
@@ -172,7 +172,7 @@ impl CxFontsAtlas {
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
         
-        match cx.get_dependency(path) {
+        match cx.take_dependency(path) {
             // FIXME(eddyb) this clones the `data` `Vec<u8>`, in order to own it
             // inside a `owned_font_face::OwnedFace`.
             Ok(data) => match CxFont::load_from_ttf_bytes(data) {
@@ -439,7 +439,7 @@ impl ShapeCache {
             let (direction, string) = key;
             rustybuzz_buffer.set_direction(direction);
             rustybuzz_buffer.push_str(string);
-            let glyph_buffer = owned_font_face.with_ref( | face | rustybuzz::shape(face, &[], rustybuzz_buffer));
+            let glyph_buffer = owned_font_face.with_ref( | face | makepad_rustybuzz::shape(face, &[], rustybuzz_buffer));
             let glyph_ids: Vec<_> = glyph_buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize).collect();
             rustybuzz_buffer = glyph_buffer.clear();
 

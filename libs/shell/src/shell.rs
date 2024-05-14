@@ -1,7 +1,6 @@
 use std::{
     path::{Path, PathBuf},
     fs::File,
-    io::Write,
     fs,
     io::prelude::*,
     io::BufReader,
@@ -18,7 +17,7 @@ pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
     
     let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
     if !r.success() {
-        return Err(format!("Process {} in dir {:?} returned error exit code ", cmd, cwd));
+        return Err(format!("Process {} in dir {:?} returned error exit code {:?}", cmd, cwd, r.code()));
     }
     Ok(())
 } 
@@ -36,7 +35,7 @@ pub fn shell_env(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> 
     
     let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
     if !r.success() {
-        return Err(format!("Process {} in dir {:?} returned error exit code ", cmd, cwd));
+        return Err(format!("Process {} in dir {:?} returned error exit code {:?}", cmd, cwd, r.code()));
     }
     Ok(())
 }
@@ -60,7 +59,7 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     let stderr = std::str::from_utf8(&r.stderr).unwrap_or("could not decode utf8");
     let stdout = std::str::from_utf8(&r.stdout).unwrap_or("could not decode utf8");
     if !r.status.success() {
-        return Err(format!("Process {} in dir {:?} returned error exit code\n{}\n{}", cmd, cwd, stderr, stdout));
+        return Err(format!("Process {} in dir {:?} returned error exit code {}\n{}\n{}", cmd, cwd, r.status, stderr, stdout));
     }
     Ok(format!("{}{}", stdout, stderr))
 }
@@ -82,7 +81,7 @@ pub fn shell_env_cap_split(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[
     }
     let r = child.unwrap().wait_with_output();
     if let Err(e) = r{
-        return ("".to_string(),format!("Wait with output failewd for process {}", e), false);
+        return ("".to_string(),format!("Wait with output failed for process {}", e), false);
     }
     let r = r.unwrap();
     let stderr = std::str::from_utf8(&r.stderr).unwrap_or("could not decode utf8").to_string();

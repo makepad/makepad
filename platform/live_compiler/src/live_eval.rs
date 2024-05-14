@@ -196,6 +196,16 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
         LiveValue::ExprCall {ident, args} => {
             *index += 1;
             match ident {
+                live_id!(pow) if *args == 2 => {
+                    let a = live_eval(live_registry, start, index, nodes)?;
+                    let b = live_eval(live_registry, start, index, nodes)?;
+                    if let LiveEval::Float64(va) = a {
+                        if let LiveEval::Float64(vb) = b {
+                            // ok so how do we blend this eh.
+                            return Ok(LiveEval::Float64(va.powf(vb)))
+                        }
+                    }
+                }
                 live_id!(blend) if *args == 2 => {
                     let a = live_eval(live_registry, start, index, nodes)?;
                     let b = live_eval(live_registry, start, index, nodes)?;
@@ -208,6 +218,26 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                                 va.z + (vb.z - va.z) * vb.w,
                                 va.w
                             )))
+                        }
+                    }
+                }
+                live_id!(mix) if *args == 3 => {
+                    let a = live_eval(live_registry, start, index, nodes)?;
+                    let b = live_eval(live_registry, start, index, nodes)?;
+                    let c = live_eval(live_registry, start, index, nodes)?;
+                    if let LiveEval::Vec4(va) = a {
+                        if let LiveEval::Vec4(vb) = b {
+                            if let LiveEval::Float64(vc) = c {
+                                let vc = vc as f32;
+                                // ok so how do we blend this eh.
+                                return Ok(LiveEval::Vec4(vec4(
+                                    va.x + (vb.x - va.x) * vc,
+                                    va.y + (vb.y - va.y) * vc,
+                                    va.z + (vb.z - va.z) * vc,
+                                    va.w + (vb.w - va.w) * vc
+                                )))
+                            }
+                            
                         }
                     }
                 }

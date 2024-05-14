@@ -10,39 +10,122 @@ live_design!{
     import makepad_studio::log_list::LogList;
     import makepad_studio::run_list::RunList;
     import makepad_studio::profiler::Profiler;
-    
+
     ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
 
     Logo = <Button> {
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
             fn get_color(self) -> vec4 {
-                return #xffffff
+                return (THEME_COLOR_D_1)
             }
         }
-        icon_walk: {width: 300.0, height: Fit}
+        icon_walk: {width: 250.0, height: Fit}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 return sdf.result
             }
         }
-        margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0}
-        padding: 0.0
-        text: ""
     }
-    
+
+    IconTab = <Tab> {
+        closeable: false
+        icon_walk: { width: 15., height: 15. }
+    }
+
+    Vr = <View> {
+        width: Fit, height: 27.,
+        flow: Right,
+        spacing: 0.,
+        margin: <THEME_MSPACE_V_2> {}
+        <View> {
+            width: (THEME_BEVELING * 2.0), height: Fill
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+        }
+        <View> {
+            width: (THEME_BEVELING), height: Fill,
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+        }
+    }
+
+    DockSettings = <View> {
+        align: { x: 0.0, y: 0. }
+        padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
+        spacing: (THEME_SPACE_2)
+        <Filler> {}
+        <P> { width: Fit, text: "Open here"}
+        <CheckBoxCustom> {
+            text:""
+            // text:"Apps"
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 13.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_4),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
+            }
+        }
+        <CheckBoxCustom> {
+            text:""
+            // text:"Designer"
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 14.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_3),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
+            }
+        }
+        <CheckBoxCustom> {
+            text:""
+            // text:"Editor"
+            width: 13.
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 7.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_6),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+            }
+        }
+        <CheckBoxCustom> {
+            text:""
+            // text:"Scene"
+            align: { x: 0.5, y: 0.5 }
+            draw_check: { check_type: None }
+            icon_walk: {width: 13.}
+            draw_icon: {
+                color: (THEME_COLOR_D_2),
+                // color_active: (STUDIO_PALETTE_1),
+                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
+            }
+        }
+    }
+
     AppUI =  <Window> {
+        margin: 5.
         caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
-        window: {inner_size: vec2(1600, 900)},
+        window: { inner_size: vec2(1600, 900) },
+        show_bg: true,
+        draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
         window_menu = {
             main = Main {items: [app, file, edit, selection, view, run, window, help]}
-                
+
             app = Sub {name: "Makepad Studio", items: [about, line, settings, line, quit]}
             about = Item {name: "About Makepad Studio", enabled: false}
             settings = Item {name: "Settings", enabled: false}
             quit = Item {name: "Quit Makepad Studio", key: KeyQ}
-                
+
             file = Sub {name: "File", items: [new_file, new_window, line, save_as, line, rename, line, close_editor, close_window]}
             new_file = Item {name: "New File", enabled: false, shift: true, key: KeyN}
             new_window = Item {name: "New Window", enabled: false, shift: true, key: KeyN}
@@ -50,7 +133,7 @@ live_design!{
             rename = Item {name: "Rename", enabled: false}
             close_editor = Item {name: "Close Editor", enabled: false}
             close_window = Item {name: "Close Window", enabled: false}
-                
+
             edit = Sub {name: "Edit", items: [undo, redo, line, cut, copy, paste, line, find, replace, line, find_in_files, replace_in_files]}
             undo = Item {name: "Undo", enabled: false}
             redo = Item {name: "Redo", enabled: false}
@@ -61,213 +144,538 @@ live_design!{
             replace = Item {name: "Replace", enabled: false}
             find_in_files = Item {name: "Find in Files", enabled: false}
             replace_in_files = Item {name: "Replace in Files", enabled: false}
-                
+
             selection = Sub {name: "Selection", items: [select_all]}
             select_all = Item {name: "Select All", enabled: false}
-                
+
             view = Sub {name: "View", items: [select_all]}
             zoom_in = Item {name: "Zoom In", enabled: false}
             zoom_out = Item {name: "Zoom Out", enabled: false}
             select_all = Item {name: "Enter Full Screen", enabled: false}
-                
+
             run = Sub {name: "Run", items: [run_program]}
             run_program = Item {name: "Run Program", enabled: false}
-                
+
             window = Sub {name: "Window", items: [minimize, zoom, line, all_to_front]}
             minimize = Item {name: "Minimize", enabled: false}
             zoom = Item {name: "Zoom", enabled: false}
             all_to_front = Item {name: "Bring All to Front", enabled: false}
-                
+
             help = Sub {name: "Help", items: [about]}
-                
+
             line = Line,
         }
         body = {dock = <Dock> {
-            height: Fill,
-            width: Fill
-                
+            width: Fill, height: Fill,
+            tab_bar:{
+                OutlineFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 11.
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_1)
+                        svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
+                    }
+                }
+                EditFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 6.
+                        margin: { top: 3. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_6)
+                        svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+                    }
+                }
+                DesignFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 13.
+                        margin: { top: 2. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_3)
+                        svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
+                    }
+                }
+                FilesFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 10.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_2)
+                        svg_file: dep("crate://self/resources/icons/icon_file.svg"),
+                    }
+                }
+                RunFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 13.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_4)
+                        svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
+                    }
+                }
+                RunListTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 9.
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_5)
+                        svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                    }
+                }
+                LogTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk:{
+                        width: 12.5
+                        margin: { top: 5. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_2)
+                        svg_file: dep("crate://self/resources/icons/icon_log.svg"),
+                    }
+                }
+                ProfilerTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 11.
+                        margin: { top: 2. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_7)
+                        svg_file: dep("crate://self/resources/icons/icon_profiler.svg"),
+                    }
+                }
+                SearchFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 13.,
+                        margin: { top: 4. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_3)
+                        svg_file: dep("crate://self/resources/icons/icon_search.svg"),
+                    }
+                }
+            }
             root = Splitter {
                 axis: Horizontal,
-                align: FromA(230.0),
+                align: FromA(250.0),
                 a: file_tree_tabs,
                 b: split1
             }
-                
+
             split1 = Splitter {
                 axis: Vertical,
                 align: FromB(200.0),
                 a: split2,
                 b: log_tabs
             }
-                
+
             split2 = Splitter {
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: edit_tabs,
                 b: run_tabs
             }
-                
+            /*
+            split3 = Splitter {
+                axis: Horizontal,
+                align: Weighted(0.5),
+                a: design_tabs,
+                b: run_tabs
+            }*/
+
             file_tree_tabs = Tabs {
-                tabs: [file_tree, search, run_list],
-                selected: 2
-            }
-                
-            edit_tabs = Tabs {
-                tabs: [edit_first],
+                tabs: [file_tree_tab, search, run_list_tab, outline_first],
                 selected: 0
             }
-                
-            log_tabs = Tabs {
-                tabs: [log_list, profiler],
-                selected: 1
+
+            edit_tabs = Tabs {
+                tabs: [edit_first, design_first],
+                selected: 0
             }
-                
+
+            log_tabs = Tabs {
+                tabs: [log_list_tab, profiler],
+                selected: 0
+            }
+
             run_tabs = Tabs {
                 tabs: [run_first],
                 selected: 0
             }
-                
-            file_tree = Tab {
-                name: "Explore",
-                closable: false,
+            /*
+            design_tabs = Tabs {
+                tabs: [design_first],
+                selected: 0
+            }*/
+
+            file_tree_tab = Tab {
+                name: "Files",
+                template: FilesFirstTab,
                 kind: StudioFileTree
             }
-                
+
             search = Tab {
                 name: "Search"
-                closable: false,
+                template: SearchFirstTab,
                 kind: Search
             }
-                
+
             run_first = Tab {
-                name: "View"
-                closable: false,
+                name: "App >"
+                template: RunFirstTab,
                 kind: RunFirst
             }
-                
+
+            design_first = Tab {
+                name: "Design >"
+                template: DesignFirstTab,
+                kind: DesignFirst
+            }
+
             edit_first = Tab {
-                name: "Edit"
-                closable: false,
+                name: "Code >"
+                template: EditFirstTab,
                 kind: EditFirst
             }
-                
-            run_list = Tab {
+
+            outline_first = Tab {
+                name: "Scene >"
+                template: OutlineFirstTab,
+                kind: OutlineFirst
+            }
+
+            run_list_tab = Tab {
                 name: "Run"
-                closable: false,
+                template: RunListTab,
                 kind: RunList
             }
-                
+
             file1 = Tab {
                 name: "app.rs",
-                closable: true,
+                template: PermanentTab,
                 kind: StudioEditor
             }
-                
-            log_list = Tab {
+
+            log_list_tab = Tab {
                 name: "Log",
-                closable: false,
+                template: LogTab,
                 kind: LogList
             }
-            
+
             profiler = Tab {
                 name: "Profiler",
-                closable: false,
+                template: ProfilerTab,
                 kind: Profiler
             }
-                
-            StudioEditor = <StudioEditor> {}
-            EditFirst = <RectView> {
-                draw_bg: {color: #052329}
-                <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
+
+
+            StudioEditor = <View> {
+                flow: Down,
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5}
+                        height: Fit, width: Fill,
+                        spacing: (THEME_SPACE_1)
+                        flow: Right,
+                        margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
+
+                        <ButtonFlat> { width: Fit, text: "File"}
+                        <ButtonFlat> { width: Fit, text: "Edit"}
+                        <ButtonFlat> { width: Fit, text: "Search"}
+                        <ButtonFlat> { width: Fit, text: "Debug"}
+                        <Filler> {}
+                        <ButtonFlat> { width: Fit, text: "Docs"}
                     }
+                }
+                editor = <StudioEditor> {}
+            }
+            EditFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill,
+                    align: { x: 0., y: 0. }
                     flow: Down
-                    <Logo> {}
-                    <Label> {
-                        text: "Welcome to\nMakepad \n\n欢迎来到\nMakepad"
-                        width: Fit,
-                        margin: {left: 200}
-                        draw_text: {
-                            text_style: {
-                                font_size: 20.0,
-                                height_factor: 1.0,
-                                font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
-                            },
-                        }
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
+                    // <H3> {
+                    //     width: Fit,
+                    //     text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
+                    //     margin: {left: 185}
+                    // }
+                }
+            }
+            OutlineFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill,
+                    align: { x: 0.5, y: 0.5 }
+                    flow: Down
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
+                }
+            }
+            DesignFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill
+                    flow: Down
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
                     }
                 }
             }
             RunFirst = <RectView> {
-                draw_bg: {color: #4}
                 <View> {
-                    width: Fill,
-                    height: Fill
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    }
+                    width: Fill, height: Fill,
                     flow: Down
-                        <Logo> {
-                        draw_icon: {
-                            fn get_color(self) -> vec4 {
-                                return #7
-                            }
-                        }
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
                     }
                 }
             }
-            RunList = <RunList> {
+            RunList = <View> {
+                flow: Down,
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0.0, y: 0. }
+                        padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
+                        spacing: (THEME_SPACE_2)
+                        <Pbold> { width: Fit, text: "Types" } 
+                        <CheckBoxToggle> { text: "Release"}
+                        <CheckBoxToggle> { text: "Debug"}
+                    }
+                }
+                <RunList> {}
             }
             Search = <RectView> {
-                draw_bg: {color: #x28}
-                //  margin:{left: 0, top: 0}
-                <View> {
-                    margin:10
-                    flow: Down
-                    <View> 
-                    {
-                        flow: Right
-                        height: Fit
-                        <TextInput>{
-                            draw_bg: {
-                                fn pixel(self) -> vec4 {
-                                    return #x00000044
-                                }
-                            }
+            flow: Down,
+                <DockToolbar> {
+                    content = {
+                        padding: { right: (THEME_SPACE_2) }
+                        spacing: (THEME_SPACE_2)
+                        <TextInput> {
                             width: Fill,
-                            empty_message:"Search here"                           
+                            empty_message: "Search",
                         }
-                        //panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
-                    // <Button> {
-                    //     text:"Search"
-                            
-                    //     draw_icon: {
-                    //         svg_file: (ICO_SEARCH)
-                    //         fn get_color(self) -> vec4 {
-                    //             return #8;
-                    //         }
-                    //     } 
-                    //     icon_walk:  {
-                    //         margin: {left: 10}
-                    //         width: Fit,
-                    //         // height: 12.0
-                    //     } 
-                    // }
-                }
-                    <Label>
-                    {
-                        text: "this does not work yet."
+
+                        <CheckBoxCustom> {
+                            text:""
+                            draw_check: { check_type: None }
+                            icon_walk: {width: 14.}
+                            draw_icon: {
+                                color: (THEME_COLOR_D_3),
+                                color_active: (THEME_COLOR_U_5),
+                                svg_file: dep("crate://self/resources/icons/icon_search_case_sensitive.svg"),
+                            }
+                        }
+                        <CheckBoxCustom> {
+                            text:""
+                            draw_check: { check_type: None }
+                            icon_walk: {width: 16.}
+                            draw_icon: {
+                                color: (THEME_COLOR_D_3),
+                                color_active: (THEME_COLOR_U_5),
+                                svg_file: dep("crate://self/resources/icons/icon_search_full_word.svg"),
+                            }
+                        }
+                        <CheckBoxCustom> {
+                            text:""
+                            draw_check: { check_type: None }
+                            icon_walk: {width: 12.}
+                            draw_icon: {
+                                color: (THEME_COLOR_D_3),
+                                color_active: (THEME_COLOR_U_5),
+                                svg_file: dep("crate://self/resources/icons/icon_search_regex.svg"),
+                            }
+                        }
                     }
+                }
+                <View> {
+                    flow: Down
+                    margin: <THEME_MSPACE_2> {}
+                    <P> { text: "this does not work yet." }
                 }
             }
             RunView = <RunView> {}
-            StudioFileTree = <StudioFileTree> {}
-            LogList = <LogList> {}
-            Profiler = <Profiler> {}
+            StudioFileTree = <View> {
+                flow: Down,
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5 }
+                        spacing: (THEME_SPACE_1)
+                        <View> {
+                            align: { x: 0., y: 0.5 }
+                            width: Fit, height: Fit,
+                            flow: Right,
+                            spacing: 0.,
+                            <ButtonFlat> {
+                                width: 32.
+                                text: ""
+                                icon_walk: { width: 14. }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/icons/icon_filetree_folder_create.svg"),
+                                }
+                            }
+                            <ButtonFlat> {
+                                width: 32.
+                                text: ""
+                                icon_walk: { width: 11. }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/icons/icon_filetree_file_create.svg"),
+                                }
+                            }
+                        }
+                        <Vr> {}
+                        <TextInput> {
+                            width: Fill,
+                            empty_message: "Filter",
+                        }
+                    }
+                }
+                file_tree = <StudioFileTree> {}
+            }
+            LogList = <View> {
+                flow: Down,
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5 }
+                        spacing: (THEME_SPACE_1)
+                        <View> {
+                            width: Fit
+                            flow: Right,
+                            spacing: (THEME_SPACE_2)
+                            <CheckBoxCustom> {
+                                margin: {left: (THEME_SPACE_1)}
+                                text:"Error"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_4),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Warning"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_1),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Log"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (THEME_COLOR_U_5),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Wait"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_2),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                            <CheckBoxCustom> {
+                                text:"Panic"
+                                draw_check: { check_type: None }
+                                icon_walk: {width: 7.}
+                                draw_icon: {
+                                    color: (THEME_COLOR_D_2),
+                                    color_active: (STUDIO_PALETTE_5),
+                                    svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
+                                }
+                            }
+                        }
+                        // <Vr> {}
+                        <Filler> {}
+                        <TextInput> {
+                            width: 200.
+                            empty_message: "Filter",
+                        }
+                    }
+                }
+                log_list = <LogList> {}
+            }
+            Profiler = <View> {
+                flow: Down,
+                <DockToolbar> {
+                    content = {
+                        align: { x: 0., y: 0.5 }
+                        spacing: (THEME_SPACE_1)
+                        <ButtonFlat> {
+                            text: "Start"
+                            icon_walk: { width: 8. }
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                            }
+                        }
+                        <ButtonFlat> {
+                            text: "Clear"
+                            icon_walk: { width: 12. }
+                            draw_icon: {
+                                svg_file: dep("crate://self/resources/icons/icon_profiler_clear.svg"),
+                            }
+                        }
+                        <ButtonGroup> {
+                            height: Fit
+                            flow: Right
+                            align: { x: 0.0, y: 0.5 }
+                        }
+                        <Vr> {}
+                        <View> {
+                            width: Fit,
+                            flow: Right,
+                            spacing: 0.,
+                            <Pbold> {
+                                width: Fit,
+                                text: "Last"
+                                draw_text: { color: (THEME_COLOR_D_4) }
+                                margin: { left: 10, right: 3. }
+                            }
+                            <P> {
+                                width: Fit,
+                                text: "500 ms"
+                                draw_text: { color: (THEME_COLOR_D_4) }
+                            }
+                        }
+                    }
+                }
+                <Profiler> {}
+            }
         }}
     }
 }

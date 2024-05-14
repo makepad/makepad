@@ -82,6 +82,14 @@ impl CxKeyboard {
         }
         None
     }
+    
+    #[allow(dead_code)]
+    pub fn is_key_down(&mut self, key_code: KeyCode)->bool{
+        if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_code) {
+            return true;
+        }
+        return false
+    }
 
     #[allow(dead_code)]
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {

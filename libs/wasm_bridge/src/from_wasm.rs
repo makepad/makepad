@@ -53,7 +53,7 @@ pub trait FromWasm {
                 wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.temp, p.body))
             }
         }
-        
+         
         wrapper.push_str(&format!("app.{0}(args.{0});\n", Self::type_name()));
         wrapper.push_str("}\n");
     }

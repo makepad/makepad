@@ -1,0 +1,22 @@
+# Choose a default "cargo run" tool.
+# probe-run is recommended if you have a debugger
+# elf2uf2-rs loads firmware over USB when the rp2040 is in boot mode
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+#runner = "probe-run --chip RP2040"
+runner = "elf2uf2-rs -d"
+
+rustflags = [
+  "-C", "linker=flip-link",
+  "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.x",
+#  "-C", "link-arg=-Tdefmt.x",
+  "-Z", "trap-unreachable=no",
+  "-C", "inline-threshold=5",
+  "-C", "no-vectorize-loops",
+]
+
+[build]
+#target = "thumbv6m-none-eabi"
+
+[env]
+DEFMT_LOG = "debug"

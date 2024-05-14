@@ -8,7 +8,7 @@ use {
 };
 
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Texture(Rc<PoolId>);
 
 #[derive(Clone, Debug, PartialEq, Copy)]

@@ -28,11 +28,13 @@ pub trait CxOsApi {
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static;
-
+        
     fn start_stdin_service(&mut self) {}
     fn pre_start() -> bool {
         false
     }
+    
+    fn seconds_since_app_start(&self)->f64;
 
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
@@ -67,6 +69,7 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMacosMenu(MacosMenu),
     ShowClipboardActions(String),
+    CopyToClipboard(String),
 
     HttpRequest {
         request_id: LiveId,
@@ -96,7 +99,20 @@ impl Cx {
     pub fn get_ref(&self) -> CxRef {
         CxRef(self.self_ref.clone().unwrap())
     }
-
+    
+        
+    pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
+        if let Some(data) = self.dependencies.get_mut(path) {
+            if let Some(data) = data.data.take() {
+                return match data {
+                    Ok(data) => Ok(data),
+                    Err(s) => Err(s.clone()),
+                };
+            }
+        }
+        Err(format!("Dependency not loaded {}", path))
+    }
+    
     pub fn get_dependency(&self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get(path) {
             if let Some(data) = &data.data {
@@ -163,6 +179,13 @@ impl Cx {
     pub fn show_clipboard_actions(&mut self, selected: String) {
         self.platform_ops
             .push(CxOsOp::ShowClipboardActions(selected));
+    }
+
+    /// Copies the given string to the clipboard.
+    /// 
+    /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
+    pub fn copy_to_clipboard(&mut self, content: &str) {
+        self.platform_ops.push(CxOsOp::CopyToClipboard(content.to_owned()));
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
@@ -283,16 +306,23 @@ impl Cx {
                     size: (rect.size * dpi).ceil() / dpi,
                 })
             }
-            Some(CxPassRect::ScaledArea(area, scale)) => {
+            Some(CxPassRect::AreaOrigin(area, origin)) => {
+                let rect = area.rect(self);
+                Some(Rect {
+                    pos: origin,
+                    size: (rect.size * dpi).ceil() / dpi,
+                })
+            }
+            /*Some(CxPassRect::ScaledArea(area, scale)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: (rect.pos * dpi).floor() / dpi,
                     size: scale * (rect.size * dpi).ceil() / dpi,
                 })
-            }
+            }*/
             Some(CxPassRect::Size(size)) => Some(Rect {
                 pos: DVec2::default(),
-                size: (size / dpi).floor() * dpi,
+                size: (size * dpi).ceil() / dpi,
             }),
             None => None,
         }

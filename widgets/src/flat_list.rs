@@ -66,24 +66,20 @@ impl LiveHook for FlatList {
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
     fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        let id = nodes[index].id;
-        match apply.from {
-            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
-                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    self.templates.insert(id, live_ptr);
-                    // lets apply this thing over all our childnodes with that template
-                    for (templ_id, node) in self.items.values_mut() {
-                        if *templ_id == id {
-                            node.apply(cx, apply, index, nodes);
-                        }
+        if nodes[index].is_instance_prop() {
+            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
+                let id = nodes[index].id;
+                self.templates.insert(id, live_ptr);
+                // lets apply this thing over all our childnodes with that template
+                for (templ_id, node) in self.items.values_mut() {
+                    if *templ_id == id {
+                        node.apply(cx, apply, index, nodes);
                     }
                 }
-                else {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                }
             }
-            _ => ()
+        }
+        else {
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)
     }
@@ -119,9 +115,12 @@ impl FlatList {
             let (_, entry) = self.items.get_or_insert(cx, id, | cx | {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
-            return Some(entry.clone())
+            Some(entry.clone())
         }
-        None
+        else {
+            warning!("Template not found: {template}. Did you add it to the <FlatList> instance in `live_design!{{}}`?");
+            None
+        }
     }
 
     /*
