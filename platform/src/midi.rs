@@ -287,12 +287,20 @@ impl MidiData {
         let status = self.status();
         let channel = self.channel();
         match status {
-            0x8 | 0x9 => MidiEvent::Note(MidiNote {
-                is_on: status == 0x9,
-                channel,
-                note_number: self.data[1],
-                velocity: self.data[2]
-            }),
+            0x8 | 0x9 => {
+                let velocity = self.data[2];
+                let is_on = if status == 0x8 || velocity == 0 {
+                    false
+                } else {
+                    true
+                };
+                MidiEvent::Note(MidiNote {
+                    is_on,
+                    channel,
+                    note_number: self.data[1],
+                    velocity,
+                })
+            },
             0xA => MidiEvent::Aftertouch(MidiAftertouch {
                 channel,
                 note_number: self.data[1],
