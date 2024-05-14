@@ -1,8 +1,18 @@
 use std::env;
+use std::fs::File;
+use std::path::Path;
+use std::io::prelude::*;
+
 fn main() {
+    // write a path to makepad platform into our output dir
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let path = Path::new(&out_dir).parent().unwrap().parent().unwrap().parent().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let mut file = File::create(path.join("makepad-platform.path")).unwrap();
+    file.write_all(&format!("{}", cwd.display()).as_bytes()).unwrap();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
-    
+    println!("cargo:rustc-check-cfg=cfg(apple_sim,lines,linux_direct,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     if let Ok(configs) = env::var("MAKEPAD"){
         for config in configs.split('+'){
@@ -17,7 +27,6 @@ fn main() {
     match target_os.as_str(){
         "macos"=>{
             use std::process::Command;
-            use std::path::Path;
             let out_dir = env::var("OUT_DIR").unwrap();
             if !Command::new("clang").args(&["src/os/apple/metal_xpc.m", "-c", "-o"])
                 .arg(&format!("{}/metal_xpc.o", out_dir))

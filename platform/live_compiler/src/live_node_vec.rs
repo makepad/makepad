@@ -17,7 +17,7 @@ use {
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
-        live_node::{LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, LiveProp},
+        live_node::{LiveDesignInfoIndex, LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, LiveProp},
     }
 };
 
@@ -735,12 +735,16 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <Object>", node.id, pt).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
-                LiveValue::Clone(clone) => {
+                LiveValue::Clone{clone,..}=> {
                     writeln!(f, "{}{} <Clone> {}", node.id, pt, clone).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
                 LiveValue::Class {live_type, ..} => {
                     writeln!(f, "{}{} <Class> {:?}", node.id, pt, live_type).unwrap();
+                    stack_depth += 1;
+                }, // subnodes including this one
+                LiveValue::Deref {live_type, clone,..} => {
+                    writeln!(f, "{}{} <Deref> {:?} {}", node.id, pt, live_type, clone).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
                 LiveValue::Root {..} => {
@@ -968,7 +972,8 @@ impl LiveNodeVecApi for LiveNodeVec {
     fn open_tuple_enum(&mut self, id: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::TupleEnum(variant)})}
     fn open_named_enum(&mut self, id: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::NamedEnum(variant)})}
     fn open_object(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Object})}
-    fn open_clone(&mut self, id: LiveId, clone: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Clone(clone)})}
+    fn open_clone(&mut self, id: LiveId, clone: LiveId) {
+        self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Clone{clone, design_info:LiveDesignInfoIndex::invalid()}})}
     fn open_array(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Array})}
     fn close(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Close})}
     fn root2(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Root{id_resolve:Box::default()}})}

@@ -52,13 +52,22 @@ impl Rect {
         }
     }
     
+    pub fn inside(&self, r:Rect) -> bool    {
+        if self.pos.x >= r.pos.x && 
+            self.pos.y >= r.pos.y && 
+            self.pos.x + self.size.x <= r.pos.x + r.size.x && 
+            self.pos.y + self.size.y <= r.pos.y + r.size.y
+        {
+            return true;
+        }
+        return false;
+    }
+    
     pub fn intersects(&self, r: Rect) -> bool {
-        !(
-            r.pos.x > self.pos.x + self.size.x ||
-            r.pos.x + r.size.x < self.pos.x ||
-            r.pos.y > self.pos.y + self.size.y ||
-            r.pos.y + r.size.y < self.pos.y
-        )
+        r.pos.x < self.pos.x + self.size.x &&
+        r.pos.x + r.size.x > self.pos.x &&
+        r.pos.y < self.pos.y + self.size.y &&
+        r.pos.y + r.size.y > self.pos. y
     }
     
     pub fn add_margin(self, size: DVec2) -> Rect {
@@ -81,6 +90,24 @@ impl Rect {
         }
     }
     
+    pub fn hull(&self, other: Rect) -> Rect {
+        let otherpos = other.pos;
+        let otherfarside = other.pos + other.size;
+        let farside = self.pos + self.size;
+        let mut finalpos = self.pos;
+        let mut finalfarside = farside;
+        if otherpos.x < finalpos.x{ finalpos.x = otherpos.x };
+        if otherpos.y < finalpos.y{ finalpos.y = otherpos.y };
+
+        if otherfarside.x > finalfarside.x{ finalfarside.x = otherfarside.x };
+        if otherfarside.y > finalfarside.y{ finalfarside.y = otherfarside.y };
+        let finalsize = finalfarside - finalpos;
+        Rect{
+            pos: finalpos,
+            size: finalsize
+        }
+    }
+
     pub fn clip(&self, clip: (DVec2, DVec2)) -> Rect {
         let mut x1 = self.pos.x;
         let mut y1 = self.pos.y;
@@ -302,6 +329,9 @@ impl fmt::Display for DVec2 {
 }
 
 pub fn dvec2(x: f64, y: f64) -> DVec2 {DVec2 {x, y}}
+
+pub fn rect(x: f64, y: f64, w:f64, h:f64) -> Rect {Rect{pos:DVec2 {x, y}, size:DVec2{x:w, y:h}}}
+
 
 //------ Vec2 operators
 

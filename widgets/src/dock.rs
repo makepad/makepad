@@ -6,7 +6,6 @@ use crate::{
     widget::*,
     makepad_draw::*,
     splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
-    tab::{TabClosable},
     tab_bar::{TabBarAction, TabBar},
 };
 
@@ -214,16 +213,16 @@ pub enum DockItem {
         a: LiveId,
         b: LiveId
     },
-    #[live {tabs: vec![], selected: 0, closable: false}]
+    #[live {tabs: vec![], selected: 0, closable: true}]
     Tabs {
         tabs: Vec<LiveId>,
         selected: usize,
         closable: bool
     },
-    #[pick {name: "Tab".to_string(), kind: LiveId(0), closable: false}]
+    #[pick {name: "Tab".to_string(), kind: LiveId(0), template: live_id!(PermanentTab)}]
     Tab {
         name: String,
-        closable: bool,
+        template: LiveId,
         kind: LiveId
     }
 }
@@ -280,7 +279,7 @@ pub enum DockItemStore{
     Tab {
         id: LiveIdStore,
         name: String,
-        closable: bool,
+        template: LiveIdStore,
         kind: LiveIdStore
     }
 }
@@ -289,7 +288,7 @@ impl LiveHook for Dock {
     fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match apply.from {
-            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
+            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id,..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if nodes[index].value.is_enum() {
                         let mut dock_item = DockItem::new(cx);
@@ -493,13 +492,13 @@ impl Dock {
                 }
                 DockItem:: Tab {
                     name,
-                    closable,
+                    template,
                     kind
                 }=>{
                     out.push(DockItemStore::Tab{
                         id:LiveIdStore(*id),
                         name: name.clone(),
-                        closable: *closable,
+                        template: LiveIdStore(*template),
                         kind: LiveIdStore(*kind)
                     });
                 }
@@ -524,12 +523,12 @@ impl Dock {
             let entry = self.items.get_or_insert(cx, entry_id, | cx | {
                 (template, WidgetRef::new_from_ptr(cx, Some(*ptr)))
             });
-            return Some(entry.1.clone())
+            Some(entry.1.clone())
         }
         else {
-            log!("PortalList template not found {}", template);
+            warning!("Template not found: {template}. Did you add it to the <Dock> instance in `live_design!{{}}`?");
+            None
         }
-        None
     }
     
     pub fn items(&mut self) -> &ComponentMap<LiveId, (LiveId, WidgetRef)> {
@@ -576,7 +575,7 @@ impl Dock {
     }
     
     fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
-        self.needs_save = true;        
+        self.needs_save = true;
         for (splitter_id, item) in self.dock_items.iter_mut() {
             match *item {
                 DockItem::Splitter {a, b, ..} => {
@@ -617,7 +616,6 @@ impl Dock {
         }
     }
     
-    
     fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name:String) {
         self.needs_save = true;
         if let Some(DockItem::Tab{name, ..}) = self.dock_items.get_mut(&tab_id){
@@ -639,11 +637,11 @@ impl Dock {
         }
     }
     
-    fn find_tab_bar_of_tab(&mut self, tab_id: LiveId) -> Option<LiveId> {
+    fn find_tab_bar_of_tab(&mut self, tab_id: LiveId) -> Option<(LiveId, usize)> {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, ..} => if let Some(_) = tabs.iter().position( | v | *v == tab_id) {
-                    return Some(*tabs_id)
+                DockItem::Tabs {tabs, ..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                    return Some((*tabs_id, pos))
                 }
                 _ => ()
             }
@@ -665,6 +663,10 @@ impl Dock {
                         if *closable {
                             self.unsplit_tabs(cx, tabs_id);
                         }
+                        if !keep_item {
+                            self.dock_items.remove(&tab_id);
+                            self.items.remove(&tab_id);
+                        }
                         self.area.redraw(cx);
                         return None
                     }
@@ -673,6 +675,7 @@ impl Dock {
                         self.select_tab(cx, next_tab);
                         if !keep_item {
                             self.dock_items.remove(&tab_id);
+                            self.items.remove(&tab_id);
                         }
                         self.area.redraw(cx);
                         return Some(tabs_id)
@@ -790,9 +793,9 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    let tab_bar_id = self.find_tab_bar_of_tab(pos.id).unwrap();
+                    let (tab_bar_id, pos) = self.find_tab_bar_of_tab(pos.id).unwrap();
                     if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get_mut(&tab_bar_id) {
-                        if let Some(pos) = tabs.iter().position( | v | *v == pos.id) {
+                        //if let Some(pos) = tabs.iter().position( | v | *v == pos.id) {
                             let old = tabs[pos];
                             tabs[pos] = item;
                             tabs.push(old);
@@ -800,7 +803,7 @@ impl Dock {
                             if let Some(tab_bar) = self.tab_bars.get(&tab_bar_id) {
                                 tab_bar.contents_draw_list.redraw(cx);
                             }
-                        }
+                        //}
                     }
                     return true
                 }
@@ -809,13 +812,13 @@ impl Dock {
         false
     }
     
-    fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, template:LiveId) {
         // lets add a tab
         if self.handle_drop(cx, abs, item, false) {
             self.needs_save = true;
             self.dock_items.insert(item, DockItem::Tab {
                 name,
-                closable: closable.as_bool(),
+                template,
                 kind
             });
             self.item_or_create(cx, item, kind);
@@ -824,7 +827,7 @@ impl Dock {
         }
     }
     
-    fn drop_clone(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, new_item: LiveId) {
+    fn drop_clone(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, new_item: LiveId, template:LiveId) {
         // lets add a tab
         if let Some(DockItem::Tab {name, kind, ..}) = self.dock_items.get(&item) {
             let name = name.clone();
@@ -833,7 +836,7 @@ impl Dock {
                 self.needs_save = true;
                 self.dock_items.insert(new_item, DockItem::Tab {
                     name,
-                    closable: true,
+                    template,
                     kind
                 });
                 self.item_or_create(cx, new_item, kind);
@@ -842,21 +845,36 @@ impl Dock {
         }
     }
     
-    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
-        self.create_tab(cx, parent, item, kind, name, closable);
-        self.select_tab(cx, item);
+    fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
+        if self.items.get(&item).is_some(){
+            self.select_tab(cx, item);
+            Some(self.items.get(&item).unwrap().1.clone())
+        }
+        else{
+            let ret =self.create_tab(cx, parent, item, kind, name, template, insert_after);
+            self.select_tab(cx, item);
+            ret
+        }
     }
     
-    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    fn create_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if let Some(DockItem::Tabs {tabs, ..}) = self.dock_items.get_mut(&parent) {
-            tabs.push(item);
+            if let Some(after) = insert_after{
+                tabs.insert(after+1, item);
+            }
+            else{
+                tabs.push(item);
+            }
             self.needs_save = true;
             self.dock_items.insert(item, DockItem::Tab {
                 name,
-                closable: closable.as_bool(),
+                template,
                 kind
             });
-            self.item_or_create(cx, item, kind);
+            self.item_or_create(cx, item, kind)
+        }
+        else{
+            None
         }
     }
     
@@ -1020,8 +1038,8 @@ impl Widget for Dock {
                     if let Some(DockItem::Tabs {tabs, selected, ..}) = self.dock_items.get(&id) {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
                         if index < tabs.len() {
-                            if let Some(DockItem::Tab {name, closable, ..}) = self.dock_items.get(&tabs[index]) {
-                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name, if *closable {TabClosable::Yes}else {TabClosable::No});
+                            if let Some(DockItem::Tab {name, template, ..}) = self.dock_items.get(&tabs[index]) {
+                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name, *template);
                             }
                             stack.push(DrawStackItem::TabLabel {id, index: index + 1});
                         }
@@ -1118,9 +1136,9 @@ impl DockRef {
         None
     }
     
-    pub fn drop_clone(&self, cx: &mut Cx, abs: DVec2, old_item: LiveId, new_item: LiveId) {
+    pub fn drop_clone(&self, cx: &mut Cx, abs: DVec2, old_item: LiveId, new_item: LiveId, template:LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.drop_clone(cx, abs, old_item, new_item);
+            dock.drop_clone(cx, abs, old_item, new_item, template);
         }
     }
     
@@ -1130,21 +1148,27 @@ impl DockRef {
         }
     }
     
-    pub fn drop_create(&self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    pub fn drop_create(&self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, template:LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.drop_create(cx, abs, item, kind, name, closable);
+            dock.drop_create(cx, abs, item, kind, name, template);
         }
     }
     
-    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    pub fn create_and_select_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_and_select_tab(cx, parent, item, kind, name, closable);
+            dock.create_and_select_tab(cx, parent, item, kind, name, template, insert_after)
         }
+        else{
+            None
+        }        
     }
     
-    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, closable:TabClosable) {
+    pub fn create_tab(&self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.create_tab(cx, parent, item, kind, name, closable);
+            dock.create_tab(cx, parent, item, kind, name, template, insert_after)
+        }
+        else{
+            None
         }
     }
     
@@ -1155,7 +1179,7 @@ impl DockRef {
     }
     
     
-    pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<LiveId> {
+    pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<(LiveId, usize)> {
         if let Some(mut dock) = self.borrow_mut() {
             return dock.find_tab_bar_of_tab(tab_id);
         }

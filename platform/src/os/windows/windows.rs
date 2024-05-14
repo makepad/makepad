@@ -1,5 +1,6 @@
 use {
     std::{
+        time::Instant,
         rc::Rc,
         cell::RefCell,
     },
@@ -14,6 +15,7 @@ use {
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
+                win32_window::Win32Window,
             },
             cx_native::EventFlow,
         },
@@ -170,7 +172,7 @@ impl Cx {
                     e.abs,
                     e.time
                 );
-                self.fingers.mouse_down(e.button);
+                self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
             Win32Event::MouseMove(e) => {
@@ -256,6 +258,7 @@ impl Cx {
     }
     
     pub (crate) fn handle_repaint(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &mut D3d11Cx) {
+        
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -264,9 +267,9 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        //let dpi_factor = window.window_geom.dpi_factor;
+                        //let dpi_factor = window.window_geom.dpi_factor;                        
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*pass_id, true, window, d3d11_cx);
+                        self.draw_pass_to_window(*pass_id, false, window, d3d11_cx);
                     }
                 }
                 CxPassParent::Pass(_) => {
@@ -335,11 +338,22 @@ impl Cx {
                 CxOsOp::NormalizeWindow(_window_id) => {
                     todo!()
                 }
-                CxOsOp::SetTopmost(_window_id, _is_topmost) => {
-                    todo!()
+                CxOsOp::SetTopmost(window_id, is_topmost) => {
+                    if d3d11_windows.len() == 0 {
+                        self.platform_ops.insert(0, CxOsOp::SetTopmost(window_id, is_topmost));
+                        continue;
+                    }
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.win32_window.set_topmost(is_topmost);
+                    }
                 }
                 CxOsOp::ShowClipboardActions(_) => {
-                }
+                },
+                CxOsOp::CopyToClipboard(content) => {
+                    unsafe {
+                        Win32Window::copy_to_clipboard(&content);
+                    }
+                },
                 CxOsOp::XrStartPresenting => {
                     //todo!()
                 },
@@ -389,6 +403,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        self.os.start_time = Some(Instant::now());
         self.live_expand();
         if std::env::args().find( | v | v == "--stdin-loop").is_none() {
             self.start_disk_live_file_watcher(100);
@@ -400,11 +415,16 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
 }
 
 #[derive(Default)]
 pub struct CxOs {
+    pub (crate) start_time: Option<Instant>,
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-    pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
+   //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }

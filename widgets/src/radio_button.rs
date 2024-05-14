@@ -1,7 +1,9 @@
 use crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        widget::*, View,
+        widget::*,
+        View,
+        Image,
     };
 
 live_design!{
@@ -31,6 +33,14 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum MediaType {
+    Image,
+    #[pick] Icon,
+    None,
+}
+
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButtonGroup {
     #[deref] frame: View
@@ -41,18 +51,22 @@ pub struct RadioButton {
     #[redraw] #[live] draw_radio: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
     #[live] draw_text: DrawText,
+
+    #[live] value: LiveValue,
+
+    #[live] media: MediaType,
     
     #[live] icon_walk: Walk,
     #[walk] walk: Walk,
-    
-    #[live] value: LiveValue,
-    
+
+    #[live] image: Image,
+
     #[layout] layout: Layout,
     #[animator] animator: Animator,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] label: String,
+    #[live] text: RcStringMut,
     
     #[live] bind: String,
 }
@@ -71,11 +85,20 @@ impl RadioButtonGroup {
 impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
-        self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        match self.media {
+            MediaType::Image => {
+                let image_walk = self.image.walk(cx);
+                let _ = self.image.draw_walk(cx, image_walk);
+            }
+            MediaType::Icon => {
+                self.draw_icon.draw_walk(cx, self.icon_walk);
+            }
+            MediaType::None => {}
+        }
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_radio.end(cx);
     }
-
+        
 }
 
 impl Widget for RadioButtonGroup {
@@ -90,6 +113,7 @@ impl Widget for RadioButtonGroup {
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
+    
 }
 
 impl Widget for RadioButton {
@@ -127,12 +151,29 @@ impl Widget for RadioButton {
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
+    
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
+    }
+            
+    fn set_text(&mut self, v: &str) {
+        self.text.as_mut_empty().push_str(v);
+    }
 }
 
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
             inner.animator_play(cx, id!(selected.off));
+        }
+    }
+
+    pub fn select(&self, cx: &mut Cx, scope: &mut Scope){
+        if let Some(mut inner) = self.borrow_mut(){
+            if inner.animator_in_state(cx, id!(selected.off)) {
+                inner.animator_play(cx, id!(selected.on));
+                cx.widget_action(inner.widget_uid(), &scope.path, RadioButtonAction::Clicked);
+            }
         }
     }
 }

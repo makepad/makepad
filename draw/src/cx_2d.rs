@@ -157,10 +157,20 @@ impl<'a> Cx2d<'a> {
     pub fn set_pass_area(&mut self, pass: &Pass, area: Area) {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Area(area));
     }
-
+        
+    pub fn set_pass_area_with_origin(&mut self, pass: &Pass, area: Area, origin:DVec2) {
+        self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::AreaOrigin(area, origin));
+    }
+        
+    pub fn set_pass_shift_scale(&mut self, pass: &Pass, shift: DVec2, scale: DVec2) {
+        self.passes[pass.pass_id()].view_shift = shift;
+        self.passes[pass.pass_id()].view_scale = scale;
+    }
+    
+    /*
     pub fn set_pass_scaled_area(&mut self, pass: &Pass, area: Area, scale:f64) {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::ScaledArea(area, scale));
-    }   
+    }   */
 
     pub fn current_pass_size(&self) -> DVec2 {
         self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id, self.current_dpi_factor()).unwrap().size

@@ -16,7 +16,7 @@ use {
             LiveTypeInfo,
             LiveNodeSliceApi
         },
-        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply, Apply},
+        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply,LiveApplyReset, Apply},
         makepad_derive_live::*,
         makepad_math::*,
         makepad_live_id::{FromLiveId, live_id, live_id_num},
@@ -38,6 +38,12 @@ pub struct KeyModifiers {
     pub control: bool,
     pub alt: bool,
     pub logo: bool
+}
+
+impl KeyModifiers{
+    fn any(&self)->bool{
+        self.shift || self.control || self.alt || self.logo
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -212,7 +218,7 @@ pub struct CxDigitHover {
 
 #[derive(Default, Clone)]
 pub struct CxFingers {
-    pub first_mouse_button: Option<usize>,
+    pub first_mouse_button: Option<(usize, WindowId)>,
     captures: Vec<CxDigitCapture>,
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
@@ -327,6 +333,10 @@ impl CxFingers {
         self.captures.iter().find( | v | v.area == area).is_some()
     }
     
+    pub fn any_areas_captured(&self) -> bool {
+        self.captures.len() > 0
+    }
+    
     pub (crate) fn release_digit(&mut self, digit_id: DigitId) {
         while let Some(index) = self.captures.iter_mut().position( | v | v.digit_id == digit_id) {
             self.captures.remove(index);
@@ -380,9 +390,9 @@ impl CxFingers {
         self.switch_captures();
     }
     
-    pub (crate) fn mouse_down(&mut self, button: usize) {
+    pub (crate) fn mouse_down(&mut self, button: usize, window_id:WindowId) {
         if self.first_mouse_button.is_none() {
-            self.first_mouse_button = Some(button);
+            self.first_mouse_button = Some((button,window_id));
         }
     }
     
@@ -396,7 +406,7 @@ impl CxFingers {
     }
     
     pub (crate) fn mouse_up(&mut self, button: usize) {
-        if self.first_mouse_button == Some(button) {
+        if self.first_mouse_button.is_some() && self.first_mouse_button.unwrap().0 == button {
             self.first_mouse_button = None;
             let digit_id = live_id!(mouse).into();
             self.release_digit(digit_id);
@@ -839,7 +849,7 @@ impl Event {
                 let hover_last = cx.fingers.find_hover_area(digit_id);
                 let rect = area.clipped_rect(&cx);
                 
-                if let Some(button) = cx.fingers.first_mouse_button {
+                if let Some((button, _window_id)) = cx.fingers.first_mouse_button {
                     let device = DigitDevice::Mouse {
                         button,
                     };
@@ -967,7 +977,7 @@ impl Event {
                     return Hit::Nothing
                 }
                 
-                if cx.fingers.first_mouse_button != Some(e.button) {
+                if cx.fingers.first_mouse_button.is_some() && cx.fingers.first_mouse_button.unwrap().0 != e.button{
                     return Hit::Nothing
                 }
                 
@@ -1003,7 +1013,7 @@ impl Event {
                     return Hit::Nothing
                 }
                 
-                if cx.fingers.first_mouse_button != Some(e.button) {
+                if cx.fingers.first_mouse_button.is_some() && cx.fingers.first_mouse_button.unwrap().0 != e.button {
                     return Hit::Nothing
                 }
                 

@@ -223,10 +223,13 @@ pub struct DelaySettings {
     delaysend: f32a,
     #[live(0.8)]
     delayfeedback: f32a,
-    #[live(0.0)]
+    #[live(0.9)]
     cross: f32a,
-    #[live(0.5)]
+    #[live(0.1)]
     difference: f32a,
+    #[live(0.7)]
+    length: f32a,
+
 }
 
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
@@ -309,17 +312,17 @@ pub struct IronFishSettings {
     sample_rate: f32a,
     #[live(0.5)]
     osc_balance: f32a,
-    #[live(0.5)]
+    #[live(0.1)]
     sub_osc: f32a,
     #[live(0.0)]
     noise: f32a,
     #[live(0.0)]
     portamento: f32a,
 
-    #[live]
-    blur: BlurSettings,
-    #[live]
-    shadow: ShadowSettings,
+//    #[live]
+//  blur: BlurSettings,
+//    #[live]
+//  shadow: ShadowSettings,
 }
 
 #[derive(Copy, Clone)]
@@ -630,7 +633,7 @@ impl SubOscillatorState {
     }
 
     pub fn set_note(&mut self, note: f32, samplerate: f32) {
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
+        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 12.0) / 12.0);
         self.delta_phase = (freq * 0.5) / samplerate;
     }
 }
@@ -944,9 +947,9 @@ pub struct ChorusSettings {
     mindelay: f32a,
     #[live(0.4)]
     moddepth: f32a,
-    #[live(0.1)]
+    #[live(0.3)]
     rate: f32a,
-    #[live(0.8)]
+    #[live(0.4)]
     phasediff: f32a,
     #[live(0.5)]
     mix: f32a,
@@ -956,7 +959,7 @@ pub struct ChorusSettings {
 
 #[derive(Live, LiveHook, LiveRegister, LiveAtomic, Debug, LiveRead)]
 pub struct ReverbSettings {
-    #[live(0.05)]
+    #[live(0.00)]
     mix: f32a,
     #[live(0.04)]
     feedback: f32a,
@@ -1659,6 +1662,7 @@ pub struct IronFishState {
     g: IronFishGlobalVoiceState,
     chorus: ChorusState,
     reverb: ReverbState,
+    actual_delay_length: f32
 }
 
 impl IronFishState {
@@ -1810,26 +1814,38 @@ impl IronFishState {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
 
-        let icross = self.settings.delay.cross.get();
-        let cross = 1.0 - icross;
+        let cross = self.settings.delay.cross.get();
+        let icross = 1.0 - cross;
 
-        let leftoffs = (self.settings.delay.difference.get() * 15000.0) as usize;
+        let mut l = self.settings.delay.length.get();
+        let leftoffs = (self.settings.delay.difference.get()).powf(2.0);
+        
+        l = (l * l) *  (47000.0 - 15000.0) + 1000.0;
+        self.actual_delay_length += (l - self.actual_delay_length) * 0.3;
+        let delaylen: f32 = (self.actual_delay_length) as f32;  
+        
+        let mut delayreadposl:i32 = self.delaywritepos as i32 - (delaylen - (leftoffs * (48000.0 - delaylen))).max(1.0).min(47500.0) as i32;
+        let mut delayreadposr:i32 = self.delaywritepos as i32 - (delaylen + (leftoffs * (48000.0 - delaylen))).max(1.0).min(47500.0) as i32; 
 
-        let mut delayreadposl = self.delaywritepos + (48000 - 15000) - leftoffs;
-        let mut delayreadposr = self.delaywritepos + (48000 - 15000) + leftoffs;
         while delayreadposl >= 48000 {
             delayreadposl -= 48000;
         }
         while delayreadposr >= 48000 {
             delayreadposr -= 48000;
         }
+        while delayreadposl < 0 {
+            delayreadposl += 48000;
+        }
+        while delayreadposr < 0 {
+            delayreadposr += 48000;
+        }
 
         let fb = self.settings.delay.delayfeedback.get() * 0.98;
         let send = self.settings.delay.delaysend.get();
 
         for i in 0..frame_count {
-            let rr = self.delaylineright[delayreadposr];
-            let ll = self.delaylineleft[delayreadposl];
+            let rr = self.delaylineright[delayreadposr as  usize];
+            let ll = self.delaylineleft[delayreadposl as usize];
 
             let mut r = ll * cross + rr * icross;
             let mut l = rr * cross + ll * icross;
@@ -2325,6 +2341,7 @@ impl AudioComponent for IronFish {
             g: Default::default(),
             chorus: Default::default(),
             reverb: Default::default(),
+            actual_delay_length: 1.0
         })
     }
 

@@ -85,7 +85,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    fn animator_after_apply(&mut self, cx:&mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]){");
             tb.add("        let mut index = index + 1;");
             tb.add("        match apply.from{"); // if apply from is file, run defaults
-            tb.add("            ApplyFrom::NewFromDoc{..} | ApplyFrom::UpdateFromDoc{..}=>{"); // if apply from is file, run defaults
+            tb.add("            ApplyFrom::NewFromDoc{..}=>{"); // if apply from is file, run defaults
             tb.add("                while !nodes[index].is_close() {");
             tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
             tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
@@ -94,6 +94,17 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                    }");
             tb.add("                    index = nodes.skip_node(index);");
             tb.add("                }");
+            tb.add("            }");
+            tb.add("            ApplyFrom::UpdateFromDoc{..}=>{"); // if apply from is file, run defaults
+            tb.add("                while !nodes[index].is_close() {");
+            tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
+            tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
+            tb.add("                            self.apply(cx, &mut ApplyFrom::AnimatorInit.into(), index, nodes);");
+            tb.add("                        }");
+            tb.add("                    }");
+            tb.add("                    self.animator_apply_state(cx);");
+            tb.add("                    index = nodes.skip_node(index);");
+            tb.add("                }"); 
             tb.add("            }");
             tb.add("            ApplyFrom::AnimatorInit=>{"); // someone is calling state init on a state, means we need to find it
             tb.add("                if let Some(live_ptr) = self.").ident(&animator_field.name).add(".live_ptr {");
@@ -155,6 +166,84 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         }
         
         tb.add("impl").stream(generic.clone());
+        tb.add("LiveApplyReset for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        let walk_fields = ["abs_pos","margin","width","height"];
+        let layout_fields = ["scroll","clip_x","clip_y","padding","align","flow","spacing","line_spacing"];
+                
+        tb.add("    fn apply_reset(&mut self, cx: &mut Cx, apply:&mut Apply, start_index:usize, nodes:&[LiveNode]) {");
+        
+        if let Some(deref_field) = deref_field {
+            tb.add("    self.").ident(&deref_field.name).add(".apply_reset(cx, apply, start_index, nodes);");
+        }
+
+        for field in &fields {
+             if field.attrs.iter().any( | a | a.name == "live")  {
+                tb.add("let mut ").ident(&format!("has_{}",field.name)).add(" = false;");
+            }
+            else if field.attrs.iter().any( | a | a.name == "walk") {
+                for f in walk_fields{
+                    tb.add("let mut").ident(&format!("has_{}",f)).add(" = false;");
+                }
+            }
+            else if field.attrs.iter().any( | a | a.name == "layout") {
+                for f in layout_fields{
+                    tb.add("let mut").ident(&format!("has_{}",f)).add(" = false;");
+                }
+            } 
+        } 
+        tb.add("        if !nodes[start_index].value.is_structy_type(){");
+        tb.add("            return;");
+        tb.add("        }");
+        tb.add("        let mut index = start_index + 1;");
+        tb.add("        while !nodes[index].is_close(){");
+        tb.add("            if nodes[index].origin.has_prop_type(LivePropType::Field){");
+        tb.add("               match nodes[index].id {");
+        for field in &fields {
+            if field.attrs.iter().any( | a | a.name == "live")  {
+                tb.add("            LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>").ident(&format!("has_{}",field.name)).add("= true,");
+            }
+            else if field.attrs.iter().any( | a | a.name == "walk") {
+                for f in walk_fields{
+                    tb.add("        live_id!(").ident(f).add(")=>").ident(&format!("has_{}",f)).add(" = true,");
+                }
+            }
+            else if field.attrs.iter().any( | a | a.name == "layout") {
+                for f in layout_fields{
+                    tb.add("        live_id!(").ident(f).add(")=>").ident(&format!("has_{}",f)).add(" = true,");
+                }
+            }
+        }
+        tb.add("                    _=>()");
+        tb.add("                }");
+        tb.add("            }");
+        tb.add("            index = nodes.skip_node(index);");
+        tb.add("        }");
+        for field in &fields {
+            if let Some(attr) = field.attrs.iter().find( | a | a.name == "live" ){
+                tb.add("if !").ident(&format!("has_{}",&field.name)).add("{");
+                tb.add("self.").ident(&field.name).add(" = ");
+                if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
+                    tb.add("LiveNew::new(cx);}");
+                }
+                else {
+                    tb.add("(").stream(attr.args.clone()).add(").into();}");
+                }
+            }
+            else if field.attrs.iter().any( | a | a.name == "walk") {
+                for f in walk_fields{
+                    tb.add("if !").ident(&format!("has_{}",f)).add("{self.").ident(&field.name).add(".").ident(f).add(" = Walk::default().").ident(f).add(";}");
+                }
+            }
+            else if field.attrs.iter().any( | a | a.name == "layout") {
+                for f in layout_fields{
+                    tb.add("if !").ident(&format!("has_{}",f)).add("{self.").ident(&field.name).add(".").ident(f).add(" = Layout::default().").ident(f).add(";}");
+                }
+            }
+        }
+        tb.add("    }");
+        tb.add("}");
+        
+        tb.add("impl").stream(generic.clone());
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]) -> usize{");
@@ -162,44 +251,34 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            match nodes[index].id {");
         
         for field in &fields {
+            
+            
             if field.attrs.iter().any( | a | a.name == "live") || field.attrs.iter().any( | a | a.name == "animator") {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply, index, nodes),");
             }
             else if field.attrs.iter().any( | a | a.name == "walk") {
                 for field in &fields {
-                    if field.name == "abs_pos" ||
-                      field.name == "margin" ||
-                      field.name == "width" ||
-                      field.name == "height" {
+                    for f in walk_fields{
+                        if f == field.name{
                           return error_result(&format!("Name collision between walk splat and {}", field.name));
                       }
+                  }
                 }
-                tb.add("        live_id!(abs_pos)=>self.").ident(&field.name).add(".abs_pos.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(margin)=>self.").ident(&field.name).add(".margin.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(width)=>self.").ident(&field.name).add(".width.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(height)=>self.").ident(&field.name).add(".height.apply(cx, apply, index, nodes),");
+                for f in walk_fields{
+                    tb.add("        live_id!(").ident(f).add(")=>self.").ident(&field.name).add(".").ident(f).add(".apply(cx, apply, index, nodes),");
+                }
             }
             else if field.attrs.iter().any( | a | a.name == "layout") {
                 for field in &fields {
-                    if field.name == "scroll" ||
-                      field.name == "clip_x" ||
-                      field.name == "clip_y" ||
-                      field.name == "padding" ||
-                      field.name == "align" ||
-                      field.name == "line_spacing" ||
-                      field.name == "flow" ||
-                      field.name == "spacing"{
+                    for f in layout_fields{
+                        if f == field.name{
                           return error_result(&format!("Name collision between layout splat and {}", field.name));
                       }
+                  }
                 }
-                tb.add("        live_id!(scroll)=>self.").ident(&field.name).add(".scroll.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(clip_x)=>self.").ident(&field.name).add(".clip_x.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(clip_y)=>self.").ident(&field.name).add(".clip_y.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(padding)=>self.").ident(&field.name).add(".padding.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(align)=>self.").ident(&field.name).add(".align.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(flow)=>self.").ident(&field.name).add(".flow.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(spacing)=>self.").ident(&field.name).add(".spacing.apply(cx, apply, index, nodes),");
-                tb.add("        live_id!(line_spacing)=>self.").ident(&field.name).add(".line_spacing.apply(cx, apply, index, nodes),");
+                for f in layout_fields{
+                    tb.add("        live_id!(").ident(f).add(")=>self.").ident(&field.name).add(".").ident(f).add(".apply(cx, apply, index, nodes),");
+                }
             }
         }
         // Unknown value handling
@@ -213,7 +292,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        } else {");
         
         if let Some(deref_field) = deref_field {
-            tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply, index, nodes)");
+            tb.add("        self.").ident(&deref_field.name).add(".apply_value(cx, apply, index, nodes)");
         }
         else {
             tb.add("        <Self as LiveHook>::apply_value_instance(self, cx, apply, index, nodes)");
@@ -273,10 +352,12 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            index");
         tb.add("        };");
         
+        tb.add("        if apply.from.should_apply_reset(){<Self as LiveApplyReset>::apply_reset(self, cx, apply, start_index, nodes);}");
+                
         if animator_field.is_some() { // apply the default states
             tb.add("    if let Some(animator_index) = animator_index{self.animator_after_apply(cx, apply, animator_index, nodes);}");
         }
-        
+                
         tb.add("        self.deref_after_apply(cx, apply, start_index, nodes);");
         
         

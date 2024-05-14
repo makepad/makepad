@@ -11,6 +11,7 @@ use {
             Vec3,
             Vec4
         },
+        span::TextSpan,
         live_registry::LiveScopeTarget,
         makepad_live_tokenizer::{LiveId},
         live_ptr::{LiveModuleId, LivePtr},
@@ -19,10 +20,50 @@ use {
 };
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct LiveNode { // 40 bytes. Don't really see ways to compress
+pub struct LiveNode { // 48 bytes. Don't really see ways to compress
     pub origin: LiveNodeOrigin,
     pub id: LiveId,
     pub value: LiveValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveDesignInfoIndex(u32);
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct LiveDesignInfo{
+    pub span: TextSpan,
+    pub dx: f64,
+    pub dy: f64,
+    pub dw: f64,
+    pub dh: f64
+}
+
+impl LiveDesignInfo{
+    pub fn to_string(&self)->String{
+        format!("dx:{:.1} dy:{:.1} dw:{:.1} dh:{:.1}", self.dx, self.dy, self.dw, self.dh)
+    }
+}
+
+impl LiveDesignInfoIndex{
+    pub fn from_usize(val: usize)->Self{
+        Self(val as u32)
+    }
+    
+    pub fn invalid()->Self{
+        Self(u32::MAX)
+    }
+    
+    pub fn is_invalid(&self)->bool{
+        self.0 == u32::MAX
+    }
+    
+    pub fn index(&self)->usize{
+        if self.is_invalid(){
+            panic!()
+        }
+        return self.0 as usize
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,8 +100,9 @@ pub enum LiveValue {
     TupleEnum (LiveId),
     NamedEnum (LiveId),
     Object,
-    Clone(LiveId),
-    Class {live_type: LiveType, class_parent: Option<LivePtr>},
+    Clone{clone:LiveId, design_info:LiveDesignInfoIndex},
+    Deref{live_type: LiveType, clone:LiveId, design_info:LiveDesignInfoIndex},
+    Class {live_type: LiveType, class_parent: LivePtr, design_info:LiveDesignInfoIndex},
     Close,
     
     // shader code and other DSLs
@@ -425,6 +467,17 @@ pub enum LiveUnOp {
     Neg,
 }
 
+impl LiveNode{
+        
+    pub fn is_instance_prop(&self) -> bool {
+        self.origin.has_prop_type(LivePropType::Instance)
+    }
+        
+    pub fn is_field_prop(&self,) -> bool {
+        self.origin.has_prop_type(LivePropType::Field)
+    }
+            
+}
 
 const INLINE_STRING_BUFFER_SIZE: usize = 22;
 #[derive(Clone, Debug, PartialEq)]
@@ -441,9 +494,9 @@ impl InlineString {
             buffer[..bytes.len()].copy_from_slice(bytes);
             return Some(Self {length: bytes.len() as u8, buffer})
         }
-            None
+        None
     }
-    
+        
     pub fn as_str(&self) -> &str {
         unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer.as_ptr(), self.length as usize))}
     }
@@ -459,6 +512,7 @@ impl LiveValue {
             Self::Object | // subnodes including this one
             Self::Clone {..} | // subnodes including this one
             Self::Class {..} | 
+            Self::Deref {..} | 
             Self::Root {..} => true, // subnodes including this one
             _ => false
         }
@@ -642,15 +696,15 @@ impl LiveValue {
         }
     }*/
     
-    pub fn set_clone_name(&mut self, name: LiveId) {
-        if let Self::Clone(clone) = self {
-            *clone = name
+    pub fn set_clone_name(&mut self, set_name: LiveId) {
+        if let Self::Clone{clone,..} = self {
+            *clone = set_name
         }
     }
     
     pub fn get_clone_name(&self) -> LiveId {
         match self {
-            Self::Clone(clone) => *clone,
+            Self::Clone{clone,..} => *clone,
             _ => LiveId(0)
         }
     }
@@ -686,11 +740,12 @@ impl LiveValue {
             Self::Object => 25,
             Self::Clone {..} => 26,
             Self::Class {..} => 27,
-            Self::Root{..}=>28,
-            Self::Close => 29,
+            Self::Deref {..} => 28,
+            Self::Root{..}=>29,
+            Self::Close => 30,
             
-            Self::DSL {..} => 30,
-            Self::Import {..} => 31,
+            Self::DSL {..} => 31,
+            Self::Import {..} => 32,
             //Self::Registry {..} => 30,
         }
     }

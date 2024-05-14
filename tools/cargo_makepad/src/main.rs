@@ -8,6 +8,8 @@ use wasm::*;
 use apple::*;
 use check::*;
 pub use makepad_shell;
+pub use makepad_http;
+pub use makepad_wasm_strip;
 
 fn show_help(err: &str){
     if !err.is_empty(){
@@ -22,28 +24,31 @@ fn show_help(err: &str){
     println!();
     println!("    wasm install-toolchain                       Install the toolchain needed for wasm32 with rustup");
     println!("    wasm build <cargo args>                      Build a wasm project");
-    println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8080 by default");
+println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8010");
     println!();
     println!("    [options] with its default value:");
     println!();
-    println!("       --port=8080                               The port to run the wasm webserver");
+    println!("       --port=8010                               The port to run the wasm webserver");
+    println!("       --lan                                     Bind the webserver to your lan ip");
+    println!("       --strip                                   Strip the wasm file of debug symbols");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
     println!("    apple <ios|tvos> install-toolchain           Install the toolchain needed with rustup");
     println!("    apple <ios|tvos> --org=x --app=x run-sim <cargo args>    runs the project on the aarch64 simulator");
     println!("    apple <ios|tvos> --org=x --app=x run-device <cargo args>   runs the project on a real device");
+    println!("    apple list                                   Lists all certificates/profiles/devices");
     println!(" in order for makepad to be able to install an ios application on a real device a provisioning");
     println!(" profile is needed. To create one make an empty application in xcode and give it an organisation");
     println!(" name and product name you copy exactly and without spaces/odd characters into --org=x and --app=x");
-    println!(" Also run it on the device it atleast once, so the profile is created");
+    println!(" Also run it on the device it at least once, so the profile is created");
     println!("                         --org=organisation_name");
     println!("                         --app=product_name");
     println!(" If you have multiple signing identities or devices or provision profiles you might have to set it explicitly");
-    println!("                         --signing-identity=");
-    println!("                         --provisioning-profile=");
-    println!("                         --device-uuid=");
-    println!();     
+    println!("                         --profile=");
+    println!("                         --cert=");
+    println!("                         --device=");
+    println!();
     println!("Android commands:");
     println!();
     println!("    android [options] install-toolchain          Download and install the android sdk and rust toolchains");
@@ -58,6 +63,7 @@ fn show_help(err: &str){
     println!("       --app-label=\"applabel\"                  The app label");
     println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
     println!("       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset).");
+    println!("                                                 This is required for building apps that compile native code as part of the Rust build process.");
     println!("       --keep-sdk-sources                        Keep downloaded SDK source files (default is to remove them).");
     println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
     println!("                                                 Host OS is autodetected but can be overridden here");

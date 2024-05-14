@@ -1,4 +1,4 @@
-use self::super::jni_sys;
+use makepad_jni_sys as jni_sys;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

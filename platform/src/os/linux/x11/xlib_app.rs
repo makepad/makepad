@@ -18,7 +18,6 @@ use {
         event::*,
         cursor::MouseCursor,
         os::cx_native::EventFlow,
-        x11::x11_sys::XEvent
     },
 };
 
@@ -452,7 +451,7 @@ impl XlibApp {
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            self.copy_to_clipboard(response, &window, &event);
+                                            self.copy_to_clipboard(response, window.window.unwrap(), event.xkey.time);
                                         }
                                     }
                                     KeyCode::KeyX => {
@@ -462,7 +461,7 @@ impl XlibApp {
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            self.copy_to_clipboard(response, &window, &event);
+                                            self.copy_to_clipboard(response, window.window.unwrap(), event.xkey.time);
                                         }
                                     }
                                     _ => ()
@@ -542,6 +541,16 @@ impl XlibApp {
                     (glx.glXSwapBuffers)(display, window);
                     */
                 },
+                x11_sys::VisibilityNotify => {
+                    let event = event.xvisibility;
+                    if event.state != x11_sys::VisibilityFullyObscured {
+                        if let Some(window_ptr) = self.window_map.get(&event.window) {
+                            let window = &mut (**window_ptr);
+                            window.send_focus_event();
+                        }
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -857,15 +866,15 @@ impl XlibApp {
         }
     }
 
-    unsafe fn copy_to_clipboard(&mut self, text: &String, window: &XlibWindow, event: &XEvent) {
+    pub unsafe fn copy_to_clipboard(&mut self, text: &String, window_id: c_ulong, time: u64) {
         // store the text on the clipboard
         self.clipboard = text.clone();
         // lets set the owner
         x11_sys::XSetSelectionOwner(
             self.display,
             self.atoms.clipboard,
-            window.window.unwrap(),
-            event.xkey.time
+            window_id,
+            time
         );
         x11_sys::XFlush(self.display);
     }

@@ -31,11 +31,14 @@ pub trait LiveHook {
     fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {}
     fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
         match &apply.from{
-            ApplyFrom::NewFromDoc{..}=>self.after_new_from_doc(cx),
+            ApplyFrom::NewFromDoc{..}=>{self.after_new_from_doc(cx);self.after_apply_from_doc(cx);}
+            ApplyFrom::UpdateFromDoc{..}=>{self.after_update_from_doc(cx);self.after_apply_from_doc(cx);}
             _=>()
         }
     }
     fn after_new_from_doc(&mut self, _cx:&mut Cx){}
+    fn after_update_from_doc(&mut self, _cx:&mut Cx){}
+    fn after_apply_from_doc(&mut self, _cx:&mut Cx){}
     fn after_new_before_apply(&mut self, _cx: &mut Cx) {}
 }
 
@@ -57,6 +60,12 @@ pub trait LiveNew: LiveApply {
         ret
     }
     
+    fn new_apply_over(cx: &mut Cx, nodes: &[LiveNode]) -> Self where Self: Sized {
+        let mut ret = Self::new(cx);
+        ret.apply_over(cx, nodes);
+        ret
+    }
+    
     fn new_apply_mut_index(cx: &mut Cx, apply: &mut Apply, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         *index = ret.apply(cx, apply, *index, nodes);
@@ -65,12 +74,20 @@ pub trait LiveNew: LiveApply {
 
     fn new_from_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
-        if let Some(live_ptr) = live_ptr{
+        if let Some(live_ptr) = live_ptr{ 
             cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{
                 ret.apply(cx, &mut ApplyFrom::NewFromDoc {file_id}.into(), index, nodes)
             });
         }
         return ret
+    }
+    
+    fn apply_from_ptr(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>) {
+        if let Some(live_ptr) = live_ptr{
+            cx.get_nodes_from_live_ptr(live_ptr, |cx, _file_id, index, nodes|{
+                self.apply(cx, &mut ApplyFrom::Over.into(), index, nodes)
+            });
+        }
     }
     
     fn new_from_ptr_with_scope<'a> (cx: &mut Cx, scope:&'a mut Scope, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
@@ -88,18 +105,18 @@ pub trait LiveNew: LiveApply {
         {
             let live_registry_rc = cx.live_registry.clone();
             let mut live_registry = live_registry_rc.borrow_mut();
-            live_registry.main_module = Some((lti.module_id, lti.type_name));
+            live_registry.main_module = Some(lti.clone());
         }
         Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
     }
     
     fn update_main(&mut self, cx:&mut Cx){
-        let (module_id, id) = {
+        let lti = {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow_mut();
-            live_registry.main_module.unwrap()
+            live_registry.main_module.as_ref().unwrap().clone()
         };
-        self.update_from_module(cx, module_id, id);
+        self.update_from_module(cx, lti.module_id, lti.type_name);
     }
     
     fn new_local(cx: &mut Cx) -> Self where Self: Sized {
@@ -139,6 +156,10 @@ pub trait ToLiveValue {
 
 pub trait LiveApplyValue {
     fn apply_value(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize;
+}
+
+pub trait LiveApplyReset { 
+    fn apply_reset(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
 }
 
 pub trait LiveApply {
@@ -203,7 +224,6 @@ impl<'a,'b, 'c> From<ApplyFrom> for Apply<'a,'b,'c> {
     }
 }
 
-
 impl ApplyFrom {
     pub fn is_from_doc(&self) -> bool {
         match self {
@@ -220,13 +240,37 @@ impl ApplyFrom {
         }
     }
     
+    pub fn should_apply_reset(&self) -> bool {
+        match self {
+            Self::UpdateFromDoc{..}  => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_update_from_doc(&self) -> bool {
+        match self {
+            Self::UpdateFromDoc {..} => true,
+            _ => false
+        }
+    }
+        
     pub fn file_id(&self) -> Option<LiveFileId> {
         match self {
             Self::NewFromDoc {file_id} => Some(*file_id),
-            Self::UpdateFromDoc {file_id} => Some(*file_id),
+            Self::UpdateFromDoc {file_id,..} => Some(*file_id),
             _ => None
         }
     }
+    
+    pub fn to_live_ptr(&self, cx:&Cx, index:usize) -> Option<LivePtr> {
+        if let Some(file_id) = self.file_id(){
+            let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+            return Some(live_ptr)
+        }
+        None
+    }
+        
+        
 }
 
 

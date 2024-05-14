@@ -1,69 +1,71 @@
 use makepad_widgets::*;
- 
+       
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
+    
     App = {{App}} {
-
-        ui: <Window>{
-            show_bg: true
-            width: Fill,
-            height: Fill
-            
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    //return #000
-                    return mix(#7, #3, self.pos.y);
-                }
-            }
-            
-            body = <View>{
-                flow: Down,
-                spacing: 20,
-                align: {
-                    x: 0.5,
-                    y: 0.5
-                },
-                button1 = <Button> {
-                    text: "Hello world"
-                }
-                input1 = <TextInput> {
-                    width: 100, height: 30
-                    text: "Click to count"
-                }
-                label1 = <Label> {
-                    draw_text: {
-                        color: #f
-                    },
-                    text: "Counter: 0"
-                }
-                <Html>{
-                    font_size: 13,
-                    flow: RightWrap,
-                    width:Fill,
-                    height:Fit,
-                    padding: 5,
-                    line_spacing: 10,
-                    Button = <Button> {
-                        text: "Hello world"
+        ui: <Root>{
+            main_window = <Window>{
+                show_bg: true
+                width: Fill,
+                height: Fill
+                
+                draw_bg: {
+                    fn pixel(self) -> vec4 {
+                        // test
+                        return mix(#7, #3, self.pos.y);
                     }
-                    html:"this is <b>BOLD text</b> <i>italic</i> <Button>Hi</Button><b><i>Bold italic</i></b>"
+                }
+                
+                body = <ScrollXYView>{
+                    flow: Down,
+                    spacing:10,
+                    align: {
+                        x: 0.5,
+                        y: 0.5
+                    },
+                    button1 = <Button> {
+                        text: "Hello world"
+                        draw_text:{color:#f00}
+                    }
+                    input1 = <TextInput> {
+                        width: 100, height: 30
+                        text: "Click to count "
+                    }
+                    label1 = <Label> {
+                        draw_text: {
+                            color: #f
+                        },
+                        text: "Counter: 0"
+                    }
                 }
             }
         }
     }
-}
-  
-app_main!(App);
-
+}  
+              
+app_main!(App); 
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
  }
-
+ 
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
+        //println!("{}", std::mem::size_of::<LiveNode2>());
+        /*makepad_draw::live_design(cx);
+        makepad_widgets::base::live_design(cx);
+        makepad_widgets::theme_desktop_dark::live_design(cx);
+        makepad_widgets::label::live_design(cx);
+        makepad_widgets::view::live_design(cx);
+        makepad_widgets::button::live_design(cx);
+        makepad_widgets::window::live_design(cx);
+        makepad_widgets::scroll_bar::live_design(cx);
+        makepad_widgets::scroll_bars::live_design(cx);
+        makepad_widgets::root::live_design(cx);*/
         crate::makepad_widgets::live_design(cx);
     }
 }
@@ -71,10 +73,12 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
-            log!("BUTTON CLICKED {}", self.counter); 
+            log!("BUTTON jk {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            //log!("TOTAL : {}",TrackingHeap.total());
+            
         }
     }
 }
@@ -85,7 +89,9 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 } 
+
 /*
+
 // This is our custom allocator!
 use std::{
     alloc::{GlobalAlloc, Layout, System},

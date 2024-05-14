@@ -1,5 +1,4 @@
-use crate::makepad_draw::*;
-
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 live_design!{
     import makepad_draw::shader::std::*;
@@ -121,12 +120,14 @@ pub struct DrawColorWheel {
     #[live] val: f32,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Live, LiveHook, Widget)]
 pub struct ColorPicker {
-    #[live] draw_wheel: DrawColorWheel,
+    #[redraw] #[live] draw_wheel: DrawColorWheel,
     
     #[animator] animator: Animator,
     
+    #[walk] walk: Walk,
+        
     #[rust] pub size: f64,
     #[rust] hue: f32,
     #[rust] sat: f32,
@@ -134,6 +135,7 @@ pub struct ColorPicker {
     #[rust(ColorPickerDragMode::None)] drag_mode: ColorPickerDragMode
 }
 
+#[derive(Clone, Debug, DefaultNone)]
 pub enum ColorPickerAction {
     Change {rgba: Vec4},
     DoneChanging,
@@ -149,7 +151,7 @@ pub enum ColorPickerDragMode {
 
 impl ColorPicker {
     
-    pub fn handle_finger(&mut self, cx: &mut Cx, rel: DVec2, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: DVec2, scope:&mut Scope) {
         
         fn clamp(x: f64, mi: f64, ma: f64) -> f64 {if x < mi {mi} else if x > ma {ma} else {x}}
         
@@ -186,7 +188,8 @@ impl ColorPicker {
             changed = true;
         }
         if changed {
-            dispatch_action(cx, ColorPickerAction::Change {rgba: self.to_rgba()})
+            let uid = self.widget_uid();
+            cx.widget_action(uid, &scope.path, ColorPickerAction::Change {rgba: self.to_rgba()});
         }
     }
     
@@ -194,9 +197,33 @@ impl ColorPicker {
         Vec4::from_hsva(Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
+    
+    pub fn draw_color_picker(&mut self, cx: &mut Cx2d, rgba: Vec4, walk:Walk) {
+        if self.drag_mode == ColorPickerDragMode::None {
+            // lets convert to rgba
+            let old_rgba = self.to_rgba();
+            if !rgba.is_equal_enough(&old_rgba, 0.0001) {
+                let hsva = rgba.to_hsva();
+                self.hue = hsva.x;
+                self.sat = hsva.y;
+                self.val = hsva.z;
+            }
+        }
+        //self.draw_wheel.shader = live_shader!(cx, self::shader_wheel);
+        // i wanna draw a draw_wheel with 'width' set but height a fixed height.
+        self.size = cx.turtle().rect().size.y;
+        self.draw_wheel.hue = self.hue;
+        self.draw_wheel.sat = self.sat;
+        self.draw_wheel.val = self.val;
+        self.draw_wheel.draw_walk(cx, walk);
+    }
+}
+
+
+impl Widget for ColorPicker {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.animator_handle_event(cx, event);
-        
+                
         match event.hits(cx, self.draw_wheel.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, id!(hover.on));
@@ -219,7 +246,7 @@ impl ColorPicker {
                 else {
                     self.drag_mode = ColorPickerDragMode::None;
                 }
-                return self.handle_finger(cx, rel, dispatch_action);
+                return self.handle_finger(cx, rel, scope);
                 // lets check where we clicked!
             },
             Hit::FingerUp(fe) => {
@@ -230,35 +257,20 @@ impl ColorPicker {
                     self.animator_play(cx, id!(hover.off));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
-                dispatch_action(cx, ColorPickerAction::DoneChanging)
+                let uid = self.widget_uid();
+                cx.widget_action(uid, &scope.path, ColorPickerAction::DoneChanging);
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.rect.pos;
-                return self.handle_finger(cx, rel, dispatch_action)
-                
+                return self.handle_finger(cx, rel, scope)
+                                
             },
             _ => ()
         }
     }
-    
-    pub fn draw(&mut self, cx: &mut Cx2d, rgba: Vec4, height_scale: f64) {
-        if self.drag_mode == ColorPickerDragMode::None {
-            // lets convert to rgba
-            let old_rgba = self.to_rgba();
-            if !rgba.is_equal_enough(&old_rgba, 0.0001) {
-                let hsva = rgba.to_hsva();
-                self.hue = hsva.x;
-                self.sat = hsva.y;
-                self.val = hsva.z;
-            }
-        }
-        //self.draw_wheel.shader = live_shader!(cx, self::shader_wheel);
-        // i wanna draw a draw_wheel with 'width' set but height a fixed height.
-        self.size = cx.turtle().rect().size.y;
-        self.draw_wheel.hue = self.hue;
-        self.draw_wheel.sat = self.sat;
-        self.draw_wheel.val = self.val;
-        self.draw_wheel.draw_walk(cx, Walk::fixed_size(dvec2(self.size * height_scale, self.size * height_scale)));
+        
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.draw_color_picker(cx, vec4(1.0,0.0,0.0,1.0), walk);
+        DrawStep::done()
     }
 }
-
