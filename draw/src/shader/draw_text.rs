@@ -138,7 +138,7 @@ live_design!{
 const _: () = assert!(crate::font_atlas::ATLAS_WIDTH == 4096);
 const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 
-#[derive(Clone, Live, LiveHook, LiveRegister)]
+#[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
@@ -159,103 +159,123 @@ pub enum TextWrap {
 }
 
 struct WordIterator<'a> {
-    char_iter: Option<std::str::CharIndices<'a >>,
+    char_iter: std::str::CharIndices<'a >,
     eval_width: f64,
-    word_width: f64,
-    word_start: usize,
-    last_is_whitespace: bool,
     last_char: char,
     last_index: usize,
     font_size_total: f64,
+    ignore_newlines: bool,
+    combine_spaces: bool,
 }
-
+/*
 struct WordIteratorItem {
     start: usize,
     end: usize,
     width: f64,
-    with_newline: bool
+    with_new_line: bool
+}*/
+
+enum WordItem{
+    Spaces{start:usize, end: usize, width: f64},
+    Newline,
+    Word{start:usize, end: usize, width: f64}
 }
 
 impl<'a> WordIterator<'a> {
-    fn new(char_iter: std::str::CharIndices<'a>, eval_width: f64, font_size_total: f64) -> Self {
-        Self {
+    fn new(char_iter: std::str::CharIndices<'a>, eval_width: f64, font_size_total: f64, ignore_newlines:bool, combine_spaces:bool) -> Self {
+        let mut s = Self {
             eval_width,
-            char_iter: Some(char_iter),
-            last_is_whitespace: false,
-            word_width: 0.0,
-            word_start: 0,
-            last_char: '\0',
-            last_index: 0,
-            font_size_total
-        }
+            char_iter: char_iter,
+            last_char:'\0',
+            last_index:0,
+            font_size_total,
+            ignore_newlines,
+            combine_spaces
+        };
+        s.next_char();
+        s
     }
     
-    fn next_word(&mut self, font: &mut CxFont) -> Option<WordIteratorItem> {
-        if let Some(char_iter) = &mut self.char_iter {
-            while let Some((i, c)) = char_iter.next() {
-                self.last_index = i;
-                self.last_char = c;
-                let ret = WordIteratorItem {
-                    start: self.word_start,
-                    end: i,
-                    width: self.word_width,
-                    with_newline: false
-                };
-                
-                let adv = if let Some(glyph) = font.get_glyph(c) {
-                    glyph.horizontal_metrics.advance_width * self.font_size_total
-                }else {0.0};
-                
-                if c == '\r' {
-                    continue;
-                }
-                if c == '\n' {
-                    self.last_is_whitespace = false;
-                    self.word_start = i + 1;
-                    self.word_width = 0.0;
-                    return Some(WordIteratorItem {with_newline: true, end: i, ..ret})
-                }
-                else if c.is_whitespace() { // we only return words where whitespace turns to word
-                    self.last_is_whitespace = true;
-                }
-                else if self.last_is_whitespace {
-                    self.last_is_whitespace = false;
-                    self.word_start = i;
-                    self.word_width = adv;
-                    return Some(ret);
-                }
-                // this causes a character-based split if the word doesnt fit at all
-                if self.word_width + adv >= self.eval_width {
-                    self.word_start = i;
-                    self.word_width = adv;
-                    return Some(ret);
-                }
-                self.word_width += adv;
+    fn next_char(&mut self){
+        if let Some((i, c)) = self.char_iter.next() {
+            self.last_index = i;
+            self.last_char = c;
+        }
+        else{
+            self.last_index += self.last_char.len_utf8();
+            self.last_char = '\0';
+        };
+    }
+    
+    fn next_word(&mut self, font: &mut CxFont) -> Option<WordItem> {
+        if self.last_char == '\0'{
+            return None
+        }
+        else if self.last_char == '\n'{ // return newline
+            self.next_char();
+            if self.ignore_newlines{
+                return self.next_word(font);
             }
-            self.char_iter = None;
-            
-            let mut buffer = [0; 4];
-            let char_bytes_len = self.last_char.encode_utf8(&mut buffer).len();
-            
-            return Some(WordIteratorItem {
-                start: self.word_start,
-                end: self.last_index + char_bytes_len,
-                width: self.word_width,
-                with_newline: false
+            return Some(WordItem::Newline);
+        }
+        else if self.last_char == ' '{
+            let adv = if let Some(glyph) = font.get_glyph(' ') {
+                glyph.horizontal_metrics.advance_width * self.font_size_total
+            }else {0.0};
+            let start = self.last_index;
+            let mut width = 0.0;
+            while self.last_char == ' '{
+                if width + adv >= self.eval_width{
+                    if start == self.last_index{// advance atleast one char
+                        width += adv;
+                        self.next_char();
+                    }
+                    break;
+                }
+                width += adv;
+                self.next_char();
+            }
+            // lets make sure we advance atleast one char
+            if self.combine_spaces{
+                return Some(WordItem::Spaces{
+                    start,
+                    end: start+1,
+                    width: adv,
+                });
+            }
+            return Some(WordItem::Spaces{
+                start,
+                end: self.last_index,
+                width,
             });
         }
-        else {
-            None
+        else{
+            let start = self.last_index;
+            let mut width = 0.0;
+            while self.last_char != ' ' && self.last_char != '\0' && self.last_char != '\n' {
+                let adv = if let Some(glyph) = font.get_glyph(self.last_char) {
+                    glyph.horizontal_metrics.advance_width * self.font_size_total
+                }else {0.0};
+                if width + adv >= self.eval_width{
+                    if start == self.last_index{// advance atleast one char
+                        width += adv;
+                        self.next_char();
+                    }
+                    break;
+                }
+                width += adv;
+                self.next_char();
+            }
+            
+            return Some(WordItem::Word{
+                start,
+                end: self.last_index,
+                width,
+            });
         }
+        
     }
 }
-/*
-#[derive(Debug, Clone, Copy, Live, LiveHook)]
-pub enum Overflow {
-    #[live] Cut,
-    #[pick] Ellipsis,
-    #[live] None
-}*/
 
 pub struct TextGeom {
     pub eval_width: f64,
@@ -273,6 +293,10 @@ pub struct DrawText {
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
     #[live] pub wrap: TextWrap,
+    
+    #[live] pub ignore_newlines: bool,
+    #[live] pub combine_spaces: bool,
+    
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
     
@@ -397,7 +421,7 @@ impl DrawText {
         let zbias_step = 0.00001;
         let mut char_depth = self.draw_depth;
         
-        let mut rustybuzz_buffer = rustybuzz::UnicodeBuffer::new();
+        let mut rustybuzz_buffer = makepad_rustybuzz::UnicodeBuffer::new();
         
         // This relies on the UBA ("Unicode Bidirectional Algorithm")
         // (see http://www.unicode.org/reports/tr9/#Basic_Display_Algorithm),
@@ -423,9 +447,9 @@ impl DrawText {
                     .get_or_compute_glyph_ids(
                     (
                             if run_level.is_rtl() {
-                                rustybuzz::Direction::RightToLeft
+                                makepad_rustybuzz::Direction::RightToLeft
                             } else {
-                                rustybuzz::Direction::LeftToRight
+                                makepad_rustybuzz::Direction::LeftToRight
                             },
                             &bidi_info.text[run_range]
                         ),
@@ -554,19 +578,28 @@ impl DrawText {
                 let mut measured_width = 0.0;
                 let mut measured_height = line_height;
                 
-                let mut iter = WordIterator::new(text.char_indices(), eval_width, font_size_logical * self.font_scale);
+                let mut iter = WordIterator::new(
+                    text.char_indices(),
+                    eval_width, font_size_logical * self.font_scale,
+                    self.ignore_newlines,
+                    self.combine_spaces,
+                );
                 while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
-                    if measured_width + word.width >= eval_width {
-                        measured_height += line_height * self.text_style.line_spacing;
-                        measured_width = word.width;
-                    }
-                    else {
-                        measured_width += word.width;
-                    }
-                    if measured_width > max_width {max_width = measured_width}
-                    if word.with_newline {
-                        measured_height += line_height * self.text_style.line_spacing;
-                        measured_width = 0.0;
+                    match word{
+                        WordItem::Newline=>{
+                            measured_height += line_height * self.text_style.line_spacing;
+                            measured_width = 0.0;
+                        }
+                        WordItem::Spaces{width,..} | WordItem::Word{width,..}=>{
+                            if measured_width + width >= eval_width {
+                                measured_height += line_height * self.text_style.line_spacing;
+                                measured_width = width;
+                            }
+                            else {
+                                measured_width += width;
+                            }
+                            if measured_width > max_width {max_width = measured_width}
+                        }
                     }
                 }
                 
@@ -605,8 +638,11 @@ impl DrawText {
             }
         }
     }
+    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str){
+        self.draw_walk_word_with(cx, text, |_,_|{});
+    }
     
-    pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str) {
+    pub fn draw_walk_word_with<F>(&mut self, cx: &mut Cx2d, text: &str, mut cb:F) where F: FnMut(&mut Cx2d, Rect){
         
         // this walks the turtle per word
         if text.len() == 0 {
@@ -621,7 +657,7 @@ impl DrawText {
         let fonts_atlas = &mut*fonts_atlas;
                 
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
-        let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+        let line_drop = self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.top_drop;
         
         // lets get the width of the current turtle
         // we need it for the next_word item to properly break off
@@ -631,17 +667,42 @@ impl DrawText {
             text.char_indices(),
             padded_rect.size.x,
             font_size_logical * self.font_scale, 
+            self.ignore_newlines,
+            self.combine_spaces,
         );
-        
+        let mut last_rect = None;
         while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
-            let walk_rect = cx.walk_turtle(Walk {
-                abs_pos: None,
-                margin: Margin::default(),
-                width: Size::Fixed(word.width),
-                height: Size::Fixed(line_height)
-            });
-            // make sure our iterator uses the xpos from the turtle
-            self.draw_inner(cx, walk_rect.pos, &text[word.start..word.end], fonts_atlas);
+            match word{
+                WordItem::Newline=>{
+                    cx.turtle_new_line();
+                }
+                WordItem::Spaces{start,end,width,..} | WordItem::Word{start,end,width,..}=>{
+                    let walk_rect = cx.walk_turtle(Walk {
+                        abs_pos: None,
+                        margin: Margin::default(),
+                        width: Size::Fixed(width),
+                        height: Size::Fixed(line_drop)
+                    });
+                    if last_rect.is_none(){
+                        last_rect = Some(walk_rect)
+                    }
+                    else{
+                        let rect = last_rect.unwrap();
+                        if walk_rect.pos.y > rect.pos.y { // we emit the last rect
+                            cb(cx, rect);
+                            last_rect = Some(walk_rect);
+                        }
+                        else{
+                            last_rect.as_mut().unwrap().size.x += walk_rect.size.x;
+                        }
+                    }
+                    if let Some(rect) = last_rect{
+                        cb(cx, rect);
+                    }
+                    // make sure our iterator uses the xpos from the turtle
+                    self.draw_inner(cx, walk_rect.pos, &text[start..end], fonts_atlas);
+                }
+            }
         }
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
@@ -689,7 +750,18 @@ impl DrawText {
                             height: Size::Fixed(height)
                         });
                         
-                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip], fonts_atlas);
+                        // Ensure the chunk before the ellipsis is aligned down to a char boundary
+                        let chunk = text.get(0..ellip).unwrap_or_else(|| {
+                            let mut new_ellip = ellip.saturating_sub(1);
+                            while new_ellip > 0 {
+                                if let Some(s) = text.get(0..new_ellip) {
+                                    return s;
+                                }
+                                new_ellip -= 1;
+                            }
+                            ""
+                        });
+                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), chunk, fonts_atlas);
                         self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots], fonts_atlas);
                     }
                     else { // we might have space to h-align
@@ -718,18 +790,27 @@ impl DrawText {
                     });
                     let mut pos = dvec2(0.0, 0.0);
                     
-                    let mut iter = WordIterator::new(text.char_indices(), geom.eval_width, font_size_logical * self.font_scale);
+                    let mut iter = WordIterator::new(
+                        text.char_indices(), 
+                        geom.eval_width, 
+                        font_size_logical * self.font_scale,
+                        self.ignore_newlines,
+                        self.combine_spaces,    
+                    );
                     while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
-                        if pos.x + word.width >= geom.eval_width {
-                            pos.y += line_height * self.text_style.line_spacing;
-                            pos.x = 0.0;
-                        }
-                        self.draw_inner(cx, rect.pos + pos, &text[word.start..word.end], fonts_atlas);
-                        pos.x += word.width;
-                        
-                        if word.with_newline {
-                            pos.y += line_height * self.text_style.line_spacing;
-                            pos.x = 0.0;
+                        match word{
+                            WordItem::Newline=>{
+                                pos.y += line_height * self.text_style.line_spacing;
+                                pos.x = 0.0;
+                            }
+                            WordItem::Word{start, end, width} | WordItem::Spaces{start, end, width}=>{
+                                if pos.x + width >= geom.eval_width {
+                                    pos.y += line_height * self.text_style.line_spacing;
+                                    pos.x = 0.0;
+                                }
+                                self.draw_inner(cx, rect.pos + pos, &text[start..end], fonts_atlas);
+                                pos.x += width;
+                            }
                         }
                     }
                 }
@@ -757,7 +838,7 @@ impl DrawText {
         }
     }
     
-    pub fn closest_offset(&self, cx: &Cx, pos: DVec2) -> Option<usize> {
+    pub fn closest_offset(&self, cx: &Cx, newline_indexes: Vec<usize>, pos: DVec2) -> Option<usize> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
@@ -770,30 +851,42 @@ impl DrawText {
         let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
 
         let mut last_y = None;
+        let mut newlines = 0;
         for i in 0..rect_pos.repeat {
+            if newline_indexes.contains(&(i + newlines)) {
+                newlines += 1;
+            }
+
             let index = rect_pos.stride * i;
             let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
+
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             if last_y.is_none() {last_y = Some(y)}
             let advance = advance.buffer[index + 0] as f64;
-            if i > 0 && y > last_y.unwrap() && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
-                return Some(i - 1)
+            if i > 0 && (y - last_y.unwrap()) > 0.001 && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
+                return Some(i - 1 + newlines)
             }
             if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {
-                return Some(i)
+                return Some(i + newlines)
             }
             last_y = Some(y)
         }
-        return Some(rect_pos.repeat);
+        return Some(rect_pos.repeat + newlines);
         
     }
     
-    pub fn get_selection_rects(&self, cx: &Cx, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
+    pub fn get_selection_rects(&self, cx: &Cx, newline_indexes: Vec<usize>, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return Vec::new();
         }
+
+        // Adjustments because of newlines characters (they are not in the buffers)
+        let start_offset = newline_indexes.iter().filter(|&&i| i < start).count();
+        let start = start - start_offset;
+        let end_offset = newline_indexes.iter().filter(|&&i| i < end).count();
+        let end = end - end_offset;
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
@@ -838,7 +931,6 @@ impl DrawText {
         out
     }
     
-    
     pub fn get_char_count(&self, cx: &Cx) -> usize {
         let area = &self.draw_vars.area;
         if !area.is_valid(cx) {
@@ -848,12 +940,19 @@ impl DrawText {
         rect_pos.repeat
     }
     
-    pub fn get_cursor_pos(&self, cx: &Cx, pos: f32, index: usize) -> Option<DVec2> {
+    pub fn get_cursor_pos(&self, cx: &Cx, newline_indexes: Vec<usize>, pos: f32, index: usize) -> Option<DVec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return None
         }
+        // Adjustment because of newlines characters (they are not in the buffers)
+        let index_offset = newline_indexes.iter().filter(|&&i| i < index).count();
+        let (index, pos) = if newline_indexes.contains(&(index)){
+            (index - index_offset - 1, pos + 1.0)
+        } else {
+            (index - index_offset, pos)
+        };
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();

@@ -6,9 +6,9 @@ live_design! {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum ButtonAction {
     None,
-    Clicked,
-    Pressed,
-    Released,
+    Clicked(KeyModifiers),
+    Pressed(KeyModifiers),
+    Released(KeyModifiers),
 }
  
 #[derive(Live, LiveHook, Widget)]
@@ -47,11 +47,11 @@ impl Widget for Button {
             self.draw_bg.redraw(cx);
         }
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
-                cx.widget_action(uid, &scope.path, ButtonAction::Pressed);
+                cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, id!(hover.pressed));
             }
             Hit::FingerHoverIn(_) => {
@@ -63,15 +63,15 @@ impl Widget for Button {
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
-                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
-                    cx.widget_action(uid, &scope.path, ButtonAction::Released);
+                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                    cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
                     } else {
                         self.animator_play(cx, id!(hover.off));
                     }
                 } else {
-                    cx.widget_action(uid, &scope.path, ButtonAction::Released);
+                    cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
                     self.animator_play(cx, id!(hover.off));
                 }
             }
@@ -81,9 +81,9 @@ impl Widget for Button {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
-        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
         DrawStep::done()
     }
@@ -97,19 +97,113 @@ impl Widget for Button {
     }
 }
 
-impl ButtonRef {
+impl Button {
+        
+    pub fn draw_button(&mut self, cx: &mut Cx2d, label:&str) {
+        self.draw_bg.begin(cx, self.walk, self.layout);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_text
+        .draw_walk(cx, self.label_walk, Align::default(), label);
+        self.draw_bg.end(cx);
+    }
+    
+    
     pub fn clicked(&self, actions: &Actions) -> bool {
-        if let ButtonAction::Clicked = actions.find_widget_action(self.widget_uid()).cast() {
-            return true;
+        if let ButtonAction::Clicked(_) = actions.find_widget_action(self.widget_uid()).cast() {
+            true
+        } else {
+            false
         }
-        false
     }
 
     pub fn pressed(&self, actions: &Actions) -> bool {
-        if let ButtonAction::Pressed = actions.find_widget_action(self.widget_uid()).cast() {
-            return true;
+        if let ButtonAction::Pressed(_) = actions.find_widget_action(self.widget_uid()).cast() {
+            true
+        } else {
+            false
         }
-        false
+    }
+
+    pub fn released(&self, actions: &Actions) -> bool {
+        if let ButtonAction::Released(_) = actions.find_widget_action(self.widget_uid()).cast() {
+            true
+        } else {
+            false
+        }
+    }
+    
+    pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    
+    pub fn pressed_modifiers(&self, actions: &Actions) ->  Option<KeyModifiers> {
+        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    
+    pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
+        } else {
+            None
+        }
+    }
+}
+
+impl ButtonRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.clicked(actions)
+        } else {
+            false
+        }
+    }
+
+    pub fn pressed(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.pressed(actions)
+        } else {
+            false
+        }
+    }
+    
+    pub fn released(&self, actions: &Actions) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.released(actions)
+        } else {
+            false
+        }
+    }
+    
+    pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
+        } else {
+            None
+        }
+    }
+        
+    pub fn pressed_modifiers(&self, actions: &Actions) ->  Option<KeyModifiers> {
+        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
+        } else {
+            None
+        }
+    }
+        
+    pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast() {
+            Some(m)
+        } else {
+            None
+        }
     }
 }
 
@@ -119,5 +213,17 @@ impl ButtonSet {
     }
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.pressed(actions))
+    }
+    pub fn released(&self, actions: &Actions) -> bool {
+        self.iter().any(|v| v.released(actions))
+    }
+    
+    pub fn which_clicked_modifiers(&self, actions: &Actions) -> Option<(usize,KeyModifiers)> {
+        for (index,btn) in self.iter().enumerate(){
+            if let Some(km) = btn.clicked_modifiers(actions){
+                return Some((index, km))
+            }
+        }
+        None
     }
 }

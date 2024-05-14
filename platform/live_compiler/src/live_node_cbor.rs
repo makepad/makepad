@@ -351,7 +351,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::Id(_) => {
                     return Err("Cannot serialise LiveValue::Id".into())
                 },
-                LiveValue::Clone(_) => {
+                LiveValue::Clone{..} => {
                     return Err("Cannot serialise LiveValue::Clone".into())
                 }, // subnodes including this one
                 LiveValue::ExprBinOp(_) => {
@@ -374,6 +374,9 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 },
                 LiveValue::Class {..} => {
                     return Err("Cannot serialise LiveValue::Class".into())
+                }, // subnodes including this one
+                LiveValue::Deref {..} => {
+                    return Err("Cannot serialise LiveValue::Deref".into())
                 }, // subnodes including this one
                 LiveValue::DSL {..} => {
                     return Err("Cannot serialise LiveValue::DSL".into())
@@ -787,6 +790,10 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     }
                 }
             };
+        }
+        if stack.last().unwrap().count == stack.last().unwrap().len {
+            self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
+            stack.pop();
         }
         // lets unwind the stack
         while let Some(item) = stack.pop() {

@@ -177,8 +177,12 @@ impl BuildConnection {
                 "makepad".into(),
                 "apple".into(),
                 "tvos".into(),
-                format!("--org={}", "makepad"),
-                format!("--app={}", "example"),
+                "--org=makepad".into(),
+                "--app=aiview".into(),
+                "--app=aiview".into(),
+                "--cert=61".into(),
+                "--device=F8,27".into(),
+                "--profile=./local/tvos4.mobileprovision".into(),
                 "run-device".into(),
                 "-p".into(),
                 what.binary.clone(),
@@ -197,7 +201,7 @@ impl BuildConnection {
             BuildTarget::WebAssembly => vec![
                 "makepad".into(),
                 "wasm".into(),
-                "build".into(),
+                "run".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--release".into(),
@@ -240,9 +244,15 @@ impl BuildConnection {
 
         let http = format!("{}/{}", http, cmd_id.0);
         let mut env = vec![
+
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
+        
+        let is_in_studio = match what.target {
+            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio=>true,
+            _=>false
+        };
 
         // Default to nightly rustc but don't overwrite any user request for a
         // specific nightly version.
@@ -266,11 +276,13 @@ impl BuildConnection {
         // HACK(eddyb) do this first, as there is no way to actually send the
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
-        // it will definitely arrive before C->H ReadyToStart triggers anything).
-        msg_sender.send_message(BuildClientMessageWrap{
-            cmd_id,
-            message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
-        });
+        // it will definitely arrive before C->H ReadyToStart triggers anything)
+        if is_in_studio{
+            msg_sender.send_message(BuildClientMessageWrap{
+                cmd_id,
+                message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone().unwrap()),
+            });
+        }
 
        // let mut stderr_state = StdErrState::First;
         //let stdin_sender = process.stdin_sender.clone();
@@ -396,7 +408,7 @@ pub trait MsgSender: Send {
                 cmd_id,
                 message:BuildClientMessage::LogItem(LogItem::Location(LogItemLocation {
                 level,
-                file_name,
+                file_name: file_name.replace("\\","/"),
                 start,
                 end,
                 message
@@ -418,7 +430,13 @@ pub trait MsgSender: Send {
                     return
                 }
             };
+            if let LogLevel::Warning = level{
+                if msg.message.starts_with("unstable feature specified for"){
+                    return
+                }
+            }
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
+               
                 self.send_location_msg(cmd_id, level, span.file_name.clone(),span.start(), span.end(), msg.message.clone());
                 /*
                 if let Some(label) = &span.label {
@@ -466,6 +484,3 @@ impl fmt::Debug for dyn MsgSender {
         write!(f, "MsgSender")
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct ConnectionId(usize);

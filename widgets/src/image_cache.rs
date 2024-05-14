@@ -1,7 +1,10 @@
-use crate::{makepad_draw::*, ImageError};
+use crate::{makepad_draw::*};
 use std::collections::HashMap;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::PngDecoder;
+use std::fmt;
+use std::io::prelude::*;
+use std::fs::File;
 
 pub use makepad_zune_png::error::PngDecodeErrors;
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
@@ -13,7 +16,8 @@ pub enum ImageFit{
     Horizontal,
     Vertical,
     Smallest,
-    Biggest
+    Biggest,
+    Size
 }
 
 
@@ -90,7 +94,6 @@ impl ImageBuffer {
                 }
             }
             Err(err) => {
-                error!("Error decoding PNG: {:?}", err);
                 Err(ImageError::PngDecode(err))
             }
         }
@@ -107,7 +110,6 @@ impl ImageBuffer {
                 ImageBuffer::new(&data, info.width as usize, info.height as usize)
             },
             Err(err) => {
-                error!("Error decoding JPG: {:?}", err);
                 Err(ImageError::JpgDecode(err))
             }
         }
@@ -126,9 +128,35 @@ impl ImageCache {
     }
 }
 
+
+/// The possible errors that can occur when loading or creating an image texture.
+#[derive(Debug)]
+pub enum ImageError {
+    /// The image data buffer was empty.
+    EmptyData,
+    /// The image's pixel data was not aligned to 3-byte or 4-byte pixels.
+    /// The unsupported alignment value (in bytes) is included.
+    InvalidPixelAlignment(usize),
+    /// The image data could not be decoded as a JPEG.
+    JpgDecode(JpgDecodeErrors),
+    /// The image file at the given resource path could not be found.
+    PathNotFound(String),
+    /// The image data could not be decoded as a PNG.
+    PngDecode(PngDecodeErrors),
+    /// The image data was in an unsupported format.
+    /// Currently, only JPEG and PNG are supported.
+    UnsupportedFormat,
+}
+
+impl std::fmt::Display for ImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 pub trait ImageCacheImpl {
-    fn get_texture(&self) -> &Option<Texture>;
-    fn set_texture(&mut self, texture: Option<Texture>);
+    fn get_texture(&self, id:usize) -> &Option<Texture>;
+    fn set_texture(&mut self, texture: Option<Texture>,id: usize);
 
     fn lazy_create_image_cache(&mut self,cx: &mut Cx) {
         if !cx.has_global::<ImageCache>() {
@@ -136,50 +164,109 @@ pub trait ImageCacheImpl {
         }
     }
 
-    fn load_png_from_data(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+    fn load_png_from_data(&mut self, cx: &mut Cx, data: &[u8], id:usize) -> Result<(), ImageError> {
         match ImageBuffer::from_png(&*data){
             Ok(data)=>{
-                self.set_texture(Some(data.into_new_texture(cx)));
+                self.set_texture(Some(data.into_new_texture(cx)), id);
                 Ok(())
             }
             Err(err)=>{
-                error!("load_png_from_data: Cannot load png image from data: {}", err);
                 Err(err)
             }
         }
     }
     
-    fn load_jpg_from_data(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+    fn load_jpg_from_data(&mut self, cx: &mut Cx, data: &[u8], id:usize) -> Result<(), ImageError> {
         match ImageBuffer::from_jpg(&*data){
             Ok(data)=>{
-                self.set_texture(Some(data.into_new_texture(cx)));
+                self.set_texture(Some(data.into_new_texture(cx)), id);
                 Ok(())
             }
             Err(err)=>{
-                error!("load_jpg_from_data: Cannot load png image from data: {}", err);
                 Err(err)
             }
         }
     }
-
+    
+    fn load_image_file_by_path(
+        &mut self,
+        cx: &mut Cx,
+        image_path: &str,
+        id: usize,
+    ) -> Result<(), ImageError> {
+        log!("LOADING FROM DISK  {}", image_path);
+        if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
+            self.set_texture(Some(texture.clone()), id);
+            Ok(())
+        }
+        else{
+            if let Ok(mut f) = File::open(image_path){
+                let mut data = Vec::new();
+                match f.read_to_end(&mut data) {
+                    Ok(_len) => {
+                        if image_path.ends_with(".jpg") {
+                            match ImageBuffer::from_jpg(&*data){
+                                Ok(data)=>{
+                                    let texture = data.into_new_texture(cx);
+                                    cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
+                                    self.set_texture(Some(texture), id);
+                                    Ok(())
+                                }
+                                Err(err)=>{
+                                    error!("load_image_file_by_path: Cannot load jpeg image from path: {} {}", image_path, err);
+                                    Err(err)
+                                }
+                            }
+                        } else if image_path.ends_with(".png") {
+                            match ImageBuffer::from_png(&*data){
+                                Ok(data)=>{
+                                    let texture = data.into_new_texture(cx);
+                                    cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
+                                    self.set_texture(Some(texture), id);
+                                    Ok(())
+                                }
+                                Err(err)=>{
+                                    error!("load_image_file_by_path: Cannot load png image from path: {} {}", image_path, err);
+                                    Err(err)
+                                }
+                            }
+                        } else {
+                            error!("load_image_file_by_path: Image format not supported {}", image_path);
+                            Err(ImageError::UnsupportedFormat)
+                        }
+                    }
+                    Err(err) => {
+                        error!("load_image_file_by_path: Resource not found {} {}", image_path, err);
+                        Err(ImageError::PathNotFound(image_path.to_string()))
+                    }
+                }
+            }
+            else{
+                error!("load_image_file_by_path: File not found {}", image_path);
+                Err(ImageError::PathNotFound(image_path.to_string()))
+            }
+        }
+    }
+    
     fn load_image_dep_by_path(
         &mut self,
         cx: &mut Cx,
         image_path: &str,
+        id: usize,
     ) -> Result<(), ImageError> {
         if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
-            self.set_texture(Some(texture.clone()));
+            self.set_texture(Some(texture.clone()), id);
             Ok(())
-        }
+        } 
         else{
-            match cx.get_dependency(image_path) {
+            match cx.take_dependency(image_path) {
                 Ok(data) => {
                     if image_path.ends_with(".jpg") {
                         match ImageBuffer::from_jpg(&*data){
                             Ok(data)=>{
                                 let texture = data.into_new_texture(cx);
                                 cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
-                                self.set_texture(Some(texture));
+                                self.set_texture(Some(texture), id);
                                 Ok(())
                             }
                             Err(err)=>{
@@ -192,7 +279,7 @@ pub trait ImageCacheImpl {
                             Ok(data)=>{
                                 let texture = data.into_new_texture(cx);
                                 cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
-                                self.set_texture(Some(texture));
+                                self.set_texture(Some(texture), id);
                                 Ok(())
                             }
                             Err(err)=>{

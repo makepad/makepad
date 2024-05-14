@@ -1,0 +1,22 @@
+# from: https://github.com/rp-rs/rp2040-project-template
+
+# install thumbv6m toolchain for rp2040 compilation
+//rustup target install thumbv6m-none-eabi
+rustup target add thumbv6m-none-eabi --toolchain nightly
+# install custom linker to generate embedded binaries
+cargo install flip-link
+
+# install probe-rs and elf2uf2-rs tools to facilitate uploading/flashing/debugging:
+cargo install probe-rs --features=cli --locked
+# If you want to use elf2uf2-rs instead, do...
+cargo install elf2uf2-rs --locked
+
+# install the nightl,y chain
+rustup toolchain install nightly
+
+
+
+cd makepad-logothing
+cargo build --release
+probe-rs run target/thumbv6m-none-eabi/release/makepad-logothing --chip RP2040 
+probe-rs run target/thumbv6m-none-eabi/release/makepad-logothing --chip RP2040 --probe 2e8a:000C

@@ -7,7 +7,6 @@ use {
         collections::{HashMap},
         sync::Once,
         fmt,
-        cmp,
     }
 };
 
@@ -101,7 +100,7 @@ impl LiveIdInterner {
     }
 }
 
-#[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
+#[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LiveId(pub u64);
 
 pub const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
@@ -158,6 +157,18 @@ impl LiveId {
         Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
+    pub fn add(&self, what:u64)->Self{
+        Self(self.0 + what)
+    }
+    
+    pub fn xor(&self, what:u64)->Self{
+        Self((self.0 ^ what)| 0x8000_0000_0000_0000)
+    }
+    
+    pub fn sub(&self, what:u64)->Self{
+        Self(self.0 - what)
+    }
+        
     pub const fn from_str(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
@@ -257,7 +268,7 @@ impl LiveId {
 }
 
 pub (crate) static UNIQUE_LIVE_ID: AtomicU64 = AtomicU64::new(1);
-
+/*
 impl Ord for LiveId {
     fn cmp(&self, other: &LiveId) -> cmp::Ordering {
         LiveIdInterner::with( | idmap | {
@@ -275,7 +286,7 @@ impl PartialOrd for LiveId {
     fn partial_cmp(&self, other: &LiveId) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
-}
+}*/
 
 impl fmt::Debug for LiveId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

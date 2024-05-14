@@ -64,7 +64,7 @@ impl Cx {
                     
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                        data: WasmDataF32::new(draw_item.instances.as_ref().unwrap())
+                        data: WasmPtrF32::new(draw_item.instances.as_ref().unwrap())
                     });
                     draw_call.instance_dirty = false;
                 }
@@ -85,14 +85,22 @@ impl Cx {
                         if cxtexture.check_updated(){
                             match &cxtexture.format{
                                 TextureFormat::VecBGRAu8_32{width, height, data}=>{
-                                    self.os.from_wasm(FromWasmAllocTextureImage2D {
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmDataU32::new(&data)
+                                        data: WasmPtrU32::new(&data)
                                     });
                                 }
-                                _=>panic!()
+                                TextureFormat::VecRu8{width, height, data, ..}=>{
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D_Ru8 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrU8::new(&data)
+                                    });
+                                }
+                                x=>panic!("Texture format not implemented for webGL {:?}", x)
                             }
                         }
                     }
@@ -116,12 +124,12 @@ impl Cx {
                     }
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: geometry.os.vb_id.unwrap(),
-                        data: WasmDataF32::new(&geometry.vertices)
+                        data: WasmPtrF32::new(&geometry.vertices)
                     });
                     
                     self.os.from_wasm(FromWasmAllocIndexBuffer {
                         buffer_id: geometry.os.ib_id.unwrap(),
-                        data: WasmDataU32::new(&geometry.indices)
+                        data: WasmPtrU32::new(&geometry.indices)
                     });
                     
                     geometry.dirty = false;
@@ -171,12 +179,12 @@ impl Cx {
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: draw_call.draw_shader.draw_shader_id,
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
-                    pass_uniforms: WasmDataF32::new(pass_uniforms.as_slice()),
-                    view_uniforms: WasmDataF32::new(draw_list.draw_list_uniforms.as_slice()),
-                    draw_uniforms: WasmDataF32::new(draw_call.draw_uniforms.as_slice()),
-                    user_uniforms: WasmDataF32::new(draw_call.user_uniforms.as_slice()),
-                    live_uniforms: WasmDataF32::new(&sh.mapping.live_uniforms_buf),
-                    const_table: WasmDataF32::new(&sh.mapping.const_table.table),
+                    pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
+                    view_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
+                    draw_uniforms: WasmPtrF32::new(draw_call.draw_uniforms.as_slice()),
+                    user_uniforms: WasmPtrF32::new(draw_call.user_uniforms.as_slice()),
+                    live_uniforms: WasmPtrF32::new(&sh.mapping.live_uniforms_buf),
+                    const_table: WasmPtrF32::new(&sh.mapping.const_table.table),
                     textures
                 });
             }

@@ -52,7 +52,7 @@ pub struct DirectoryEntry {
 #[derive(Debug)]
 pub struct FileEdge {
     pub name: String,
-    pub file_node_id: FileNodeId,
+    pub file_node_id: LiveId,
 }
 
 
@@ -72,13 +72,13 @@ impl FileNode {
 #[derive(Live, LiveHook, Widget)] 
 pub struct DemoFileTree{
     #[wrap] #[live] pub file_tree: FileTree,
-    #[rust] pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
+    #[rust] pub file_nodes: LiveIdMap<LiveId, FileNode>,
     #[rust] pub root_path: String,
-    #[rust] pub path_to_file_node_id:  HashMap<String, FileNodeId>
+    #[rust] pub path_to_file_node_id:  HashMap<String, LiveId>
 }
 
 impl DemoFileTree{
-    pub fn draw_file_node(cx: &mut Cx2d, file_node_id: FileNodeId, file_tree:&mut FileTree, file_nodes: &LiveIdMap<FileNodeId, FileNode>) {
+    pub fn draw_file_node(cx: &mut Cx2d, file_node_id: LiveId, file_tree:&mut FileTree, file_nodes: &LiveIdMap<LiveId, FileNode>) {
         if let Some(file_node) = file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
                 Some(child_edges) => {
@@ -99,13 +99,13 @@ impl DemoFileTree{
 
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
-            file_node_id: Option<FileNodeId>,
+            file_node_id: Option<LiveId>,
             node_path: String,
-            path_to_file_id: &mut HashMap<String, FileNodeId>,
-            file_nodes: &mut LiveIdMap<FileNodeId, FileNode>,
+            path_to_file_id: &mut HashMap<String, LiveId>,
+            file_nodes: &mut LiveIdMap<LiveId, FileNode>,
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
-        ) -> FileNodeId {
+        ) -> LiveId {
             let file_node_id = file_node_id.unwrap_or(LiveId::from_str(&node_path).into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),

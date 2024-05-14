@@ -24,7 +24,7 @@ impl Widget for StudioFileTree {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while self.file_tree.draw_walk(cx, scope, walk).is_step() {
             self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
-            scope.data.get_mut::<AppData>().file_system.draw_file_node(
+            scope.data.get_mut::<AppData>().unwrap().file_system.draw_file_node(
                 cx,
                 live_id!(root).into(),
                 &mut self.file_tree

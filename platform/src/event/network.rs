@@ -60,6 +60,15 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
+#[derive(Debug)]
+pub struct SplitUrl<'a>{
+    pub proto: &'a str,
+    pub host: &'a str,
+    pub port: &'a str,
+    pub file: &'a str,
+    pub hash: &'a str,
+}
+
 impl HttpRequest { 
     pub fn new(url: String, method: HttpMethod) -> Self {
         HttpRequest {
@@ -69,6 +78,30 @@ impl HttpRequest {
             ignore_ssl_cert: false,
             headers: BTreeMap::new(),
             body: None
+        }
+    }
+
+    pub fn split_url(&self)->SplitUrl{
+        let (proto, rest) = self.url.split_once("://").unwrap_or((&self.url, "http://"));
+        let (host, port, rest) = if let Some((host, rest)) = rest.split_once(":"){
+            let (port, rest) = rest.split_once("/").unwrap_or((rest, ""));
+            (host, port, rest)
+        }
+        else{
+            let (host, rest) = rest.split_once("/").unwrap_or((rest, ""));
+            (host,match proto{
+                "http"|"ws"=>"80",
+                "https"|"wss"=>"443",
+                _=>"80"
+            },rest)
+        };
+        let (file, hash) = rest.split_once("#").unwrap_or((rest, ""));
+        return SplitUrl{
+            proto,
+            host,
+            port,
+            file, 
+            hash
         }
     }
     

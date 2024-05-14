@@ -281,7 +281,12 @@ impl Cx {
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
-        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        
+        self.passes[pass_id].set_matrix(
+            pass_rect.pos, 
+            pass_rect.size
+        );
+        
         self.passes[pass_id].paint_dirty = false;
 
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
@@ -305,7 +310,6 @@ impl Cx {
             }
         } 
         else if let Some(drawable) = mode.is_drawable() {
-            
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
@@ -459,13 +463,13 @@ impl Cx {
             DrawPassMode::MTKView(view)=>{
                 let drawable:ObjcId = unsafe {msg_send![view, currentDrawable]};
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::StdinMain(stdin_frame) => {
+                
                 self.commit_command_buffer(Some(stdin_frame), command_buffer, gpu_read_guards);
             }
             DrawPassMode::Drawable(drawable) => {
@@ -485,7 +489,7 @@ impl Cx {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
-        let start_time = self.start_time;
+        let start_time = self.os.start_time.unwrap();
         let () = unsafe {msg_send![
             command_buffer,
             addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
@@ -643,7 +647,7 @@ impl CxOsDrawShader {
         };
         
         let mut error: ObjcId = nil;
-        
+        //std::env::set_var("MTL_IGNORE_WARNINGS","-W");
         let library = RcObjcId::from_owned(match NonNull::new(unsafe {
             msg_send![
                 metal_cx.device,

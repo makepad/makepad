@@ -5,10 +5,9 @@ use {
             build_manager::*,
             build_protocol::*,
         },
+        makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
-        makepad_code_editor::text::{Position},
-        makepad_widgets::portal_list::PortalList,
     },
     std::{
         env,
@@ -21,17 +20,15 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     Icon = <View> {
+        width: 10, height: 10
+        margin:{top:2},
         show_bg: true,
-        width: 10,
-        height: 10
     }
     
     LogIcon = <PageFlip> {
+        width: Fit, height: Fit,
         active_page: log
         lazy_init: true,
-        width: Fit,
-        height: Fit,
-        margin: {top: 1, left: 5, right: 5}
         wait = <Icon> {
             draw_bg: {
                 fn pixel(self) -> vec4 {
@@ -120,11 +117,12 @@ live_design!{
         }
     }
     
-    LogItem = <RectView> {
-        height: Fit,
-        width: Fill
-        padding: {top: 6, bottom: 6}
-        
+    LogItem = <View> {
+        height: Fit, width: Fill
+        padding: <THEME_MSPACE_2> {} // TODO: Fix. Changing this value to i.e. '0.' causes Makepad Studio to freeze when switching to the log tab.
+        spacing: (THEME_SPACE_2)
+        align: { x: 0.0, y: 0.0 }
+        show_bg: true,
         draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
@@ -132,11 +130,11 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_BG_EDITOR,
+                        THEME_COLOR_BG_EVEN,
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    THEME_COLOR_BG_SELECTED,
+                    THEME_COLOR_CTRL_SELECTED,
                     self.selected
                 );
             }
@@ -173,36 +171,35 @@ live_design!{
                     apply: {
                         draw_bg: {selected: 1.0}
                     }
-                }
+                }  
             }
         }
     }
     
     LogList = {{LogList}}{
-        height: Fill,
-        width: Fill
+        height: Fill, width: Fill,
         list = <PortalList> {
             grab_key_focus: true
             auto_tail: true
             drag_scrolling: false
-            height: Fill,
-            width: Fill
+            height: Fill, width: Fill,
             flow: Down
             Location = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
-                location = <LinkLabel> {margin: 0, text: ""}
-                body = <Label> {width: Fill, margin: {left: 5}, padding: 0, draw_text: {wrap: Word}}
+                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
+                location = <LinkLabel> {padding:0, margin: 0, text: ""}
+                body = <P> {width: Fill, margin: {left: 5, top:0, bottom:0}, padding: 0, draw_text: {wrap: Word}}
             }
             Bare = <LogItem> {
                 icon = <LogIcon> {},
-                binary = <Label> {draw_text: {color: #5}, width: Fit, margin: {right: 4}, padding: 0, draw_text: {wrap: Word}}
-                body = <Label> {width: Fill, margin: 0, padding: 0, draw_text: {wrap: Word}}
+                binary = <P> { margin: 0, draw_text: {color: (THEME_COLOR_TEXT_META) }, width: Fit }
+                body = <P> {  margin: 0 }
             }
             Empty = <LogItem> {
                 cursor: Default
-                height: 24,
                 width: Fill
+                height: 25,
+                body = <P> {  margin: 0, text: "" }
             }
         }
     }
@@ -210,14 +207,8 @@ live_design!{
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum LogListAction {
-    JumpTo(JumpTo),
+    JumpTo(JumpToFile),
     None
-}
-
-#[derive(Clone, Debug)]
-pub struct JumpTo{
-    pub file_name:String, 
-    pub start:Position
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -285,7 +276,7 @@ impl Widget for LogList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = step.as_portal_list().borrow_mut(){
-                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().build_manager)
+                self.draw_log(cx, &mut *list, &mut scope.data.get_mut::<AppData>().unwrap().build_manager)
             }
         }
         DrawStep::done()
@@ -294,26 +285,34 @@ impl Widget for LogList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let log_list = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        let data = scope.data.get::<AppData>();
+        let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
             for (item_id, item) in log_list.items_with_actions(&actions) {
                 if item.link_label(id!(location)).pressed(&actions) {
                     if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
                         match log_item {
                             LogItem::Location(msg) => {
-                                cx.action(AppAction::JumpTo(JumpTo{
+                                cx.action(AppAction::JumpTo(JumpToFile{
                                     file_name:msg.file_name.clone(), 
-                                    start:Position{
-                                        line_index: msg.start.line_index,
-                                        byte_index: msg.start.byte_index,
-                                    },
-                                }));
+                                    line: msg.start.line_index as u32,
+                                    column: msg.start.byte_index as u32
+                                })); 
                             }
                             _ => ()
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+impl LogListRef{
+    pub fn reset_scroll(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.borrow_mut() {
+            let log_list = inner.view.portal_list(id!(list));
+            log_list.set_first_id_and_scroll(0,0.0);
+            log_list.redraw(cx);
         }
     }
 }

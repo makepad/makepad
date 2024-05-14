@@ -8,3 +8,8 @@ license = "MIT"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ubho2TrEjwOTbAybGfyLhvLKwnE="
+
+[features]
+cargo-clippy=[]
+exception=[]
+verify_message=[]

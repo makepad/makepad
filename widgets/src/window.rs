@@ -4,7 +4,7 @@ use crate::{
     performance_view::PerformanceView,
     makepad_draw::*,
     nav_control::NavControl,
-    button::*,
+    desktop_button::*,
     view::*,
     widget::*,
 };
@@ -27,8 +27,8 @@ pub struct Window {
     #[live] nav_control: NavControl,
     #[live] window: WindowHandle,
     #[live] stdin_size: DrawColor,
-    #[live] overlay: Overlay,
-    #[live] main_draw_list: DrawList2d,
+    #[rust(Overlay::new(cx))] overlay: Overlay,
+    #[rust(DrawList2d::new(cx))] main_draw_list: DrawList2d,
     #[live] pass: Pass,
     #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
@@ -69,6 +69,13 @@ impl LiveHook for Window {
             self.view(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
+       
+    }
+    
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if self.demo{
+            self.demo_next_frame = cx.new_next_frame();
+        }
         match cx.os_type() {
             OsType::Windows => {
                 if !cx.in_makepad_studio(){
@@ -77,12 +84,16 @@ impl LiveHook for Window {
                 }
             }
             OsType::Macos => {
+                //self.view(id!(caption_bar)).set_visible(true);
+                //self.view(id!(windows_buttons)).set_visible(true);
+                //self.view(id!(caption_bar)).set_visible(true);
+                //self.view(id!(windows_buttons)).set_visible(true);
                 /*if std::env::args().find(|v| v == "--message-format=json").is_some(){
                     self.apply_over(cx, live!{
                         caption_bar={draw_bg:{color:(vec4(0.,0.2,0.2,1.0))}}
                     }); 
                 }*/
-                
+                                
                 //draw_bg: {color: (THEME_COLOR_BG_APP)}  
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
@@ -95,12 +106,6 @@ impl LiveHook for Window {
                 // self.frame.get_view(id!(caption_bar)).set_visible(false);
             }
             _ => ()
-        }
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        if self.demo{
-            self.demo_next_frame = cx.new_next_frame();
         }
     }
 }
@@ -260,10 +265,10 @@ impl Widget for Window {
         }
         
         if let Event::Actions(actions) = event{
-            if self.button(id!(min)).clicked(&actions) {
+            if self.desktop_button(id!(windows_buttons.min)).clicked(&actions) {
                 self.window.minimize(cx);
             }
-            if self.button(id!(max)).clicked(&actions) {
+            if self.desktop_button(id!(windows_buttons.max)).clicked(&actions) {
                 if self.window.is_fullscreen(cx) {
                     self.window.restore(cx);
                 }
@@ -271,10 +276,11 @@ impl Widget for Window {
                     self.window.maximize(cx);
                 }
             }
-            if self.button(id!(close)).clicked(&actions) {
+            if self.desktop_button(id!(windows_buttons.close)).clicked(&actions) {
+                println!("CLOSE");
                 self.window.close(cx);
             }
-            if self.button(id!(xr_on)).clicked(&actions) {
+            if self.desktop_button(id!(web_xr.xr_on)).clicked(&actions) {
                 cx.xr_start_presenting();
             }
         }

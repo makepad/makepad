@@ -1,4 +1,4 @@
-#![cfg_attr(all(unix, use_unstable_unix_socket_ancillary_data_2021), feature(unix_socket_ancillary_data))]
+//#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 
 pub mod os;
 
@@ -41,6 +41,7 @@ mod gpu_info;
 mod geometry;
 mod debug;
 mod component_map;
+mod component_list;
 mod performance_stats;
 pub mod studio;
 
@@ -74,6 +75,8 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
+    smallvec,
+    smallvec::SmallVec,
     //makepad_image_formats::image,
     makepad_derive_live::*,
     log::*,
@@ -116,6 +119,7 @@ pub use {
         LiveNodeVecApi,
     },
     component_map::ComponentMap,
+    component_list::ComponentList,
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,
@@ -239,6 +243,7 @@ pub use {
             LiveApply,
             LiveHook,
             LiveApplyValue,
+            LiveApplyReset,
             LiveRead,
             ToLiveValue,
             Apply,

@@ -2,6 +2,7 @@ use {
     std::{
         rc::Rc,
         cell::RefCell,
+        time::Instant
     },
     makepad_objc_sys::{
         msg_send,
@@ -130,7 +131,7 @@ impl MetalWindow {
     }
     
 }
-
+ 
 
 const KEEP_ALIVE_COUNT: usize = 5;
 
@@ -348,7 +349,7 @@ impl Cx {
                     e.abs,
                     e.time
                 );
-                self.fingers.mouse_down(e.button);
+                self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
             MacosEvent::MouseMove(e) => {
@@ -420,7 +421,7 @@ impl Cx {
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0 */|| paint_dirty {
             EventFlow::Poll
         } else {
             EventFlow::Wait
@@ -516,16 +517,10 @@ impl Cx {
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
-                }
-                /*CxOsOp::WebSocketOpen {request_id, request} => {
-                    web_socket_open(request_id, request, self.os.network_response.sender.clone());
-                }
-                CxOsOp::WebSocketSendBinary {request_id: _, data: _} => {
-                    todo!()
-                }
-                CxOsOp::WebSocketSendString {request_id: _, data: _} => {
-                    todo!()
-                }*/
+                },
+                CxOsOp::CopyToClipboard(content) => {
+                    get_macos_app_global().copy_to_clipboard(&content);
+                },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
@@ -573,8 +568,9 @@ impl CxOsApi for Cx {
     }
     
     fn init_cx_os(&mut self) {
+        self.os.start_time = Some(Instant::now());
         self.live_expand();
-        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+        if !Self::has_studio_web_socket() {
             self.start_disk_live_file_watcher(100);
         }
         self.live_scan_dependencies();
@@ -587,6 +583,10 @@ impl CxOsApi for Cx {
     
     fn start_stdin_service(&mut self) {
         self.start_xpc_service()
+    }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
     }
     
     /*
@@ -608,6 +608,6 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) stdin_timers: PollTimers,
-
+    pub (crate) start_time: Option<Instant>,
     pub metal_device: Option<ObjcId>,
 }

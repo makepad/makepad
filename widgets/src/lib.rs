@@ -4,10 +4,13 @@ pub use makepad_html;
 pub use makepad_derive_widget;
 pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
+pub use makepad_markdown;
 
 pub mod button;
 pub mod label;
 pub mod image;
+pub mod image_blend;
+pub mod icon;
 pub mod link_label;
 pub mod drop_down;
 pub mod popup_menu;
@@ -22,7 +25,6 @@ pub mod vectorline;
 pub mod fold_header;
 pub mod fold_button;
 pub mod multi_window;
-pub mod designer;
 pub mod dock;
 pub mod tab;
 pub mod tab_bar;
@@ -35,6 +37,7 @@ pub mod window;
 pub mod scroll_shadow;
 pub mod window_menu;
 pub mod html;
+pub mod markdown;
 pub mod text_flow;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
@@ -44,10 +47,10 @@ pub mod slide_panel;
 pub mod page_flip;
 pub mod keyboard_view;
 pub mod flat_list;
-
 pub mod file_tree;
 pub mod slides_view;
 pub mod color_picker;
+pub mod root;
 
 pub mod debug_view;
 pub mod performance_view;
@@ -62,17 +65,31 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
-mod base;
-mod theme_desktop_dark;
+pub mod base;
+pub mod theme_desktop_dark;
 pub mod image_cache;
+pub mod bare_step;
+pub mod turtle_step;
+
+pub mod designer;
+pub mod designer_outline_tree;
+pub mod designer_view;
+pub mod designer_outline;
+pub mod designer_data;
+pub mod designer_toolbox;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     view::*,
     image::*,
+    image_blend::*,
+    icon::*,
     label::*,
     slider::*,
+    root::*,
+    text_flow::*,
+    html::*,
     check_box::*,
     drop_down::*,
     video::*,
@@ -88,7 +105,7 @@ pub use crate::{
     stack_navigation::*,
     expandable_panel::*,
     window::*,
-    tab::TabClosable,
+    multi_window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
@@ -131,6 +148,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
+    crate::image_blend::live_design(cx);
+    crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
@@ -149,7 +168,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::popup_menu::live_design(cx);
     crate::drop_down::live_design(cx);
     crate::multi_window::live_design(cx);
-    crate::designer::live_design(cx);
     crate::portal_list::live_design(cx);
     crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);
@@ -164,6 +182,16 @@ pub fn live_design(cx: &mut Cx) {
     crate::vectorline::live_design(cx);
     crate::stack_navigation::live_design(cx);
     crate::expandable_panel::live_design(cx);
-    crate::html::live_design(cx);
     crate::text_flow::live_design(cx);
+    crate::markdown::live_design(cx);
+    crate::html::live_design(cx);
+    crate::root::live_design(cx);
+    crate::bare_step::live_design(cx);
+    crate::turtle_step::live_design(cx);
+    
+    crate::designer::live_design(cx);
+    crate::designer_view::live_design(cx);
+    crate::designer_outline::live_design(cx);
+    crate::designer_outline_tree::live_design(cx);
+    crate::designer_toolbox::live_design(cx);
 }

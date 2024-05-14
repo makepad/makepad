@@ -284,45 +284,46 @@ pub struct LibEgl {
     _keep_module_alive: Module,
 }
 
+use self::super::libc_sys::{dlclose, dlopen, dlsym, RTLD_LAZY, RTLD_LOCAL};
+use std::{
+    ffi::{CString, CStr},
+    ptr::NonNull,
+};
+
+impl Module {
+    pub fn load(path: &str) -> Result<Self,()> {
+        let path = CString::new(path).unwrap();
+                        
+        let module = unsafe {dlopen(path.as_ptr(), RTLD_LAZY | RTLD_LOCAL)};
+        if module.is_null() {
+            Err(())
+        } else {
+            Ok(Module(unsafe {NonNull::new_unchecked(module)}))
+        }
+    }
+                
+    pub fn get_symbol<F: Sized>(&self, name: &str) -> Result<F, ()> {
+        let name = CString::new(name).unwrap();
+                        
+        let symbol = unsafe {dlsym(self.0.as_ptr(), name.as_ptr())};
+                        
+        if symbol.is_null() {
+            return Err(());
+        }
+                        
+        Ok(unsafe {std::mem::transmute_copy::<_, F>(&symbol)})
+    }
+}
+
+impl Drop for Module {
+    fn drop(&mut self) {
+        unsafe {dlclose(self.0.as_ptr())};
+    }
+}
+
 impl LibEgl {
     pub fn try_load() -> Option<LibEgl> {
-        use self::super::libc_sys::{dlclose, dlopen, dlsym, RTLD_LAZY, RTLD_LOCAL};
-        use std::{
-            ffi::{CString, CStr},
-            ptr::NonNull,
-        };
         
-        impl Module {
-            pub fn load(path: &str) -> Result<Self,()> {
-                let path = CString::new(path).unwrap();
-                
-                let module = unsafe {dlopen(path.as_ptr(), RTLD_LAZY | RTLD_LOCAL)};
-                if module.is_null() {
-                    Err(())
-                } else {
-                    Ok(Module(unsafe {NonNull::new_unchecked(module)}))
-                }
-            }
-            
-            pub fn get_symbol<F: Sized>(&self, name: &str) -> Result<F, ()> {
-                let name = CString::new(name).unwrap();
-                
-                let symbol = unsafe {dlsym(self.0.as_ptr(), name.as_ptr())};
-                
-                if symbol.is_null() {
-                    return Err(());
-                }
-                
-                Ok(unsafe {std::mem::transmute_copy::<_, F>(&symbol)})
-            }
-        }
-        
-        impl Drop for Module {
-            fn drop(&mut self) {
-                unsafe {dlclose(self.0.as_ptr())};
-            }
-        }
-
         let module = Module::load("libEGL.so").or_else(|_| Module::load("libEGL.so.1")).ok()?;
 
         let eglGetProcAddress: PFNEGLGETPROCADDRESSPROC = module.get_symbol("eglGetProcAddress").ok();
