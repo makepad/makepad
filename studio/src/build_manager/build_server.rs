@@ -244,7 +244,6 @@ impl BuildConnection {
 
         let http = format!("{}/{}", http, cmd_id.0);
         let mut env = vec![
-
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
@@ -262,7 +261,7 @@ impl BuildConnection {
             env.push(("RUSTUP_TOOLCHAIN", "nightly"));
         }
 
-        let process = ChildProcess::start("cargo", &args, path, &env).expect("Cannot start process");
+        let process = ChildProcess::start("cargo", &args, path, &env, is_in_studio).expect("Cannot start process");
 
         shared.write().unwrap().processes.insert(
             what,
