@@ -4,12 +4,11 @@ use crate::{
     makepad_draw::*,
     widget::*
 };
-use std::fmt;
 
 live_design!{
     ImageBase = {{Image}} {}
 }
-
+ 
 #[derive(Live, Widget)]
 pub struct Image {
     #[walk] walk: Walk,
@@ -23,11 +22,11 @@ pub struct Image {
 }
 
 impl ImageCacheImpl for Image {
-    fn get_texture(&self) -> &Option<Texture> {
+    fn get_texture(&self, _id:usize) -> &Option<Texture> {
         &self.texture
     }
     
-    fn set_texture(&mut self, texture: Option<Texture>) {
+    fn set_texture(&mut self, texture: Option<Texture>, _id:usize) {
         self.texture = texture;
     }
 }
@@ -37,7 +36,7 @@ impl LiveHook for Image{
         self.lazy_create_image_cache(cx);
         let source = self.source.clone();
         if source.as_str().len()>0 {
-            let _ = self.load_image_dep_by_path(cx, source.as_str());
+            let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
         }
     }
 }
@@ -49,7 +48,19 @@ impl Widget for Image {
 }
 
 impl Image {
-    
+    /// Returns the original size of the image in pixels (not its displayed size).
+    ///
+    /// Returns `None` if the image has not been loaded into a texture yet.
+    pub fn size_in_pixels(&self, cx: &mut Cx) -> Option<(usize, usize)> {
+        self.texture.as_ref()
+            .and_then(|t| t.get_format(cx).vec_width_height())
+    }
+
+    /// True if a texture has been set on this `Image`.
+    pub fn has_texture(&self) -> bool {
+        self.texture.is_some()
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
         // alright we get a walk. depending on our aspect ratio
         // we change either nothing, or width or height
@@ -67,6 +78,10 @@ impl Image {
         
         let aspect = width / height;
         match self.fit {
+            ImageFit::Size => {
+                walk.width = Size::Fixed(width);
+                walk.height = Size::Fixed(height);
+            }
             ImageFit::Stretch => {
             }
             ImageFit::Horizontal => {
@@ -102,19 +117,28 @@ impl Image {
 }
 
 impl ImageRef {
-    /// Loads the image at the given `image_path` into this `ImageRef`.
+    /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_image_dep_by_path(cx, image_path)
+            inner.load_image_dep_by_path(cx, image_path, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
+    /// Loads the image at the given `image_path` on disk into this `ImageRef`.
+    pub fn load_image_file_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.load_image_file_by_path(cx, image_path, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }    
+    
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_jpg_from_data(cx, data)
+            inner.load_jpg_from_data(cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
@@ -123,13 +147,13 @@ impl ImageRef {
     /// Loads a PNG into this `ImageRef` by decoding the given encoded PNG `data`.
     pub fn load_png_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.load_png_from_data(cx, data)
+            inner.load_png_from_data(cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
     }
     
-    pub fn set_texture(&self, texture: Option<Texture>) {
+    pub fn set_texture(&self, _cx:&mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.texture = texture
         }
@@ -139,30 +163,24 @@ impl ImageRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
-    }    
-}
+    }
 
+    /// See [`Image::size_in_pixels()`].
+    pub fn size_in_pixels(&self, cx: &mut Cx) -> Option<(usize, usize)> {
+        if let Some(inner) = self.borrow() {
+            inner.size_in_pixels(cx)
+        } else {
+            None
+        }
+    }
 
-/// The possible errors that can occur when loading or creating an image texture.
-#[derive(Debug)]
-pub enum ImageError {
-    /// The image data buffer was empty.
-    EmptyData,
-    /// The image's pixel data was not aligned to 3-byte or 4-byte pixels.
-    /// The unsupported alignment value (in bytes) is included.
-    InvalidPixelAlignment(usize),
-    /// The image data could not be decoded as a JPEG.
-    JpgDecode(JpgDecodeErrors),
-    /// The image file at the given resource path could not be found.
-    PathNotFound(String),
-    /// The image data could not be decoded as a PNG.
-    PngDecode(PngDecodeErrors),
-    /// The image data was in an unsupported format.
-    /// Currently, only JPEG and PNG are supported.
-    UnsupportedFormat,
-}
-impl fmt::Display for ImageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+    /// See [`Image::has_texture()`].
+    pub fn has_texture(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.has_texture()
+        } else {
+            false
+        }
     }
 }
+

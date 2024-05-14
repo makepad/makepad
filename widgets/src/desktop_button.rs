@@ -12,7 +12,7 @@ live_design!{
     
     DrawDesktopButton = {{DrawDesktopButton}} {}
     DesktopButtonBase = {{DesktopButton}} {}
-}
+} 
 
 #[derive(Live, Widget)]
 pub struct DesktopButton {
@@ -27,8 +27,8 @@ impl Widget for DesktopButton{
         self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                cx.widget_action(uid, &scope.path, ButtonAction::Pressed);
+            Hit::FingerDown(fe) => {
+                cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
@@ -39,7 +39,7 @@ impl Widget for DesktopButton{
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
-                cx.widget_action(uid, &scope.path, ButtonAction::Clicked);
+                cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                 if fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));
                 }
@@ -48,7 +48,7 @@ impl Widget for DesktopButton{
                 }
             }
             else {
-                cx.widget_action(uid, &scope.path, ButtonAction::Released);
+                cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
                 self.animator_play(cx, id!(hover.off));
             }
             _ => ()
@@ -56,7 +56,7 @@ impl Widget for DesktopButton{
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
-        let _ = self.draw_walk_desktop_button(cx, walk);
+        let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }
 }
@@ -83,8 +83,7 @@ pub struct DrawDesktopButton {
 }
 
 impl LiveHook for DesktopButton {
-    
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+    fn after_apply_from_doc(&mut self, _cx: &mut Cx) {
         let (w, h) = match self.draw_bg.button_type {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
@@ -97,13 +96,12 @@ impl LiveHook for DesktopButton {
     }
 }
 
-impl DesktopButton {
-    pub fn area(&mut self)->Area{
-        self.draw_bg.area()
-    }
-    pub fn get_widwalk(&self)->Walk{self.walk}
-    
-    pub fn draw_walk_desktop_button(&mut self, cx: &mut Cx2d, walk:Walk) {
-        self.draw_bg.draw_walk(cx, walk);
+impl DesktopButtonRef{
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let ButtonAction::Clicked(_) = actions.find_widget_action(self.widget_uid()).cast() {
+            true
+        } else {
+            false
+        }
     }
 }

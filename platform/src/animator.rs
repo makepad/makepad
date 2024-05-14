@@ -550,6 +550,7 @@ impl LiveNew for Animator {
 }
 impl LiveApply for Animator {
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
+
         if let Some(file_id) = apply.from.file_id() {
             self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
         }
@@ -1133,8 +1134,8 @@ impl Animator {
                 let first_time = Self::first_keyframe_time_from_array(&reader);
                 
                 let mut timeline = Vec::new();
-                timeline.open_array(live_id!(0));
-                timeline.push_id(live_id!(0), track);
+                timeline.open_array(LiveId(0));
+                timeline.push_id(LiveId(0), track);
                 if first_time != 0.0 { // insert first key from the last value
                     timeline.push_live(state.node_slice(last_index));
                 }

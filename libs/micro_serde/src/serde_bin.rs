@@ -315,6 +315,20 @@ impl<A,B,C,D> DeBin for (A,B,C,D) where A:DeBin, B:DeBin, C:DeBin, D:DeBin{
     fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C,D), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
 }
 
+impl<A,B,C,D,E> SerBin for (A,B,C,D,E) where A: SerBin, B:SerBin, C:SerBin, D:SerBin, E:SerBin {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.0.ser_bin(s);
+        self.1.ser_bin(s);
+        self.2.ser_bin(s);
+        self.3.ser_bin(s);
+        self.4.ser_bin(s);
+    }
+}
+
+impl<A,B,C,D,E> DeBin for (A,B,C,D,E) where A:DeBin, B:DeBin, C:DeBin, D:DeBin, E:DeBin{
+    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C,D,E), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
+}
+
 impl<K, V> SerBin for HashMap<K, V> where K: SerBin,
 V: SerBin {
     fn ser_bin(&self, s: &mut Vec<u8>) {

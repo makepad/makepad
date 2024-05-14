@@ -38,7 +38,7 @@ pub enum FileRequest {
     OpenFile(String, u64),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
-    SaveFile(String, String, u64),
+    SaveFile(String, String, u64, bool),
 
 }
 
@@ -61,7 +61,7 @@ pub enum FileResponse {
     OpenFile(Result<(String, String, u64), FileError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
-    SaveFile(Result<(String,String,String, u64), FileError>),
+    SaveFile(Result<(String,String,String, u64, bool), FileError>),
 }
 
 /// A type for representing data about a file tree.

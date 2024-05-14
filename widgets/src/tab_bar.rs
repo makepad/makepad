@@ -4,7 +4,7 @@ use {
         makepad_draw::*,
         widget::*,
         scroll_bars::ScrollBars,
-        tab::{TabAction, Tab, TabClosable},
+        tab::{TabAction, Tab},
     },
 };
 
@@ -20,7 +20,6 @@ pub struct TabBar {
 
     #[live] draw_fill: DrawColor,
     #[walk] walk: Walk,
-    #[live] tab: Option<LivePtr>,
     
     #[rust] draw_state: DrawStateWrap<()>,
     
@@ -29,7 +28,9 @@ pub struct TabBar {
     #[rust] tab_order: Vec<LiveId>,
     
     #[rust] is_dragged: bool,
-    #[rust] tabs: ComponentMap<LiveId, Tab>,
+    
+    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    #[rust] tabs: ComponentMap<LiveId, (Tab, LiveId)>,
     
     #[rust] selected_tab: Option<usize>,
     
@@ -38,13 +39,32 @@ pub struct TabBar {
 }
 
 impl LiveHook for TabBar {
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
+    /*fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
-            for tab in self.tabs.values_mut() {
+            for (tab, templl) in self.tabs.values_mut() {
                 tab.apply(cx, apply, index, nodes);
             }
         }
         self.view_area.redraw(cx);
+    }*/
+    
+    // hook the apply flow to collect our templates and apply to instanced childnodes
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        if nodes[index].is_instance_prop() {
+            if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
+                let id = nodes[index].id;
+                self.templates.insert(id, live_ptr);
+                for (_, (node, templ_id)) in self.tabs.iter_mut() {
+                    if *templ_id == id {
+                        node.apply(cx, apply, index, nodes);
+                    }
+                }
+            }
+        }
+        else {
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+        }
+        nodes.skip_node(index)
     }
 }
 
@@ -64,7 +84,7 @@ impl Widget for TabBar{
         if let Some(tab_id) = self.next_selected_tab_id.take() {
             cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(tab_id));
         }
-        for (tab_id, tab) in self.tabs.iter_mut() {
+        for (tab_id, (tab,_)) in self.tabs.iter_mut() {
             tab.handle_event_with(cx, event, &mut | cx, action | match action {
                 TabAction::WasPressed => {
                     cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(*tab_id));
@@ -153,17 +173,17 @@ impl TabBar {
         self.scroll_bars.end(cx);
     }
     
-    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, closable:TabClosable) {
+    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, template:LiveId) {
         if let Some(selected_tab) = self.selected_tab {
             let tab_order_len = self.tab_order.len();
-            let tab = self.get_or_create_tab(cx, tab_id);
+            let tab = self.get_or_create_tab(cx, tab_id, template);
             if tab_order_len == selected_tab {
                 tab.set_is_selected(cx, true, Animate::No);
             }
             else {
                 tab.set_is_selected(cx, false, Animate::No);
             }
-            tab.draw(cx, name, closable);
+            tab.draw(cx, name);
             if tab_order_len == selected_tab {
                 self.selected_tab_id = Some(tab_id);
             }
@@ -171,16 +191,17 @@ impl TabBar {
         }
         else {
             self.tab_order.push(tab_id);
-            let tab = self.get_or_create_tab(cx, tab_id);
-            tab.draw(cx, name, closable);
+            let tab = self.get_or_create_tab(cx, tab_id, template);
+            tab.draw(cx, name);
         }
     }
     
-    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId) -> &mut Tab {
-        let tab = self.tab;
-        self.tabs.get_or_insert(cx, tab_id, | cx | {
-            Tab::new_from_ptr(cx, tab)
-        })
+    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId, template:LiveId) -> &mut Tab {
+        let ptr = self.templates.get(&template).cloned();
+        let (tab,_) = self.tabs.get_or_insert(cx, tab_id, | cx | {
+            (Tab::new_from_ptr(cx, ptr),template)
+        });
+        tab
     }
     
     pub fn selected_tab_id(&self) -> Option<LiveId> {
@@ -192,12 +213,12 @@ impl TabBar {
             return;
         }
         if let Some(tab_id) = self.selected_tab_id {
-            let tab = &mut self.tabs[tab_id];
+            let (tab,_) = &mut self.tabs[tab_id];
             tab.set_is_selected(cx, false, animate);
         }
         self.selected_tab_id = tab_id;
         if let Some(tab_id) = self.selected_tab_id {
-            let tab = self.get_or_create_tab(cx, tab_id);
+            let (tab,_) = &mut self.tabs[tab_id];
             tab.set_is_selected(cx, true, animate);
         }
         self.view_area.redraw(cx);
@@ -229,7 +250,7 @@ impl TabBar {
     }
     
     pub fn is_over_tab(&self, cx:&Cx, abs:DVec2)->Option<(LiveId,Rect)>{
-        for (tab_id, tab) in self.tabs.iter() {
+        for (tab_id, (tab,_)) in self.tabs.iter() {
             let rect = tab.area().rect(cx);
             if rect.contains(abs){
                 return Some((*tab_id, rect))

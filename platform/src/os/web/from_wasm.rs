@@ -1,7 +1,6 @@
 use crate::{
     makepad_wasm_bridge::*,
     makepad_math::Vec4,
-    makepad_live_id::{LiveId},
     cursor::MouseCursor,
     draw_shader::DrawShaderTextureInput,
     draw_vars::{
@@ -150,6 +149,7 @@ impl DrawShaderTextureInput{
 #[derive(FromWasm)]
 pub struct FromWasmCreateThread {
     pub context_ptr: u32,
+    pub timer: u32,
 }
 
 #[derive(FromWasm)]
@@ -181,13 +181,13 @@ pub struct FromWasmCompileWebGLShader {
 #[derive(FromWasm)]
 pub struct FromWasmAllocArrayBuffer {
     pub buffer_id: usize,
-    pub data: WasmDataF32,
+    pub data: WasmPtrF32,
 }
 
 #[derive(FromWasm)]
 pub struct FromWasmAllocIndexBuffer {
     pub buffer_id: usize,
-    pub data: WasmDataU32,
+    pub data: WasmPtrU32,
 }
 
 #[derive(FromWasm)]
@@ -212,12 +212,22 @@ impl Into<WColor> for Vec4{
     fn into(self)->WColor{WColor{r:self.x, g:self.y, b:self.z,a:self.w}}
 }
 
+#[allow(non_camel_case_types)]
 #[derive(FromWasm)]
-pub struct FromWasmAllocTextureImage2D {
+pub struct FromWasmAllocTextureImage2D_BGRAu8_32 {
     pub texture_id: usize,
     pub width: usize,
     pub height: usize,
-    pub data: WasmDataU32
+    pub data: WasmPtrU32
+}
+
+#[allow(non_camel_case_types)]
+#[derive(FromWasm)]
+pub struct FromWasmAllocTextureImage2D_Ru8 {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmPtrU8
 }
 
 #[derive(FromWasm, Default)]
@@ -257,12 +267,12 @@ pub struct FromWasmSetDefaultDepthAndBlendMode {
 pub struct FromWasmDrawCall {
     pub vao_id: usize,
     pub shader_id: usize,
-    pub pass_uniforms: WasmDataF32,
-    pub view_uniforms: WasmDataF32,
-    pub draw_uniforms: WasmDataF32,
-    pub user_uniforms: WasmDataF32,
-    pub live_uniforms: WasmDataF32,
-    pub const_table: WasmDataF32,
+    pub pass_uniforms: WasmPtrF32,
+    pub view_uniforms: WasmPtrF32,
+    pub draw_uniforms: WasmPtrF32,
+    pub user_uniforms: WasmPtrF32,
+    pub live_uniforms: WasmPtrF32,
+    pub const_table: WasmPtrF32,
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
 }
 

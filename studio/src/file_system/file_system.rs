@@ -22,11 +22,11 @@ use {
 pub struct FileSystem {
     pub file_client: FileClient,
     pub root_path: String,
-    pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
-    pub path_to_file_node_id: HashMap<String, FileNodeId>,
-    pub tab_id_to_file_node_id: HashMap<LiveId, FileNodeId>,
+    pub file_nodes: LiveIdMap<LiveId, FileNode>,
+    pub path_to_file_node_id: HashMap<String, LiveId>,
+    pub tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
     pub tab_id_to_session: HashMap<LiveId, Session>,
-    pub open_documents: HashMap<FileNodeId, OpenDoc>
+    pub open_documents: HashMap<LiveId, OpenDoc>
 }
 
 pub enum OpenDoc {
@@ -51,7 +51,7 @@ impl FileNode {
 #[derive(Debug)]
 pub struct FileEdge {
     pub name: String,
-    pub file_node_id: FileNodeId,
+    pub file_node_id: LiveId,
 }
 
 #[derive(DefaultNone, Debug, Clone)]
@@ -77,11 +77,11 @@ impl FileSystem {
         self.tab_id_to_session.remove(&tab_id);
     }
     
-    pub fn path_to_file_node_id(&self, path: &str) -> Option<FileNodeId> {
+    pub fn path_to_file_node_id(&self, path: &str) -> Option<LiveId> {
         self.path_to_file_node_id.get(path).cloned()
     }
     
-    pub fn file_node_id_to_tab_id(&self, file_node: FileNodeId) -> Option<LiveId> {
+    pub fn file_node_id_to_tab_id(&self, file_node: LiveId) -> Option<LiveId> {
         for (tab, id) in &self.tab_id_to_file_node_id {
             if *id == file_node {
                 return Some(*tab)
@@ -117,10 +117,10 @@ impl FileSystem {
                         FileResponse::OpenFile(result) => {
                             match result {
                                 Ok((_unix_path, data, id)) => {
-                                    let file_id = FileNodeId(LiveId(id));
+                                    let file_id = LiveId(id);
                                     let dock = ui.dock(id!(dock));
                                     for (tab_id, file_id) in &self.tab_id_to_file_node_id {
-                                        if id == file_id.0.0 {
+                                        if id == file_id.0 {
                                             dock.redraw_tab(cx, *tab_id);
                                         }
                                     }
@@ -139,10 +139,10 @@ impl FileSystem {
                             }
                         }
                         FileResponse::SaveFile(result) => match result {
-                            Ok((path, old, new, _id)) => {
+                            Ok((path, old, new, _id, was_patch)) => {
                                 // alright file has been saved
                                 // now we need to check if a live_design!{} changed or something outside it
-                                if old != new {
+                                if old != new && !was_patch {
                                     let mut old_neg = Vec::new();
                                     let mut new_neg = Vec::new();
                                     match LiveRegistry::tokenize_from_str_live_design(&old, Default::default(), Default::default(), Some(&mut old_neg)) {
@@ -158,7 +158,7 @@ impl FileSystem {
                                                 if old_neg != new_neg {
                                                     cx.action(FileSystemAction::RecompileNeeded)
                                                 }
-                                                if old_tokens != new_tokens {
+                                                if old_tokens != new_tokens{
                                                     // design code changed, hotreload it
                                                     cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
                                                         file_name: path,
@@ -190,7 +190,7 @@ impl FileSystem {
         }
     }
     
-    pub fn request_open_file(&mut self, tab_id: LiveId, file_id: FileNodeId) {
+    pub fn request_open_file(&mut self, tab_id: LiveId, file_id: LiveId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         self.tab_id_to_file_node_id.insert(tab_id, file_id);
@@ -209,23 +209,26 @@ impl FileSystem {
         };
         self.open_documents.insert(file_id, OpenDoc::Decorations(dec));
         let path = self.file_node_path(file_id);
-        self.file_client.send_request(FileRequest::OpenFile(path, file_id.0.0));
+        self.file_client.send_request(FileRequest::OpenFile(path, file_id.0));
     }
     
-    
-    pub fn request_save_file(&mut self, tab_id: LiveId) {
+    pub fn request_save_file_for_tab_id(&mut self, tab_id: LiveId, was_patch:bool) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
-            if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
-                let text = doc.as_text().to_string();
-                let path = self.file_node_path(*file_id);
-                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0.0));
-            }
+            self.request_save_file_for_file_node_id(*file_id, was_patch)
         };
     }
     
-    pub fn clear_decorations(&mut self, file_node_id: &FileNodeId) {
+    pub fn request_save_file_for_file_node_id(&mut self, file_id: LiveId, was_patch:bool) {
+        if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
+            let text = doc.as_text().to_string();
+            let path = self.file_node_path(file_id);
+            self.file_client.send_request(FileRequest::SaveFile(path.clone(), text, file_id.0, was_patch));
+        }
+    }
+    
+    pub fn clear_decorations(&mut self, file_node_id: &LiveId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         match self.open_documents.get_mut(file_node_id) {
@@ -246,7 +249,7 @@ impl FileSystem {
         }
     }
     
-    pub fn redraw_view_by_file_id(&mut self, cx: &mut Cx, id: FileNodeId, dock: &DockRef) {
+    pub fn redraw_view_by_file_id(&mut self, cx: &mut Cx, id: LiveId, dock: &DockRef) {
         for (tab_id, file_id) in &self.tab_id_to_file_node_id {
             if id == *file_id {
                 dock.item(*tab_id).redraw(cx)
@@ -260,7 +263,7 @@ impl FileSystem {
         }
     }
     
-    pub fn add_decoration(&mut self, file_id: FileNodeId, dec: Decoration) {
+    pub fn add_decoration(&mut self, file_id: LiveId, dec: Decoration) {
         // ok lets see if we have a document
         // ifnot, we create a new one
         match self.open_documents.get_mut(&file_id) {
@@ -277,7 +280,7 @@ impl FileSystem {
     }
     
     
-    pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: FileNodeId, file_tree: &mut FileTree) {
+    pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: LiveId, file_tree: &mut FileTree) {
         if let Some(file_node) = self.file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
                 Some(child_edges) => {
@@ -295,11 +298,11 @@ impl FileSystem {
         }
     }
     
-    pub fn file_node_name(&self, file_node_id: FileNodeId) -> String {
+    pub fn file_node_name(&self, file_node_id: LiveId) -> String {
         self.file_nodes.get(&file_node_id).unwrap().name.clone()
     }
     
-    pub fn file_node_path(&self, file_node_id: FileNodeId) -> String {
+    pub fn file_node_path(&self, file_node_id: LiveId) -> String {
         let mut path = self.root_path.clone();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
@@ -313,7 +316,7 @@ impl FileSystem {
     }
     
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
-        let mut min_diff: HashMap<FileNodeId, usize> = HashMap::new();
+        let mut min_diff: HashMap<LiveId, usize> = HashMap::new();
         let mut outer_path = Vec::new();
         let mut inner_path = Vec::new();
         for (_outer_tab_id, outer_file_id) in &self.tab_id_to_file_node_id {
@@ -380,13 +383,13 @@ impl FileSystem {
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
-            file_node_id: Option<FileNodeId>,
+            file_node_id: Option<LiveId>,
             node_path: String,
-            path_to_file_id: &mut HashMap<String, FileNodeId>,
-            file_nodes: &mut LiveIdMap<FileNodeId, FileNode>,
+            path_to_file_id: &mut HashMap<String, LiveId>,
+            file_nodes: &mut LiveIdMap<LiveId, FileNode>,
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
-        ) -> FileNodeId {
+        ) -> LiveId {
             let file_node_id = file_node_id.unwrap_or(LiveId::from_str(&node_path).into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),

@@ -1007,7 +1007,6 @@ impl CxTexture {
                 unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
                 let mut render_target_view = None;
                 unsafe {d3d11_cx.device.CreateRenderTargetView(&resource, None, Some(&mut render_target_view)).unwrap()};
-        
                 self.os.texture = texture;
                 self.os.render_target_view = render_target_view;
                 self.os.shader_resource_view = shader_resource_view;

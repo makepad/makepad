@@ -1,4 +1,5 @@
 function watchFileChange() {
+    
     var req = new XMLHttpRequest()
     req.timeout = 60000
     req.addEventListener("error", function() {

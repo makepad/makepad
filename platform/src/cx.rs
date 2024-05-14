@@ -7,7 +7,6 @@ use {
         },
         any::{Any, TypeId},
         rc::Rc,
-        time::Instant,
         rc::Weak,
         cell::RefCell,
     },
@@ -50,7 +49,7 @@ use {
 
 //pub use makepad_shader_compiler::makepad_derive_live::*;
 //pub use makepad_shader_compiler::makepad_math::*;
-
+ 
 pub struct Cx {
     pub (crate) os_type: OsType,
     pub (crate) in_makepad_studio: bool,
@@ -65,8 +64,7 @@ pub struct Cx {
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
-    pub (crate) start_time: Instant,
-    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
+    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>, 
     
     pub draw_shaders: CxDrawShaders,
     
@@ -116,10 +114,9 @@ pub struct Cx {
     pub(crate) spawner: Spawner,
     
     pub(crate) studio_web_socket: Option<WebSocket>,
+    pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
-
-
 }
 
 #[derive(Clone)]
@@ -231,8 +228,6 @@ impl Cx {
             new_draw_event: Default::default(),
             new_actions: Default::default(),
             
-            start_time: Instant::now(),
-            
             redraw_id: 1,
             event_id: 1,
             repaint_id: 1,
@@ -245,7 +240,7 @@ impl Cx {
             ime_area: Default::default(),
             platform_ops: Default::default(),
             studio_web_socket: None,
-            
+            studio_http: "".to_string(),
             new_next_frames: Default::default(),
             
             dependencies: Default::default(),

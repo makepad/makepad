@@ -1,4 +1,4 @@
-import {WasmBridge} from "/makepad/libs/wasm_bridge/src/wasm_bridge.js"
+import {WasmBridge} from "../makepad_wasm_bridge/wasm_bridge.js"
 
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
@@ -36,6 +36,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
+
+        this.dispatch_first_msg();
     }
     
     async load_deps() {
@@ -87,40 +89,16 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
-        this.start_live_change_watch();
         var loaders = document.getElementsByClassName('canvas_loader');
         for (var i = 0; i < loaders.length; i ++) {
             loaders[i].parentNode.removeChild(loaders[i])
         }
     }
     
-    start_live_change_watch(){
-        var req = new XMLHttpRequest()
-        req.timeout = 60000
-        req.addEventListener("error", ()=>{
-            setTimeout(function() {
-                location.href = location.href
-            }, 500)
-        })
-        req.responseType = 'text'
-        req.addEventListener("load", ()=>{
-            if (req.status === 201) return this.start_live_change_watch();
-            if (req.status === 200) {
-                if (req.response.length > 0){
-                    this.to_wasm.ToWasmLiveFileChange({body:req.response});
-                    this.do_wasm_pump();
-                }
-                this.start_live_change_watch();
-            }
-        })
-        req.open("GET", "/$live_file_change?" + ('' + Math.random()).slice(2))
-        req.send()
-    }
-    
     FromWasmLoadDeps(args) {
         let promises = [];
         for (let path of args.deps) {
-            promises.push(fetch_path("/makepad/", path))
+            promises.push(fetch_path(".", path))
         }
         this.load_deps_promise = Promise.all(promises);
     }
@@ -244,7 +222,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmHideTextIME() {
         this.update_text_area_pos({x: -3000, y: -3000});
     }
-    
+    /*
     FromWasmWebSocketOpen(args) {
         let id_lo = args.id_lo;
         let id_hi = args.id_hi;
@@ -287,7 +265,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         }
         web_socket._queue = []
-    }
+    }*/
     
     FromWasmWebSocketSend(args) {
         let web_socket = this.web_sockets[args.web_socket_id];
@@ -314,7 +292,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         const start_worklet = async () => {
 
-            await this.audio_context.audioWorklet.addModule("/makepad/platform/src/os/web/audio_worklet.js", {credentials: 'omit'});
+            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", {credentials: 'omit'});
             
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
@@ -459,7 +437,7 @@ export class WasmWebBrowser extends WasmBridge {
         
     }
     
-    alloc_thread_stack(context_ptr) {
+    alloc_thread_stack(context_ptr, timer) {
         let tls_size = this.exports.__tls_size.value;
         tls_size += 8 - (tls_size & 7); // align it to 8 bytes
         let stack_size = this.thread_stack_size; // 8mb
@@ -470,6 +448,7 @@ export class WasmWebBrowser extends WasmBridge {
         return {
             tls_ptr,
             stack_ptr,
+            timer,
             module: this.wasm._module,
             memory: this.wasm._memory,
             context_ptr
@@ -485,7 +464,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmCreateThread(args) {
         
         let worker = new Worker(
-            '/makepad/platform/src/os/web/web_worker.js',
+            './makepad_platform/web_worker.js',
             {type: 'module'}
         );
         
@@ -497,7 +476,7 @@ export class WasmWebBrowser extends WasmBridge {
             console.error("FromWasmCreateThread not available, wasm file not compiled with -C link-arg=--export=__stack_pointer");
             return
         }
-        worker.postMessage(this.alloc_thread_stack(args.context_ptr));
+        worker.postMessage(this.alloc_thread_stack(args.context_ptr, args.timer));
         
         this.workers.push(worker);
     }
@@ -618,6 +597,28 @@ export class WasmWebBrowser extends WasmBridge {
         return new_ptr
     }
     
+
+    wasm_return_first_msg() {
+        let ret_ptr = this.exports.wasm_return_first_msg(this.wasm_app)
+        this.update_array_buffer_refs();
+        return this.new_from_wasm(ret_ptr);
+    }
+
+    dispatch_first_msg(){
+        let from_wasm = this.wasm_return_first_msg();
+        from_wasm.dispatch_on_app();
+        from_wasm.free();
+    }
+    
+    do_wasm_pump() {
+        let to_wasm = this.to_wasm;
+        this.to_wasm = this.new_to_wasm();
+        let from_wasm = this.wasm_process_msg(to_wasm);
+        from_wasm.dispatch_on_app();
+        from_wasm.free();
+    }
+    
+
     wasm_process_msg(to_wasm) {
         let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership(), this.wasm_app)
         this.update_array_buffer_refs();
@@ -1237,10 +1238,6 @@ function fetch_path(base, path) {
             })
         })
         let url = base + path;
-        if (location.hostname.startsWith("192.168") || location.hostname == "localhost") {
-            // fix this on the server next time
-            url = url.replace("/Users/admin/makepad/edit_repo", "");
-        }
         req.open("GET", url)
         req.send()
     })

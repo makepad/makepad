@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{*};
 use self::super::android_jni;
 use crate::LiveId;
-use makepad_http::websocket::{MessageHeader, MessageFormat, WebSocket};
+use makepad_http::websocket::{ServerWebSocketMessageHeader, ServerWebSocketMessageFormat, ServerWebSocket};
 
 pub struct OsWebSocket{
     pub sender_ref: Arc<Box<Sender<WebSocketMessage>>>,
@@ -19,12 +19,12 @@ impl OsWebSocket{
     pub fn send_message(&mut self, message:WebSocketMessage)->Result<(),()>{
         let frame = match &message{
             WebSocketMessage::String(data)=>{
-                let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                WebSocket::build_message(header, &data.to_string().into_bytes())
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                ServerWebSocket::build_message(header, &data.to_string().into_bytes())
             }
             WebSocketMessage::Binary(data)=>{
-                let header = MessageHeader::from_len(data.len(), MessageFormat::Text, true);
-                WebSocket::build_message(header, &data)
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                ServerWebSocket::build_message(header, &data)
             }
             _=>panic!()
         };
@@ -33,7 +33,7 @@ impl OsWebSocket{
         Ok(())
     }
     
-    pub fn open(request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
+    pub fn open(_socket_id:u64,  request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         let request_id = LiveId::unique();
 
         let sender_ref = Arc::new(Box::new(rx_sender));

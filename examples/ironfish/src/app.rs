@@ -2,8 +2,7 @@ use crate::{
     makepad_audio_graph::*, makepad_audio_widgets::display_audio::*,
     makepad_audio_widgets::piano::*, makepad_synth_ironfish::ironfish::*, makepad_widgets::*,
     sequencer::*,
-}; 
-
+};
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design! {
@@ -15,12 +14,9 @@ live_design! {
     import makepad_audio_graph::mixer::Mixer;
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
-    import makepad_widgets::designer::Designer;
-
+    
     import makepad_draw::shader::std::*;
-
-
-
+/*
     BlurStage = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -151,7 +147,7 @@ live_design! {
             }
         }
     }
-
+*/
 
     App = {{App}} {
 
@@ -162,50 +158,51 @@ live_design! {
                 }
             }
         }
-        ui: <Window> {
-            window: {inner_size: vec2(1280, 1000)},
-            pass: {clear_color: #2A}
-            block_signal_event: true;
-            /*body2 = <View>{
-                step4 = <BlurStage>{
-                    width: Fill,
-                    height: Fill,
-                    draw_bg:{blury: 0.0, blurx: 10.0}
-                    step3 = <BlurStage>{
+        ui: <Root>{
+            main_window = <Window> {
+                window: {inner_size: vec2(1280, 1000)},
+                pass: {clear_color: #2A}
+                block_signal_event: true;
+                /*body2 = <View>{
+                    step4 = <BlurStage>{
                         width: Fill,
                         height: Fill,
-                        draw_bg:{blury: 10.0, blurx: 0.0}
-                        step2 = <BlurStage>{
+                        draw_bg:{blury: 0.0, blurx: 10.0}
+                        step3 = <BlurStage>{
                             width: Fill,
                             height: Fill,
-                            draw_bg:{blury: 7.07, blurx: 7.07}
-                            step1 = <BlurStage>{
+                            draw_bg:{blury: 10.0, blurx: 0.0}
+                            step2 = <BlurStage>{
                                 width: Fill,
                                 height: Fill,
-                                draw_bg:{blury: -7.07, blurx: 7.07}
-                                <AppDesktop> {}
+                                draw_bg:{blury: 7.07, blurx: 7.07}
+                                step1 = <BlurStage>{
+                                    width: Fill,
+                                    height: Fill,
+                                    draw_bg:{blury: -7.07, blurx: 7.07}
+                                    <AppDesktop> {}
+                                }
                             }
                         }
                     }
-                }
-            }*/
-            body = <View>
-            {
-                
-                width: Fill,
-                height: Fill,
-                
-                shadowstep = <ShadowStage> {
+                }*/
+                body = <AppDesktop> {}
+                /*<View>
+                {
+                    
                     width: Fill,
                     height: Fill,
-                    draw_bg:{shadowy: 10.0, shadowx: 10.0, shadowopacity: 2.0}
-                    padding: 10
-                    <AppDesktop> {}
-                }
+                    
+                    shadowstep = <ShadowStage> {
+                        width: Fill,
+                        height: Fill,
+                        draw_bg:{shadowy: 10.0, shadowx: 10.0, shadowopacity: 2.0}
+                        padding: 10
+                        <AppDesktop> {}
+                    }
+                }*/
             }
-
         }
-
     }
 }
 app_main!(App);
@@ -216,7 +213,7 @@ pub struct SynthPreset {
     pub fav: bool,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct App {
     #[live]
     ui: WidgetRef,
@@ -239,7 +236,22 @@ impl LiveRegister for App {
     }
 }
 
+impl LiveHook for App{
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        if apply.from.is_update_from_doc(){
+            self.init_ui_state(cx);
+        }
+    }
+}
+
 impl App {
+    pub fn init_ui_state(&mut self, cx:&mut Cx){
+        let ui = self.ui.clone();
+        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let db = DataBindingStore::from_nodes(ironfish.settings.live_read());
+        Self::data_bind(db.data_to_widgets(cx, &ui));
+    }
+    
     pub fn data_bind(mut db: DataBindingMap) {
         // sequencer
         db.bind(id!(sequencer.playing), ids!(playpause));
@@ -264,6 +276,7 @@ impl App {
 
         db.bind(id!(delay.difference), ids!(delaydifference.slider));
         db.bind(id!(delay.cross), ids!(delaycross.slider));
+        db.bind(id!(delay.length), ids!(delaylength.slider));
 
         // Chorus panel
         db.bind(id!(chorus.mix), ids!(chorusmix.slider));
@@ -281,7 +294,7 @@ impl App {
         db.bind(id!(lfo.rate), ids!(rate.slider));
         db.bind(id!(filter1.lfo_amount), ids!(lfoamount.slider));
         db.bind(id!(lfo.synconkey), ids!(sync.checkbox));
-
+        
         //Volume Envelope
         db.bind(id!(volume_envelope.a), ids!(vol_env.attack.slider));
         db.bind(id!(volume_envelope.h), ids!(vol_env.hold.slider));
@@ -415,7 +428,7 @@ impl App {
             |v| v,
         );
 
-        db.apply(id!(shadow.opacity), ids!(shadowstep, draw_bg.shadowopacity), |v| v);
+        /*db.apply(id!(shadow.opacity), ids!(shadowstep, draw_bg.shadowopacity), |v| v);
         db.apply(id!(shadow.x), ids!(shadowstep, draw_bg.shadowx), |v| v);
         db.apply(id!(shadow.y), ids!(shadowstep, draw_bg.shadowy), |v| v);
 
@@ -426,21 +439,19 @@ impl App {
         db.apply(id!(blur.size), ids!(step3, draw_bg.blursize), |v| v);
         db.apply(id!(blur.std), ids!(step3, draw_bg.blurstd), |v| v);
         db.apply(id!(blur.size), ids!(step4, draw_bg.blursize), |v| v);
-        db.apply(id!(blur.std), ids!(step4, draw_bg.blurstd), |v| v);
+        db.apply(id!(blur.std), ids!(step4, draw_bg.blurstd), |v| v);*/
     }
 }
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let ui = self.ui.clone();
-        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let db = DataBindingStore::from_nodes(ironfish.settings.live_read());
-        Self::data_bind(db.data_to_widgets(cx, &ui));
-        ui.piano(id!(piano)).set_key_focus(cx);
+        self.preset(cx,0,false);
+        self.ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        
         let ui = self.ui.clone();
         let piano = ui.piano(id!(piano));
 
@@ -503,6 +514,11 @@ impl MatchEvent for App {
         if ui.button_set(ids!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx);
         }
+        
+        if let Some((index,km)) = ui.button_set(ids!(preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7,preset_8)).which_clicked_modifiers(&actions){
+            self.preset(cx, index, km.shift);
+        }
+        
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &ui, Self::data_bind);
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -527,6 +543,50 @@ impl MatchEvent for App {
         }
     }
 }
+impl App{
+    #[cfg(target_arch = "wasm32")]
+    pub fn preset(&mut self, _cx: &mut Cx, _index: usize, _save: bool) {
+        
+    }
+    
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
+        use std::fs::File;
+        use std::io::prelude::*;
+        
+        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let file_name = format!("examples/ironfish/preset_{}.txt", index);
+        if save {
+            let nodes = ironfish.settings.live_read();
+            let data = nodes.to_cbor(0).unwrap();
+            let data = makepad_miniz::compress_to_vec(&data, 10);
+            let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
+            log!("Saving preset {}", file_name);
+            let mut file = File::create(&file_name).unwrap();
+            file.write_all(&data).unwrap();
+        }
+        else if let Ok(mut file) = std::fs::File::open(&file_name) {
+            log!("Loading preset {}", file_name);
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            if let Ok(data) = makepad_base64::base64_decode(&data) {
+                if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
+                    let mut nodes = Vec::new();
+                    nodes.from_cbor(&data).unwrap();
+                    ironfish.settings.apply_over(cx, &nodes);
+                    self.init_ui_state(cx);
+                    //self.imgui.root_frame().bind_read(cx, &nodes);
+                }
+                else {
+                    log!("Error decompressing preset");
+                }
+            }
+            else {
+                log!("Error base64 decoding preset");
+            }
+        }
+    }
+}
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -546,37 +606,4 @@ impl AppMain for App {
                 };
             });
     }
-    /*
-    pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
-        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let file_name = format!("preset_{}.txt", index);
-        if save {
-            let nodes = ironfish.settings.live_read();
-            let data = nodes.to_cbor(0).unwrap();
-            let data = makepad_miniz::compress_to_vec(&data, 10);
-            let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
-            log!("Saving preset {}", file_name);
-            let mut file = File::create(&file_name).unwrap();
-            file.write_all(&data).unwrap();
-        }
-        else if let Ok(mut file) = File::open(&file_name) {
-            log!("Loading preset {}", file_name);
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).unwrap();
-            if let Ok(data) = makepad_base64::base64_decode(&data) {
-                if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
-                    let mut nodes = Vec::new();
-                    nodes.from_cbor(&data).unwrap();
-                    ironfish.settings.apply_over(cx, &nodes);
-                    //self.imgui.root_frame().bind_read(cx, &nodes);
-                }
-                else {
-                    log!("Error decompressing preset");
-                }
-            }
-            else {
-                log!("Error base64 decoding preset");
-            }
-        }
-    }*/
 }

@@ -77,10 +77,9 @@ impl AppleTarget {
 pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut signing_identity  = None;
     let mut provisioning_profile = None;
-    let mut device_uuid = None;
+    let mut device_identifier = None;
     let mut app = None;
     let mut org = None;
-    let mut org_id = None;
     if args.len() < 1{
         return Err(format!("not enough args"))
     }
@@ -91,6 +90,11 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
         "tvos"=>{
             AppleOs::Tvos
         }
+        "list"=>{
+            let pp = parse_profiles()?;
+            pp.println();
+            return Ok(())
+        }
         _=>{
             return Err(format!("please enter ios or tvos"))
         }
@@ -98,24 +102,21 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut args = &args[1..];
     for i in 0..args.len() {
         let v = &args[i];
-        if let Some(opt) = v.strip_prefix("--signing-identity=") {
+        if let Some(opt) = v.strip_prefix("--cert=") {
             signing_identity = Some(opt.to_string());
         } 
-        else if let Some(opt) = v.strip_prefix("--provisioning-profile=") {
+        else if let Some(opt) = v.strip_prefix("--profile=") {
             provisioning_profile = Some(opt.to_string());
         } 
-        else if let Some(opt) = v.strip_prefix("--device-uuid=") {
-            device_uuid = Some(opt.to_string());
-        } 
+        else if let Some(opt) = v.strip_prefix("--device=") {
+            device_identifier = Some(opt.to_string());
+        }
         else if let Some(opt) = v.strip_prefix("--app=") {
             app = Some(opt.to_string());
-        } 
+        }
         else if let Some(opt) = v.strip_prefix("--org=") {
             org = Some(opt.to_string());
         }
-        else if let Some(opt) = v.strip_prefix("--org-id=") {
-            org_id = Some(opt.to_string());
-        }  
         else {
             args = &args[i..];
             break
@@ -132,10 +133,9 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
                 apple_os,
                 signing_identity, 
                 provisioning_profile, 
-                device_uuid, 
+                device_identifier, 
                 app,
                 org,
-                org_id,
             },&args[1..], AppleTarget::device_target(apple_os))?;
             Ok(())
         }
@@ -144,10 +144,9 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
                 apple_os,
                 signing_identity, 
                 provisioning_profile, 
-                device_uuid, 
+                device_identifier, 
                 app,
                 org,
-                org_id,
             },
             &args[1..], AppleTarget::sim_target(apple_os))?;
             Ok(())

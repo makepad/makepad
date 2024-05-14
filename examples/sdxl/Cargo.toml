@@ -12,3 +12,4 @@ makepad-widgets = { path = "../../widgets", version = "0.6.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.4.0" }
 makepad-micro-serde-derive = { path = "../../libs/micro_serde/derive", version = "0.4.0" }
 jpeg-encoder = {version = "0.6.0"}
+makepad-http = { path = "../../libs/http", version = "0.4.0" } 

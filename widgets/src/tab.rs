@@ -15,7 +15,9 @@ pub struct Tab {
     #[rust] is_dragging: bool,
     
     #[live] draw_bg: DrawQuad,
+    #[live] draw_icon: DrawIcon,
     #[live] draw_name: DrawText,
+    #[live] icon_walk: Walk,
     //#[live] draw_drag: DrawColor,
     
     #[animator] animator: Animator,
@@ -23,7 +25,7 @@ pub struct Tab {
     #[live] close_button: TabCloseButton,
     
     // height: f32,
-    
+    #[live] closeable: bool,
     #[live] hover: f32,
     #[live] selected: f32,
     
@@ -42,19 +44,6 @@ pub enum TabAction {
     //DragHit(DragHit)
 }
 
-pub enum TabClosable{
-    Yes,
-    No
-}
-
-impl TabClosable{
-    pub fn as_bool(&self)->bool{
-        match self{
-            Self::Yes=>true,
-            Self::No=>false
-        }
-    }
-}
 
 impl Tab {
     
@@ -67,13 +56,15 @@ impl Tab {
         self.animator_toggle(cx, is_selected, animate, id!(selected.on), id!(selected.off));
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, name: &str, closable:TabClosable) {
+    pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         //self.bg_quad.color = self.color(self.is_selected);
         self.draw_bg.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
-        if let TabClosable::Yes = closable{
+        if self.closeable{
             self.close_button.draw(cx);
         }
+        
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         //cx.turtle_align_y();
         self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
         //cx.turtle_align_y();

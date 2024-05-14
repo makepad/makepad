@@ -119,13 +119,13 @@ pub struct View {
     pub draw_bg: DrawColor,
 
     #[live(false)]
-    show_bg: bool,
+    pub show_bg: bool,
 
     #[layout]
-    layout: Layout,
+    pub layout: Layout,
 
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
 
     //#[live] use_cache: bool,
     #[live]
@@ -139,7 +139,7 @@ pub struct View {
     event_order: EventOrder,
 
     #[live(true)]
-    visible: bool,
+    pub visible: bool,
 
     #[live(true)]
     grab_key_focus: bool,
@@ -195,7 +195,6 @@ impl LiveHook for View {
         _nodes: &[LiveNode],
     ) {
         if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
-            //self.children.clear();
             self.draw_order.clear();
             self.find_cache.clear();
         }
@@ -217,18 +216,6 @@ impl LiveHook for View {
                     Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-        /*
-        if let Some(image_texture) = &mut self.image_texture {
-            if self.image_scale != 0.0 {
-                let texture_desc = image_texture.get_desc(cx);
-                self.walk = Walk::fixed_size(
-                    DVec2 {
-                        x: texture_desc.width.unwrap() as f64 * self.image_scale,
-                        y: texture_desc.height.unwrap() as f64 * self.image_scale
-                    }
-                );
-            }
-        */
     }
 
     fn apply_value_instance(
@@ -237,11 +224,7 @@ impl LiveHook for View {
         apply: &mut Apply,
         index: usize,
         nodes: &[LiveNode],
-    ) -> usize {
-        //! TODO
-        // NOTE FOR LIVE RELOAD
-        // the id is always unique
-        // Draw order is never cleared.
+    ) -> usize { 
 
         let id = nodes[index].id;
         match apply.from {
@@ -253,7 +236,7 @@ impl LiveHook for View {
                 }
             }
             ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
+                if nodes[index].is_instance_prop() {
                     self.draw_order.push(id);
                     return self
                         .children
@@ -275,6 +258,8 @@ pub enum ViewAction {
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
     FingerMove(FingerMoveEvent),
+    FingerHoverIn(FingerHoverEvent),
+    FingerHoverOut(FingerHoverEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
 }
@@ -307,6 +292,24 @@ impl ViewRef {
         None
     }
 
+    pub fn finger_hover_in(&self, actions: &Actions) -> Option<FingerHoverEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerHoverIn(fd) = item.cast() {
+                return Some(fd);
+            }
+        }
+        None
+    }
+
+    pub fn finger_hover_out(&self, actions: &Actions) -> Option<FingerHoverEvent> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let ViewAction::FingerHoverOut(fd) = item.cast() {
+                return Some(fd);
+            }
+        }
+        None
+    }
+
     pub fn key_down(&self, actions: &Actions) -> Option<KeyEvent> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let ViewAction::KeyDown(fd) = item.cast() {
@@ -325,7 +328,7 @@ impl ViewRef {
         None
     }
 
-    pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_cut(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.animator_cut(cx, state);
         }
@@ -407,9 +410,9 @@ impl ViewRef {
 }
 
 impl ViewSet {
-    pub fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
-            item.cut_state(cx, state)
+            item.animator_cut(cx, state)
         }
     }
 
@@ -634,7 +637,8 @@ impl Widget for View {
                         self.animator_play(cx, id!(down.off));
                     }
                 }
-                Hit::FingerHoverIn(_) => {
+                Hit::FingerHoverIn(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerHoverIn(e));
                     if let Some(cursor) = &self.cursor {
                         cx.set_cursor(*cursor);
                     }
@@ -642,7 +646,8 @@ impl Widget for View {
                         self.animator_play(cx, id!(hover.on));
                     }
                 }
-                Hit::FingerHoverOut(_) => {
+                Hit::FingerHoverOut(e) => {
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerHoverOut(e));
                     if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(hover.off));
                     }
@@ -688,7 +693,7 @@ impl Widget for View {
                             }
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            if false {
+                            /*if false {
                                 // FIXME(eddyb) this was the previous logic,
                                 // but the only tested apps that use `CachedView`
                                 // are sized correctly (regardless of `dpi_factor`)
@@ -698,12 +703,12 @@ impl Widget for View {
                                     self.area,
                                     2.0 / self.dpi_factor.unwrap_or(1.0),
                                 );
-                            } else {
+                            } else {*/
                                 cx.set_pass_area(
                                     &texture_cache.pass,
                                     self.area,
                                 );
-                            }
+                            //}
                         }
                         return DrawStep::done();
                     }
@@ -838,7 +843,7 @@ impl Widget for View {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                        if false {
+                       /* if false {
                             // FIXME(eddyb) this was the previous logic,
                             // but the only tested apps that use `CachedView`
                             // are sized correctly (regardless of `dpi_factor`)
@@ -848,12 +853,12 @@ impl Widget for View {
                                 area,
                                 2.0 / self.dpi_factor.unwrap_or(1.0),
                             );
-                        } else {
+                        } else {*/
                             cx.set_pass_area(
                                 &texture_cache.pass,
                                 area,
                             );
-                        }
+                        //}
                     }
                 }
                 self.draw_state.end();
@@ -938,5 +943,12 @@ impl View {
 
     pub fn child_count(&self) -> usize {
         self.draw_order.len()
+    }
+    
+    pub fn debug_print_children(&self){
+        log!("Debug print view children {:?}", self.children.len());
+        for i in 0..self.draw_order.len(){
+            log!("Child: {}",self.draw_order[i])
+        }
     }
 }

@@ -505,7 +505,7 @@ impl Win32Window {
                     window.last_mouse_pos,
                     Self::get_key_modifiers()
                 );
-                get_win32_app_global().current_cursor = MouseCursor::Hidden;
+                get_win32_app_global().current_cursor = Some(MouseCursor::Hidden);
             },
             WM_MOUSEWHEEL => {
                 let delta = (wparam.0 >> 16) as u16 as i16 as f64;
@@ -735,7 +735,7 @@ impl Win32Window {
         //run_catch_panic(-1, || callback_inner(window, msg, wparam, lparam))
     }
 
-    unsafe fn copy_to_clipboard(text: &String) {
+    pub unsafe fn copy_to_clipboard(text: &String) {
         // plug it into the windows clipboard
         // make utf16 dta
         if let Ok(()) = OpenClipboard(None) {

@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_micro_serde::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
             LiveFileChange,
@@ -16,6 +17,8 @@ use {
             /*LiveTokenId,*/
             LiveFileId,
         },
+        studio::{StudioToAppVec,StudioToApp},
+        web_socket::WebSocketMessage,
         makepad_live_compiler::LiveTypeInfo,
         /*makepad_math::*,*/
         cx::Cx,
@@ -185,7 +188,7 @@ impl Cx {
     
     pub fn start_disk_live_file_watcher(&mut self, milis:u64){
         let live_registry = self.live_registry.borrow();
-
+        
         let mut file_list:Vec<(String,String, Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
             if let Some(start) = file.file_name.find("src/"){
@@ -222,11 +225,33 @@ impl Cx {
     }
     
     pub fn handle_live_edit(&mut self)->bool{
+        // lets poll our studio connection
+        let mut all_changes:Vec<LiveFileChange> = Vec::new();
+        
+        if let Some(studio_socket) = &mut self.studio_web_socket{
+            while let Ok(msg) = studio_socket.try_recv(){
+                match msg {
+                    WebSocketMessage::Binary(bin)=>{
+                        if let Ok(data) = StudioToAppVec::deserialize_bin(&bin){
+                            for data in data.0{
+                                match data{
+                                    StudioToApp::LiveChange{file_name, content}=>{
+                                        all_changes.retain(|v| v.file_name != file_name); 
+                                        all_changes.push(LiveFileChange{file_name, content})
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _=>()
+                }
+            }
+        }
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
         // then find the token-slice we need
-        let mut all_changes = Vec::new();
+        
         while let Ok(changes) = self.live_file_change_receiver.try_recv(){
             all_changes.extend(changes);
         }
@@ -424,7 +449,7 @@ impl Cx {
         let doc = live_registry.ptr_to_doc(live_ptr);
         
         let next_index = cb(self, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
-        if next_index <= live_ptr.index as usize + 2 {
+        if next_index <= live_ptr.index as usize + 1 {
             self.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);
         }
     }

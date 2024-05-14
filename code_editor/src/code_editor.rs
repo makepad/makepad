@@ -4,6 +4,7 @@ use {
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
         session::{SelectionMode, Session},
+        history::{NewGroup},
         settings::Settings,
         str::StrExt,
         text::Position,
@@ -20,11 +21,15 @@ live_design! {
     import makepad_widgets::theme_desktop_dark::*;
 
     TokenColors = {{TokenColors}} {
+        whitespace: #6E6E6E,
+        delimiter: #a,
+        delimiter_highlight: #f,
+        error_decoration: #f00,
+        warning_decoration: #0f0,
+        
         unknown: #C0C0C0,
         branch_keyword: #C485BE,
-        comment: #638D54,
         constant: #CC917B,
-        delimiter: #a,
         identifier: #D4D4D4,
         loop_keyword: #FF8C00,
         number: #B6CEAA,
@@ -33,10 +38,7 @@ live_design! {
         string: #CC917B,
         function: #fffcc9,
         typename: #56C9B1,
-        whitespace: #6E6E6E,
-        delimiter_highlight: #f,
-        error_decoration: #f00,
-        warning_decoration: #0f0,
+        comment: #638D54,
     }
 
     DrawIndentGuide = {{DrawIndentGuide}} {
@@ -104,26 +106,22 @@ live_design! {
                 );
                 sdf.gloop(self.gloopiness);
             }
-            return sdf.fill(mix(#5558,#08f8,self.focus));
+            return sdf.fill(mix(THEME_COLOR_U_1 * 1.1, THEME_COLOR_U_3 * 0.8, self.focus));
         }
     }
 
-    DrawCodeText = {{DrawCodeText}} {
-    }
+    DrawCodeText = {{DrawCodeText}} { }
 
     CodeEditor = {{CodeEditor}} {
-        width: Fill,
-        height: Fill,
+        height: Fill, width: Fill,
         margin: 0,
+
         scroll_bars: <ScrollBars> {}
-        draw_bg: {
-           // draw_depth: 0.0,
-            color: #2a
-        }
+        draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
         draw_gutter: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {},
-            color: #5,
+            color: (THEME_COLOR_TEXT_META),
         }
         draw_text: {
             draw_depth: 1.0,
@@ -132,7 +130,7 @@ live_design! {
                 if self.outline < 0.5 {
                     return incol
                 }
-                if self.pos.y<0.12 {
+                if self.pos.y < 0.12 {
                     return #f
                 }
                 return incol
@@ -140,7 +138,7 @@ live_design! {
         }
         draw_indent_guide: {
            // draw_depth: 1.0,
-            color: #5,
+            color: (THEME_COLOR_U_2),
         }
         draw_decoration: {
           //  draw_depth: 2.0,
@@ -154,18 +152,18 @@ live_design! {
             uniform blink: 0.0
             instance focus: 0.0
             fn pixel(self) -> vec4 {
-                let color = mix(#0000,mix(self.color, #0000, self.blink),self.focus);
+                let color = mix(THEME_COLOR_U_HIDDEN, mix(self.color, THEME_COLOR_U_HIDDEN, self.blink),self.focus);
                 return vec4(color.rgb*color.a, color.a);
             }
-            color: #C0C0C0,
+            color: (THEME_COLOR_WHITE),
         }
 
 
         draw_cursor_bg: {
             instance focus: 0.0
             fn pixel(self) -> vec4 {
-                let color = mix(#0000,#4447,self.focus);
-                return vec4(color.rgb*color.a, color.a);
+                let color = mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_U_1, self.focus);
+                return vec4(color.rgb * color.a, color.a);
             }
         }
 
@@ -334,7 +332,6 @@ impl CodeEditor {
 
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-
         let last_added_selection =
             session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
@@ -505,7 +502,7 @@ impl CodeEditor {
         pos: Position,
         session: &mut Session,
     ) {
-        session.set_selection(pos, Affinity::Before, SelectionMode::Simple);
+        session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
@@ -880,6 +877,7 @@ impl CodeEditor {
                             _ => SelectionMode::All,
                         }
                     },
+                    NewGroup::Yes
                 );
                 self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
@@ -936,7 +934,7 @@ impl CodeEditor {
                 }
                 cx.set_cursor(MouseCursor::Text);
                 let ((cursor, affinity), _) = self.pick(session, abs);
-                session.move_to(cursor, affinity);
+                session.move_to(cursor, affinity, NewGroup::Yes);
                 // alright how are we going to do scrolling
                 self.redraw(cx);
             }
@@ -951,7 +949,7 @@ impl CodeEditor {
                 *next = cx.new_next_frame();
                 let abs = *abs;
                 let ((cursor, affinity), _) = self.pick(session, abs);
-                session.move_to(cursor, affinity);
+                session.move_to(cursor, affinity, NewGroup::Yes);
                 self.redraw(cx);
             }
         }

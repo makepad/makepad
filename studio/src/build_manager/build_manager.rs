@@ -8,48 +8,85 @@ use {
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,
+            StdinMouseDown,
+            StdinMouseUp,
+            StdinMouseMove,
+            StdinScroll,
+            StdinKeyModifiers
         },
-        makepad_platform::studio::{AppToStudioVec,AppToStudio,EventSample, GPUSample},
-        makepad_platform::log::LogLevel,
+        makepad_platform::studio::{AppToStudio,AppToStudioVec,EventSample, GPUSample, StudioToAppVec, StudioToApp},
         build_manager::{
             build_protocol::*,
             build_client::BuildClient
         },
-        run_view::*,
         app::AppAction,
         makepad_shell::*,
     },
     makepad_code_editor::{text, decoration::{Decoration, DecorationType}},
     makepad_http::server::*,
     std::{
-        collections::HashMap,
+        sync::{Arc,Mutex},
+        cell::RefCell,
+        collections::{HashMap,hash_map},
         io::prelude::*,
         path::PathBuf,
         path::Path,
         fs::File,
+        sync::mpsc,
+        thread,
+        time,
+        net::{UdpSocket, SocketAddr},
+        time::{Instant, Duration},
     },
-    std::sync::mpsc,
-    std::thread,
-    std::time,
-    std::net::{UdpSocket, SocketAddr},
-    std::time::{Instant, Duration},
+    
 };
 
 pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
     pub log_index: String,
     pub process: BuildProcess,
-    pub swapchain: Option<cx_stdin::Swapchain<Texture >>,
+    pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
+    pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::Swapchain<Texture >>>,
+    pub app_area: HashMap<usize, Area>,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
     /// and needs to be kept around to avoid deallocating the backing texture.
     ///
     /// While not strictly necessary, it can also accept *new* draws to any of
     /// its images, which allows the client to catch up a frame or two, visually.
-    pub last_swapchain_with_completed_draws: Option<cx_stdin::Swapchain<Texture >>,
-    
     pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
 }
+impl ActiveBuild{
+    pub fn swapchain_mut(&mut self, index:usize)->&mut Option<cx_stdin::Swapchain<Texture >>{
+       match self.swapchain.entry(index) {
+            hash_map::Entry::Occupied(o) => o.into_mut(),
+            hash_map::Entry::Vacant(v) => v.insert(None),
+        }
+    }
+    pub fn last_swapchain_with_completed_draws_mut(&mut self, index:usize)->&mut Option<cx_stdin::Swapchain<Texture >>{
+        match self.last_swapchain_with_completed_draws.entry(index) {
+            hash_map::Entry::Occupied(o) => o.into_mut(),
+            hash_map::Entry::Vacant(v) => v.insert(None),
+        }
+    }
+    pub fn swapchain(&self, index:usize)->Option<&cx_stdin::Swapchain<Texture >>{
+        if let Some(e) = self.swapchain.get(&index){
+            if let Some(e) = e{
+                return Some(e)
+            }
+        }
+        None
+    }
+    pub fn last_swapchain_with_completed_draws(&mut self, index:usize)->Option<&cx_stdin::Swapchain<Texture >>{
+        if let Some(e) = self.last_swapchain_with_completed_draws.get(&index){
+            if let Some(e) = e{
+                return Some(e)
+            }
+        }
+        None
+    }
+}
+
 
 #[derive(Default)]
 pub struct ActiveBuilds {
@@ -91,7 +128,9 @@ pub struct BuildManager {
     pub studio_http: String,
     pub recv_studio_msg: ToUIReceiver<(LiveId,AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
-    pub send_file_change: FromUISender<LiveFileChange>
+    pub tick_timer: Timer,
+    //pub send_file_change: FromUISender<LiveFileChange>,
+    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, mpsc::Sender<Vec<u8>>)>>>>,
 }
 
 pub struct BuildBinary {
@@ -101,7 +140,7 @@ pub struct BuildBinary {
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum BuildManagerAction {
-    StdinToHost {run_view_id: LiveId, msg: StdinToHost},
+    StdinToHost {build_id: LiveId, msg: StdinToHost},
     None
 }
 
@@ -114,7 +153,9 @@ impl BuildManager {
         else{
              8001
         };
-        
+        //self.studio_http = format!("http://172.20.10.4:{}/$studio_web_socket", self.http_port);
+        self.studio_http = format!("http://127.0.0.1:{}/$studio_web_socket", self.http_port);
+        self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
         
@@ -151,6 +192,13 @@ impl BuildManager {
         }
     }
     
+    pub fn process_name(&mut self, tab_id: LiveId) -> Option<String> {
+        if let Some(build) = self.active.builds.get(&tab_id){
+            return Some(build.process.binary.clone())
+        }
+        None
+    }
+     
     pub fn handle_tab_close(&mut self, tab_id: LiveId) -> bool {
         let len = self.active.builds.len();
         if self.active.builds.remove(&tab_id).is_some(){
@@ -167,19 +215,20 @@ impl BuildManager {
     
     pub fn start_recompile(&mut self, _cx: &mut Cx) {
         // alright so. a file was changed. now what.
-        for (item_id, active_build) in &mut self.active.builds {
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
-            active_build.swapchain = None;
-            //active_build.last_swapchain_with_completed_draws = None;
+        for (build_id, active_build) in &mut self.active.builds {
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Run(active_build.process.clone(), self.studio_http.clone()));
+            
+            active_build.swapchain.clear();
+            active_build.last_swapchain_with_completed_draws.clear();
             active_build.aux_chan_host_endpoint = None;
         }
     }
     
     pub fn clear_active_builds(&mut self) {
         // alright so. a file was changed. now what.
-        for item_id in self.active.builds.keys() {
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::Stop);
+        for build_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
         }
         self.active.builds.clear();
     }
@@ -192,28 +241,98 @@ impl BuildManager {
         self.profile.clear();
     }
     
-    pub fn start_recompile_timer(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+    pub fn start_recompile_timer(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.recompile_timer);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
-        for item_id in self.active.builds.keys() {
+        /*for item_id in self.active.builds.keys() {
             let view = ui.run_view(&[*item_id]);
             view.recompile_started(cx);
-        }
+        }*/
     }
     
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
-       for item_id in self.active.builds.keys() {
+       /*for item_id in self.active.builds.keys() {
             self.clients[0].send_cmd_with_id(*item_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
                 file: live_file_change.file_name.clone(),
                 contents: live_file_change.content.clone()
             }.to_json()));
+        }*/
+        if let Ok(d)= self.active_build_websockets.lock(){
+            let data = StudioToAppVec(vec![StudioToApp::LiveChange{
+                file_name:live_file_change.file_name.clone(),
+                content:live_file_change.content.clone()
+            }]).serialize_bin();
+            for node in d.borrow_mut().iter_mut(){
+                let _ = node.1.send(data.clone());
+            }
         }
-        let _ = self.send_file_change.send(live_file_change);
+    }
+    
+    pub fn broadcast_to_stdin(&mut self, msg: HostToStdin){
+        for build_id in self.active.builds.keys() {
+            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(msg.to_json()));
+        }
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
-
+        if let Some(_) = self.tick_timer.is_event(event) {
+            self.broadcast_to_stdin(HostToStdin::Tick);
+        }
+        
+        match event {
+            Event::MouseDown(e) => {
+                // we should only send this if it was captured by one of our runviews
+                for (build_id,build) in &self.active.builds{
+                    for area in build.app_area.values(){
+                        if e.handled.get() == *area{
+                            self.clients[0].send_cmd_with_id(*build_id, BuildCmd::HostToStdin(
+                                HostToStdin::MouseDown(StdinMouseDown {
+                                    time: e.time,
+                                    x: e.abs.x,
+                                    y: e.abs.y,
+                                    button: e.button,
+                                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                                }).to_json()
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+            Event::MouseMove(e) => {
+                // we send this one to what window exactly?
+                self.broadcast_to_stdin(HostToStdin::MouseMove(StdinMouseMove {
+                    time: e.time,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                }));
+            }
+            Event::MouseUp(e) => {
+                self.broadcast_to_stdin(HostToStdin::MouseUp(StdinMouseUp {
+                    time: e.time,
+                    button: e.button,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                }));
+            }
+            Event::Scroll(e) => {
+                self.broadcast_to_stdin(HostToStdin::Scroll(StdinScroll {
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                    x: e.abs.x,
+                    y: e.abs.y,
+                    sx: e.scroll.x,
+                    sy: e.scroll.y,
+                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers)
+                }));
+            }
+            _ => ()
+        }
+                        
+            
         if let Event::Signal = event {
             let log = &mut self.log;
             let active = &mut self.active;       
@@ -280,10 +399,22 @@ impl BuildManager {
                             values.gpu.push(sample);
                             cx.action(AppAction::RedrawProfiler)
                         }
+                        AppToStudio::FocusDesign=>{
+                            cx.action(AppAction::FocusDesign(build_id))
+                        }
+                        AppToStudio::PatchFile(ef)=>{
+                            cx.action(AppAction::PatchFile(ef))
+                        }
+                        AppToStudio::EditFile(ef)=>{
+                            cx.action(AppAction::EditFile(ef))
+                        }
+                        AppToStudio::JumpToFile(jt)=>{
+                            cx.action(AppAction::JumpTo(jt));
+                        }
                     }
                 }
             }
-            
+                
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv(){
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(loc)) => {
@@ -324,7 +455,7 @@ impl BuildManager {
                         match msg {
                             Ok(msg) => {
                                 cx.action(BuildManagerAction::StdinToHost {
-                                    run_view_id: wrap.cmd_id,
+                                    build_id: wrap.cmd_id,
                                     msg
                                 })
                             }
@@ -360,17 +491,17 @@ impl BuildManager {
     pub fn start_http_server(&mut self) {
         let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), self.http_port as u16);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
-        
         //log!("Http server at http://127.0.0.1:{}/ for wasm examples and mobile", self.http_port);
         start_http_server(HttpServer {
             listen_address: addr,
             post_max_size: 1024 * 1024,
             request: tx_request
         });
-        
+        /*
         let rx_file_change = self.send_file_change.receiver();
         //let (tx_live_file, rx_live_file) = mpsc::channel::<HttpServerRequest> ();
         
+        let active_build_websockets = self.active_build_websockets.clone();
         // livecoding observer
         std::thread::spawn(move || {
             loop{
@@ -378,8 +509,10 @@ impl BuildManager {
                     // lets send this change to all our websocket connections
                 }
             }
-        });
+        });*/
+        
         let studio_sender = self.recv_studio_msg.sender();
+        let active_build_websockets = self.active_build_websockets.clone();
         std::thread::spawn(move || {
             // TODO fix this proper:
             let makepad_path = "./".to_string();
@@ -402,15 +535,18 @@ impl BuildManager {
             while let Ok(message) = rx_request.recv() {
                 // only store last change, fix later
                 match message {
-                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender: _,headers} => {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender,headers} => {
+                        println!("CONNECT MSG");
                         if let Some(id) = headers.path.rsplit("/").next(){
                             if let Ok(id) = id.parse::<u64>(){
                                 socket_id_to_build_id.insert(web_socket_id, LiveId(id));
+                                active_build_websockets.lock().unwrap().borrow_mut().push((web_socket_id,response_sender));
                             }
                         }
                     },
                     HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
                         socket_id_to_build_id.remove(&web_socket_id);
+                        active_build_websockets.lock().unwrap().borrow_mut().retain(|v| v.0 != web_socket_id);
                     },
                     HttpServerRequest::BinaryMessage {web_socket_id, response_sender: _, data} => {
                         if let Some(id) = socket_id_to_build_id.get(&web_socket_id){
@@ -418,7 +554,6 @@ impl BuildManager {
                                 let _ = studio_sender.send((*id,msg));
                             }
                         }
-                        //println!("GOT BINARY MESSAGE");
                         // new incombing message from client
                     }
                     HttpServerRequest::Get {headers, response_sender} => {

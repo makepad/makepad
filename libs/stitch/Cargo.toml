@@ -1,0 +1,18 @@
+[package]
+name = "makepad-stitch"
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev]
+opt-level = 1  
+
+[dev-dependencies]
+criterion = "0.5.1"
+wast = "200.0.0"
+
+[[bench]]
+name = "benches"
+harness = false
+
+[workspace]
+members = ["coremark", "fuzz"]

@@ -1,0 +1,22 @@
+[package]
+name = "makepad-experiments-websocket-windows"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad websocket test"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "shZoP-LMDS_D9QdOWJ-1eEmE1m4="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
+makepad-audio-graph = { path = "../../audio_graph", version = "0.6.0" }
+
+[dependencies.windows]
+version = "0.43.0"
+features = [
+    "Foundation_Collections" ,
+    "Networking_Sockets" ,
+    "Storage_Streams"
+]

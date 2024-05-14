@@ -2,10 +2,15 @@ use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
-use std::time::{Instant, Duration};
+use std::time::{Instant};
 use crate::database::*; 
 use crate::comfyui::*; 
- 
+use makepad_http::server::*;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+use std::sync::mpsc;
+use std::cell::RefCell;
+use std::sync::{Arc,Mutex};
+   
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -13,17 +18,17 @@ live_design!{
     import crate::app_ui::AppUI;
     import crate::app_ui::AppWindow;
     App = {{App}} { 
-        ui: <MultiWindow> {
+        ui: <Root> {
             <Window> {
                 window: {inner_size: vec2(2000, 1024)},
                 caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
                 hide_caption_on_fullscreen: true,
                 body = <AppUI>{}
             }
-            <Window> {
+            /*<Window> {
                 window: {inner_size: vec2(960, 540)},
                 body = <AppWindow>{}
-            }
+            }*/
         }
     }
 }
@@ -80,19 +85,13 @@ impl Workflow {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-        /*Machine::new("DESKTOP-1:8188", id_lut!(m1)),
-        Machine::new("DESKTOP-2:8188", id_lut!(m2)),
-        Machine::new("DESKTOP-3:8188", id_lut!(m3)),
-        Machine::new("DESKTOP-4:8188", id_lut!(m4)),*/
-        Machine::new("10.0.0.125:8188", id_lut!(m1)),
-       /* Machine::new("DESKTOP-8:8188", id_lut!(m6))*/
+       Machine::new("10.0.0.111:8188", id_lut!(m1)),
+        //Machine::new("192.168.8.231:8188", id_lut!(m1)),
     ])] machines: Vec<Machine>,
     
     #[rust(vec![
         Workflow::new("turbo")
     ])] workflows: Vec<Workflow>,
-    
-    #[rust] todo: Vec<(bool, PromptState)>,
     
     #[rust(Database::new(cx))] db: Database,
     
@@ -104,10 +103,16 @@ pub struct App {
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
-    #[rust(true)] take_photo:bool,
-    #[rust(0.85)] dial1: f32,
-    #[rust(0.85)] dial2: f32
-    //#[rust(Instant::now())] last_flip: Instant
+    #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
+    #[rust] llm_chat: Vec<(LLMMsg,String)>,
+    
+    #[rust] delay_timer: Timer,
+}
+
+enum LLMMsg{
+    AI,
+    Human,
+    Progress
 }
 
 impl LiveRegister for App{
@@ -120,7 +125,7 @@ impl LiveRegister for App{
 impl App {
     pub fn start_video_inputs(&mut self, cx: &mut Cx) {
         let video_sender = self.video_recv.sender();
-        cx.video_input(0, move | img | {
+        cx.video_input(0, move | img | { 
             let _ = video_sender.send((0, img.to_buffer()));
         });
     }
@@ -150,26 +155,12 @@ impl App {
                 let g = out[y*width*3 + x*3 + 1];
                 let b = out[y*width*3 + x*3 + 2];
                 let c = Vec4{x:r as f32 / 255.0, y:g as f32 / 255.0,z:b as f32 / 255.0,w:1.0};
-                let d1 = (self.dial1-0.5)*2.0;
-                let d2 = (self.dial2*5.0).powf(2.0);
-                let shift = vec4(d1,d1,d1,0.0);
-                let scale = vec4(d2,d2,d2,1.0);
-                let c = (c - shift)*scale + shift;
                 //let c = Vec4::from_lerp(vec4(c.x,c.x,c.x,1.0), c, 1.0 - self.dial2);
                 out[y*width*3 + x*3 + 0] = (c.x * 255.0).min(255.0).max(0.0) as u8;
                 out[y*width*3 + x*3 + 1] = (c.y * 255.0).min(255.0).max(0.0) as u8;
                 out[y*width*3 + x*3 + 2] = (c.z * 255.0).min(255.0).max(0.0) as u8;
             }
         }
-        /*
-        let d1 = (self.dial1-0.5)*2.0;
-        let d2 = pow(self.dial2*10.0,2.0);
-        let shift = vec4(d1,d1,d1,0.0)
-        let scale = vec4(d2,d2,d2,1.0)
-        let c = (self.get_video_pixel(self.pos)-shift)*scale + shift;
-        return mix(vec4(c.x, c.x,c.x, 1.0), c, 1.0-self.dial2)
-        */
-        
         self.video_input[0].swap_vec_u32(cx, &mut buf);
         // lets encode it
         let mut jpeg = Vec::new();
@@ -234,7 +225,7 @@ impl App {
              
         request.set_header("Content-Type".to_string(), "application/json".to_string());
 
-        let ws = fs::read_to_string(format!("examples/sdxl/workspace_{}.json", prompt_state.prompt.preset.workflow)).unwrap();
+        let ws = fs::read_to_string("examples/sdxl/workspace_turbo.json").unwrap();
         let ws = ws.replace("CLIENT_ID", "1234");
         let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
         let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
@@ -246,7 +237,6 @@ impl App {
         
         request.set_metadata_id(machine.id);
         request.set_body(ws.as_bytes().to_vec());
-        Self::update_progress(cx, &self.ui, machine.id, true, 0, 1);
             
         cx.http_request(live_id!(prompt), request);
             
@@ -256,6 +246,63 @@ impl App {
         };
     }
     
+    #[cfg(target_os = "windows")]
+    fn send_query_to_llm(&mut self, _cx: &mut Cx) {
+    }
+        
+    #[cfg(not(target_os = "windows"))]
+    fn send_query_to_llm(&mut self, cx: &mut Cx) {
+        // alright we have a query. now what
+        let url = format!("http://127.0.0.1:8080/completion");
+        let mut request = HttpRequest::new(url, HttpMethod::POST);
+        let mut prompt = String::new();
+        
+        prompt.push_str(&format!("<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are an assistant that answers in very short image generator prompts of maximum 2 lines<|eot_id|>\n\n"));
+        
+        for (ai, msg) in &self.llm_chat{
+            match ai{
+               LLMMsg::Human=>prompt.push_str(&format!("<|start_header_id|>user<|end_header_id|>
+                {}<|eot_id|>", msg)),
+               LLMMsg::AI=>prompt.push_str(&format!("<|start_header_id|>assistant<|end_header_id|>
+                {}<|eot_id|>\n", msg)),
+                LLMMsg::Progress=>()
+            }
+        }
+        
+        prompt = prompt.replace("\\","").replace("\"", "\\\"").replace("\n","\\n");
+        
+        let body = format!("{{
+            \"stream\":false,
+            \"n_predict\":400,
+            \"temperature\":0.7,
+            \"stop\":[\"<|eot_id|>\"],
+            \"repeat_last_n\":256,
+            \"repeat_penalty\":1.18,
+            \"top_k\":40,
+            \"top_p\":0.95,
+            \"min_p\":0.05,
+            \"tfs_z\":1,
+            \"typical_p\":1,
+            \"presence_penalty\":0,
+            \"frequency_penalty\":0,
+            \"mirostat\":0,
+            \"mirostat_tau\":5,
+            \"mirostat_eta\":0.1,
+            \"grammar\":\"\",
+            \"n_probs\":0,
+            \"min_keep\":0,
+            \"image_data\":[],
+            \"cache_prompt\":true,
+            \"api_key\":\"\",
+            \"prompt\":\"{}\"
+        }}", prompt);
+       
+        request.set_header("Content-Type".to_string(), "application/json".to_string());
+        request.set_body(body.as_bytes().to_vec());
+                    
+        cx.http_request(live_id!(llm), request);
+    }
+    /*
     fn clear_todo(&mut self, cx: &mut Cx) {
         for _ in 0..2 {
             self.todo.clear();
@@ -277,7 +324,7 @@ impl App {
         for machine in &mut self.machines {
             machine.running = MachineRunning::Stopped;
         }
-    }
+    }*/
     
     fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
         let machine = self.machines.iter().find( | v | v.id == machine_id).unwrap();
@@ -298,7 +345,7 @@ impl App {
             machine.web_socket = Some(WebSocket::open(request));
         }
     }
-    
+    /*
     fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) { 
         let progress_id = match machine {
             live_id!(m1) => id!(progress1),
@@ -307,8 +354,7 @@ impl App {
         ui.view(progress_id).apply_over_and_redraw(cx, live!{
             draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
         });
-    }
-    
+    }*/
     
     fn load_seed_from_current_image(&mut self, cx: &mut Cx) {
         if let Some(current_image) = &self.current_image {
@@ -341,9 +387,52 @@ impl App {
         }
     }
     
-    fn set_current_image(&mut self, _cx: &mut Cx, image_id: ImageId) {
+    fn update_textures(&mut self, cx: &mut Cx) {
+        if let Some(current_image) = &self.current_image {
+            let tex = self.db.image_texture(current_image);
+            if tex.is_some() {
+                self.ui.image_blend(id!(image_view.image)).set_texture(cx, tex.clone());
+                //self.ui.image_blend(id!(big_image.image1)).set_texture(cx, tex.clone());
+                self.ui.image_blend(id!(second_image.image1)).set_texture(cx, tex);
+            }
+        }
+    }
+    
+    fn set_current_image(&mut self, cx: &mut Cx, image_id: ImageId) {
+        // lets send the remote screens the 3 images below the current selection
+        let single =  self.ui.check_box(id!(single_check_box)).selected(cx);
+            
+        pub fn get_data_for_index(db:&Database, current:usize, id:usize, single:bool)->Option<Vec<u8>>{
+            let id = if single || db.image_files[current].prompt_hash != db.image_files[id].prompt_hash{
+                current
+            }
+            else{
+                id
+            };
+            if let Some(image) = db.image_files.get(id){
+                if let Ok(data) = fs::read(format!("{}/{}",db.image_path, image.image_id.as_file_name())) {
+                    return Some(data)
+                }
+            }
+            None
+        }
+        // lets find our current image id, and we should set all to the same if the prompt hash is the same
+        if let Some(current) = self.db.image_files.iter().position(|v| v.image_id == image_id){
+            for (_id, ip, sender) in self.remote_screens.lock().unwrap().borrow_mut().iter(){
+                log!("{:?}", ip);
+                let index = if *ip == Ipv4Addr::new(10,0,0,117){1} //tv5
+                else {0}; //tv3
+                if let Some(data) = get_data_for_index(&self.db, current, current+index, single){
+                    let _= sender.send(data);
+                }
+            }
+        }
+        /*
+        */
         self.current_image = Some(image_id);
+        self.update_textures(cx);
         let prompt_hash = self.prompt_hash_from_current_image();
+        
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
             self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.positive);
         }
@@ -377,13 +466,9 @@ impl App {
         self.ui.redraw(cx);
         if let Some(ImageListItem::ImageRow {prompt_hash: _, image_count, image_files}) = self.filtered.list.get(item_id as usize) {
             self.set_current_image(cx, image_files[row.min(*image_count)].clone());
+            
             //self.last_flip = Instant::now();
         }
-    }
-    
-    fn update_todo_display(&mut self, cx: &mut Cx) {
-        let todo = self.todo.len();
-        self.ui.label(id!(todo_label)).set_text_and_redraw(cx, &format!("Todo {}", todo));
     }
     
     fn save_preset(&self) -> PromptPreset {
@@ -406,9 +491,20 @@ impl App {
         self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
     }
     
-    fn render(&mut self, cx: &mut Cx, photo:bool) {
+    fn next_render(&mut self, cx:&mut Cx){
+        if self.ui.check_box(id!(render_check_box)).selected(cx) {
+            self.render(cx);
+            return
+        }
+    }
+    
+    fn next_render_delay(&mut self, cx:&mut Cx){
+        let delay = self.ui.text_input(id!(settings_delay.input)).text().parse::<f64>().unwrap_or(1.0);
+        self.delay_timer = cx.start_timeout(delay);
+    }
+        
+    fn render(&mut self, cx: &mut Cx) {
         let randomise = self.ui.check_box(id!(random_check_box)).selected(cx);
-        self.take_photo = photo;
         let positive = self.ui.text_input(id!(positive)).text();
         let negative = self.ui.text_input(id!(negative)).text();
         if randomise {
@@ -426,44 +522,46 @@ impl App {
             seed: self.last_seed as u64
         };
         if let Some(machine_id) = self.get_free_machine(){
-            if photo || self.current_photo_name.is_none(){
-                self.send_camera_to_machine(cx, machine_id, prompt_state);
-            }
-            else{
-                self.send_prompt_to_machine(cx, machine_id, self.current_photo_name.clone().unwrap_or("".to_string()), prompt_state); 
-            }
+            self.send_camera_to_machine(cx, machine_id, prompt_state);
         }
-        else{
-            self.todo.insert(0, (photo, prompt_state));
-        }
-        // lets update the queuedisplay
-        self.update_todo_display(cx);
     }
-
-    fn update_render_todo(&mut self, cx: &mut Cx) {
-        
-        if self.todo.len() == 0 && self.ui.check_box(id!(auto_check_box)).selected(cx) {
-            self.render(cx, self.take_photo);
-            return
-        }
-        while self.todo.len()>0{
-            if let Some(machine) = self.machines.iter().find( | v | !v.running.is_running()) {
-                
-                let (photo, prompt_state) = self.todo.pop().unwrap();
-                if photo{
-                    self.send_camera_to_machine(cx, machine.id, prompt_state);
-                }
-                else{
-                    self.send_prompt_to_machine(cx, machine.id, self.current_photo_name.clone().unwrap_or("".to_string()), prompt_state); 
+    
+    pub fn start_http_server(&mut self) {
+        let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), 8009);
+        let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
+        start_http_server(HttpServer {
+            listen_address: addr,
+            post_max_size: 1024 * 1024,
+            request: tx_request
+        });
+        let remote_screens = self.remote_screens.clone();
+        std::thread::spawn(move || {
+            while let Ok(message) = rx_request.recv() {
+                // only store last change, fix later
+                match message {
+                    HttpServerRequest::ConnectWebSocket {web_socket_id, response_sender,headers} => {
+                        let ip = if let IpAddr::V4(addr) = headers.addr.ip(){
+                            addr
+                        }
+                        else{
+                            Ipv4Addr::new(0,0,0,0)
+                        };
+                        remote_screens.lock().unwrap().borrow_mut().push((web_socket_id,ip,response_sender));
+                    },
+                    HttpServerRequest::DisconnectWebSocket {web_socket_id} => {
+                        remote_screens.lock().unwrap().borrow_mut().retain(|v| v.0 != web_socket_id);
+                    },
+                    HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender: _, data:_} => {
+                        //log!("GOT MESSAGE {} {}", web_socket_id, data.len());
+                    }
+                    HttpServerRequest::Get {headers:_, response_sender:_} => {
+                    }
+                    HttpServerRequest::Post {..} => { //headers, body, response}=>{
+                    }
                 }
             }
-            else{
-                break;
-            }
-        }
-        self.update_todo_display(cx);
+        });
     }
-
 }
 
 impl MatchEvent for App {
@@ -481,14 +579,25 @@ impl MatchEvent for App {
         cx.start_interval(0.016);
         self.update_seed_display(cx);
         self.start_video_inputs(cx);
+        self.start_http_server();
+    }
+    
+    fn handle_timer(&mut self, cx: &mut Cx, e:&TimerEvent){
+        if self.delay_timer.is_timer(e).is_some(){
+            self.next_render(cx);
+        }
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
+        if self.db.handle_decoded_images(cx) {
+            self.update_textures(cx);
+            self.ui.redraw(cx);
+        }
+        
         for m in 0..self.machines.len(){
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){
                     Ok(WebSocketMessage::String(s))=>{
-
                         if s.contains("execution_interrupted") {
                                                                                      
                         }
@@ -516,9 +625,9 @@ impl MatchEvent for App {
                                                     self.machines[m].fetching = Some((photo_name.clone(), prompt_state.clone()));
                                                     self.machines[m].running = MachineRunning::Stopped;
                                                     //self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
-                                                    Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                    //Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
                                                     self.fetch_image(cx, self.machines[m].id, &image.filename);
-                                                    self.update_render_todo(cx);
+                                                    self.next_render_delay(cx);
                                                 }
                                             }
                                         }
@@ -688,20 +797,11 @@ impl MatchEvent for App {
                             weight(&self.ui, 2, cc.value, cx);
                         }
                         27=>{
-                            let val = cc.value as f32 / 127.0;
-                            self.dial2 = val;
-                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
-                                draw_bg:{dial2:(val)}
-                            });
+                            //let val = cc.value as f32 / 127.0;
                             //weight(&self.ui, 3, cc.value, cx);
                         }
                         23=>{
-                            let val = cc.value as f32 / 127.0;
-                            self.dial1 = val;
-                            self.ui.widget(id!(video_input0)).apply_over(cx, live!{
-                                draw_bg:{dial1:(val)}
-                            });
-                            //weight(&self.ui, 4, cc.value, cx);
+                            //let val = cc.value as f32 / 127.0;
                         }
                         _=>()
                     }
@@ -709,6 +809,7 @@ impl MatchEvent for App {
                 _=>()
             }
         }
+
         while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
             let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
             if img_width != vfb.format.width / 2 || img_height != vfb.format.height {
@@ -723,7 +824,7 @@ impl MatchEvent for App {
             }
             let image_size = [vfb.format.width as f32, vfb.format.height as f32];
             let v = self.ui.image(id!(video_input0));
-            v.set_texture(Some(self.video_input[id].clone()));
+            v.set_texture(cx, Some(self.video_input[id].clone()));
             v.set_uniform(cx, id!(image_size), &image_size);
             v.set_uniform(cx, id!(is_rgb), &[0.0]);
             v.redraw(cx);
@@ -737,6 +838,30 @@ impl MatchEvent for App {
                 NetworkResponse::HttpResponse(res) => {
                     // alright we got an image back
                     match event.request_id {
+                        live_id!(llm)=>if let Some(res) = res.get_string_body() {
+                            // lets parse it as json
+                            if let Ok(val) = JsonValue::deserialize_json(&res){
+                                if let Some(val) = val.key("content"){
+                                    if let Some(val) = val.string(){
+                                        if let Some((LLMMsg::Progress,_)) = self.llm_chat.last(){
+                                            self.llm_chat.pop();
+                                        }
+                                        let val = val.strip_prefix("assistant").unwrap_or(val);
+                                        let val = val.to_string().replace("\"","");
+                                        let val = val.trim();
+                                        self.ui.text_input(id!(positive)).set_text(&val);
+                                        self.llm_chat.push((LLMMsg::AI,val.into()));
+                                        self.ui.widget(id!(llm_chat)).redraw(cx);
+                                    }
+                                }
+                                else{
+                                    log!("{}", res);
+                                }
+                            }
+                            else{
+                                log!("{}", res);
+                            }
+                        }
                         live_id!(prompt) => if let Some(_data) = res.get_string_body() { // lets check if the prompt executed
                         }
                         live_id!(image) => if let Some(data) = res.get_body() {
@@ -787,18 +912,28 @@ impl MatchEvent for App {
     }
     
     fn handle_draw_2d(&mut self, cx:&mut Cx2d){
-        if let Some(current_image) = &self.current_image {
-            let tex = self.db.image_texture(current_image);
-            if tex.is_some() {
-                self.ui.image(id!(image_view.image)).set_texture(tex.clone());
-                self.ui.image(id!(big_image.image1)).set_texture(tex.clone());
-                self.ui.image(id!(second_image.image1)).set_texture(tex);
-            }
-        }
         
         let image_list = self.ui.portal_list(id!(image_list));
-        
+        let llm_chat = self.ui.portal_list(id!(llm_chat));
+                
         while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
+           if let Some(mut llm_chat) = llm_chat.has_widget(&next).borrow_mut() {
+                llm_chat.set_item_range(cx, 0, self.llm_chat.len());
+                while let Some(item_id) = llm_chat.next_visible_item(cx) {
+                    if item_id >= self.llm_chat.len(){
+                        continue
+                    }
+                    let (is_llm, msg) = &self.llm_chat[item_id];
+                    let template = match is_llm{
+                        LLMMsg::AI=>live_id!(AI),
+                        LLMMsg::Human=>live_id!(Human),
+                        LLMMsg::Progress=>live_id!(AI)
+                    };
+                    let item = llm_chat.item(cx, item_id, template).unwrap();
+                    item.set_text(msg);
+                    item.draw_all(cx, &mut Scope::empty());
+                }
+            }
             if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
                 // alright now we draw the items
                 image_list.set_item_range(cx, 0, self.filtered.list.len());
@@ -820,7 +955,7 @@ impl MatchEvent for App {
                                     if index >= *image_count {break}
                                     // alright we need to query our png cache for an image.
                                     let tex = self.db.image_texture(&image_files[index]);
-                                    row.image(id!(img)).set_texture(tex);
+                                    row.image(id!(img)).set_texture(cx, tex);
                                 }
                                 item.draw_all(cx, &mut Scope::empty());
                             }
@@ -854,10 +989,8 @@ impl MatchEvent for App {
                     self.load_seed_from_current_image(cx);
                 }
             }
-            KeyEvent {is_repeat: false, key_code: KeyCode::KeyC, modifiers, ..} =>{
-                if modifiers.control || modifiers.logo {
-                    self.clear_todo(cx);
-                }
+            KeyEvent {is_repeat: false, key_code: KeyCode::KeyC,  ..} =>{
+                
             }
             KeyEvent {is_repeat: false, key_code: KeyCode::KeyR, modifiers, ..} => {
                 if modifiers.control || modifiers.logo {
@@ -876,9 +1009,7 @@ impl MatchEvent for App {
                     }
                 }
             }
-           KeyEvent {is_repeat: false, key_code: KeyCode::Escape, ..} => {
-                self.clear_todo(cx);
-            }
+          
             /*        
             Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::Home, modifiers, ..}) => {
                 if self.ui.view(id!(big_image)).visible() || modifiers.logo {
@@ -902,8 +1033,8 @@ impl MatchEvent for App {
     }
     
     fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
-        log!("HERE {:?}", devices);
-        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 30.0);
+        println!("{:?}", devices);
+        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
         cx.use_video_input(&input);
     }
     
@@ -922,20 +1053,32 @@ impl MatchEvent for App {
                 _ => ()
             }
         }
-                    
-        if self.ui.button(id!(take_photo)).clicked(&actions) {
-            self.clear_todo(cx);
-            self.render(cx, true);
+        
+        let chat = self.ui.text_input(id!(chat));
+        if let Some(val) = chat.returned(&actions){
+            chat.set_text_and_redraw(cx, "");
+            chat.set_cursor(0,0);
+            self.llm_chat.push((LLMMsg::Human, val));
+            self.llm_chat.push((LLMMsg::Progress, "... Thinking ...".into()));
+            self.ui.widget(id!(llm_chat)).redraw(cx);
+            self.send_query_to_llm(cx);
         }
                     
-        if self.ui.button(id!(render_single)).clicked(&actions) {
-            self.clear_todo(cx);
-            self.render(cx, false);
+        if let Some(true) = self.ui.check_box(id!(render_check_box)).changed(&actions) {
+            self.render(cx);
         }
-                    
-                            
-        if self.ui.button(id!(clear_toodo)).clicked(&actions) {
-            self.clear_todo(cx);
+        
+        if self.ui.button(id!(trim_button)).clicked(&actions) {
+            if self.llm_chat.len()>2{
+                let last = self.llm_chat.len().max(2)-1;
+                self.llm_chat.drain(2..last);
+                self.ui.widget(id!(llm_chat)).redraw(cx);
+            }
+        }
+        
+        if self.ui.button(id!(clear_button)).clicked(&actions) {
+            self.llm_chat.clear();
+            self.ui.widget(id!(llm_chat)).redraw(cx);
         }
                     
         if let Some(change) = self.ui.text_input(id!(search)).changed(&actions) {
@@ -943,7 +1086,7 @@ impl MatchEvent for App {
             self.ui.redraw(cx);
             image_list.set_first_id_and_scroll(0, 0.0);
         }
-                    
+        
         /*if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
             if e.tap_count >1 {
                 self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
@@ -972,6 +1115,7 @@ impl MatchEvent for App {
                 }
             }
             if let Some(fd) = item.as_view().finger_down(&actions) {
+                
                 if fd.tap_count == 2 {
                     if let ImageListItem::Prompt {prompt_hash} = self.filtered.list[item_id as usize] {
                         self.load_inputs_from_prompt_hash(cx, prompt_hash);
@@ -989,9 +1133,6 @@ impl AppMain for App {
             return
         }
         
-        if self.db.handle_decoded_images(cx) {
-            self.ui.redraw(cx);
-        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

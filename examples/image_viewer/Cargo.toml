@@ -1,0 +1,10 @@
+[package]
+name = "makepad-example-image-viewer"
+version = "0.6.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "An image viewer example"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }

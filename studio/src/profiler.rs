@@ -16,13 +16,8 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
     ProfilerEventChart = {{ProfilerEventChart}}{
-        height: Fill,
-        width: Fill
-        draw_bg: {
-            fn pixel(self)->vec4{
-                return #3
-            }
-        }
+        height: Fill, width: Fill,
+        draw_bg: { fn pixel(self)->vec4{ return THEME_COLOR_BG_CONTAINER } }
         draw_line: {
             fn pixel(self)->vec4{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -32,7 +27,7 @@ live_design!{
                     self.rect_size.x - 2.0 ,
                     self.rect_size.y - 2.0
                 )
-                sdf.fill_keep(#6)
+                sdf.fill_keep(THEME_COLOR_DIVIDER)
                 return sdf.result
             }
         }
@@ -42,20 +37,24 @@ live_design!{
             }
         }
         draw_time:{ 
-            color: #f,
-            text_style: <THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_META)
         }
         draw_label:{
-            color: #0,
-            text_style: <THEME_FONT_LABEL>{}
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT_DARK)
         }
     }
     
     Profiler = {{Profiler}}{
-        height: Fill,
-        width: Fill
-        <ProfilerEventChart>{
-        }
+        height: Fill, width: Fill
+        <ProfilerEventChart>{ }
     }
 }
 
@@ -84,7 +83,7 @@ struct ProfilerEventChart{
 }
 
 impl ProfilerEventChart{
-    fn draw_block(&mut self, cx: &mut Cx2d, rect:&Rect, sample_start:f64, sample_end: f64, label:&str){
+    fn draw_block(&mut self, cx: &mut Cx2d, rect:&Rect, sample_start:f64, sample_end: f64, label:&str, meta:u64){
         let scale = rect.size.x / self.time_range.len();
         let xpos = rect.pos.x + (sample_start - self.time_range.start) * scale;
         let xsize = ((sample_end - sample_start) * scale).max(2.0);
@@ -95,13 +94,23 @@ impl ProfilerEventChart{
                 
         self.draw_item.draw_abs(cx, rect);
         self.tmp_label.clear();
-        if sample_end - sample_start > 0.001{
-            write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
+        if meta >0{
+            if sample_end - sample_start > 0.001{
+                write!(&mut self.tmp_label, "{}({meta}) {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
+            }
+            else{
+                write!(&mut self.tmp_label, "{}({meta}) {:.0} µs", label, (sample_end-sample_start)*1000_000.0).unwrap();
+            }
         }
         else{
-            write!(&mut self.tmp_label, "{} {:.0} ns", label, (sample_end-sample_start)*1000000.0).unwrap();
+            if sample_end - sample_start > 0.001{
+                write!(&mut self.tmp_label, "{} {:.2} ms", label, (sample_end-sample_start)*1000.0).unwrap();                        
+            }
+            else{
+                write!(&mut self.tmp_label, "{} {:.0} µs", label, (sample_end-sample_start)*1000_000.0).unwrap();
+            }
         }
-        
+            
         // if xsize > 10.0 lets draw a clipped piece of text 
         if xsize > 10.0{
             cx.begin_turtle(Walk::abs_rect(rect), Layout::default());
@@ -114,7 +123,7 @@ impl ProfilerEventChart{
 impl Widget for ProfilerEventChart {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         self.draw_bg.begin(cx, walk, Layout::default());
-        let bm = &scope.data.get::<AppData>().build_manager;
+        let bm = &scope.data.get::<AppData>().unwrap().build_manager;
         let mut label = String::new();
         
         let rect = cx.turtle().rect(); 
@@ -150,7 +159,7 @@ impl Widget for ProfilerEventChart {
                     }
                     let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
                     self.draw_item.color = Vec4::from_u32(color);
-                    self.draw_block(cx, &rect, sample.start, sample.end, Event::name_from_u32(sample.event_u32));
+                    self.draw_block(cx, &rect, sample.start, sample.end, Event::name_from_u32(sample.event_u32), sample.event_meta);
                 }
             }
             
@@ -165,7 +174,7 @@ impl Widget for ProfilerEventChart {
                     self.draw_block(cx, &Rect{
                         pos:rect.pos + dvec2(0.0,25.0),
                         size:rect.size
-                    }, sample.start, sample.end, "GPU");
+                    }, sample.start, sample.end, "GPU", 0);
                 }
             }
         }

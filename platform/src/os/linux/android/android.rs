@@ -1,4 +1,5 @@
 #[allow(unused)]
+use makepad_jni_sys as jni_sys;
 use {
     std::rc::Rc,
     std::cell::{RefCell},
@@ -7,9 +8,9 @@ use {
     std::time::{Instant, Duration},
     std::sync::{mpsc, mpsc::Sender},
     std::collections::HashMap,
+    jni_sys::jobject,
     self::super::{
         android_media::CxAndroidMedia,
-        jni_sys::jobject,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
@@ -59,8 +60,8 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
         web_socket::WebSocketMessage,
     },
-    makepad_http::websocket::WebSocket as WebSocketImpl,
-    makepad_http::websocket::WebSocketMessage as WebSocketMessageImpl
+    makepad_http::websocket::ServerWebSocket as WebSocketImpl,
+    makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
 
 impl Cx {
@@ -732,6 +733,9 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_selected) => {
                     //to_java.show_clipboard_actions(selected.as_str());
                 },
+                CxOsOp::CopyToClipboard(content) => {
+                    unsafe {android_jni::to_java_copy_to_clipboard(content);}
+                },
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
@@ -794,11 +798,16 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
+    
+    fn seconds_since_app_start(&self)->f64{
+        Instant::now().duration_since(self.os.start_time).as_secs_f64()
+    }
 }
 
 impl Default for CxOs {
     fn default() -> Self {
         Self {
+            start_time: Instant::now(),
             first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
@@ -832,6 +841,7 @@ pub struct CxOs {
 
     pub quit: bool,
     pub fullscreen: bool,
+    pub (crate) start_time: Instant,
     pub (crate) timers: PollTimers,
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,

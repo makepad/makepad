@@ -2,9 +2,10 @@ use crate::makepad_shell::*;
 
 pub fn rustup_toolchain_install() -> Result<(), String> {
     println!("Installing Rust toolchains for wasm");
+    /*
     shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "update",
-    ]) ?;
+    ]) ?;*/
     shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "install",
         "nightly"
@@ -29,6 +30,8 @@ pub fn rustup_toolchain_install() -> Result<(), String> {
         "rust-std",
         "--toolchain",
         "nightly",
+        "--target",
+        "wasm32-unknown-unknown"
     ]) ?;
     shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "component",
@@ -36,6 +39,8 @@ pub fn rustup_toolchain_install() -> Result<(), String> {
         "rust-src",
         "--toolchain",
         "nightly",
+        "--target",
+        "wasm32-unknown-unknown"
     ]) ?;
     
     Ok(())
