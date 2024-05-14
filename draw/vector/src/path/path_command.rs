@@ -1,4 +1,4 @@
-use crate::geometry::{Point, Transform, Transformation};
+use crate::geometry::{Point, Transform, Transformation, Vector};
 
 /// A command in a path
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,7 +18,9 @@ impl Transform for PathCommand {
     {
         match self {
             PathCommand::ArcTo(e, r, xr, l, s) => {
-                PathCommand::ArcTo(e.transform(t), r.transform(t), xr, l, s)
+                let rv = Vector { x: r.x, y: r.y }.transform(t);
+                let rn = Point { x: rv.x, y: rv. y };
+                PathCommand::ArcTo(e.transform(t), rn, xr, l, s)
             }
             PathCommand::MoveTo(p) => PathCommand::MoveTo(p.transform(t)),
             PathCommand::LineTo(p) => PathCommand::LineTo(p.transform(t)),

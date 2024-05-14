@@ -481,6 +481,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         Line(bool),
         Arc(bool),
         Cubic(bool),
+        CubicSmooth(bool),
         Quadratic(bool),
         Close
     }
@@ -495,6 +496,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         num_count: usize,
         last_pt: Point,
         first_pt: Point,
+        last_ctl_pt: Option<Point>,
         out: Vec<PathCommand>,
         num_state: Option<NumState>
     }
@@ -530,6 +532,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                 Cmd::Vert(_) => 1,
                 Cmd::Line(_) => 2,
                 Cmd::Cubic(_) => 6,
+                Cmd::CubicSmooth(_) => 4,
                 Cmd::Arc(_) => 7,
                 Cmd::Quadratic(_) => 4,
                 Cmd::Close => 0
@@ -611,7 +614,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
             match self.cmd {
                 Cmd::Unknown => (),
                 Cmd::Move(abs) => {
-                    
+                    self.last_ctl_pt = None;
                     if abs {
                         self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
                     }
@@ -622,6 +625,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                     self.out.push(PathCommand::MoveTo(self.last_pt));
                 },
                 Cmd::Hor(abs) => {
+                    self.last_ctl_pt = None;
                     if abs {
                         self.last_pt = Point {x: self.nums[0], y: self.last_pt.y};
                     }
@@ -631,6 +635,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                     self.out.push(PathCommand::LineTo(self.last_pt));
                 }
                 Cmd::Vert(abs) => {
+                    self.last_ctl_pt = None;
                     if abs {
                         self.last_pt = Point {x: self.last_pt.x, y: self.nums[0]};
                     }
@@ -640,6 +645,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                     self.out.push(PathCommand::LineTo(self.last_pt));
                 }
                 Cmd::Line(abs) => {
+                    self.last_ctl_pt = None;
                     if abs {
                         self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
                     }
@@ -656,12 +662,50 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                             Point {x: self.nums[2], y: self.nums[3]},
                             self.last_pt,
                         ));
+                        self.last_ctl_pt = Some(Point {x: self.nums[2], y: self.nums[3]});
                     } else {
                         self.out.push(PathCommand::CubicTo(
                             self.last_pt + Vector {x: self.nums[0], y: self.nums[1]},
                             self.last_pt + Vector {x: self.nums[2], y: self.nums[3]},
                             self.last_pt + Vector {x: self.nums[4], y: self.nums[5]},
                         ));
+                        self.last_ctl_pt = Some(
+                            self.last_pt + Vector {x: self.nums[2], y: self.nums[3]});
+                        self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
+                    }
+                },
+                Cmd::CubicSmooth(abs) => {
+                    // Calculate absolute x1, y1 for control point 1
+                    let a_cp1 = if self.last_ctl_pt.is_none() {
+                        self.last_pt
+                    } else {
+                        self.last_pt + (self.last_pt - self.last_ctl_pt.unwrap())
+                    };
+
+                    // Transform s command into c command
+                    let mut tmp = [0.0; 4];
+                    tmp.copy_from_slice(&self.nums[0..4]);
+                    self.nums[2..6].copy_from_slice(&tmp);
+
+                    if abs {
+                        self.nums[0..2].copy_from_slice(&[a_cp1.x, a_cp1.y]);
+                        self.last_pt = Point {x: self.nums[4], y: self.nums[5]};
+                        self.out.push(PathCommand::CubicTo(
+                            Point {x: self.nums[0], y: self.nums[1]},
+                            Point {x: self.nums[2], y: self.nums[3]},
+                            self.last_pt,
+                        ));
+                        self.last_ctl_pt = Some(Point {x: self.nums[2], y: self.nums[3]});
+                    } else {
+                        let r_cp1 = a_cp1 - self.last_pt;
+                        self.nums[0..2].copy_from_slice(&[r_cp1.x, r_cp1.y]);
+                        self.out.push(PathCommand::CubicTo(
+                            self.last_pt + Vector {x: self.nums[0], y: self.nums[1]},
+                            self.last_pt + Vector {x: self.nums[2], y: self.nums[3]},
+                            self.last_pt + Vector {x: self.nums[4], y: self.nums[5]},
+                        ));
+                        self.last_ctl_pt = Some(
+                            self.last_pt + Vector {x: self.nums[2], y: self.nums[3]});
                         self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
                     }
                 },
@@ -724,6 +768,8 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
             b'q' => state.next_cmd(Cmd::Quadratic(false)) ?,
             b'C' => state.next_cmd(Cmd::Cubic(true)) ?,
             b'c' => state.next_cmd(Cmd::Cubic(false)) ?,
+            b'S' => state.next_cmd(Cmd::CubicSmooth(true)) ?,
+            b's' => state.next_cmd(Cmd::CubicSmooth(false)) ?,
             b'H' => state.next_cmd(Cmd::Hor(true)) ?,
             b'h' => state.next_cmd(Cmd::Hor(false)) ?,
             b'V' => state.next_cmd(Cmd::Vert(true)) ?,
