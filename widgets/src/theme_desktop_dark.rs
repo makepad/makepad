@@ -306,7 +306,7 @@ live_design! {
 
     P = <Label> {
         width: Fill,
-        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: <THEME_MSPACE_2> {}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -2799,7 +2799,8 @@ live_design! {
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        padding: { top: (THEME_SPACE_2), bottom: 2. }
+        padding: { bottom: 2. }
+        margin: <THEME_MSPACE_2> { bottom: (THEME_SPACE_2 - 2.)}
         spacing: 7.5,
         align: {x: 0., y: 0.}
 
@@ -3379,7 +3380,7 @@ live_design! {
         min: 0.0, max: 1.0,
         step: 0.0,
         label_align: { y: 0.0 }
-        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+        margin: <THEME_MSPACE_2> { bottom: 0.}
         precision: 2,
         height: Fit
 
