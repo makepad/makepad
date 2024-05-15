@@ -1,4 +1,4 @@
-#![cfg_attr(all(unix, use_unstable_unix_socket_ancillary_data_2021), feature(unix_socket_ancillary_data))]
+//#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 
 pub mod os;
 

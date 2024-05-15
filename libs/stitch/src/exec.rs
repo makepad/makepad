@@ -1,6 +1,8 @@
+//! Types and functions for executing threaded code.
+
 use {
     crate::{
-        code::{Code, CodeSlot},
+        code::{Code, InstrSlot},
         data::UnguardedData,
         elem::UnguardedElem,
         error::Error,
@@ -20,17 +22,24 @@ use {
     std::{hint, mem, ptr},
 };
 
-#[cfg(windows)]
-pub(crate) type ThreadedInstr = unsafe extern "sysv64" fn(
-    ip: Ip,
-    sp: Sp,
-    md: Md,
-    ms: Ms,
-    ix: Ix,
-    sx: Sx,
-    dx: Dx,
-    cx: Cx,
-) -> ControlFlowBits;
+/// A `ThreadedInstr` is a subroutine that executes a single WebAssembly instruction.
+///
+/// The signature of a `ThreadedInstr` has been carefully designed so that LLVM can perform sibling
+/// optimisation, and the most heavily used parts of the execution context are stored in hardware
+/// registers, which is crucial for performance.
+///
+/// The idea is to pass a copy of the most heavily fields of the execution context as arguments to a
+/// `ThreadedInstr`. These arguments form the "registers" of our virtual machine. We currently use 6
+/// virtual integer registers and 2 virtual floating-point registers. Our goal is to make sure that
+/// these virtual registers are mapped to actual hardware registers on the physical machine.
+///
+/// On 64-bit non-Windows platforms, we use the "C" ABI. This corresponds to the "aapcs" ABI on Mac,
+/// and the "sysv64" ABI on Linux. Both ABIs allow at least 6 integer and 6 floating point arguments
+/// to be passed in hardware registers, which is sufficient for our needs.
+///
+/// On 64-bit Windows platforms, the "C" ABI corresponds to the "win64" ABI. This ABI allows only
+/// the first 4 arguments to be passed in hardware registers, regardless of their type. This is
+/// insufficient for our needs, so on Windows platforms, we use the "sysv64" ABI instead.
 
 #[cfg(not(windows))]
 pub(crate) type ThreadedInstr = unsafe extern "C" fn(
@@ -44,22 +53,68 @@ pub(crate) type ThreadedInstr = unsafe extern "C" fn(
     cx: Cx,
 ) -> ControlFlowBits;
 
-pub(crate) type Ip = *mut CodeSlot;
+#[cfg(windows)]
+pub(crate) type ThreadedInstr = unsafe extern "sysv64" fn(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits;
+
+// Virtual registers
+
+/// The instruction pointer register (`Ip`) stores a pointer to the current instruction.
+pub(crate) type Ip = *mut InstrSlot;
+
+/// The stack pointer register (`Sp`) stores a pointer to the end of the current call frame.
 pub(crate) type Sp = *mut StackSlot;
+
+/// The memory data register (`Md`) stores a pointer to the start of the current [`Memory`].
 pub(crate) type Md = *mut u8;
+
+/// The memory size register (`Ms`) stores the size of the current [`Memory`].
 pub(crate) type Ms = u32;
+
+/// The integer register (`Ix`) stores temporary values of integral type.
 pub(crate) type Ix = u64;
+
+/// The single precision floating-point register (`Sx`) stores temporary values of type `f32`.
 pub(crate) type Sx = f32;
+
+/// The double precision floating-point register (`Dx`) stores temporary values of type `f64`.
 pub(crate) type Dx = f64;
+
+/// The context register (`Cx`) stores a pointer to a [`Context`].
+///
+/// This register is special because it's the only one that does not have a corresponding field in
+/// the [`Context`], but instead stores a pointer to the [`Context`] itself.
 pub(crate) type Cx<'a> = *mut Context<'a>;
 
+/// An execution context for executing threaded code.
 #[derive(Debug)]
 pub(crate) struct Context<'a> {
+    // Virtual registers
+    pub(crate) ip: Ip,
+    pub(crate) sp: Sp,
+    pub(crate) md: Md,
+    pub(crate) ms: Ms,
+    pub(crate) ix: Ix,
+    pub(crate) sx: Sx,
+    pub(crate) dx: Dx,
+
+    // A mutable reference to the store in which we're executing.
     pub(crate) store: &'a mut Store,
+    // A scoped lock to the stack for the current thread.
     pub(crate) stack: Option<StackGuard>,
+    // Used to store out-of-band error data.
     pub(crate) error: Option<Error>,
 }
 
+/// Used to tell the interpreter what to do next.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ControlFlow {
     Stop,
@@ -68,6 +123,7 @@ pub(crate) enum ControlFlow {
 }
 
 impl ControlFlow {
+    /// Creates a `ControlFlow` from its raw bits.
     pub(crate) fn from_bits(bits: usize) -> Option<Self> {
         if bits == 0 {
             Some(Self::Stop)
@@ -80,6 +136,7 @@ impl ControlFlow {
         }
     }
 
+    /// Converts a `ControlFlow` to its raw bits.
     pub(crate) fn to_bits(self) -> ControlFlowBits {
         match self {
             Self::Stop => 0,
@@ -89,89 +146,150 @@ impl ControlFlow {
     }
 }
 
+/// The raw bit representation of a `ControlFlow`.
 pub(crate) type ControlFlowBits = usize;
 
+/// Executes the given [`Func`] with the given arguments.
+///
+/// The results are written to the `results` slice.
 pub(crate) fn exec(
     store: &mut Store,
     func: Func,
     args: &[Val],
     results: &mut [Val],
 ) -> Result<(), Error> {
+    // Lock the stack for the current thread.
     let mut stack = Stack::lock();
+
+    // Obtain the type of the function.
+    let type_ = func.type_(store).clone();
+
+    // Check that the stack has enough space.
+    let stack_height = unsafe { stack.ptr().offset_from(stack.base_ptr()) as usize };
+    if type_.call_frame_size() > Stack::SIZE - stack_height {
+        return Err(Trap::StackOverflow)?;
+    }
+
+    // Copy the arguments to the stack.
     let mut ptr = stack.ptr();
     for arg in args.iter().copied() {
         let arg = arg.to_unguarded(store.id());
-        unsafe { arg.write_to_stack(&mut ptr) };
+        unsafe {
+            arg.write_to_stack(ptr);
+            ptr = ptr.add(1);
+        };
     }
-    let type_ = func.type_(store).clone();
+
+    // Ensure that the function is compiled before calling it.
     func.compile(store);
+
+    // Store the start of the call frame so we can reset the stack to it later.
+    let ptr = stack.ptr();
+
     match func.0.as_mut(store) {
         FuncEntity::Wasm(func) => {
-            let Code::Compiled(state) = func.code_mut() else {
-                panic!();
+            // Obtain the compiled code for this function.
+            let Code::Compiled(code) = func.code_mut() else {
+                unreachable!();
             };
+
+            // Create a trampoline for the [`WasmFuncEntity`].
             let mut trampoline = [
-                call as CodeSlot,
-                state.code.as_mut_ptr() as CodeSlot,
+                call as InstrSlot,
+                code.code.as_mut_ptr() as InstrSlot,
                 type_.call_frame_size() * mem::size_of::<StackSlot>(),
-                stop as CodeSlot,
+                stop as InstrSlot,
             ];
-            let ptr = stack.ptr();
+
+            // Create an execution context.
             let mut context = Context {
+                ip: trampoline.as_mut_ptr(),
+                sp: stack.ptr(),
+                md: ptr::null_mut(),
+                ms: 0,
+                ix: 0,
+                sx: 0.0,
+                dx: 0.0,
                 store,
                 stack: Some(stack),
                 error: None,
             };
+
+            // Main interpreter loop
             loop {
                 match ControlFlow::from_bits(unsafe {
                     next_instr(
-                        trampoline.as_mut_ptr(),
-                        ptr,
-                        ptr::null_mut(),
-                        0,
-                        0,
-                        0.0,
-                        0.0,
+                        context.ip,
+                        context.sp,
+                        context.md,
+                        context.ms,
+                        context.ix,
+                        context.sx,
+                        context.dx,
                         &mut context as *mut _,
                     )
                 })
                 .unwrap()
                 {
-                    ControlFlow::Stop => break,
+                    ControlFlow::Stop => {
+                        stack = context.stack.take().unwrap();
+
+                        // Reset the stack to the start of the call frame.
+                        stack.set_ptr(ptr);
+
+                        break;
+                    }
                     ControlFlow::Trap(trap) => {
-                        drop(context.stack.take().unwrap());
+                        stack = context.stack.take().unwrap();
+
+                        // Reset the stack to the start of the call frame.
+                        stack.set_ptr(ptr);
+
                         return Err(trap)?;
                     }
                     ControlFlow::Error => {
-                        drop(context.stack.take().unwrap());
+                        stack = context.stack.take().unwrap();
+
+                        // Reset the stack to the start of the call frame.
+                        stack.set_ptr(ptr);
+
                         return Err(context.error.take().unwrap());
                     }
                 }
             }
-            stack = context.stack.take().unwrap();
-            stack.set_ptr(ptr);
         }
         FuncEntity::Host(func) => {
-            let ptr = stack.ptr();
+            // Set the stack pointer to the end of the call frame.
             stack.set_ptr(unsafe { ptr.add(type_.call_frame_size()) });
+
+            // Call the [`HostTrampoline`] of the [`HostFuncEntity`].
             stack = func.trampoline().clone().call(store, stack)?;
+
+            // Reset the stack to the start of the call frame.
             stack.set_ptr(ptr);
         }
     }
+
+    // Copy the results from the stack.
     let mut ptr = stack.ptr();
     for result in results.iter_mut() {
         unsafe {
             *result = Val::from_unguarded(
-                UnguardedVal::read_from_stack(&mut ptr, result.type_()),
+                UnguardedVal::read_from_stack(ptr, result.type_()),
                 store.id(),
             );
+            ptr = ptr.add(1);
         }
     }
+
     Ok(())
 }
 
+// Helper macros
+
+/// A helper macro for defining a `ThreadedInstr` with the correct ABI.
 #[cfg(windows)]
-macro_rules! instr {
+macro_rules! threaded_instr {
     ($name:ident(
         $ip:ident: Ip,
         $sp:ident: Sp,
@@ -194,9 +312,8 @@ macro_rules! instr {
         ) -> ControlFlowBits $body
     };
 }
-
 #[cfg(not(windows))]
-macro_rules! instr {
+macro_rules! threaded_instr {
     ($name:ident(
         $ip:ident: Ip,
         $sp:ident: Sp,
@@ -220,6 +337,7 @@ macro_rules! instr {
     };
 }
 
+/// A helper macro for unwrapping a result or propagating its trap.
 macro_rules! r#try {
     ($expr:expr) => {
         match $expr {
@@ -231,7 +349,7 @@ macro_rules! r#try {
 
 // Control instructions
 
-instr!(unreachable(
+threaded_instr!(unreachable(
     _ip: Ip,
     _sp: Sp,
     _md: Md,
@@ -244,7 +362,7 @@ instr!(unreachable(
     ControlFlow::Trap(Trap::Unreachable).to_bits()
 });
 
-instr!(br(
+threaded_instr!(br(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -254,12 +372,17 @@ instr!(br(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let target = *ip.cast();
+
+    // Branch to target
     let ip = target;
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(br_if_z_s(
+threaded_instr!(br_if_z_s(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -269,13 +392,18 @@ instr!(br_if_z_s(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let (cond, ip): (u32, _) = read_stack(ip, sp);
     let (target, ip) = read_imm(ip);
+
+    // Branch to target if zero
     let ip = if cond == 0 { target } else { ip };
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(br_if_z_r(
+threaded_instr!(br_if_z_r(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -285,13 +413,18 @@ instr!(br_if_z_r(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let cond: u32 = read_reg(ix, sx, dx);
     let (target, ip) = read_imm(ip);
+
+    // Branch to target if zero
     let ip = if cond == 0 { target } else { ip };
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(br_if_nz_s(
+threaded_instr!(br_if_nz_s(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -301,13 +434,18 @@ instr!(br_if_nz_s(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let (cond, ip): (u32, _) = read_stack(ip, sp);
     let (target, ip) = read_imm(ip);
+
+    // Branch to target if not zero
     let ip = if cond != 0 { target } else { ip };
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(br_if_nz_r(
+threaded_instr!(br_if_nz_r(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -317,13 +455,18 @@ instr!(br_if_nz_r(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let cond: u32 = read_reg(ix, sx, dx);
     let (target, ip) = read_imm(ip);
+
+    // Branch to target if not zero
     let ip = if cond != 0 { target } else { ip };
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(br_table_s(
+threaded_instr!(br_table_s(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -333,14 +476,19 @@ instr!(br_table_s(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let (target_idx, ip): (u32, _) = read_stack(ip, sp);
     let (target_count, ip): (u32, _) = read_imm(ip);
     let targets: *mut Ip = ip.cast();
+
+    // Branch to target
     let ip = *targets.add(target_idx.min(target_count) as usize);
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(br_table_r(
+threaded_instr!(br_table_r(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -350,14 +498,19 @@ instr!(br_table_r(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let target_idx: u32 = read_reg(ix, sx, dx);
     let (target_count, ip): (u32, _) = read_imm(ip);
     let targets: *mut Ip = ip.cast();
+
+    // Branch to target
     let ip = *targets.add(target_idx.min(target_count) as usize);
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(return_(
+threaded_instr!(return_(
     _ip: Ip,
     sp: Sp,
     _md: Md,
@@ -367,15 +520,18 @@ instr!(return_(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Restore call frame from stack.
     let old_sp = sp;
     let ip = *old_sp.offset(-4).cast();
     let sp = *old_sp.offset(-3).cast();
     let md = *old_sp.offset(-2).cast();
     let ms = *old_sp.offset(-1).cast();
+
+    // Execute next instruction.
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(call(
+threaded_instr!(call(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -385,19 +541,26 @@ instr!(call(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands.
     let (target, ip) = read_imm(ip);
     let (offset, ip) = read_imm(ip);
+
+    // Store call frame on stack.
     let new_sp: Sp = sp.cast::<u8>().add(offset).cast();
     *new_sp.offset(-4).cast() = ip;
     *new_sp.offset(-3).cast() = sp;
     *new_sp.offset(-2).cast() = md;
     *new_sp.offset(-1).cast() = ms;
+
+    // Update stack pointer and branch to target.
     let ip = target;
     let sp = new_sp;
+
+    // Execute next instruction.
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(call_host(
+threaded_instr!(call_host(
     ip: Ip,
     sp: Sp,
     _md: Md,
@@ -407,29 +570,26 @@ instr!(call_host(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let (func, ip): (UnguardedFunc, _) = read_imm(ip);
     let (offset, ip) = read_imm(ip);
     let (mem, ip): (Option<UnguardedMem>, _) = read_imm(ip);
-    (*cx)
-        .stack
-        .as_mut()
-        .unwrap_unchecked()
-        .set_ptr(sp.cast::<u8>().add(offset).cast());
+
+    let mut stack = (*cx).stack.take().unwrap_unchecked();
+    stack.set_ptr(sp.cast::<u8>().add(offset).cast());
     let FuncEntity::Host(func) = func.as_ref() else {
         hint::unreachable_unchecked();
     };
-    let stack = match func
-        .trampoline()
-        .clone()
-        .call((*cx).store, (*cx).stack.take().unwrap_unchecked())
-    {
+    let stack = match func.trampoline().clone().call((*cx).store, stack) {
         Ok(stack) => stack,
         Err(error) => {
             (*cx).error = Some(error);
             return ControlFlow::Error.to_bits();
         }
     };
+
     (*cx).stack = Some(stack);
+
     let md;
     let ms;
     if let Some(mut mem) = mem {
@@ -440,10 +600,12 @@ instr!(call_host(
         md = ptr::null_mut();
         ms = 0;
     }
+
+    // Execute next instruction
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(call_indirect(
+threaded_instr!(call_indirect(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -453,11 +615,13 @@ instr!(call_indirect(
     dx: Dx,
     cx: Cx,
 ) -> ControlFlowBits {
+    // Read operands
     let (table_offset, ip): (u32, _) = read_stack(ip, sp);
     let (table, ip): (UnguardedTable, _) = read_imm(ip);
     let (type_, ip): (UnguardedInternedFuncType, _) = read_imm(ip);
     let (stack_offset, ip) = read_imm(ip);
     let (mem, ip): (Option<UnguardedMem>, _) = read_imm(ip);
+
     let func = r#try!(table
         .as_ref()
         .downcast_ref::<UnguardedFuncRef>()
@@ -476,30 +640,27 @@ instr!(call_indirect(
     Func(Handle::from_unguarded(func, (*(*cx).store).id())).compile(&mut *(*cx).store);
     match func.as_mut() {
         FuncEntity::Wasm(func) => {
-            let Code::Compiled(state) = func.code_mut() else {
+            let Code::Compiled(code) = func.code_mut() else {
                 hint::unreachable_unchecked();
             };
-            let target = state.code.as_mut_ptr();
+            let target = code.code.as_mut_ptr();
+
             let new_sp: Sp = sp.cast::<u8>().add(stack_offset).cast();
             *new_sp.offset(-4).cast() = ip;
             *new_sp.offset(-3).cast() = sp;
             *new_sp.offset(-2).cast() = md;
             *new_sp.offset(-1).cast() = ms;
+
             let ip = target;
             let sp = new_sp;
+
+            // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
         FuncEntity::Host(func) => {
-            (*cx)
-                .stack
-                .as_mut()
-                .unwrap_unchecked()
-                .set_ptr(sp.cast::<u8>().add(stack_offset).cast());
-            let stack = match func
-                .trampoline()
-                .clone()
-                .call((*cx).store, (*cx).stack.take().unwrap_unchecked())
-            {
+            let mut stack = (*cx).stack.take().unwrap_unchecked();
+            stack.set_ptr(sp.cast::<u8>().add(stack_offset).cast());
+            let stack = match func.trampoline().clone().call((*cx).store, stack) {
                 Ok(stack) => stack,
                 Err(error) => {
                     (*cx).error = Some(error);
@@ -507,6 +668,7 @@ instr!(call_indirect(
                 }
             };
             (*cx).stack = Some(stack);
+
             let md;
             let ms;
             if let Some(mut mem) = mem {
@@ -517,6 +679,8 @@ instr!(call_indirect(
                 md = ptr::null_mut();
                 ms = 0;
             }
+
+            // Execute next instruction
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         }
     }
@@ -526,7 +690,7 @@ instr!(call_indirect(
 
 macro_rules! ref_is_null {
     ($ref_is_null_s:ident, $ref_is_null_r:ident, $T:ty) => {
-        instr!($ref_is_null_s(
+        threaded_instr!($ref_is_null_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -549,7 +713,7 @@ macro_rules! ref_is_null {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($ref_is_null_r(
+        threaded_instr!($ref_is_null_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -603,7 +767,7 @@ macro_rules! select {
         $select_iir:ident,
         $T:ty
     ) => {
-        instr!($select_sss(
+        threaded_instr!($select_sss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -628,7 +792,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_rss(
+        threaded_instr!($select_rss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -653,7 +817,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_iss(
+        threaded_instr!($select_iss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -678,7 +842,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_srs(
+        threaded_instr!($select_srs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -703,7 +867,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_irs(
+        threaded_instr!($select_irs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -728,7 +892,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_sis(
+        threaded_instr!($select_sis(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -753,7 +917,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_ris(
+        threaded_instr!($select_ris(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -778,7 +942,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_iis(
+        threaded_instr!($select_iis(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -803,7 +967,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_ssr(
+        threaded_instr!($select_ssr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -828,7 +992,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_isr(
+        threaded_instr!($select_isr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -853,7 +1017,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_sir(
+        threaded_instr!($select_sir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -878,7 +1042,7 @@ macro_rules! select {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_iir(
+        threaded_instr!($select_iir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -941,7 +1105,7 @@ macro_rules! select_float {
             $T
         );
 
-        instr!($select_rsr(
+        threaded_instr!($select_rsr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -966,7 +1130,7 @@ macro_rules! select_float {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_srr(
+        threaded_instr!($select_srr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -991,7 +1155,7 @@ macro_rules! select_float {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_irr(
+        threaded_instr!($select_irr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1016,7 +1180,7 @@ macro_rules! select_float {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($select_rir(
+        threaded_instr!($select_rir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1146,7 +1310,7 @@ select!(
 
 macro_rules! global_get {
     ($global_get:ident, $T:ty) => {
-        instr!($global_get(
+        threaded_instr!($global_get(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1184,7 +1348,7 @@ global_get!(global_get_extern_ref, UnguardedExternRef);
 
 macro_rules! global_set {
     ($global_set_s:ident, $global_set_r:ident, $global_set_i:ident, $T:ty) => {
-        instr!($global_set_s(
+        threaded_instr!($global_set_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1209,7 +1373,7 @@ macro_rules! global_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($global_set_r(
+        threaded_instr!($global_set_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1234,7 +1398,7 @@ macro_rules! global_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($global_set_i(
+        threaded_instr!($global_set_i(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1282,7 +1446,7 @@ global_set!(
 
 macro_rules! table_get {
     ($table_get_s:ident, $table_get_r:ident, $table_get_i:ident, $T:ty) => {
-        instr!($table_get_s(
+        threaded_instr!($table_get_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1311,7 +1475,7 @@ macro_rules! table_get {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_get_r(
+        threaded_instr!($table_get_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1340,7 +1504,7 @@ macro_rules! table_get {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_get_i(
+        threaded_instr!($table_get_i(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1396,7 +1560,7 @@ macro_rules! table_set {
         $table_set_ri:ident,
         $T:ty
     ) => {
-        instr!($table_set_ss(
+        threaded_instr!($table_set_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1423,7 +1587,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_rs(
+        threaded_instr!($table_set_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1450,7 +1614,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_is(
+        threaded_instr!($table_set_is(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1477,7 +1641,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_ir(
+        threaded_instr!($table_set_ir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1504,7 +1668,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_ii(
+        threaded_instr!($table_set_ii(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1531,7 +1695,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_sr(
+        threaded_instr!($table_set_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1558,7 +1722,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_si(
+        threaded_instr!($table_set_si(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1585,7 +1749,7 @@ macro_rules! table_set {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($table_set_ri(
+        threaded_instr!($table_set_ri(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1639,7 +1803,7 @@ table_set!(
 
 macro_rules! table_size {
     ($table_size:ident, $T:ty) => {
-        instr!($table_size(
+        threaded_instr!($table_size(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1673,7 +1837,7 @@ table_size!(table_size_extern_ref, UnguardedExternRef);
 
 macro_rules! table_grow {
     ($table_grow:ident, $T:ty) => {
-        instr!($table_grow(
+        threaded_instr!($table_grow(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1712,7 +1876,7 @@ table_grow!(table_grow_extern_ref, UnguardedExternRef);
 
 macro_rules! table_fill {
     ($table_fill:ident, $T:ty) => {
-        instr!($table_fill(
+        threaded_instr!($table_fill(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1746,7 +1910,7 @@ table_fill!(table_fill_extern_ref, UnguardedExternRef);
 
 macro_rules! table_copy {
     ($table_copy:ident, $T:ty) => {
-        instr!($table_copy(
+        threaded_instr!($table_copy(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1794,7 +1958,7 @@ table_copy!(table_copy_extern_ref, UnguardedExternRef);
 
 macro_rules! table_init {
     ($table_init:ident, $T:ty) => {
-        instr!($table_init(
+        threaded_instr!($table_init(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1832,7 +1996,7 @@ table_init!(table_init_extern_ref, UnguardedExternRef);
 
 macro_rules! elem_drop {
     ($elem_drop:ident, $T:ty) => {
-        instr!($elem_drop(
+        threaded_instr!($elem_drop(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1864,7 +2028,7 @@ elem_drop!(elem_drop_extern_ref, UnguardedExternRef);
 
 macro_rules! load {
     ($load_s:ident, $load_r:ident, $load_i:ident, $T:ty, $U:ty) => {
-        instr!($load_s(
+        threaded_instr!($load_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1894,7 +2058,7 @@ macro_rules! load {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($load_r(
+        threaded_instr!($load_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1924,7 +2088,7 @@ macro_rules! load {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($load_i(
+        threaded_instr!($load_i(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1969,7 +2133,7 @@ macro_rules! store {
         $T:ty,
         $U:ty
     ) => {
-        instr!($store_ss(
+        threaded_instr!($store_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -1996,7 +2160,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_rs(
+        threaded_instr!($store_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2023,7 +2187,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_is(
+        threaded_instr!($store_is(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2050,7 +2214,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_ir(
+        threaded_instr!($store_ir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2077,7 +2241,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_ii(
+        threaded_instr!($store_ii(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2104,7 +2268,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_sr(
+        threaded_instr!($store_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2131,7 +2295,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_si(
+        threaded_instr!($store_si(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2158,7 +2322,7 @@ macro_rules! store {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($store_ri(
+        threaded_instr!($store_ri(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2206,7 +2370,7 @@ macro_rules! store_float {
             $T, $U
         );
 
-        instr!($store_rr(
+        threaded_instr!($store_rr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2360,7 +2524,7 @@ store!(
     u32
 );
 
-instr!(memory_size(
+threaded_instr!(memory_size(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2383,7 +2547,7 @@ instr!(memory_size(
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(memory_grow(
+threaded_instr!(memory_grow(
     ip: Ip,
     sp: Sp,
     _md: Md,
@@ -2414,7 +2578,7 @@ instr!(memory_grow(
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(memory_fill(
+threaded_instr!(memory_fill(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2437,7 +2601,7 @@ instr!(memory_fill(
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(memory_copy(
+threaded_instr!(memory_copy(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2460,7 +2624,7 @@ instr!(memory_copy(
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(memory_init(
+threaded_instr!(memory_init(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2486,7 +2650,7 @@ instr!(memory_init(
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(data_drop(
+threaded_instr!(data_drop(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -2510,7 +2674,7 @@ instr!(data_drop(
 
 macro_rules! un_op {
     ($un_op_s:ident, $un_op_r:ident, $f:expr) => {
-        instr!($un_op_s(
+        threaded_instr!($un_op_s(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2533,7 +2697,7 @@ macro_rules! un_op {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($un_op_r(
+        threaded_instr!($un_op_r(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2566,7 +2730,7 @@ macro_rules! bin_op {
         $bin_op_ir:ident,
         $f:expr
     ) => {
-        instr!($bin_op_ss(
+        threaded_instr!($bin_op_ss(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2590,7 +2754,7 @@ macro_rules! bin_op {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($bin_op_rs(
+        threaded_instr!($bin_op_rs(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2614,7 +2778,7 @@ macro_rules! bin_op {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($bin_op_is(
+        threaded_instr!($bin_op_is(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2638,7 +2802,7 @@ macro_rules! bin_op {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($bin_op_ir(
+        threaded_instr!($bin_op_ir(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2677,7 +2841,7 @@ macro_rules! bin_op_noncommutative {
     ) => {
         bin_op!($bin_op_ss, $bin_op_rs, $bin_op_is, $bin_op_ir, $f);
 
-        instr!($bin_op_sr(
+        threaded_instr!($bin_op_sr(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2701,7 +2865,7 @@ macro_rules! bin_op_noncommutative {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($bin_op_si(
+        threaded_instr!($bin_op_si(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -2725,7 +2889,7 @@ macro_rules! bin_op_noncommutative {
             next_instr(ip, sp, md, ms, ix, sx, dx, cx)
         });
 
-        instr!($bin_op_ri(
+        threaded_instr!($bin_op_ri(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3657,7 +3821,7 @@ un_op!(
 
 macro_rules! copy_imm_to_stack {
     ($copy_imm_to_stack:ident, $T:ty) => {
-        instr!($copy_imm_to_stack(
+        threaded_instr!($copy_imm_to_stack(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3688,7 +3852,7 @@ copy_imm_to_stack!(copy_imm_to_stack_extern_ref, UnguardedExternRef);
 
 macro_rules! copy_stack {
     ($copy_stack_t:ident, $T:ty) => {
-        instr!($copy_stack_t(
+        threaded_instr!($copy_stack_t(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3719,7 +3883,7 @@ copy_stack!(copy_stack_extern_ref, UnguardedExternRef);
 
 macro_rules! copy_reg_to_stack {
     ($copy_reg_to_stack_t:ident, $T:ty) => {
-        instr!($copy_reg_to_stack_t(
+        threaded_instr!($copy_reg_to_stack_t(
             ip: Ip,
             sp: Sp,
             md: Md,
@@ -3748,7 +3912,7 @@ copy_reg_to_stack!(copy_reg_to_stack_f64, f64);
 copy_reg_to_stack!(copy_reg_to_stack_func_ref, UnguardedFuncRef);
 copy_reg_to_stack!(copy_reg_to_stack_extern_ref, UnguardedExternRef);
 
-instr!(stop(
+threaded_instr!(stop(
     _ip: Ip,
     _sp: Sp,
     _md: Md,
@@ -3761,7 +3925,7 @@ instr!(stop(
     ControlFlow::Stop.to_bits()
 });
 
-instr!(compile(
+threaded_instr!(compile(
     ip: Ip,
     sp: Sp,
     md: Md,
@@ -3785,7 +3949,7 @@ instr!(compile(
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 
-instr!(enter(
+threaded_instr!(enter(
     ip: Ip,
     sp: Sp,
     _md: Md,
@@ -3800,16 +3964,19 @@ instr!(enter(
     let FuncEntity::Wasm(func) = func.as_ref() else {
         hint::unreachable_unchecked();
     };
-    let Code::Compiled(state) = func.code() else {
+    let Code::Compiled(code) = func.code() else {
         hint::unreachable_unchecked();
     };
-    let stack_height =
-        usize::try_from(sp.offset_from((*cx).stack.as_mut().unwrap_unchecked().base_ptr()))
-            .unwrap_unchecked();
-    if state.max_stack_height > Stack::SIZE - stack_height {
+
+    // Check that the stack has enough space.
+    let stack_height = sp.offset_from((*cx).stack.as_mut().unwrap_unchecked().base_ptr()) as usize;
+    if code.max_stack_height > Stack::SIZE - stack_height {
         return ControlFlow::Trap(Trap::StackOverflow).to_bits();
     }
-    ptr::write_bytes(sp, 0, state.local_count);
+
+    // Initialize the locals for this function to their default values.
+    ptr::write_bytes(sp, 0, code.local_count);
+
     let md;
     let ms;
     if let Some(mut mem) = mem {
@@ -3820,6 +3987,8 @@ instr!(enter(
         md = ptr::null_mut();
         ms = 0;
     }
+
+    // Execute the next instruction.
     next_instr(ip, sp, md, ms, ix, sx, dx, cx)
 });
 

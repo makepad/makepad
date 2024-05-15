@@ -16,6 +16,7 @@ use {
     },
     std::{
         collections::HashMap,
+        env,
         fmt,
         path::PathBuf,
         sync::{Arc, RwLock, Mutex, mpsc::Sender},
@@ -92,9 +93,6 @@ impl BuildConnection {
         let args: Vec<String> = match &what.target {
             BuildTarget::ReleaseStudio => vec![
                 "run".into(),
-                "nightly".into(),
-                "cargo".into(),
-                "run".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--message-format=json".into(),
@@ -105,9 +103,6 @@ impl BuildConnection {
             ],
             BuildTarget::DebugStudio => vec![
                 "run".into(),
-                "nightly".into(),
-                "cargo".into(),
-                "run".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--message-format=json".into(),
@@ -116,9 +111,6 @@ impl BuildConnection {
                 "--stdin-loop".into(),
             ],
             BuildTarget::Release => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "run".into(),
                 "-p".into(),
                 what.binary.clone(),
@@ -129,9 +121,6 @@ impl BuildConnection {
             ],
             BuildTarget::Debug => vec![
                 "run".into(),
-                "nightly".into(),
-                "cargo".into(),
-                "run".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--message-format=json".into(),
@@ -139,9 +128,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::Profiler => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "instruments".into(),
                 "-t".into(),
                 "time".into(),
@@ -153,9 +139,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::IosSim  => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "apple".into(),
                 "ios".into(),
@@ -168,9 +151,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::IosDevice => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "ios".into(),
                 format!("--org={}", "makepad"),
@@ -182,9 +162,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::TvosSim  => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "apple".into(),
                 "tvos".into(),
@@ -197,14 +174,15 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::TvosDevice => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "apple".into(),
                 "tvos".into(),
-                format!("--org={}", "makepad"),
-                format!("--app={}", "example"),
+                "--org=makepad".into(),
+                "--app=aiview".into(),
+                "--app=aiview".into(),
+                "--cert=61".into(),
+                "--device=F8,27".into(),
+                "--profile=./local/tvos4.mobileprovision".into(),
                 "run-device".into(),
                 "-p".into(),
                 what.binary.clone(),
@@ -212,9 +190,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::Android => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "android".into(),
                 "run".into(),
@@ -224,9 +199,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::WebAssembly => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "wasm".into(),
                 "run".into(),
@@ -236,9 +208,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::CheckMacos => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "check".into(),
                 "--target=aarch64-apple-darwin".into(),
                 "-p".into(),
@@ -247,9 +216,6 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::CheckWindows => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "check".into(),
                 "--target=x86_64-pc-windows-msvc".into(),
                 "-p".into(),
@@ -258,20 +224,14 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ],
             BuildTarget::CheckLinux => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "check".into(),
                 "--target=x86_64-unknown-linux-gnu".into(),
                 "-p".into(),
                 what.binary.clone(),
                 "--release".into(),
                 "--message-format=json".into(),
-            ],            
+            ],
             BuildTarget::CheckAll => vec![
-                "run".into(),
-                "nightly".into(),
-                "cargo".into(),
                 "makepad".into(),
                 "check".into(),
                 "all".into(),
@@ -281,16 +241,28 @@ impl BuildConnection {
                 "--message-format=json".into(),
             ]
         };
-        
+
         let http = format!("{}/{}", http, cmd_id.0);
-        let env = [
-            ("RUST_BACKTRACE","1"),
+        let mut env = vec![
             ("MAKEPAD_STUDIO_HTTP", http.as_str()),
             ("MAKEPAD", "lines")
         ];
-
-        let process = ChildProcess::start("rustup", &args, path, &env).expect("Cannot start process");
         
+        let is_in_studio = match what.target {
+            BuildTarget::ReleaseStudio | BuildTarget::DebugStudio=>true,
+            _=>false
+        };
+
+        // Default to nightly rustc but don't overwrite any user request for a
+        // specific nightly version.
+        // FIXME: also apply this for overrides set using rustup override rather
+        // than using an env var or as commandline argument.
+        if !env::var("RUSTUP_TOOLCHAIN").map_or(false, |toolchain| toolchain.contains("nightly")) {
+            env.push(("RUSTUP_TOOLCHAIN", "nightly"));
+        }
+
+        let process = ChildProcess::start("cargo", &args, path, &env, is_in_studio).expect("Cannot start process");
+
         shared.write().unwrap().processes.insert(
             what,
             BuildServerProcess {
@@ -303,11 +275,13 @@ impl BuildConnection {
         // HACK(eddyb) do this first, as there is no way to actually send the
         // initial swapchain to the client at all, unless we have this first
         // (thankfully sending this before we ever read from the client means
-        // it will definitely arrive before C->H ReadyToStart triggers anything).
-        msg_sender.send_message(BuildClientMessageWrap{
-            cmd_id,
-            message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone()),
-        });
+        // it will definitely arrive before C->H ReadyToStart triggers anything)
+        if is_in_studio{
+            msg_sender.send_message(BuildClientMessageWrap{
+                cmd_id,
+                message: BuildClientMessage::AuxChanHostEndpointCreated(process.aux_chan_host_endpoint.clone().unwrap()),
+            });
+        }
 
        // let mut stderr_state = StdErrState::First;
         //let stdin_sender = process.stdin_sender.clone();

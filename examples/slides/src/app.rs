@@ -13,71 +13,66 @@ live_design!{
             height: Fill
             body = {
                 <SlidesView> {
+                    //current_slide:2.0
                     <Slide> {
-                        title = {text: " Hello Exec(ut)"},
+                        title = {text: "Hello RustNL!"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "Playing with local AI"},
+                        title = {text: "Visual application design\nin Rust"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
                         title = {text:"Makepad"},
-                        <SlideBody> {text: "- Rebuilding VB/Delphi\n   in Rust"}
-                    }                    
-                    <Slide> {
-                        title = {text: "10 years is a long time"},
-                        <SlideBody> {text: "- Whole stack from scratch"}
+                        <SlideBody> {text: "- Reimagining VB/Delphi\n- A new IDE and designtool"}
                     }
                     <Slide> {
-                        title = {text: "AI moves incredibly fast"},
-                        <SlideBody> {text: "- september 2023\n- 2 months later: 6x faster"}
+                        title = {text:"Why"},
+                        <SlideBody> {text: "- I love to have fun with code\n- Sound, Graphics, Robots"}
                     }
                     <Slide> {
-                        title = {text: "Large Language Models"},
-                        <SlideBody> {text: "- text input, text output\n- GPT 3.5, LLama, Mistral"}
+                        title = {text:"Rust"},
+                        <SlideBody> {text: "- Fast, reliable\n- Focus on compiletime"}
                     }
                     <Slide> {
-                        title = {text: "Diffuser models"},
-                        <SlideBody> {text: "- text input, image output\n- Midjourney, Stable Diffusion, Dall-E"}
+                        title = {text: "Lets use the side screens!"},
+                        <SlideBody> {text: "- Simple app on appleTV"}
                     }
                     <Slide> {
-                        title = {text: "Multi modal"},
-                        <SlideBody> {text: "- Can use image/audio as inputs"}
+                        title = {text: "AI SDXL"},
+                        <SlideBody> {text: "- Fun with GenAI\n- Server IO test"}
                     }
                     <Slide> {
-                        title = {text: "Lets build!"},
-                        <SlideBody> {text: "- a generative image explorer\n- conversational input\n- image output"}
+                        title = {text: "Lets add a camera"},
+                        <SlideBody> {text: "- Smile :)"}
                     }
                     <Slide> {
-                        title = {text: "Lets go local"},
-                        <SlideBody> {text: "- Fun, it's your own computer\n- Can be faster\n- Privacy"}
+                        title = {text: "Team"},
+                        <SlideBody> {text: "- Design: Sebastian Michailidis\n- Hard things: Eddy Bruël\n- Cheerleader: Rik Arends"}
                     }
                     <Slide> {
-                        title = {text: "Language model"},
-                        <SlideBody> {text: "- Mixtral 8x7b\n- Very close to chatGPT"}
+                        title = {text: "Makepad Studio"},
+                        <SlideBody> {text: "- Hybrid code and design"}
                     }
                     <Slide> {
-                        title = {text: "Image model"},
-                        <SlideBody> {text: "- SDXL Turbo\n- Fast and good"}
-                    }
-                    <Slide> {
-                        title = {text: "How much compute"},
-                        <SlideBody> {text: "- GPU 1: NVidia 4090 for SDXL\n- 86 TFLOP\n- GPU 2: Apple M3 max for Mixtral\n- 28 TFLOP: 114\n- 2005 2nd BGW Blue gene\n- 448KW, 41000 cores"}
-                    }
-                    <Slide> {
-                        title = {text: "Lets try it"},
-                        <SlideBody> {text: "- Pure prompt\n- Conversation\n- Camera input"}
-                    }
-                    <Slide> {
-                        title = {text: "Demo ComfyUI"},
-                    }
-                    <Slide> {
-                        title = {text: "Llama CPP"},
+                        title = {text: "UI Framework"},
+                        <SlideBody> {text: "- Shader based DSL\n- High performance\n- Query based model"}
                     }
                     <Slide> {
                         title = {text: "Future"},
-                        <SlideBody> {text: "- Hold on to your hats\n- Integrate LLM in code editor"}
+                        <SlideBody> {text: "- Tool assisted instancing"}
+                    }
+                    <Slide> {
+                        title = {text: "IDE Extensions"},
+                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Bruël"}
+                    }
+                    <Slide> {                        
+                        title = {text: "Embedded Rust"},
+                        <SlideBody> {text: "- Lets drive"}
+                    }
+                    <Slide> {
+                        title = {text: "Embedded and UI workshop!"},
+                        <SlideBody> {text: "- Today! 14:00 - 17:30"}
                     }
                     <Slide> {
                         title = {text: "Links"}, 

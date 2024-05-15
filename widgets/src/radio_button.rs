@@ -66,7 +66,7 @@ pub struct RadioButton {
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] label: String,
+    #[live] text: RcStringMut,
     
     #[live] bind: String,
 }
@@ -95,10 +95,10 @@ impl RadioButton {
             }
             MediaType::None => {}
         }
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_radio.end(cx);
     }
-
+        
 }
 
 impl Widget for RadioButtonGroup {
@@ -113,6 +113,7 @@ impl Widget for RadioButtonGroup {
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
+    
 }
 
 impl Widget for RadioButton {
@@ -149,6 +150,14 @@ impl Widget for RadioButton {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
         DrawStep::done()
+    }
+    
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
+    }
+            
+    fn set_text(&mut self, v: &str) {
+        self.text.as_mut_empty().push_str(v);
     }
 }
 

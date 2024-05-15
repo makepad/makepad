@@ -52,8 +52,7 @@ fn wasmi(bytes: &[u8]) -> f32 {
     let instance = instance.start(&mut store).unwrap();
     let run = instance.get_func(&store, "run").unwrap();
     let mut results = [Value::F32(F32::from_float(0.0))];
-    run.call(&mut store, &[], &mut results)
-        .unwrap();
+    run.call(&mut store, &[], &mut results).unwrap();
     results[0].f32().unwrap().to_float()
 }
 
@@ -66,7 +65,9 @@ fn wasmtime(bytes: &[u8]) -> f32 {
     let module = Module::new(&engine, bytes).unwrap();
     let mut linker = Linker::new(&engine);
     let clock_ms = Func::wrap(&mut store, clock_ms);
-    linker.define(&mut store, "env", "clock_ms", clock_ms).unwrap();
+    linker
+        .define(&mut store, "env", "clock_ms", clock_ms)
+        .unwrap();
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let run = instance.get_func(&mut store, "run").unwrap();
     let mut results = [Val::F32(0)];
@@ -79,5 +80,5 @@ fn main() {
     println!("stitch {}", stitch(bytes));
     println!("wasm3 {}", wasm3(bytes));
     println!("wasmi {}", wasmi(bytes));
-    println!("wasmi {}", wasmtime(bytes));
+    println!("wasmtime {}", wasmtime(bytes));
 }

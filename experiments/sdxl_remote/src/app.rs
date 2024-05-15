@@ -13,19 +13,34 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    // test
-                    return mix(#7, #3, self.pos.y);
+                    return mix(#5, #3, self.pos.y);
                 }
             }
             
             body = <View>{
-                flow: Down,
+                flow: Overlay,
+                align:{x:0.0,y:1.0}
+                Logo = <Button> {
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/logo_makepad.svg"),
+                        fn get_color(self) -> vec4 {
+                            return (#8)
+                        }
+                    }
+                    icon_walk: {margin:{left:200,bottom:100},width: 850.0, height: Fit}
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            return #0000
+                        }
+                    }
+                }
                 image = <ImageBlend> {
                     breathe: true,
                     width: Fill,
                     height: Fill,
                     margin: 0
                 }
+                
             }
         }
     }
@@ -92,7 +107,7 @@ impl AppMain for App {
 
 impl App{
     fn open_websocket(&mut self, _cx:&mut Cx){
-        let request = HttpRequest::new("http://10.0.0.105:8009".into(), HttpMethod::GET);
+        let request = HttpRequest::new("http://172.20.10.4:8009".into(), HttpMethod::GET);
         self.web_socket = Some(WebSocket::open(request));
     }
 }

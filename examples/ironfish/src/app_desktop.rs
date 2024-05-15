@@ -563,7 +563,7 @@ live_design! {
         }
     }
 
-    GraphPaper = <RoundedView dx:395.5 dy:2853.7 dw:390.0 dh:137.4> {
+    GraphPaper = <RoundedView dx:486.8 dy:2826.3 dw:390.0 dh:137.4> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -1707,7 +1707,7 @@ live_design! {
                 title = {
                     width: Fit
                     label = {
-                        text: "Filter",
+                        text: "Hello",
                     },
                 }
 
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-49.8 dy:-212.5 dw:1613.1 dh:1522.33>{
+    AppDesktop = <View dx:-88.9 dy:-240.8 dw:1613.1 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill

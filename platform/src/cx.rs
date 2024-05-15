@@ -49,7 +49,7 @@ use {
 
 //pub use makepad_shader_compiler::makepad_derive_live::*;
 //pub use makepad_shader_compiler::makepad_math::*;
-
+ 
 pub struct Cx {
     pub (crate) os_type: OsType,
     pub (crate) in_makepad_studio: bool,
@@ -114,6 +114,7 @@ pub struct Cx {
     pub(crate) spawner: Spawner,
     
     pub(crate) studio_web_socket: Option<WebSocket>,
+    pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
 }
@@ -239,7 +240,7 @@ impl Cx {
             ime_area: Default::default(),
             platform_ops: Default::default(),
             studio_web_socket: None,
-            
+            studio_http: "".to_string(),
             new_next_frames: Default::default(),
             
             dependencies: Default::default(),
