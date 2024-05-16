@@ -305,7 +305,7 @@ live_design! {
     }
 
     P = <Label> {
-        width: Fill,
+        width: Fit,
         margin: <THEME_MSPACE_2> {}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
@@ -318,7 +318,7 @@ live_design! {
     }
 
     Pbold = <Label> {
-        width: Fill,
+        width: Fit,
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
@@ -331,7 +331,7 @@ live_design! {
     }
 
     Pitalic = <Label> {
-        width: Fill,
+        width: Fit,
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_ITALIC> {
@@ -344,7 +344,7 @@ live_design! {
     }
 
     Pbolditalic = <Label> {
-        width: Fill,
+        width: Fit,
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
