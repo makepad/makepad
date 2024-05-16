@@ -835,7 +835,7 @@ live_design!{
                         margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
                         text: "Positive"
                         draw_text: {
-                            text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
+                            text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
                         }
                         draw_bg: {
                             color: (COLOR_TEXT_INPUT)
