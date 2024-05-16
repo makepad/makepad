@@ -494,10 +494,7 @@ live_design! {
     Html = <HtmlBase> {
         width: Fill, height: Fit,
         flow: RightWrap,
-        width:Fill,
-        height:Fit,
         padding: <THEME_MSPACE_1> {}
-
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
 

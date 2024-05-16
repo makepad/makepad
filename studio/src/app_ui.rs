@@ -167,7 +167,7 @@ live_design!{
         }
         body = {dock = <Dock> {
             width: Fill, height: Fill,
-            tab_bar:{
+            tab_bar: {
                 OutlineFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
@@ -402,6 +402,7 @@ live_design!{
                 }
                 editor = <StudioEditor> {}
             }
+
             EditFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,
@@ -420,6 +421,7 @@ live_design!{
                     // }
                 }
             }
+
             OutlineFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,
@@ -433,6 +435,7 @@ live_design!{
                     }
                 }
             }
+
             DesignFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill
@@ -445,6 +448,7 @@ live_design!{
                     }
                 }
             }
+
             RunFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,
@@ -457,6 +461,7 @@ live_design!{
                     }
                 }
             }
+
             RunList = <View> {
                 flow: Down,
                 <DockToolbar> {
@@ -471,8 +476,9 @@ live_design!{
                 }
                 <RunList> {}
             }
+
             Search = <RectView> {
-            flow: Down,
+                flow: Down,
                 <DockToolbar> {
                     content = {
                         padding: { right: (THEME_SPACE_2) }
@@ -520,7 +526,9 @@ live_design!{
                     <P> { text: "this does not work yet." }
                 }
             }
+
             RunView = <RunView> {}
+
             StudioFileTree = <View> {
                 flow: Down,
                 <DockToolbar> {
@@ -558,6 +566,7 @@ live_design!{
                 }
                 file_tree = <StudioFileTree> {}
             }
+
             LogList = <View> {
                 flow: Down,
                 <DockToolbar> {
@@ -630,6 +639,7 @@ live_design!{
                 }
                 log_list = <LogList> {}
             }
+
             Profiler = <View> {
                 flow: Down,
                 <DockToolbar> {

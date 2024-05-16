@@ -882,7 +882,7 @@ live_design!{
                 // TODO: SHOW
                 <ZooHeader> {
                     title = {text:"<Dock>"}
-                    <ZooDesc> {text:"Dock"}
+                    <ZooDesc> { text:"<Dock>" }
                     <CachedRoundedView> {
                         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
                         width: Fill, height: Fit,
@@ -893,6 +893,8 @@ live_design!{
                                 <Dock> {
                                     height: 500., width: Fill
 
+                                    tab_bar: {}
+
                                     root = Splitter {
                                         axis: Horizontal,
                                         align: FromA(300.0),
@@ -902,12 +904,12 @@ live_design!{
 
                                     tab_set_1 = Tabs {
                                         tabs: [tab_a, tab_b],
-                                        selected: 1
+                                        selected: 0
                                     }
 
                                     tab_set_2 = Tabs {
                                         tabs: [tab_c, tab_d, tab_e, tab_f],
-                                        selected: 1
+                                        selected: 0
                                     }
 
                                     tab_a = Tab {
@@ -987,118 +989,146 @@ live_design!{
                         }
                     }
 
-                <ZooHeader> {
-                    title = {text:"<DockMinimal>"}
-                    <ZooDesc> {text:"DockMinimal"}
-                    <CachedRoundedView> {
-                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
-                        width: Fill, height: Fit,
-                            <View> {
-                                height: Fit, width: Fill
-                                show_bg: true,
-                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-                                <DockMinimal> {
-                                    height: 500., width: Fill
-
-                                    root = Splitter {
-                                        axis: Horizontal,
-                                        align: FromA(300.0),
-                                        a: tab_set_1,
-                                        b: tab_set_2
-                                    }
-
-                                    tab_set_1 = Tabs {
-                                        tabs: [tab_a, tab_b],
-                                        selected: 1
-                                    }
-
-                                    tab_set_2 = Tabs {
-                                        tabs: [tab_c, tab_d, tab_e, tab_f],
-                                        selected: 1
-                                    }
-
-                                    tab_a = Tab {
-                                        name: "Tab A"
-                                        template: CloseableTab,
-                                        kind: Container_A
-                                    }
-
-                                    tab_b = Tab {
-                                        name: "Tab B"
-                                        template: PermanentTab,
-                                        kind: Container_B
-                                    }
-
-                                    tab_c = Tab {
-                                        name: "Tab C"
-                                        template: CloseableTab,
-                                        kind: Container_C
-                                    }
-
-                                    tab_d = Tab {
-                                        name: "Tab D"
-                                        template: CloseableTab,
-                                        kind: Container_D
-                                    }
-
-                                    tab_e = Tab {
-                                        name: "Tab E"
-                                        template: CloseableTab,
-                                        kind: Container_E
-                                    }
-
-                                    tab_f = Tab {
-                                        name: "Tab F"
-                                        template: CloseableTab,
-                                        kind: Container_F
-                                    }
-
-                                    Container_A = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        <Label> {text: "Hallo"}
-                                    }
-
-                                    Container_B = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Kuckuck"}
-                                    }
-
-                                    Container_C = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Ahoy"}
-                                    }
-
-                                    Container_D = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Hi"}
-                                    }
-
-                                    Container_E = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Ahoy"}
-                                    }
-
-                                    Container_F = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Hi"}
-                                    }
-                                }
-
-                            }
-                        }
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+#### tab_bar\n
+- holds all tab template definitions\n
+#### splitter \n
+- axis: split orientation\n
+- align: dimensions of the two docks\n
+- a: select the first tab set\n
+- b: select the second tab set\n
+#### tabs \n
+- tabs: selects the tabs for the tab sets\n
+- selected: defines which tab is selected by default\n
+#### tab \n
+- name: name shown in the tab\n
+- template: selects the tab template\n
+- body: selects the tab content\n
+#### arbitrary named dsl blocks \n
+- define the 'body templates' that are instanced in tab with 'body'"
                     }
+                }
+
+                // <ZooHeader> {
+                //     title = {text:"<DockMinimal>"}
+                //     <ZooDesc> {text:"DockMinimal"}
+                //     <CachedRoundedView> {
+                //         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                //         width: Fill, height: Fit,
+                //             <View> {
+                //                 height: Fit, width: Fill
+                //                 show_bg: true,
+                //                 draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
+                //                 <DockMinimal> {
+                //                     height: 500., width: Fill
+
+                //                     root = Splitter {
+                //                         axis: Horizontal,
+                //                         align: FromA(300.0),
+                //                         a: tab_set_1,
+                //                         b: tab_set_2
+                //                     }
+
+                //                     tab_set_1 = Tabs {
+                //                         tabs: [tab_a, tab_b],
+                //                         selected: 1
+                //                     }
+
+                //                     tab_set_2 = Tabs {
+                //                         tabs: [tab_c, tab_d, tab_e, tab_f],
+                //                         selected: 1
+                //                     }
+
+                //                     tab_a = Tab {
+                //                         name: "Tab A"
+                //                         template: CloseableTab,
+                //                         kind: Container_A
+                //                     }
+
+                //                     tab_b = Tab {
+                //                         name: "Tab B"
+                //                         template: PermanentTab,
+                //                         kind: Container_B
+                //                     }
+
+                //                     tab_c = Tab {
+                //                         name: "Tab C"
+                //                         template: CloseableTab,
+                //                         kind: Container_C
+                //                     }
+
+                //                     tab_d = Tab {
+                //                         name: "Tab D"
+                //                         template: CloseableTab,
+                //                         kind: Container_D
+                //                     }
+
+                //                     tab_e = Tab {
+                //                         name: "Tab E"
+                //                         template: CloseableTab,
+                //                         kind: Container_E
+                //                     }
+
+                //                     tab_f = Tab {
+                //                         name: "Tab F"
+                //                         template: CloseableTab,
+                //                         kind: Container_F
+                //                     }
+
+                //                     Container_A = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         <Label> {text: "Hallo"}
+                //                     }
+
+                //                     Container_B = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Kuckuck"}
+                //                     }
+
+                //                     Container_C = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Ahoy"}
+                //                     }
+
+                //                     Container_D = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Hi"}
+                //                     }
+
+                //                     Container_E = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Ahoy"}
+                //                     }
+
+                //                     Container_F = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Hi"}
+                //                     }
+                //                 }
+
+                //             }
+                //         }
+                //     }
 
                     // TODO: SHOW
                     // SEEMS NOT TO WORK WITHOUT DUMMY DATA
