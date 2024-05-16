@@ -153,6 +153,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text: "<View>" }
                     <ZooDesc> {text:"This is a gray view with flow set to Right\nTo show the extend, the background has been enabled using show_bg and a gray pixelshader has been provided to draw_bg."}
@@ -262,6 +275,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"RoundedView"}
                     <ZooDesc> {
@@ -280,6 +306,19 @@ live_design!{
                         <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                         <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                         <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
+                    }
+                }
+
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
                     }
                 }
 
@@ -354,6 +393,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<TextInput>"}
                     <ZooDesc> { text:"Simple 1 line textbox" }
@@ -408,6 +460,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<Label>"}
                     <ZooDesc> { text:"Default single line textbox" }
@@ -439,6 +504,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = { text:"<Slider>" }
                     <ZooDesc> { text:"A parameter dragger" }
@@ -467,6 +545,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<DropDown>"}
                     <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
@@ -478,11 +569,37 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<FileTree>"}
                     <ZooDesc> {text:"File Tree"}
                     <ZooGroup> {
                         <DemoFileTree> { file_tree:{ height: 400. } }
+                    }
+                }
+
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
                     }
                 }
 
@@ -506,6 +623,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<Html>"}
                     <ZooDesc> {text:"HTML Widget"}
@@ -517,6 +647,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<Markdown>"}
                     <ZooDesc> {text:"Markdown"}
@@ -525,6 +668,19 @@ live_design!{
                             width:Fill, height: Fit,
                             body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote.\n\nThis is `inline code`.\n\n ```code block```"
                         }
+                    }
+                }
+
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
                     }
                 }
 
@@ -602,6 +758,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<LinkLabel>"}
                     <ZooDesc> {text:"Link Label"}
@@ -655,6 +824,19 @@ live_design!{
                             }
 
                         }
+                    }
+                }
+
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
                     }
                 }
 
@@ -715,6 +897,19 @@ live_design!{
                                 }
                             }
                         }
+                    }
+                }
+
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
                     }
                 }
 
@@ -856,6 +1051,19 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 <ZooHeader> {
                     title = {text:"<SlidesView>"}
                     width: Fill, height: Fit,
@@ -879,21 +1087,40 @@ live_design!{
                     }
                 }
 
+                <View> {
+                    height: Fit, width: Fill,
+                    margin: <THEME_MSPACE_2> {}
+                    padding: <THEME_MSPACE_2> {}
+                    flow: Down,
+                    <H3> { text: "Description"}
+                    <Markdown> {
+                        width:Fill, height: Fit,
+                        body: "\n
+INSERT DOCS HERE"
+                    }
+                }
+
                 // TODO: SHOW
                 <ZooHeader> {
                     title = {text:"<Dock>"}
                     <ZooDesc> { text:"<Dock>" }
                     <CachedRoundedView> {
-                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
                         width: Fill, height: Fit,
                             <View> {
                                 height: Fit, width: Fill
-                                show_bg: true,
-                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
                                 <Dock> {
                                     height: 500., width: Fill
 
-                                    tab_bar: {}
+                                    tab_bar: {
+                                        StandardTab = <Tab> {
+                                            spacing: (THEME_SPACE_2)
+                                            closeable: false
+                                        }
+                                        PermaTab = <Tab> {
+                                            spacing: (THEME_SPACE_2)
+                                            closeable: true
+                                        }
+                                     }
 
                                     root = Splitter {
                                         axis: Horizontal,
@@ -914,37 +1141,37 @@ live_design!{
 
                                     tab_a = Tab {
                                         name: "Tab A"
-                                        template: PermanentTab,
+                                        template: PermaTab,
                                         kind: Container_A
                                     }
 
                                     tab_b = Tab {
                                         name: "Tab B"
-                                        template: PermanentTab,
+                                        template: PermaTab,
                                         kind: Container_B
                                     }
 
                                     tab_c = Tab {
                                         name: "Tab C"
-                                        template: CloseableTab,
+                                        template: StandardTab,
                                         kind: Container_C
                                     }
 
                                     tab_d = Tab {
                                         name: "Tab D"
-                                        template: CloseableTab,
+                                        template: StandardTab,
                                         kind: Container_D
                                     }
 
                                     tab_e = Tab {
                                         name: "Tab E"
-                                        template: CloseableTab,
+                                        template: StandardTab,
                                         kind: Container_E
                                     }
 
                                     tab_f = Tab {
                                         name: "Tab F"
-                                        template: CloseableTab,
+                                        template: StandardTab,
                                         kind: Container_F
                                     }
 
@@ -988,6 +1215,124 @@ live_design!{
                             }
                         }
                     }
+
+
+
+                <ZooHeader> {
+                    title = {text:"<Dock>"}
+                    <ZooDesc> { text:"<Dock>" }
+                    <CachedRoundedView> {
+                        width: Fill, height: Fit,
+                            <View> {
+                                height: Fit, width: Fill
+                                <DockMinimal> {
+                                    height: 500., width: Fill
+
+                                    tab_bar: {
+                                        StandardTab = <TabMinimal> {
+                                            spacing: (THEME_SPACE_2)
+                                            closeable: false
+                                        }
+                                        PermaTab = <TabMinimal> {
+                                            spacing: (THEME_SPACE_2)
+                                            closeable: true
+                                        }
+                                     }
+
+                                    root = Splitter {
+                                        axis: Horizontal,
+                                        align: FromA(300.0),
+                                        a: tab_set_1,
+                                        b: tab_set_2
+                                    }
+
+                                    tab_set_1 = Tabs {
+                                        tabs: [tab_a, tab_b],
+                                        selected: 0
+                                    }
+
+                                    tab_set_2 = Tabs {
+                                        tabs: [tab_c, tab_d, tab_e, tab_f],
+                                        selected: 0
+                                    }
+
+                                    tab_a = Tab {
+                                        name: "Tab A"
+                                        template: PermaTab,
+                                        kind: Container_A
+                                    }
+
+                                    tab_b = Tab {
+                                        name: "Tab B"
+                                        template: PermaTab,
+                                        kind: Container_B
+                                    }
+
+                                    tab_c = Tab {
+                                        name: "Tab C"
+                                        template: StandardTab,
+                                        kind: Container_C
+                                    }
+
+                                    tab_d = Tab {
+                                        name: "Tab D"
+                                        template: StandardTab,
+                                        kind: Container_D
+                                    }
+
+                                    tab_e = Tab {
+                                        name: "Tab E"
+                                        template: StandardTab,
+                                        kind: Container_E
+                                    }
+
+                                    tab_f = Tab {
+                                        name: "Tab F"
+                                        template: StandardTab,
+                                        kind: Container_F
+                                    }
+
+                                    Container_A = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        <Label> {text: "Hallo"}
+                                    }
+
+                                    Container_B = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        <Label> {text: "Kuckuck"}
+                                    }
+
+                                    Container_C = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        <Label> {text: "Ahoy"}
+                                    }
+
+                                    Container_D = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        <Label> {text: "Hi"}
+                                    }
+
+                                    Container_E = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        <Label> {text: "Ahoy"}
+                                    }
+
+                                    Container_F = <RectView> {
+                                        height: Fill, width: Fill
+                                        padding: 10.,
+                                        <Label> {text: "Hi"}
+                                    }
+                                }
+
+                            }
+                        }
+                    }
+
 
                 <View> {
                     height: Fit, width: Fill,

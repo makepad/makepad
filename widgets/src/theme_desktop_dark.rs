@@ -2029,6 +2029,7 @@ live_design! {
 
     TabMinimal = <TabBase> {
         width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
+
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { }
 
@@ -2056,10 +2057,20 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let marker_height = 2.5
-
-                sdf.rect(0, self.rect_size.y - marker_height, self.rect_size.x, marker_height)
-                sdf.fill(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL), self.selected));
+                sdf.box(
+                    -1.,
+                    -1.,
+                    self.rect_size.x + 2,
+                    self.rect_size.y + 2,
+                    1.
+                )
+                sdf.fill_keep(
+                    mix(
+                        THEME_COLOR_D_2 * 0.75,
+                        THEME_COLOR_DOCK_TAB_SELECTED,
+                        self.selected
+                    )
+                )
                 return sdf.result
             }
         }
@@ -2109,18 +2120,20 @@ live_design! {
     }
 
     TabBarMinimal = <TabBarBase> {
-        tab: <TabMinimal> {}
+        CloseableTab = <Tab> {closeable:true}
+        PermanentTab = <Tab> {closeable:false}
+
         draw_drag: {
             draw_depth: 10
             color: (THEME_COLOR_BG_CONTAINER)
         }
         draw_fill: {
-            color: (THEME_COLOR_U_HIDDEN)
+            color: (THEME_COLOR_D_1)
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
 
-        scroll_bars: <ScrollBars> {
+        scroll_bars: <ScrollBarsTabs> {
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
@@ -2154,7 +2167,8 @@ live_design! {
                 );
 
                 sdf.subtract()
-                return sdf.fill(THEME_COLOR_BG_APP)
+                sdf.fill(THEME_COLOR_BG_APP)
+                return sdf.result
             }
         }
         border_size: (THEME_DOCK_BORDER_SIZE)
@@ -2165,9 +2179,10 @@ live_design! {
             draw_depth: 10.0
             color: (THEME_COLOR_DRAG_QUAD)
         }
-        tab_bar: <TabBarMinimal> {}
+        tab_bar: <TabBar> {}
         splitter: <Splitter> {}
     }
+
 
     // TODO: remove?
     RectView = <View> {
