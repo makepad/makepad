@@ -1176,36 +1176,42 @@ INSERT DOCS HERE"
                                     }
 
                                     Container_A = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_U_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Hallo"}
                                     }
 
                                     Container_B = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_U_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Kuckuck"}
                                     }
 
                                     Container_C = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_U_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Ahoy"}
                                     }
 
                                     Container_D = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_U_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Hi"}
                                     }
 
                                     Container_E = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_U_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Ahoy"}
                                     }
 
                                     Container_F = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_U_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Hi"}
@@ -1293,36 +1299,42 @@ INSERT DOCS HERE"
                                     }
 
                                     Container_A = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_D_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Hallo"}
                                     }
 
                                     Container_B = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_D_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Kuckuck"}
                                     }
 
                                     Container_C = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_D_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Ahoy"}
                                     }
 
                                     Container_D = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_D_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Hi"}
                                     }
 
                                     Container_E = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_D_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Ahoy"}
                                     }
 
                                     Container_F = <RectView> {
+                                        draw_bg: { color: (THEME_COLOR_D_1) }
                                         height: Fill, width: Fill
                                         padding: 10.,
                                         <Label> {text: "Hi"}

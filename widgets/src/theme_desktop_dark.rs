@@ -2057,17 +2057,31 @@ live_design! {
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let stroke_width = 2.5
+
+                sdf.rect(
+                    -1.,
+                    -1.,
+                    self.rect_size.x + 2.0,
+                    self.rect_size.y + 2.0
+                );
+
+                sdf.fill( THEME_COLOR_D_1 )
+
                 sdf.box(
                     -1.,
-                    -1.,
-                    self.rect_size.x + 2,
-                    self.rect_size.y + 2,
+                    // -1.,
+                    self.rect_size.y - stroke_width,
+                    self.rect_size.x + 2.,
+                    stroke_width,
+                    // self.rect_size.y * 0.25,
                     1.
                 )
-                sdf.fill_keep(
+
+                sdf.fill(
                     mix(
-                        THEME_COLOR_D_2 * 0.75,
-                        THEME_COLOR_DOCK_TAB_SELECTED,
+                        THEME_COLOR_D_HIDDEN,
+                        THEME_COLOR_U_4,
                         self.selected
                     )
                 )
