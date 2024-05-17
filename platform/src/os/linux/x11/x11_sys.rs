@@ -82,6 +82,10 @@ pub const EnterWindowMask: u32 = 16;
 pub const LeaveWindowMask: u32 = 32;
 pub const XBufferOverflow: i32 = -1;
 
+pub const QueuedAlready: i32 = 0;
+pub const QueuedAfterReading: i32 = 1;
+pub const QueuedAfterFlush: i32 = 2;
+
 // Added, from https://community.khronos.org/t/list-for-xevent-structures-type-component/70768
 pub const VisibilityNotify: u32 = 15;
 // Added, from https://tronche.com/gui/x/xlib/events/window-state-change/visibility.html
@@ -271,6 +275,10 @@ extern "C" {
     pub fn XPending(arg1: *mut Display) -> c_int;
     
     pub fn XNextEvent(arg1: *mut Display, arg2: *mut XEvent) -> c_int;
+
+    pub fn XPeekEvent(arg1: *mut Display, arg2: *mut XEvent) -> c_int;
+
+    pub fn XEventsQueued(arg1: *mut Display, arg2: c_int) -> c_int;
     
     pub fn XGetWindowProperty(
         arg1: *mut Display,

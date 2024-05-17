@@ -508,12 +508,29 @@ impl XlibApp {
                     }
                 },
                 x11_sys::KeyRelease => {
-                    self.do_callback(XlibEvent::KeyUp(KeyEvent {
-                        key_code: self.xkeyevent_to_keycode(&mut event.xkey),
-                        is_repeat: false,
-                        modifiers: self.xkeystate_to_modifiers(event.xkey.state),
-                        time: self.time_now()
-                    }));
+                    // if the next event is a keypress, this comes from a repeat
+                    // Therefore, forget both this event and the next
+                    let mut is_repeat = false;
+                    if x11_sys::XEventsQueued(self.display, x11_sys::QueuedAfterReading) > 0 {
+                        let mut nev = mem::MaybeUninit::uninit();
+                        x11_sys::XPeekEvent(self.display, nev.as_mut_ptr());
+                        let nev = nev.assume_init();
+                        if nev.type_ as u32 == x11_sys::KeyPress
+                            && nev.xkey.time == event.xkey.time
+                            && nev.xkey.keycode == event.xkey.keycode {
+                            let mut nnev = mem::MaybeUninit::uninit();
+                            x11_sys::XNextEvent(self.display, nnev.as_mut_ptr());
+                            is_repeat = true;
+                        }
+                    }
+                    if !is_repeat {
+                        self.do_callback(XlibEvent::KeyUp(KeyEvent {
+                            key_code: self.xkeyevent_to_keycode(&mut event.xkey),
+                            is_repeat: false,
+                            modifiers: self.xkeystate_to_modifiers(event.xkey.state),
+                            time: self.time_now()
+                        }));
+                    }
                 },
                 x11_sys::ClientMessage => {
                     let event = event.xclient;
