@@ -1826,7 +1826,7 @@ live_design! {
     TabCloseButton = <TabCloseButtonBase> {
         // TODO: NEEDS FOCUS STATE
         height: 10.0, width: 10.0,
-        margin: { right: (THEME_SPACE_2), left: -3.5 },
+        margin: { left: -3.5 },
         draw_button: {
 
             instance hover: float;
