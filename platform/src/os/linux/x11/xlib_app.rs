@@ -56,6 +56,7 @@ pub struct XlibApp {
     pub internal_cursor: MouseCursor,
     pub atoms: XlibAtoms,
     pub dnd: Dnd,
+    pub next_keypress_is_repeat: bool,
 }
 
 impl XlibApp {
@@ -86,6 +87,7 @@ impl XlibApp {
                 current_cursor: MouseCursor::Default,
                 internal_cursor: MouseCursor::Default,
                 dnd: Dnd::new(display),
+                next_keypress_is_repeat: false,
             }
         }
     }
@@ -471,10 +473,11 @@ impl XlibApp {
                             let block_text = modifiers.control || modifiers.logo || modifiers.alt;
                             self.do_callback(XlibEvent::KeyDown(KeyEvent {
                                 key_code: key_code,
-                                is_repeat: false,
+                                is_repeat: self.next_keypress_is_repeat,
                                 modifiers: modifiers,
                                 time: self.time_now()
                             }));
+                            self.next_keypress_is_repeat = false;
                             block_text
                         }else {false};
                         
@@ -508,12 +511,26 @@ impl XlibApp {
                     }
                 },
                 x11_sys::KeyRelease => {
-                    self.do_callback(XlibEvent::KeyUp(KeyEvent {
-                        key_code: self.xkeyevent_to_keycode(&mut event.xkey),
-                        is_repeat: false,
-                        modifiers: self.xkeystate_to_modifiers(event.xkey.state),
-                        time: self.time_now()
-                    }));
+                    // if the next event is a keypress, this comes from a repeat
+                    // Therefore, forget both this event and the next
+                    if x11_sys::XEventsQueued(self.display, x11_sys::QueuedAfterReading) > 0 {
+                        let mut nev = mem::MaybeUninit::uninit();
+                        x11_sys::XPeekEvent(self.display, nev.as_mut_ptr());
+                        let nev = nev.assume_init();
+                        if nev.type_ as u32 == x11_sys::KeyPress
+                            && nev.xkey.time == event.xkey.time
+                            && nev.xkey.keycode == event.xkey.keycode {
+                            self.next_keypress_is_repeat = true;
+                        }
+                    }
+                    if !self.next_keypress_is_repeat {
+                        self.do_callback(XlibEvent::KeyUp(KeyEvent {
+                            key_code: self.xkeyevent_to_keycode(&mut event.xkey),
+                            is_repeat: false,
+                            modifiers: self.xkeystate_to_modifiers(event.xkey.state),
+                            time: self.time_now()
+                        }));
+                    }
                 },
                 x11_sys::ClientMessage => {
                     let event = event.xclient;
