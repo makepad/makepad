@@ -339,7 +339,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
                                 });
                             }*/
                         }
-                        buffer.Unlock().unwrap();
+                        buffer.Unlock().ok();
                     };
                 }
             }
