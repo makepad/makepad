@@ -39,6 +39,7 @@ impl WindowsHttpSocket{
         http_header.push_str(&request.get_headers_string());
         http_header.push_str("\r\n"); 
         println!("Sending headers #{}#", http_header);
+
         // lets push the entire body
         // lets write the http request
         if stream.is_err(){
@@ -68,7 +69,7 @@ impl WindowsHttpSocket{
         }
         
         if let Some(body) = request.body{
-            if write_bytes_to_tcp_stream_no_error(&mut stream, &body){
+        println!("Sending body #{}#", body.len());            if write_bytes_to_tcp_stream_no_error(&mut stream, &body){
                 response_sender.send(NetworkResponseItem{
                     request_id: request_id,
                     response: NetworkResponse::HttpResponse(HttpResponse{
