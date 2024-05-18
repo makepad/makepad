@@ -20,7 +20,7 @@ use crate::{
             BuildManagerAction
         },
     }
-}; 
+};   
 use std::fs::File;
 use std::io::Write;
 use std::env;
@@ -292,7 +292,7 @@ impl MatchEvent for App{
                     StdinToHost::SetCursor(cursor) => {
                         cx.set_cursor(cursor)
                     }
-                    StdinToHost::ReadyToStart => {
+                    StdinToHost::ReadyToStart => { 
                         // lets fetch all our runviews
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
