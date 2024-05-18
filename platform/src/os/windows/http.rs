@@ -67,9 +67,9 @@ impl WindowsHttpSocket{
             }).ok();
             return
         }
-        
+        println!("SENDING BODY {}", request.body.as_ref().unwrap().len());
         if let Some(body) = request.body{
-        println!("Sending body #{}#", body.len());            if write_bytes_to_tcp_stream_no_error(&mut stream, &body){
+            if write_bytes_to_tcp_stream_no_error(&mut stream, &body){
                 response_sender.send(NetworkResponseItem{
                     request_id: request_id,
                     response: NetworkResponse::HttpResponse(HttpResponse{
