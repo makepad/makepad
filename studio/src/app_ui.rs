@@ -400,7 +400,7 @@ live_design!{
                         <ButtonFlat> { width: Fit, text: "Docs"}
                     }
                 }
-                editor = <StudioEditor> {}
+                editor = <StudioEditor> {} 
             }
             EditFirst = <RectView> {
                 <View> {
