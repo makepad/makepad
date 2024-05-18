@@ -563,7 +563,7 @@ live_design! {
         }
     }
 
-    GraphPaper = <RoundedView dx:486.8 dy:2826.3 dw:390.0 dh:137.4> {
+    GraphPaper = <RoundedView dx:395.4 dy:2855.5 dw:390.0 dh:137.4> {
         width: Fill,
         height: 120
         draw_bg: {
@@ -933,7 +933,7 @@ live_design! {
 
 
     // PANELS
-    EnvelopePanel = <RoundedView dx:385.7 dy:2603.2 dw:392.2 dh:197.0> {
+    EnvelopePanel = <RoundedView dx:384.6 dy:2602.6 dw:392.2 dh:197.0> {
         flow: Down,
         padding: <SPACING_0> {}
         width: Fill,
@@ -995,7 +995,7 @@ live_design! {
 
     }
 
-    VolumeEnvelopePanel = <View dx:382.4 dy:2343.2 dw:395.0 dh:196.4> {
+    VolumeEnvelopePanel = <View dx:379.4 dy:2323.2 dw:395.0 dh:196.4> {
         vol_env = <EnvelopePanel> {
             flow: Down
             width: Fill,
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-88.9 dy:-240.8 dw:1613.1 dh:1522.3>{
+    AppDesktop = <View dx:-377.4 dy:-1227.1 dw:1613.1 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill

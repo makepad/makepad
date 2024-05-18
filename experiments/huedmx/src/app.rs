@@ -711,18 +711,22 @@ impl App {
                 let laser1 = 400;
                 let laser2 = 420;
                 let laser3 = 440;
-                dmx_f32(state.dial_b[0], dmx, &[laser1,laser2,laser3], 1);
-                dmx_f32(state.dial_b[1], dmx, &[laser1,laser2,laser3], 2);
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 3);
-                dmx_f32(0.3, dmx, &[laser1,laser2,laser3], 4); 
-                dmx_f32(state.dial_b[2], dmx, &[laser1,laser2,laser3], 5);
-                dmx_f32(state.dial_b[3], dmx, &[laser1,laser2,laser3], 6);
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 7);
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 8); 
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 10); 
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 9); // y position
-                dmx_f32(state.dial_b[4], dmx, &[laser1,laser2,laser3], 11); 
-                dmx_f32(state.dial_b[5], dmx, &[laser1,laser2,laser3], 12); 
+                let laser4 = 460;
+                let laser5 = 480;
+                let lasers = [laser1,laser2,laser3,laser4,laser5];
+                                
+                dmx_f32(state.dial_b[0], dmx, &lasers, 1);
+                dmx_f32(state.dial_b[1], dmx, &lasers, 2);
+                dmx_f32(0.5, dmx, &lasers, 3);
+                dmx_f32(0.3, dmx, &lasers, 4); 
+                dmx_f32(state.dial_b[2], dmx, &lasers, 5);
+                dmx_f32(state.dial_b[3], dmx, &lasers, 6);
+                dmx_f32(0.5, dmx, &lasers, 7);
+                dmx_f32(0.5, dmx, &lasers, 8); 
+                dmx_f32(0.5, dmx, &lasers, 10); 
+                dmx_f32(0.5, dmx, &lasers, 9); // y position
+                dmx_f32(state.dial_b[4], dmx, &lasers, 11); 
+                dmx_f32(state.dial_b[5], dmx, &lasers, 12); 
                                                                                                 
                 
                 //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
