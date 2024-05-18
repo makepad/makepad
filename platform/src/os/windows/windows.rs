@@ -283,7 +283,14 @@ impl Cx {
         }
     }
     
-    pub (crate) fn handle_networking_events(&mut self) {
+    pub(crate) fn handle_networking_events(&mut self) {
+        let mut out = Vec::new();
+        while let Ok(event) = self.os.network_response.receiver.try_recv(){
+            out.push(event);
+        }
+        if out.len()>0{
+            self.call_event_handler(& Event::NetworkResponses(out))
+        }
     }
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx) -> EventFlow {
