@@ -35,7 +35,7 @@ impl WindowsHttpSocket{
         // alright lets construct a http request
         // lets join the headers
                 
-        let mut http_header = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", request.method.to_string(), split.file, split.host);
+        let mut http_header = format!("{} /{} HTTP/1.1\r\nHost: {}\r\n", request.method.to_string(), split.file, split.host);
         http_header.push_str(&request.get_headers_string());
         http_header.push_str("\r\n"); 
         // lets push the entire body
