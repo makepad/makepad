@@ -380,8 +380,11 @@ impl Cx {
                 },
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    todo!("HttpRequest not implemented yet on windows, we'll get there");
+                CxOsOp::HttpRequest {request_id, request} => {
+                    use crate::os::windows::http::WindowsHttpSocket;
+                    WindowsHttpSocket::open(request_id, request, self.os.network_response.sender.clone());
+
+                    //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
@@ -426,5 +429,6 @@ pub struct CxOs {
     pub (crate) start_time: Option<Instant>,
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-   //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
+    pub (crate) network_response: NetworkResponseChannel,
+    //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }
