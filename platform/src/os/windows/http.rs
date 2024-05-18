@@ -105,6 +105,15 @@ impl WindowsHttpSocket{
             }
             // alright we have a ret_buf, now we need to split it at \r\n\r\n and return it
             println!("GOT RET {}", std::str::from_utf8(&ret_buf).unwrap_or(""));
+            response_sender.send(NetworkResponseItem{
+                request_id: request_id,
+                response: NetworkResponse::HttpResponse(HttpResponse{
+                    metadata_id: request.metadata_id,
+                    status_code: 200,
+                    headers: Default::default(),
+                    body:Some(Vec::new())
+                })
+            }).ok();
         });
         
         /*
