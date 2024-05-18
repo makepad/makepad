@@ -85,7 +85,7 @@ impl Workflow {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-       Machine::new("10.0.0.111:8188", id_lut!(m1)),
+       Machine::new("127.0.0.1:8188", id_lut!(m1)),
         //Machine::new("192.168.8.231:8188", id_lut!(m1)),
     ])] machines: Vec<Machine>,
     
