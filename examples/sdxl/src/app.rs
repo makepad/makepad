@@ -189,7 +189,7 @@ impl App {
         let photo_name = format!("{}", LiveId::from_str(&format!("{:?}", Instant::now())).0);
         // alright lets write things
         let form_top = format!("--Boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", photo_name);
-        let form_bottom = format!("\r\n--Boundary--");
+        let form_bottom = format!("\r\n--Boundary--\r\n");
 
         request.set_metadata_id(machine.id);
         let mut body = Vec::new();
