@@ -25,10 +25,10 @@ live_design!{
                 hide_caption_on_fullscreen: true,
                 body = <AppUI>{}
             }
-            /*<Window> {
+            <Window> {
                 window: {inner_size: vec2(960, 540)},
                 body = <AppWindow>{}
-            }*/
+            }
         }
     }
 }
@@ -179,11 +179,6 @@ impl App {
         None
     }
     
-    #[cfg(target_os = "windows")]
-    fn send_camera_to_machine(&mut self, _cx: &mut Cx, _machine_id: LiveId, _prompt_state: PromptState){
-    }
-        
-    #[cfg(not(target_os = "windows"))]
     fn send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
         let jpeg = self.get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
