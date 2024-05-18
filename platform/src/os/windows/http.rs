@@ -39,7 +39,7 @@ impl WindowsHttpSocket{
         http_header.push_str(&request.get_headers_string());
         http_header.push_str("\r\n"); 
         // lets push the entire body
-        
+        println!("REQUEST HEADER:{}", http_header);
         // lets write the http request
         if stream.is_err(){
             response_sender.send(NetworkResponseItem{
