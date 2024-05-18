@@ -13,6 +13,8 @@ pub mod wasapi;
 pub mod windows_media;
 pub mod winrt_midi; 
 pub mod media_foundation;
+pub mod http;
+
 //pub mod com_sys;
 pub mod d3d11;
 pub mod windows;
