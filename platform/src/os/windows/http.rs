@@ -67,8 +67,9 @@ impl WindowsHttpSocket{
             }).ok();
             return
         }
-        println!("SENDING BODY {}", request.body.as_ref().unwrap().len());
+        
         if let Some(body) = request.body{
+            println!("SENDING BODY {}", body.len());
             if write_bytes_to_tcp_stream_no_error(&mut stream, &body){
                 response_sender.send(NetworkResponseItem{
                     request_id: request_id,
@@ -81,6 +82,9 @@ impl WindowsHttpSocket{
                 }).ok();
                 return
             }
+        }
+        else{
+            println!("NO BODY");
         }
         
         let _reader_thread = std::thread::spawn(move || {
