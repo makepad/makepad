@@ -1423,7 +1423,13 @@ Example\n
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### goal_slide (f64)\n
+tbd\n
+Example\n
+#### anim_speed (f64)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -1682,13 +1688,33 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-#### tab_bar\n
-- holds all tab template definitions\n
-#### splitter \n
+#### drop_target_draw_list (DrawList2d)\n
+tbd\n
+Example\n
+#### round_corner (DrawRoundCorner)\n
+tbd\n
+Example\n
+#### padding_fill (DrawColor)\n
+tbd\n
+Example\n
+#### border_size (f64)\n
+tbd\n
+Example\n
+#### draw_quad (DrawColor)\n
+tbd\n
+Example\n
+#### tab_bar (Option<LivePtr>)\n
+Holds all tab template definitions\n
+Example\n
+#### splitter (Option<LivePtr>)\n
 - axis: split orientation\n
 - align: dimensions of the two docks\n
 - a: select the first tab set\n
 - b: select the second tab set\n
+Example\n
+----\n
+
+
 #### tabs \n
 - tabs: selects the tabs for the tab sets\n
 - selected: defines which tab is selected by default\n
