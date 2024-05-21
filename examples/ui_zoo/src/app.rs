@@ -162,7 +162,8 @@ live_design!{
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+Typographic defaults\n
+tbd"
                     }
                 }
 
@@ -284,7 +285,66 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+### Global attributes
+#### flow (enum)\n
+Controls stacking direction of child elements.\n
+- Right: Horizontal\n
+- Down: Vertical\n
+#### margin (float)\n
+tbd\n
+Example\n
+#### padding (float)\n
+tbd\n
+Example\n
+#### height (tbd)\n
+tbd\n
+Example\n
+#### width (tbd)\n
+tbd\n
+Example\n
+### View
+#### show_bg (bool)\n
+tbd\n
+Example\n
+#### draw_bg (DrawColor)\n
+tbd\n
+Example\n
+#### layout (Layout)\n
+tbd\n
+Example\n
+#### walk (Walk)\n
+tbd\n
+Example\n
+#### dpi_factor (Option<f64>)\n
+tbd\n
+Example\n
+#### optimize (ViewOptimize)\n
+tbd\n
+Example\n
+#### debug (ViewDebug)\n
+tbd\n
+Example\n
+#### event_order (EventOrder)\n
+tbd\n
+Example\n
+#### visible (bool)\n
+tbd\n
+Example\n
+#### grab_key_focus (bool)\n
+tbd\n
+Example\n
+#### block_signal_event (bool)\n
+tbd\n
+Example\n
+#### cursor (Option<MouseCursor>)\n
+tbd\n
+Example\n
+#### scroll_bars (Option<LivePtr>)\n
+tbd\n
+Example\n
+#### design_mode (bool)\n
+tbd\n
+Example\n "
                     }
                 }
 
@@ -402,7 +462,25 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### draw_bg (DrawQuad)\n
+tbd\n
+Example\n
+#### draw_text (DrawText)\n
+tbd\n
+Example\n
+#### icon_walk (Walk)\n
+tbd\n
+Example\n
+#### label_walk (Walk)\n
+tbd\n
+Example\n
+#### grab_key_focus (bool)\n
+tbd\n
+Example\n
+#### text (RcStringMut)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -469,7 +547,52 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### draw_select (DrawQuad)\n
+tbd\n
+Example\n
+#### draw_cursor (DrawQuad)\n
+tbd\n
+Example\n
+#### draw_text (DrawLabel)\n
+tbd\n
+Example\n
+#### label_align (Align)\n
+tbd\n
+Example\n
+#### cursor_size (f64)\n
+tbd\n
+Example\n
+#### cursor_margin_bottom (f64)\n
+tbd\n
+Example\n
+#### cursor_margin_top (f64)\n
+tbd\n
+Example\n
+#### select_pad_edges (f64)\n
+tbd\n
+Example\n
+#### empty_message (String)\n
+tbd\n
+Example\n
+#### numeric_only (bool)\n
+tbd\n
+Example\n
+#### secret (bool)\n
+tbd\n
+Example\n
+#### on_focus_select_all (bool)\n
+tbd\n
+Example\n
+#### read_only (bool)\n
+tbd\n
+Example\n
+#### text (String)\n
+tbd\n
+Example\n
+#### ascii_only (bool)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -513,7 +636,8 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+INSERT DOCS HERE
+"
                     }
                 }
 
@@ -680,7 +804,13 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### body (Rc<String>)\n
+tbd\n
+Example\n
+#### paragraph_spacing (f64)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
