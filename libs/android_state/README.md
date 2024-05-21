@@ -28,3 +28,5 @@ All other functions are intended for Makepad-internal use only,
 and will not be useful for external users.
 
 [`robius-android-env`]: https://github.com/project-robius/robius-android-env
+[`get_java_vm()`]: https://docs.rs/makepad-android-state/latest/makepad_android_state/fn.get_java_vm.html
+[`get_activity()`]: https://docs.rs/makepad-android-state/latest/makepad_android_state/fn.get_activity.html
