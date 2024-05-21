@@ -636,7 +636,15 @@ Example\n
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE
+#### align (Align)\n
+tbd\n
+Example\n
+#### padding (Padding)\n
+tbd\n
+Example\n
+#### text (RcStringMut)\n
+tbd\n
+Example\n
 "
                     }
                 }
@@ -678,7 +686,48 @@ INSERT DOCS HERE
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+### DrawSlider
+#### slide_pos (f32)\n
+tbd\n
+Example\n
+#### slider_type (SliderType)\n
+tbd\n
+Example\n
+### Slider
+#### label_walk (Walk)\n
+tbd\n
+Example\n
+#### label_align (Align)\n
+tbd\n
+Example\n
+#### draw_text (DrawText)\n
+tbd\n
+Example\n
+#### text (String)\n
+tbd\n
+Example\n
+#### text_input (TextInput)\n
+tbd\n
+Example\n
+#### precision (usize)\n
+tbd\n
+Example\n
+#### min (f64)\n
+tbd\n
+Example\n
+#### max (f64)\n
+tbd\n
+Example\n
+#### step (f64)\n
+tbd\n
+Example\n
+#### default (f64)\n
+tbd\n
+Example\n
+#### bind (String)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -702,7 +751,31 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### draw_text (DrawLabelText)\n
+tbd\n
+Example\n
+#### bind (String)\n
+tbd\n
+Example\n
+#### bind_enum (String)\n
+tbd\n
+Example\n
+#### popup_menu (Option<LivePtr>)\n
+tbd\n
+Example\n
+#### labels (Vec<String>)\n
+tbd\n
+Example\n
+#### values (Vec<LiveValue>)\n
+tbd\n
+Example\n
+#### popup_menu_position (PopupMenuPosition)\n
+tbd\n
+Example\n
+#### selected_item (usize)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -723,7 +796,45 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+### FileTreeNode
+#### is_even (f32)\n
+tbd\n
+Example\n
+#### scale (f32)\n
+tbd\n
+Example\n
+#### is_folder (f32)\n
+tbd\n
+Example\n
+#### focussed (f32)\n
+tbd\n
+Example\n
+#### selected (f32)\n
+tbd\n
+Example\n
+#### hover (f32)\n
+tbd\n
+Example\n
+#### opened (f32)\n
+tbd\n
+Example\n
+### FileTree
+#### file_node (Option<LivePtr>)\n
+tbd\n
+Example\n
+#### folder_node (Option<LivePtr>)\n
+tbd\n
+Example\n
+#### filler (DrawBgQuad)\n
+tbd\n
+Example\n
+#### node_height (f64)\n
+tbd\n
+Example\n
+#### draw_scroll_shadow (DrawScrollShadow)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -756,7 +867,13 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### opened (f64)\n
+tbd\n
+Example\n
+#### body_walk (Walk)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -780,7 +897,19 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### body (Rc<String>)\n
+tbd\n
+Example\n
+#### ul_markers (Vec<String>)\n
+tbd\n
+Example\n
+#### ol_markers (Vec<OrderedListType>)\n
+tbd\n
+Example\n
+#### ol_separator (String)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -897,7 +1026,22 @@ Example\n
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### min_width (i64)\n
+tbd\n
+Example\n
+#### min_height (i64)\n
+tbd\n
+Example\n
+#### width_scale (f64)\n
+tbd\n
+Example\n
+#### fit (ImageFit)\n
+tbd\n
+Example\n
+#### source (LiveDependency)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -966,7 +1110,9 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -1039,7 +1185,28 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### icon_walk (Walk)\n
+tbd\n
+Example\n
+#### label_walk (Walk)\n
+tbd\n
+Example\n
+#### label_align (Align)\n
+tbd\n
+Example\n
+#### draw_text (DrawText)\n
+tbd\n
+Example\n
+#### draw_icon (DrawIcon)\n
+tbd\n
+Example\n
+#### text (RcStringMut)\n
+tbd\n
+Example\n
+#### bind (String)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
@@ -1190,7 +1357,37 @@ INSERT DOCS HERE"
                     <Markdown> {
                         width:Fill, height: Fit,
                         body: "\n
-INSERT DOCS HERE"
+#### draw_icon (DrawIcon)\n
+tbd\n
+Example\n
+#### draw_text (DrawText)\n
+tbd\n
+Example\n
+#### value (LiveValue)\n
+tbd\n
+Example\n
+#### media (MediaType)\n
+tbd\n
+Example\n
+#### icon_walk (Walk)\n
+tbd\n
+Example\n
+#### image (Image)\n
+tbd\n
+Example\n
+#### label_walk (Walk)\n
+tbd\n
+Example\n
+#### label_align (Align)\n
+tbd\n
+Example\n
+#### text (ReStringMut)\n
+tbd\n
+Example\n
+#### bind (String)\n
+tbd\n
+Example\n
+"
                     }
                 }
 
