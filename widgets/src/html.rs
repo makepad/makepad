@@ -101,12 +101,12 @@ impl Html {
         }
 
         match node.open_tag_lc() {
-            some_id!(h1) => open_header_tag(cx, tf, 2.0, &mut trim_whitespace_in_text),
-            some_id!(h2) => open_header_tag(cx, tf, 1.5, &mut trim_whitespace_in_text),
-            some_id!(h3) => open_header_tag(cx, tf, 1.17, &mut trim_whitespace_in_text),
-            some_id!(h4) => open_header_tag(cx, tf, 1.0, &mut trim_whitespace_in_text),
-            some_id!(h5) => open_header_tag(cx, tf, 0.83, &mut trim_whitespace_in_text),
-            some_id!(h6) => open_header_tag(cx, tf, 0.67, &mut trim_whitespace_in_text),
+            some_id!(h1) => open_header_tag(cx, tf, 3.5, &mut trim_whitespace_in_text),
+            some_id!(h2) => open_header_tag(cx, tf, 2.8, &mut trim_whitespace_in_text),
+            some_id!(h3) => open_header_tag(cx, tf, 2.2, &mut trim_whitespace_in_text),
+            some_id!(h4) => open_header_tag(cx, tf, 1.7, &mut trim_whitespace_in_text),
+            some_id!(h5) => open_header_tag(cx, tf, 1.3, &mut trim_whitespace_in_text),
+            some_id!(h6) => open_header_tag(cx, tf, 1.0, &mut trim_whitespace_in_text),
 
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
