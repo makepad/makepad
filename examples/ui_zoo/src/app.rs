@@ -434,6 +434,34 @@ INSERT DOCS HERE"
                                 text: "Vertical Layout"
                             }
                         }
+                        <Label> { text: "<ButtonFlatter>"}
+                        <View> {
+                            flow: Right,
+                            align: { x: 0., y: 0.5 }
+                            width: Fill, height: Fit,
+                            <ButtonFlatter> {
+                                draw_icon: {
+                                    color: #f00,
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                                text: "I can have a lovely icon!"
+                            }
+
+                            <ButtonFlatter> {
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                            }
+
+                            <ButtonFlatter> {
+                                flow: Down,
+                                icon_walk: { width: 15. }
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                }
+                                text: "Vertical Layout"
+                            }
+                        }
 
                         <H4> { text: "Freely styled button"}
                         <Label> { text: "<Button>"}

@@ -989,11 +989,20 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
+            instance color: (THEME_COLOR_TEXT_DEFAULT)
+            instance color_hover: (THEME_COLOR_TEXT_DEFAULT)
+            instance color_pressed: (THEME_COLOR_TEXT_DEFAULT)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
+
             fn get_color(self) -> vec4 {
-                return THEME_COLOR_TEXT_DEFAULT
+                return mix(
+                    self.color,
+                    mix(self.color_hover, self.color_pressed, self.pressed),
+                    self.hover
+                )
             }
         }
 
@@ -1004,31 +1013,37 @@ live_design! {
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+
+            instance color: (THEME_COLOR_TEXT_DEFAULT)
+            instance color_hover: #ff0
+            instance color_pressed: (THEME_COLOR_TEXT_DEFAULT)
+
             fn get_color(self) -> vec4 {
                 return mix(
+                    self.color,
                     mix(
-                        self.color,
-                        mix(self.color, #f, 0.5),
-                        self.hover
-                    ),
-                    self.color * 0.75,
-                    self.pressed
+                        self.color_hover,
+                        self.color_pressed, self.pressed),
+                    self.hover
                 )
+
             }
         }
 
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            
+            instance border_radius: (THEME_CORNER_RADIUS)
+            instance color: (THEME_COLOR_CTRL_DEFAULT)
+            instance color_hover: (THEME_COLOR_CTRL_HOVER)
+            instance color_pressed: (THEME_COLOR_CTRL_PRESSED)
+            
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                let body = mix(mix(self.color, self.color_hover, self.hover), self.color_pressed, self.pressed);
 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
