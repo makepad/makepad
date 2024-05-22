@@ -811,7 +811,7 @@ live_design! {
         }
     }
 
-    ScrollBarTabs = <ScrollBarBase> {
+    ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
@@ -883,11 +883,11 @@ live_design! {
         }
     }
 
-    ScrollBarsTabs = <ScrollBarsBase> {
+    ScrollBars = <ScrollBarsBase> {
         show_scroll_x: true,
         show_scroll_y: true,
-        scroll_bar_x: <ScrollBarTabs> {}
-        scroll_bar_y: <ScrollBarTabs> {}
+        scroll_bar_x: <ScrollBar> {}
+        scroll_bar_y: <ScrollBar> {}
     }
 
     ScrollBar = <ScrollBarBase> {
@@ -1977,7 +1977,7 @@ live_design! {
 
         width: Fill, height: (THEME_TAB_HEIGHT)
 
-        scroll_bars: <ScrollBarsTabs> {
+        scroll_bars: <ScrollBars> {
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
@@ -2147,7 +2147,7 @@ live_design! {
 
         width: Fill, height: (THEME_TAB_HEIGHT)
 
-        scroll_bars: <ScrollBarsTabs> {
+        scroll_bars: <ScrollBars> {
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
