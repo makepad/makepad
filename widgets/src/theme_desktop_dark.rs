@@ -811,16 +811,22 @@ live_design! {
         }
     }
 
+
     ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
         draw_bar: {
             //draw_depth: 5.0
-            uniform border_radius: 1.5
-            instance bar_width: 6.0
             instance pressed: 0.0
             instance hover: 0.0
+            
+            instance color: (THEME_COLOR_CTRL_DEFAULT)
+            instance color_hover: (THEME_COLOR_CTRL_SCROLLBAR_HOVER)
+            instance color_pressed: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
+            
+            uniform bar_width: 6.0
+            uniform border_radius: 1.5
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -842,90 +848,11 @@ live_design! {
                         self.border_radius
                     );
                 }
-                return sdf.fill(THEME_COLOR_U_HIDDEN)
-            }
-        }
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bar: {pressed: 0.0, hover: 0.0}
-                    }
-                }
-
-                on = {
-                    cursor: Default,
-                    from: {
-                        all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_bar: {
-                            pressed: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
-                        }
-                    }
-                }
-
-                pressed = {
-                    cursor: Default,
-                    from: {all: Snap}
-                    apply: {
-                        draw_bar: {
-                            pressed: 1.0,
-                            hover: 1.0,
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    ScrollBars = <ScrollBarsBase> {
-        show_scroll_x: true,
-        show_scroll_y: true,
-        scroll_bar_x: <ScrollBar> {}
-        scroll_bar_y: <ScrollBar> {}
-    }
-
-    ScrollBar = <ScrollBarBase> {
-        bar_size: 10.0,
-        bar_side_margin: 3.0
-        min_handle_size: 30.0
-        draw_bar: {
-            //draw_depth: 5.0
-            uniform border_radius: 1.5
-            instance bar_width: 6.0
-            instance pressed: 0.0
-            instance hover: 0.0
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                if self.is_vertical > 0.5 {
-                    sdf.box(
-                        1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.bar_width,
-                        self.rect_size.y * self.norm_handle,
-                        self.border_radius
-                    );
-                }
-                else {
-                    sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.bar_width,
-                        self.border_radius
-                    );
-                }
-                return sdf.fill( mix(
-                    THEME_COLOR_CTRL_DEFAULT,
+                return sdf.fill(mix(
+                    self.color, 
                     mix(
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
+                        self.color_hover,
+                        self.color_pressed,
                         self.pressed
                     ),
                     self.hover
@@ -1129,14 +1056,7 @@ live_design! {
         margin: 0.
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.fill(#f00)
-                return sdf.result
-            }
-        }
-
+        
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
@@ -1159,23 +1079,29 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
+
+            uniform color: (THEME_COLOR_U_HIDDEN)
+            uniform color_pressed: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_bevel_light: (THEME_COLOR_BEVEL_LIGHT)
+            uniform color_bevel_shadow: (THEME_COLOR_BEVEL_SHADOW)
+
             uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_U_HIDDEN)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            uniform bevel: (THEME_BEVELING)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                let body = mix(mix(self.color, self.color_pressed, self.hover), self.color_pressed, self.pressed);
 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
                     body_transp,
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    mix(THEME_COLOR_U_HIDDEN, self.color_bevel_shadow, self.pressed),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
                 let bot_gradient = mix(
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    mix(THEME_COLOR_U_HIDDEN, self.color_bevel_light, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -1191,7 +1117,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVELING
+                    self.bevel 
                 )
 
                 return sdf.result
