@@ -989,9 +989,10 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            instance color: (THEME_COLOR_TEXT_DEFAULT)
-            instance color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            instance color_pressed: (THEME_COLOR_TEXT_DEFAULT)
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_pressed: (THEME_COLOR_TEXT_DEFAULT)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -1011,12 +1012,12 @@ live_design! {
         }
 
         draw_icon: {
-            instance hover: 0.0
-            instance pressed: 0.0
+            uniform hover: 0.0
+            uniform pressed: 0.0
 
-            instance color: (THEME_COLOR_TEXT_DEFAULT)
-            instance color_hover: #ff0
-            instance color_pressed: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: #ff0
+            uniform color_pressed: (THEME_COLOR_TEXT_DEFAULT)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -1034,25 +1035,29 @@ live_design! {
             instance hover: 0.0
             instance pressed: 0.0
             
-            instance border_radius: (THEME_CORNER_RADIUS)
-            instance color: (THEME_COLOR_CTRL_DEFAULT)
-            instance color_hover: (THEME_COLOR_CTRL_HOVER)
-            instance color_pressed: (THEME_COLOR_CTRL_PRESSED)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_pressed: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_bevel_light: (THEME_COLOR_BEVEL_LIGHT)
+            uniform color_bevel_shadow: (THEME_COLOR_BEVEL_SHADOW)
+            uniform bevel: (THEME_BEVELING)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
+
                 let body = mix(mix(self.color, self.color_hover, self.hover), self.color_pressed, self.pressed);
 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
                     body_transp,
-                    mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    mix(self.color_bevel_light, self.color_bevel_shadow, self.pressed),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
                 let bot_gradient = mix(
-                    mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    mix(self.color_bevel_shadow, self.color_bevel_light, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -1068,7 +1073,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVELING
+                    self.bevel
                 )
 
                 return sdf.result

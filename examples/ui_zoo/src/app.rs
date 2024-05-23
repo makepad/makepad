@@ -276,77 +276,6 @@ tbd"
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-### Global attributes
-#### flow (enum)\n
-Controls stacking direction of child elements.\n
-- Right: Horizontal\n
-- Down: Vertical\n
-#### margin (float)\n
-tbd\n
-Example\n
-#### padding (float)\n
-tbd\n
-Example\n
-#### height (tbd)\n
-tbd\n
-Example\n
-#### width (tbd)\n
-tbd\n
-Example\n
-### View
-#### show_bg (bool)\n
-tbd\n
-Example\n
-#### draw_bg (DrawColor)\n
-tbd\n
-Example\n
-#### layout (Layout)\n
-tbd\n
-Example\n
-#### walk (Walk)\n
-tbd\n
-Example\n
-#### dpi_factor (Option<f64>)\n
-tbd\n
-Example\n
-#### optimize (ViewOptimize)\n
-tbd\n
-Example\n
-#### debug (ViewDebug)\n
-tbd\n
-Example\n
-#### event_order (EventOrder)\n
-tbd\n
-Example\n
-#### visible (bool)\n
-tbd\n
-Example\n
-#### grab_key_focus (bool)\n
-tbd\n
-Example\n
-#### block_signal_event (bool)\n
-tbd\n
-Example\n
-#### cursor (Option<MouseCursor>)\n
-tbd\n
-Example\n
-#### scroll_bars (Option<LivePtr>)\n
-tbd\n
-Example\n
-#### design_mode (bool)\n
-tbd\n
-Example\n "
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"RoundedView"}
@@ -369,18 +298,6 @@ Example\n "
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-INSERT DOCS HERE"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<Button>"}
@@ -481,36 +398,6 @@ INSERT DOCS HERE"
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### draw_bg (DrawQuad)\n
-tbd\n
-Example\n
-#### draw_text (DrawText)\n
-tbd\n
-Example\n
-#### icon_walk (Walk)\n
-tbd\n
-Example\n
-#### label_walk (Walk)\n
-tbd\n
-Example\n
-#### grab_key_focus (bool)\n
-tbd\n
-Example\n
-#### text (RcStringMut)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<TextInput>"}
@@ -566,63 +453,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### draw_select (DrawQuad)\n
-tbd\n
-Example\n
-#### draw_cursor (DrawQuad)\n
-tbd\n
-Example\n
-#### draw_text (DrawLabel)\n
-tbd\n
-Example\n
-#### label_align (Align)\n
-tbd\n
-Example\n
-#### cursor_size (f64)\n
-tbd\n
-Example\n
-#### cursor_margin_bottom (f64)\n
-tbd\n
-Example\n
-#### cursor_margin_top (f64)\n
-tbd\n
-Example\n
-#### select_pad_edges (f64)\n
-tbd\n
-Example\n
-#### empty_message (String)\n
-tbd\n
-Example\n
-#### numeric_only (bool)\n
-tbd\n
-Example\n
-#### secret (bool)\n
-tbd\n
-Example\n
-#### on_focus_select_all (bool)\n
-tbd\n
-Example\n
-#### read_only (bool)\n
-tbd\n
-Example\n
-#### text (String)\n
-tbd\n
-Example\n
-#### ascii_only (bool)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<Label>"}
@@ -655,27 +485,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### align (Align)\n
-tbd\n
-Example\n
-#### padding (Padding)\n
-tbd\n
-Example\n
-#### text (RcStringMut)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = { text:"<Slider>" }
@@ -705,59 +514,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-### DrawSlider
-#### slide_pos (f32)\n
-tbd\n
-Example\n
-#### slider_type (SliderType)\n
-tbd\n
-Example\n
-### Slider
-#### label_walk (Walk)\n
-tbd\n
-Example\n
-#### label_align (Align)\n
-tbd\n
-Example\n
-#### draw_text (DrawText)\n
-tbd\n
-Example\n
-#### text (String)\n
-tbd\n
-Example\n
-#### text_input (TextInput)\n
-tbd\n
-Example\n
-#### precision (usize)\n
-tbd\n
-Example\n
-#### min (f64)\n
-tbd\n
-Example\n
-#### max (f64)\n
-tbd\n
-Example\n
-#### step (f64)\n
-tbd\n
-Example\n
-#### default (f64)\n
-tbd\n
-Example\n
-#### bind (String)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<DropDown>"}
@@ -770,43 +526,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### draw_text (DrawLabelText)\n
-tbd\n
-Example\n
-#### bind (String)\n
-tbd\n
-Example\n
-#### bind_enum (String)\n
-tbd\n
-Example\n
-#### popup_menu (Option<LivePtr>)\n
-tbd\n
-Example\n
-#### labels (Vec<String>)\n
-tbd\n
-Example\n
-#### values (Vec<LiveValue>)\n
-tbd\n
-Example\n
-#### popup_menu_position (PopupMenuPosition)\n
-tbd\n
-Example\n
-#### selected_item (usize)\n
-tbd\n
-Example\n
-"
-                    }
-                }
-
                 <ZooHeader> {
                     title = {text:"<FileTree>"}
                     <ZooDesc> {text:"File Tree"}
@@ -815,56 +534,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-### FileTreeNode
-#### is_even (f32)\n
-tbd\n
-Example\n
-#### scale (f32)\n
-tbd\n
-Example\n
-#### is_folder (f32)\n
-tbd\n
-Example\n
-#### focussed (f32)\n
-tbd\n
-Example\n
-#### selected (f32)\n
-tbd\n
-Example\n
-#### hover (f32)\n
-tbd\n
-Example\n
-#### opened (f32)\n
-tbd\n
-Example\n
-### FileTree
-#### file_node (Option<LivePtr>)\n
-tbd\n
-Example\n
-#### folder_node (Option<LivePtr>)\n
-tbd\n
-Example\n
-#### filler (DrawBgQuad)\n
-tbd\n
-Example\n
-#### node_height (f64)\n
-tbd\n
-Example\n
-#### draw_scroll_shadow (DrawScrollShadow)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = { text:"<FoldHeader>" }
@@ -886,24 +555,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### opened (f64)\n
-tbd\n
-Example\n
-#### body_walk (Walk)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<Html>"}
@@ -916,30 +567,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### body (Rc<String>)\n
-tbd\n
-Example\n
-#### ul_markers (Vec<String>)\n
-tbd\n
-Example\n
-#### ol_markers (Vec<OrderedListType>)\n
-tbd\n
-Example\n
-#### ol_separator (String)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<Markdown>"}
@@ -952,24 +579,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### body (Rc<String>)\n
-tbd\n
-Example\n
-#### paragraph_spacing (f64)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<Image>"}
@@ -1045,33 +654,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### min_width (i64)\n
-tbd\n
-Example\n
-#### min_height (i64)\n
-tbd\n
-Example\n
-#### width_scale (f64)\n
-tbd\n
-Example\n
-#### fit (ImageFit)\n
-tbd\n
-Example\n
-#### source (LiveDependency)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<LinkLabel>"}
@@ -1129,20 +711,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<CheckBox>"}
@@ -1204,39 +772,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### icon_walk (Walk)\n
-tbd\n
-Example\n
-#### label_walk (Walk)\n
-tbd\n
-Example\n
-#### label_align (Align)\n
-tbd\n
-Example\n
-#### draw_text (DrawText)\n
-tbd\n
-Example\n
-#### draw_icon (DrawIcon)\n
-tbd\n
-Example\n
-#### text (RcStringMut)\n
-tbd\n
-Example\n
-#### bind (String)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<RadioButton>"}
@@ -1376,48 +911,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### draw_icon (DrawIcon)\n
-tbd\n
-Example\n
-#### draw_text (DrawText)\n
-tbd\n
-Example\n
-#### value (LiveValue)\n
-tbd\n
-Example\n
-#### media (MediaType)\n
-tbd\n
-Example\n
-#### icon_walk (Walk)\n
-tbd\n
-Example\n
-#### image (Image)\n
-tbd\n
-Example\n
-#### label_walk (Walk)\n
-tbd\n
-Example\n
-#### label_align (Align)\n
-tbd\n
-Example\n
-#### text (ReStringMut)\n
-tbd\n
-Example\n
-#### bind (String)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 <ZooHeader> {
                     title = {text:"<SlidesView>"}
@@ -1442,24 +935,6 @@ Example\n
                     }
                 }
 
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### goal_slide (f64)\n
-tbd\n
-Example\n
-#### anim_speed (f64)\n
-tbd\n
-Example\n
-"
-                    }
-                }
 
                 // TODO: SHOW
                 <ZooHeader> {
@@ -1706,54 +1181,6 @@ Example\n
                         }
                     }
 
-
-                <View> {
-                    height: Fit, width: Fill,
-                    margin: <THEME_MSPACE_2> {}
-                    padding: <THEME_MSPACE_2> {}
-                    flow: Down,
-                    <H3> { text: "Description"}
-                    <Markdown> {
-                        width:Fill, height: Fit,
-                        body: "\n
-#### drop_target_draw_list (DrawList2d)\n
-tbd\n
-Example\n
-#### round_corner (DrawRoundCorner)\n
-tbd\n
-Example\n
-#### padding_fill (DrawColor)\n
-tbd\n
-Example\n
-#### border_size (f64)\n
-tbd\n
-Example\n
-#### draw_quad (DrawColor)\n
-tbd\n
-Example\n
-#### tab_bar (Option<LivePtr>)\n
-Holds all tab template definitions\n
-Example\n
-#### splitter (Option<LivePtr>)\n
-- axis: split orientation\n
-- align: dimensions of the two docks\n
-- a: select the first tab set\n
-- b: select the second tab set\n
-Example\n
-----\n
-
-
-#### tabs \n
-- tabs: selects the tabs for the tab sets\n
-- selected: defines which tab is selected by default\n
-#### tab \n
-- name: name shown in the tab\n
-- template: selects the tab template\n
-- body: selects the tab content\n
-#### arbitrary named dsl blocks \n
-- define the 'body templates' that are instanced in tab with 'body'"
-                    }
-                }
 
                 // <ZooHeader> {
                 //     title = {text:"<DockMinimal>"}
