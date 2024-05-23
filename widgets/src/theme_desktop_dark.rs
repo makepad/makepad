@@ -1223,15 +1223,17 @@ live_design! {
             uniform size: 7.5;
 
             uniform color_gradient_top: (THEME_COLOR_INSET_PIT_TOP)
+            instance color_gradient_top_hover: (THEME_COLOR_INSET_PIT_TOP_HOVER)
             uniform color_gradient_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_gradient_bottom_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
 
-            uniform color_check_inactive: (THEME_COLOR_U_HIDDEN)
+            uniform color_check: (THEME_COLOR_TEXT_ACTIVE)
             uniform color_check_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_check_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_check_inactive: (THEME_COLOR_U_HIDDEN)
 
             uniform color_bevel_light: (THEME_COLOR_BEVEL_LIGHT)
-            uniform color_bevel_shadow: (THEME_COLOR_BEVEL_SHADOW)
-            // uniform bevel: (THEME_BEVELING)
+            instance color_bevel_shadow: (THEME_COLOR_BEVEL_SHADOW)
+            instance bevel: (THEME_BEVELING)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -1249,7 +1251,7 @@ live_design! {
                         sdf.stroke(mix(
                             self.color_bevel_shadow,
                             self.color_bevel_light,
-                            self.pos.y), THEME_BEVELING)
+                            self.pos.y), self.bevel)
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
@@ -1261,7 +1263,7 @@ live_design! {
                                 self.color_check_hover,
                                 self.hover
                             ),
-                            self.color_check_active,
+                            self.color_check,
                             self.selected), 1.25
                         );
                     }
@@ -1271,7 +1273,7 @@ live_design! {
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(mix(self.color_gradient_top, self.color_gradient_bottom, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(self.color_bevel_shadow, self.color_bevel_light, self.pos.y), THEME_BEVELING)
+                        sdf.stroke(mix(self.color_bevel_shadow, self.color_bevel_light, self.pos.y), self.bevel)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
@@ -1281,7 +1283,7 @@ live_design! {
                                     self.color_check_hover,
                                     self.hover
                                 ),
-                                self.color_check_active,
+                                self.color_check,
                                 self.selected
                             )
                         );
@@ -1297,7 +1299,7 @@ live_design! {
                                 self.color_bevel_shadow,
                                 self.color_bevel_light,
                                 clamp(self.pos.y - 0.2, 0, 1)),
-                            THEME_BEVELING
+                            self.bevel 
                         )
 
                         sdf.fill(
@@ -1307,8 +1309,8 @@ live_design! {
                                     self.color_gradient_bottom * 0.1,
                                     pow(self.pos.y, 1.0)),
                                 mix(
-                                    THEME_COLOR_INSET_PIT_TOP_HOVER * 1.75,
-                                    THEME_COLOR_INSET_PIT_BOTTOM * 0.1,
+                                    self.color_gradient_top_hover * 1.75,
+                                    self.color_gradient_bottom * 0.1,
                                     pow(self.pos.y, 1.0)),
                                 self.hover
                             )
@@ -1319,10 +1321,7 @@ live_design! {
                         sdf.subtract();
                         sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
                         sdf.blend(self.selected)
-                        sdf.fill(mix(
-                            THEME_COLOR_TEXT_DEFAULT,
-                            THEME_COLOR_TEXT_HOVER,
-                            self.hover));
+                        sdf.fill(self.color_check);
                     }
                     CheckType::None => {
                         sdf.fill(THEME_COLOR_D_HIDDEN);
