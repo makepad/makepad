@@ -1633,13 +1633,15 @@ live_design! {
 
     NavControl = <NavControlBase> {
         draw_focus: {
+            uniform color: #000f
+
             fn pixel(self) -> vec4 {
-                return #000f
+                return self.color
             }
         }
         draw_text: {
             text_style: {
-                font_size: 6
+                font_size: 6.
             },
             color: (THEME_COLOR_TEXT_DEFAULT)
         }
@@ -1653,11 +1655,10 @@ live_design! {
         nav_control: <NavControl> {}
         caption_bar = <SolidView> {
             visible: false,
-
-            flow: Right
-
+            flow: Right,
             draw_bg: {color: (THEME_COLOR_APP_CAPTION_BAR)}
-            height: 27,
+            height: 27.,
+
             caption_label = <View> {
                 width: Fill, height: Fill,
                 align: {x: 0.5, y: 0.5},
@@ -1732,12 +1733,16 @@ live_design! {
 
     Splitter = <SplitterBase> {
         draw_splitter: {
+            instance pressed: 0.0
+            instance hover: 0.0
+
+            uniform color: (THEME_COLOR_D_HIDDEN)
+            uniform color_hover: (THEME_COLOR_CTRL_SCROLLBAR_HOVER)
+            uniform color_pressed: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
+
             uniform border_radius: 1.0
             uniform splitter_pad: 1.0
             uniform splitter_grabber: 110.0
-
-            instance pressed: 0.0
-            instance hover: 0.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1762,10 +1767,10 @@ live_design! {
                     );
                 }
                 return sdf.fill_keep(mix(
-                    THEME_COLOR_D_HIDDEN,
+                    self.color,
                     mix(
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
+                        self.color_hover,
+                        self.color_pressed,
                         self.pressed
                     ),
                     self.hover
@@ -1818,10 +1823,13 @@ live_design! {
         // TODO: NEEDS FOCUS STATE
         height: 10.0, width: 10.0,
         margin: { left: -3.5 },
-        draw_button: {
 
+        draw_button: {
             instance hover: float;
             instance selected: float;
+
+            uniform color: (THEME_COLOR_TEXT_INACTIVE)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1834,8 +1842,8 @@ live_design! {
                 sdf.move_to(min.x, max.y);
                 sdf.line_to(max.x, min.y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_INACTIVE,
-                    THEME_COLOR_TEXT_HOVER,
+                    self.color,
+                    self.color_hover,
                     self.hover
                 ), 1.0);
             }
@@ -1864,23 +1872,29 @@ live_design! {
 
     Tab = <TabBase> {
         width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
-
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { }
 
         close_button: <TabCloseButton> {}
+
         draw_name: {
             text_style: <THEME_FONT_REGULAR> {}
+
             instance hover: 0.0
             instance selected: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_INACTIVE)
+            uniform color_hover: (THEME_COLOR_TEXT_SELECTED)
+            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_INACTIVE,
-                        THEME_COLOR_TEXT_SELECTED,
+                        self.color,
+                        self.color_hover,
                         self.selected
                     ),
-                    THEME_COLOR_TEXT_HOVER,
+                    self.color_selected,
                     self.hover
                 )
             }
@@ -1889,6 +1903,9 @@ live_design! {
         draw_bg: {
             instance hover: float
             instance selected: float
+
+            uniform color: (THEME_COLOR_D_2 * 0.75)
+            uniform color_selected: (THEME_COLOR_DOCK_TAB_SELECTED)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1901,8 +1918,8 @@ live_design! {
                 )
                 sdf.fill_keep(
                     mix(
-                        THEME_COLOR_D_2 * 0.75,
-                        THEME_COLOR_DOCK_TAB_SELECTED,
+                        self.color,
+                        self.color_selected,
                         self.selected
                     )
                 )
