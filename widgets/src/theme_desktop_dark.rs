@@ -1132,28 +1132,26 @@ live_design! {
         margin: 0.
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.fill(#f00)
-                return sdf.result
-            }
-        }
 
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
+            
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_pressed: (THEME_COLOR_TEXT_PRESSED)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
+                        self.color,
+                        self.color_hover,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                        self.color_pressed,
                     self.pressed
                 )
             }
@@ -1162,14 +1160,17 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
+
             uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_U_HIDDEN)
-            instance bodybottom: (THEME_COLOR_U_HIDDEN)
+            uniform color: (THEME_COLOR_U_HIDDEN)
+            uniform color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform color_pressed: (THEME_COLOR_D_HIDDEN)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_HIDDEN, self.pressed);
+                let body = mix(mix(self.color, self.color_hover, self.hover), self.color_pressed, self.pressed);
 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
