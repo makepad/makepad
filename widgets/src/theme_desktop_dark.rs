@@ -1223,8 +1223,8 @@ live_design! {
             uniform size: 7.5;
 
             uniform color_gradient_top: (THEME_COLOR_INSET_PIT_TOP)
-            instance color_gradient_top_hover: (THEME_COLOR_INSET_PIT_TOP_HOVER)
             uniform color_gradient_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
+            instance color_gradient_top_hover: (THEME_COLOR_INSET_PIT_TOP_HOVER)
             uniform color_gradient_bottom_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
 
             uniform color_check: (THEME_COLOR_TEXT_ACTIVE)
@@ -1335,17 +1335,22 @@ live_design! {
             instance focus: 0.0
             instance selected: 0.0
             instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_selected: (THEME_COLOR_TEXT_DEFAULT) 
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_DEFAULT,
+                        self.color,
+                        self.color_hover,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_DEFAULT,
+                    self.color_selected,
                     self.selected
                 )
             }
@@ -1355,8 +1360,10 @@ live_design! {
             instance focus: 0.0
             instance hover: 0.0
             instance selected: 0.0
+
             uniform color: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
