@@ -2397,6 +2397,8 @@ live_design! {
         width: Fit, height: Fit,
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2), right: 22.5 }
         align: {x: 0., y: 0.}
+        popup_menu: <PopupMenu> {}
+        selected_item: 0
 
         draw_text: {
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
@@ -2504,9 +2506,6 @@ live_design! {
             }
         }
 
-        popup_menu: <PopupMenu> {}
-
-        selected_item: 0
         animator: {
             hover = {
                 default: off,
