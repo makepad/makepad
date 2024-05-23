@@ -2251,31 +2251,6 @@ live_design! {
         align: { y: 0.5 }
         padding: <THEME_MSPACE_1> { left: 15. }
 
-        draw_name: {
-            instance selected: 0.0
-            instance hover: 0.0
-
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
-
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P),
-            }
-
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        self.color,
-                        self.color_selected,
-                        self.selected
-                    ),
-                    self.color_hover,
-                    self.hover
-                )
-            }
-        }
-
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
@@ -2304,6 +2279,31 @@ live_design! {
                 sdf.stroke(mix(self.check_color, self.check_color_hover, self.selected), 1.0);
 
                 return sdf.result;
+            }
+        }
+
+        draw_name: {
+            instance selected: 0.0
+            instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
+
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P),
+            }
+
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_selected,
+                        self.selected
+                    ),
+                    self.color_hover,
+                    self.hover
+                )
             }
         }
 
@@ -2352,22 +2352,25 @@ live_design! {
         width: 150., height: Fit,
         flow: Down,
         padding: <THEME_MSPACE_1> {}
-
         menu_item: <PopupMenuItem> {}
 
         draw_bg: {
-            instance color: (THEME_COLOR_FLOATING_BG)
-            instance border_width: 1.0,
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0),
-            instance radius: 2.0
-            instance blur: 0.0
+            uniform color: (THEME_COLOR_FLOATING_BG)
+            uniform color_bevel_light: (THEME_COLOR_BEVEL_LIGHT)
+            instance color_bevel_shadow: (THEME_COLOR_BEVEL_SHADOW)
+            instance bevel: (THEME_BEVELING)
+
+            uniform border_width: 1.0,
+            uniform inset: vec4(0.0, 0.0, 0.0, 0.0),
+            uniform radius: 2.0
+            uniform blur: 0.0
 
             fn get_color(self) -> vec4 {
                 return self.color
             }
 
             fn get_border_color(self) -> vec4 {
-                return mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, pow(self.pos.y, 0.35))
+                return mix(self.color_bevel_light, self.color_bevel_shadow, pow(self.pos.y, 0.35))
             }
 
             fn pixel(self) -> vec4 {
@@ -2382,7 +2385,7 @@ live_design! {
                 )
                 sdf.fill_keep(self.get_color())
                 if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), THEME_BEVELING)
+                    sdf.stroke(self.get_border_color(), self.bevel)
                 }
                 return sdf.result;
             }
@@ -2396,14 +2399,17 @@ live_design! {
         align: {x: 0., y: 0.}
 
         draw_text: {
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_pressed: (THEME_COLOR_TEXT_PRESSED)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
 
             fn get_color(self) -> vec4 {
                 return mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_PRESSED,
+                    self.color,
+                    self.color_pressed,
                     self.pressed
                 )
             }
@@ -2416,14 +2422,22 @@ live_design! {
             instance open: 0.0
             
             uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_U_HIDDEN)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            uniform color: (THEME_COLOR_U_HIDDEN)
+            uniform color_pressed: (THEME_COLOR_CTRL_HOVER)
+            uniform color_focussed: (THEME_COLOR_CTRL_HOVER)
+
+            uniform color_bevel_light: (THEME_COLOR_BEVEL_LIGHT)
+            instance color_bevel_shadow: (THEME_COLOR_BEVEL_SHADOW)
+            instance bevel: (THEME_BEVELING)
+
+            uniform triangle_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform triangle_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), self.bodybottom, self.focus);
+                let body = mix(mix(self.color, self.color_pressed, self.hover), self.color_focussed, self.focus);
                 let body_transp = vec4(body.xyz, 0.0);
 
                 let top_gradient = mix(
@@ -2431,16 +2445,16 @@ live_design! {
                     mix(
                         mix(
                             THEME_COLOR_U_HIDDEN,
-                            THEME_COLOR_BEVEL_LIGHT,
+                            self.color_bevel_light,
                             self.hover
                         ),
-                        THEME_COLOR_BEVEL_LIGHT,
+                        self.color_bevel_light,
                         self.focus
                     ),
                     max(0.0, grad_top - sdf.pos.y) / grad_top);
 
                 let bot_gradient = mix(
-                    mix(body_transp, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    mix(body_transp, self.color_bevel_shadow, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -2452,12 +2466,12 @@ live_design! {
                 sdf.stroke(mix(
                     mix(
                         THEME_COLOR_D_HIDDEN,
-                        THEME_COLOR_BEVEL_SHADOW,
+                        self.color_bevel_shadow,
                         self.hover
                     ),
-                    THEME_COLOR_BEVEL_SHADOW,
+                    self.color_bevel_shadow,
                     self.focus
-                    ), THEME_BEVELING
+                    ), self.bevel
                 )
 
                 sdf.box(
@@ -2471,7 +2485,7 @@ live_design! {
 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVELING * 1.5
+                    self.bevel * 1.5
                 )
 
                 // lets draw a little triangle in the corner
@@ -2484,7 +2498,7 @@ live_design! {
                 sdf.line_to(c.x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
 
-                sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+                sdf.fill(mix(self.triangle_color, self.triangle_color_hover, self.hover));
 
                 return sdf.result
             }
