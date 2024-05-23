@@ -1998,16 +1998,27 @@ live_design! {
 
     Dock = <DockBase> {
         flow: Down,
+        border_size: (THEME_DOCK_BORDER_SIZE)
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
+        drag_quad: {
+            draw_depth: 10.0
+            color: (THEME_COLOR_DRAG_QUAD)
+        }
+        tab_bar: <TabBar> {}
+        splitter: <Splitter> {}
 
         round_corner: {
+            uniform color: (THEME_COLOR_BG_APP)
+
             draw_depth: 20.0
             border_radius: 20.
+
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
                     mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
                 )
-
                 let sdf = Sdf2d::viewport(pos * self.rect_size);
                 sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
                 sdf.box(
@@ -2017,22 +2028,11 @@ live_design! {
                     self.rect_size.y * 2.0,
                     4.0
                 );
-
                 sdf.subtract()
-                sdf.fill(THEME_COLOR_BG_APP)
+                sdf.fill(self.color)
                 return sdf.result
             }
         }
-        border_size: (THEME_DOCK_BORDER_SIZE)
-
-        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
-        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
-        drag_quad: {
-            draw_depth: 10.0
-            color: (THEME_COLOR_DRAG_QUAD)
-        }
-        tab_bar: <TabBar> {}
-        splitter: <Splitter> {}
     }
 
     TabMinimal = <TabBase> {
@@ -2044,16 +2044,22 @@ live_design! {
         close_button: <TabCloseButton> {}
         draw_name: {
             text_style: <THEME_FONT_REGULAR> {}
+
             instance hover: 0.0
             instance selected: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_INACTIVE)
+            uniform color_hover: (THEME_COLOR_TEXT_SELECTED)
+            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_INACTIVE,
-                        THEME_COLOR_TEXT_SELECTED,
+                        self.color,
+                        self.color_hover,
                         self.selected
                     ),
-                    THEME_COLOR_TEXT_HOVER,
+                    self.color_selected,
                     self.hover
                 )
             }
@@ -2063,9 +2069,14 @@ live_design! {
             instance hover: float
             instance selected: float
 
+            uniform color: (THEME_COLOR_D_1)
+            uniform activity_marker_color: (THEME_COLOR_D_HIDDEN)
+            uniform activity_marker_color_selected: (THEME_COLOR_U_4)
+            uniform activity_marker_width: 2.5
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let stroke_width = 2.5
+                let stroke_width = self.activity_marker_width
 
                 sdf.rect(
                     -1.,
@@ -2074,22 +2085,20 @@ live_design! {
                     self.rect_size.y + 2.0
                 );
 
-                sdf.fill( THEME_COLOR_D_1 )
+                sdf.fill(self.color)
 
                 sdf.box(
                     -1.,
-                    // -1.,
                     self.rect_size.y - stroke_width,
                     self.rect_size.x + 2.,
                     stroke_width,
-                    // self.rect_size.y * 0.25,
                     1.
                 )
 
                 sdf.fill(
                     mix(
-                        THEME_COLOR_D_HIDDEN,
-                        THEME_COLOR_U_4,
+                        self.activity_marker_color,
+                        self.activity_marker_color_selected,
                         self.selected
                     )
                 )
@@ -2160,7 +2169,7 @@ live_design! {
             show_scroll_y: false
             scroll_bar_x: {
                 draw_bar: {bar_width: 3.0}
-                bar_size: 4
+                bar_size: 4.
                 use_vertical_finger_scroll: true
             }
         }
@@ -2168,17 +2177,30 @@ live_design! {
 
     DockMinimal = <DockBase> {
         flow: Down,
+        border_size: (THEME_DOCK_BORDER_SIZE)
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
+        tab_bar: <TabBar> {}
+        splitter: <Splitter> {}
+
+        drag_quad: {
+            draw_depth: 10.0
+            color: (THEME_COLOR_DRAG_QUAD)
+        }
 
         round_corner: {
+            uniform color: (THEME_COLOR_BG_APP)
+
             draw_depth: 20.0
             border_radius: 20.
+
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
                     mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
                 )
-
                 let sdf = Sdf2d::viewport(pos * self.rect_size);
+
                 sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
                 sdf.box(
                     0.25,
@@ -2189,20 +2211,10 @@ live_design! {
                 );
 
                 sdf.subtract()
-                sdf.fill(THEME_COLOR_BG_APP)
+                sdf.fill(self.color)
                 return sdf.result
             }
         }
-        border_size: (THEME_DOCK_BORDER_SIZE)
-
-        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
-        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
-        drag_quad: {
-            draw_depth: 10.0
-            color: (THEME_COLOR_DRAG_QUAD)
-        }
-        tab_bar: <TabBar> {}
-        splitter: <Splitter> {}
     }
 
 
@@ -2217,6 +2229,7 @@ live_design! {
         padding: <THEME_MSPACE_1> {}
         width: Fill, height: 38.,
         align: { x: 0., y: 1.0 }
+
         draw_bg: {
             border_width: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
@@ -2241,17 +2254,23 @@ live_design! {
         draw_name: {
             instance selected: 0.0
             instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P),
             }
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_SELECTED,
+                        self.color,
+                        self.color_selected,
                         self.selected
                     ),
-                    THEME_COLOR_TEXT_HOVER,
+                    self.color_hover,
                     self.hover
                 )
             }
@@ -2260,8 +2279,11 @@ live_design! {
         draw_bg: {
             instance selected: 0.0
             instance hover: 0.0
-            instance color: (THEME_COLOR_FLOATING_BG)
-            instance color_selected: (THEME_COLOR_CTRL_HOVER)
+
+            uniform color: (THEME_COLOR_FLOATING_BG)
+            uniform color_selected: (THEME_COLOR_CTRL_HOVER)
+            uniform check_color: (THEME_COLOR_U_HIDDEN)
+            uniform check_color_hover: (THEME_COLOR_TEXT_DEFAULT)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -2272,7 +2294,6 @@ live_design! {
                     self.hover
                 ))
 
-                //
                 // we have 3 points, and need to rotate around its center
                 let sz = 3.;
                 let dx = 2.0;
@@ -2280,7 +2301,7 @@ live_design! {
                 sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
                 sdf.line_to(c.x, c.y + sz);
                 sdf.line_to(c.x + sz, c.y - sz);
-                sdf.stroke(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_DEFAULT, self.selected), 1.0);
+                sdf.stroke(mix(self.check_color, self.check_color_hover, self.selected), 1.0);
 
                 return sdf.result;
             }
