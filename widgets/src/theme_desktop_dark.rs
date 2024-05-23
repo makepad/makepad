@@ -1012,8 +1012,8 @@ live_design! {
         }
 
         draw_icon: {
-            uniform hover: 0.0
-            uniform pressed: 0.0
+            instance hover: 0.0
+            instance pressed: 0.0
 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: #ff0
