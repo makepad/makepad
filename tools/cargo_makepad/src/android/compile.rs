@@ -2,26 +2,26 @@ use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget};
 use crate::utils::*;
 use crate::makepad_shell::*;
-use super::sdk::{NDK_VERSION_FULL, BUILD_TOOLS_DIR, SDK_VERSION, PLATFORMS_DIR, API_LEVEL};
+use super::sdk::{ANDROID_BUILD_TOOLS_VERSION, ANDROID_PLATFORM, ANDROID_SDK_VERSION, BUILD_TOOLS_DIR, NDK_VERSION_FULL, PLATFORMS_DIR};
 
 fn aapt_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("aapt")
+    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("aapt")
 }
 
 fn d8_jar_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("lib/d8.jar")
+    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("lib/d8.jar")
 }
 
 fn apksigner_jar_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("lib/apksigner.jar")
+    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("lib/apksigner.jar")
 }
 
 fn zipalign_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(SDK_VERSION).join("zipalign")
+    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("zipalign")
 }
 
 fn android_jar_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(PLATFORMS_DIR).join(API_LEVEL).join("android.jar")
+    sdk_dir.join(PLATFORMS_DIR).join(ANDROID_PLATFORM).join("android.jar")
 }
 
 
@@ -41,7 +41,7 @@ pub struct BuildResult {
     java_url: String,
 }
 
-fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
+fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->String{
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <manifest xmlns:android="http://schemas.android.com/apk/res/android"
         xmlns:tools="http://schemas.android.com/tools"
@@ -53,7 +53,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
             android:supportsRtl="true"
             android:debuggable="true"
             android:largeHeap="true"
-            tools:targetApi="33">
+            tools:targetApi="{sdk_version}">
             <meta-data android:name="android.max_aspect" android:value="2.1" />
             <activity
                 android:name=".{class_name}"
@@ -65,7 +65,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
                 </intent-filter>
             </activity>
         </application>
-        <uses-sdk android:targetSdkVersion="33"/>
+        <uses-sdk android:targetSdkVersion="{sdk_version}" />
         <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
         <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
         <uses-feature android:name="android.software.midi" android:required="true"/>
@@ -142,12 +142,18 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
                 // Set the linker env var to the path of the target-specific `clang` binary.
                 (&android_target.linker_env_var(), full_clang_path.to_str().unwrap()),
 
-                // We set standard Android-related env vars to allow other crates
-                ("ANDROID_HOME",          sdk_dir.to_str().unwrap()),
-                ("ANDROID_SDK_ROOT",      sdk_dir.to_str().unwrap()),
-                ("ANDROID_SDK_VERSION",   super::sdk::SDK_VERSION),
-                ("ANDROID_API_LEVEL",     super::sdk::API_LEVEL),
-                ("JAVA_HOME",             sdk_dir.join("openjdk").to_str().unwrap()),
+                // We set standard Android-related env vars to allow other tools to know
+                // which version of Java, Android build tools, and Android SDK we're targeting.
+                // These environment variables are either standard in the Android ecosystem 
+                // or are defined by the `android-build` crate: <https://crates.io/crates/android-build>.
+                ("ANDROID_HOME",                 sdk_dir.to_str().unwrap()),
+                ("ANDROID_SDK_ROOT",             sdk_dir.to_str().unwrap()),
+                ("ANDROID_BUILD_TOOLS_VERSION",  super::sdk::ANDROID_BUILD_TOOLS_VERSION),
+                ("ANDROID_PLATFORM",             super::sdk::ANDROID_PLATFORM),
+                ("ANDROID_SDK_VERSION",          super::sdk::ANDROID_SDK_VERSION.to_string().as_str()),
+                ("ANDROID_API_LEVEL",            super::sdk::ANDROID_SDK_VERSION.to_string().as_str()),  // for legacy/clarity purposes
+                ("ANDROID_SDK_EXTENSION",        super::sdk::ANDROID_SDK_EXTENSION),
+                ("JAVA_HOME",                    sdk_dir.join("openjdk").to_str().unwrap()),
 
                 // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
                 // The naming conventions of these env variable keys are established by the `cc` Rust crate.
@@ -179,7 +185,7 @@ fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str) 
     mkdir(&tmp_dir) ?; 
     mkdir(&out_dir) ?;
 
-    let manifest_xml = manifest_xml(app_label, "MakepadApp", java_url);
+    let manifest_xml = manifest_xml(app_label, "MakepadApp", java_url, ANDROID_SDK_VERSION);
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
     
