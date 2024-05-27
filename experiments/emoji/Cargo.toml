@@ -1,0 +1,11 @@
+[package]
+name = "emoji"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-draw = { path = "../../draw" }
+makepad-html = { path = "../../libs/html" }
+makepad-live-id = { path = "../../libs/live_id" }
+tiny-skia = "0.11.4"
+ttf-parser = "0.21.1"
