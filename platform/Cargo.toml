@@ -45,8 +45,10 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 [target.aarch64-unknown-linux-gnu.dependencies]
 
 [target.'cfg(target_os = "android")'.dependencies]
-makepad-jni-sys = { path = "../libs/jni-sys", version = "0.4.0" }
-makepad-android-state = { path = "../libs/android_state", version = "0.1.0" }
+## Note: we must not use local 'path' dependencies on `makepad-jni-sys` or `makepad-android-state`
+## in order to guarantee that only one instance of each crate exists in the app binary.
+makepad-jni-sys = "0.4.0"
+makepad-android-state = "0.1.0"
 
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../libs/futures_legacy"
