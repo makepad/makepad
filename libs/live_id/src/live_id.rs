@@ -242,6 +242,14 @@ impl LiveId {
         })
     }
     
+    pub fn from_str_with_intern(id_str: &str, intern:InternLiveId) -> Self{
+        let id = Self::from_str(id_str);
+        if let InternLiveId::Yes = intern{
+            LiveIdInterner::with( | idmap | {idmap.id_to_string.insert(id, id_str.to_string())});
+        }
+        id
+    }
+    
     pub fn from_str_num_with_lut(id_str: &str, num:u64) -> Result<Self,
     String> {
         let id = Self::from_str_num(id_str, num);
@@ -265,6 +273,12 @@ impl LiveId {
     pub fn unique() -> Self {
         LiveId(UNIQUE_LIVE_ID.fetch_add(1, Ordering::SeqCst))
     }
+}
+ 
+#[derive(Clone, Copy)]
+pub enum InternLiveId{
+    Yes,
+    No
 }
 
 pub (crate) static UNIQUE_LIVE_ID: AtomicU64 = AtomicU64::new(1);
