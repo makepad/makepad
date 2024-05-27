@@ -69,7 +69,7 @@ pub struct Html {
 impl LiveHook for Html {
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        let new_doc = parse_html(&*self.body, &mut errors);
+        let new_doc = parse_html(&*self.body, &mut errors, InternLiveId::No);
         if new_doc != self.doc{
             self.doc = new_doc;
             self.text_flow.clear_items();
@@ -371,7 +371,7 @@ impl Widget for Html {
     fn set_text(&mut self, v:&str){
         self.body = Rc::new(v.to_string());
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(&*self.body, &mut errors);
+        self.doc = parse_html(&*self.body, &mut errors, InternLiveId::No);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
