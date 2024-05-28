@@ -36,6 +36,12 @@ pub struct Button {
     #[live(true)]
     grab_key_focus: bool,
 
+    #[live(true)]
+    enabled: bool,
+
+    #[live(true)]
+    visible: bool,
+
     #[live]
     pub text: RcStringMut,
 }
@@ -46,40 +52,46 @@ impl Widget for Button {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(fe) => {
-                if self.grab_key_focus {
-                    cx.set_key_focus(self.draw_bg.area());
-                }
-                cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                self.animator_play(cx, id!(hover.pressed));
-            }
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => {
-                if fe.is_over {
-                    cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
-                    cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
-                    if fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
-                    } else {
-                        self.animator_play(cx, id!(hover.off));
+        if self.enabled && self.visible {
+            match event.hits(cx, self.draw_bg.area()) {
+                Hit::FingerDown(fe) => {
+                    if self.grab_key_focus {
+                        cx.set_key_focus(self.draw_bg.area());
                     }
-                } else {
-                    cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                    cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                    self.animator_play(cx, id!(hover.pressed));
+                }
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.animator_play(cx, id!(hover.on));
+                }
+                Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
                 }
+                Hit::FingerUp(fe) => {
+                    if fe.is_over {
+                        cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                        cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                        if fe.device.has_hovers() {
+                            self.animator_play(cx, id!(hover.on));
+                        } else {
+                            self.animator_play(cx, id!(hover.off));
+                        }
+                    } else {
+                        cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                }
+                _ => (),
             }
-            _ => (),
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
@@ -205,6 +217,18 @@ impl ButtonRef {
             None
         }
     }
+
+    pub fn set_visible(&self, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.visible = visible
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.enabled = enabled
+        }
+    }
 }
 
 impl ButtonSet {
@@ -225,5 +249,16 @@ impl ButtonSet {
             }
         }
         None
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        for item in self.iter() {
+            item.set_visible(visible)
+        }
+    }
+    pub fn set_enabled(&self, enabled: bool) {
+        for item in self.iter() {
+            item.set_enabled(enabled)
+        }
     }
 }
