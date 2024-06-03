@@ -24,6 +24,7 @@ pub use {
         makepad_vector::path::PathIterator,
     },
     makepad_rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
+    makepad_vector::ttf_parser::GlyphId,
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
@@ -576,5 +577,13 @@ impl CxFont {
 
     pub fn get_glyph_by_id(&mut self, id: usize) -> makepad_vector::ttf_parser::Result<&Glyph> {
         self.owned_font_face.with_ref(|face| self.ttf_font.get_glyph_by_id(face, id))
+    }
+
+    pub fn get_advance_width_for_char(&mut self, c: char) -> Option<f64> {
+        self.get_advance_width_for_glyph(self.owned_font_face.with_ref(|face| face.glyph_index(c))?)
+    }
+
+    pub fn get_advance_width_for_glyph(&mut self, id: GlyphId) -> Option<f64> {
+        self.owned_font_face.with_ref(|face| face.glyph_hor_advance(id).map(|advance_width| advance_width as f64))
     }
 }
