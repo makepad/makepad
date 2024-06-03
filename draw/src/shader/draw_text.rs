@@ -1,14 +1,11 @@
-use {
-    crate::{
-        makepad_platform::*,
-        turtle::{Walk, Size, Align},
-        font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
-        draw_list_2d::ManyInstances,
-        geometry::GeometryQuad2D,
-        cx_2d::Cx2d
-    },
+use crate::{
+    makepad_platform::*,
+    turtle::{Walk, Size, Align},
+    font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
+    draw_list_2d::ManyInstances,
+    geometry::GeometryQuad2D,
+    cx_2d::Cx2d
 };
-
 
 live_design!{
     
@@ -158,6 +155,7 @@ pub enum TextWrap {
     Line
 }
 
+#[derive(Clone)]
 struct WordIterator<'a> {
     char_iter: std::str::CharIndices<'a >,
     eval_width: f64,
@@ -219,8 +217,8 @@ impl<'a> WordIterator<'a> {
             return Some(WordItem::Newline);
         }
         else if self.last_char == ' '{
-            let adv = if let Some(glyph) = font.get_glyph(' ') {
-                glyph.horizontal_metrics.advance_width * self.font_size_total
+            let adv = if let Some(advance_width) = font.get_advance_width_for_char(' ') {
+                advance_width * self.font_size_total
             }else {0.0};
             let start = self.last_index;
             let mut width = 0.0;
@@ -253,8 +251,8 @@ impl<'a> WordIterator<'a> {
             let start = self.last_index;
             let mut width = 0.0;
             while self.last_char != ' ' && self.last_char != '\0' && self.last_char != '\n' {
-                let adv = if let Some(glyph) = font.get_glyph(self.last_char) {
-                    glyph.horizontal_metrics.advance_width * self.font_size_total
+                let adv = if let Some(advance_width) = font.get_advance_width_for_char(self.last_char) {
+                    advance_width * self.font_size_total
                 }else {0.0};
                 if width + adv >= self.eval_width{
                     if start == self.last_index{// advance atleast one char
@@ -273,7 +271,6 @@ impl<'a> WordIterator<'a> {
                 width,
             });
         }
-        
     }
 }
 
@@ -421,90 +418,65 @@ impl DrawText {
         let zbias_step = 0.00001;
         let mut char_depth = self.draw_depth;
         
-        let mut rustybuzz_buffer = makepad_rustybuzz::UnicodeBuffer::new();
-        
-        // This relies on the UBA ("Unicode Bidirectional Algorithm")
-        // (see http://www.unicode.org/reports/tr9/#Basic_Display_Algorithm),
-        // as implemented by `unicode_bidi`, to slice the text into substrings
-        // that can be individually shaped, then assembled visually.
-        let bidi_info = unicode_bidi::BidiInfo::new(chunk, None);
-        
-        // NOTE(eddyb) the caller of `draw_inner` has already processed the text,
-        // such that `chunk` won't contain e.g. any `\n`.
-        if bidi_info.paragraphs.len() == 1 {
-            let runs_with_level_and_range = {
-                let para = &bidi_info.paragraphs[0];
-                // Split `chunk` into "runs" (that differ in their LTR/RTL "level").
-                let (adjusted_levels, runs) = bidi_info.visual_runs(para, para.range.clone());
-                runs.into_iter().map(move | run_range | (adjusted_levels[run_range.start], run_range))
-            };
-            
-            for (run_level, run_range) in runs_with_level_and_range {
-                // FIXME(eddyb) UBA/`unicode_bidi` only offers a LTR/RTL distinction,
-                // even if `rustybuzz` has vertical `Direction`s as well.
-                let (glyph_ids, new_rustybuzz_buffer) = cxfont
-                    .shape_cache
-                    .get_or_compute_glyph_ids(
-                    (
-                            if run_level.is_rtl() {
-                                makepad_rustybuzz::Direction::RightToLeft
-                            } else {
-                                makepad_rustybuzz::Direction::LeftToRight
-                            },
-                            &bidi_info.text[run_range]
-                        ),
-                        rustybuzz_buffer,
-                        owned_font_face
-                    );
-                rustybuzz_buffer = new_rustybuzz_buffer;
-                for &glyph_id in glyph_ids {
-                    let glyph = owned_font_face.with_ref(|face| font.get_glyph_by_id(face, glyph_id).unwrap());
-                    
-                    let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
-                    
-                    // HACK(eddyb) this is a different padding from the SDF padding,
-                    // this allows the glyph rasterization to avoid touching the
-                    // edges of the raster area, while the SDF padding exists for
-                    // e.g. bilinear sampling to have excess texels to sample.
-                    let pad_dpx = 2.0;
-                    let w_dpx = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + pad_dpx * 2.0;
-                    let h_dpx = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + pad_dpx * 2.0;
-                    let (w_dpx, h_dpx) = if w_dpx <= pad_dpx * 2.0{(0.0,0.0)}else { (w_dpx, h_dpx) };
-                                        
-                    let tc = *atlas_page.atlas_glyphs.entry(glyph_id).or_insert_with(|| {
-                        // see if we can fit it
-                        // allocate slot
-                        fonts_atlas.alloc.alloc_atlas_glyph(w_dpx, h_dpx, CxFontsAtlasTodo {
-                            font_id,
-                            atlas_page_id,
-                            glyph_id,
-                        })
-                    });
+        let rustybuzz_buffer = cx.rustybuzz_buffer.take().unwrap();
+        let (glyph_ids, new_rustybuzz_buffer) = cxfont
+            .shape_cache
+            .get_or_compute_glyph_ids(
+            (
+                    makepad_rustybuzz::Direction::LeftToRight,
+                    chunk,
+                ),
+                rustybuzz_buffer,
+                owned_font_face
+            );
+        cx.rustybuzz_buffer = Some(new_rustybuzz_buffer);
 
-                    let pad = pad_dpx * self.font_scale / dpi_factor;
-                    let w = w_dpx * self.font_scale / dpi_factor;
-                    let h = h_dpx * self.font_scale / dpi_factor;
-                    
-                    let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - pad;
-                    let delta_y = -(font_size_logical * self.font_scale * glyph.bounds.p_min.y - pad)
-                        + self.text_style.font_size * self.font_scale * self.text_style.top_drop;
-                    // give the callback a chance to do things
-                    //et scaled_min_pos_x = walk_x + delta_x;
-                    //let scaled_min_pos_y = pos.y - delta_y;
-                    self.font_t1 = tc.t1;
-                    self.font_t2 = tc.t2;
-                    self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
-                    self.rect_size = dvec2(w, h).into();
-                    self.char_depth = char_depth;
-                    self.delta.x = delta_x as f32;
-                    self.delta.y = delta_y as f32;
-                    self.shader_font_size = self.text_style.font_size as f32;
-                    self.advance = advance as f32; //char_offset as f32;
-                    char_depth += zbias_step;
-                    mi.instances.extend_from_slice(self.draw_vars.as_slice());
-                    walk_x += advance;
-                }
-            }
+        for &glyph_id in glyph_ids {
+            let glyph = owned_font_face.with_ref(|face| font.get_glyph_by_id(face, glyph_id).unwrap());
+            
+            let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+
+            // HACK(eddyb) this is a different padding from the SDF padding,
+            // this allows the glyph rasterization to avoid touching the
+            // edges of the raster area, while the SDF padding exists for
+            // e.g. bilinear sampling to have excess texels to sample.
+            let pad_dpx = 2.0;
+            let w_dpx = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + pad_dpx * 2.0;
+            let h_dpx = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + pad_dpx * 2.0;
+            let (w_dpx, h_dpx) = if w_dpx <= pad_dpx * 2.0{(0.0,0.0)}else { (w_dpx, h_dpx) };
+
+            let tc = *atlas_page.atlas_glyphs.entry(glyph_id).or_insert_with(|| {
+                // see if we can fit it
+                // allocate slot
+                fonts_atlas.alloc.alloc_atlas_glyph(w_dpx, h_dpx, CxFontsAtlasTodo {
+                    font_id,
+                    atlas_page_id,
+                    glyph_id,
+                })
+            });
+
+            let pad = pad_dpx * self.font_scale / dpi_factor;
+            let w = w_dpx * self.font_scale / dpi_factor;
+            let h = h_dpx * self.font_scale / dpi_factor;
+
+            let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - pad;
+            let delta_y = -(font_size_logical * self.font_scale * glyph.bounds.p_min.y - pad)
+                + self.text_style.font_size * self.font_scale * self.text_style.top_drop;
+            // give the callback a chance to do things
+            //et scaled_min_pos_x = walk_x + delta_x;
+            //let scaled_min_pos_y = pos.y - delta_y;
+            self.font_t1 = tc.t1;
+            self.font_t2 = tc.t2;
+            self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
+            self.rect_size = dvec2(w, h).into();
+            self.char_depth = char_depth;
+            self.delta.x = delta_x as f32;
+            self.delta.y = delta_y as f32;
+            self.shader_font_size = self.text_style.font_size as f32;
+            self.advance = advance as f32; //char_offset as f32;
+            char_depth += zbias_step;
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());
+            walk_x += advance;
         }
         
     }
