@@ -471,7 +471,7 @@ impl<'a> Cx2d<'a> {
     
 }
 
-fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
+pub fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
     #[derive(Debug)]
     enum Cmd {
         Unknown,
