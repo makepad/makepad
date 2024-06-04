@@ -115,9 +115,7 @@ impl MatchEvent for App{
         self.store_to_widgets(cx);
         self.start_artnet_client(cx);
         self.fetch_hue_lights(cx);
-        self.start_imu_forward(cx);
-        self.start_forza_forward(cx);
-        self.hue_poll = cx.start_interval(0.1);
+self.hue_poll = cx.start_interval(0.1);
     }
     
     fn handle_timer(&mut self, cx:&mut Cx, e:&TimerEvent){
@@ -317,44 +315,7 @@ struct ForzaTelemetryDash{
 }
 
 impl App {
-    pub fn start_imu_forward(&mut self, _cx:&mut Cx){
-        // open up port udp X and forward packets to both wind + platform
-        let imu_recv = UdpSocket::bind("0.0.0.0:44442").unwrap();
-        std::thread::spawn(move || {
-            let mut buffer = [0u8;25];
-            while let Ok((length, _addr)) = imu_recv.recv_from(&mut buffer){
-                 log!("IMU {:x?}",&buffer[0..length]);
-            } 
-        });
-    }
-    
-    pub fn start_forza_forward(&mut self, _cx:&mut Cx){
-        let wind_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let wind_send_addr = "10.0.0.202:44443";
-        let platform_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let platform_send_addr = "10.0.0.126:51010";
-                
-        // open up port udp X and forward packets to both wind + platform
-        let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
-        let buf = [0 as u8,]; 
-        let _ = wind_socket.send_to(&buf, wind_send_addr);
-        std::thread::spawn(move || {
-            
-            let mut buffer = [0u8;1024];
-            while let Ok((length, _addr)) = forca_recv.recv_from(&mut buffer){
-                let forza = ForzaTelemetryDash::deserialize_bin(&buffer[0..length]).unwrap();
-                let speed = (forza.velocity_x*forza.velocity_x+forza.velocity_y*forza.velocity_y+forza.velocity_z*forza.velocity_z).sqrt();
-                // ok so speed is 20.0 at 40mph
-                // max fan is 127.0
-                // lets say 100mph = 60 = 127.
-                let buf = [(speed*2.2).min(255.0) as u8,];
-                let _ = wind_socket.send_to(&buf, wind_send_addr);
-                println!("SENDING TO {:?}", buf); 
-                let _ = platform_socket.send_to(&buffer[0..length], platform_send_addr);
-            }
-        });
-    }
-    
+
     pub fn handle_hue_lights(&mut self, _cx:&mut Cx, res:&HttpResponse){
         if let Some(data) = res.get_string_body() {
             let value = JsonValue::deserialize_json(&data).unwrap();
