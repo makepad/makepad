@@ -1,8 +1,11 @@
 use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
+use std::env;
 
-const OPENAI_BASE_URL: &str = "https://makepad.nl/v1";
+const OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
+const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+const OPENAI_MODEL_ENV: &str = "OPENAI_MODEL";
 
 live_design!{
     import makepad_widgets::theme_desktop_dark::*;
@@ -25,7 +28,7 @@ live_design!{
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return mix(#3, #1, self.pos.y);
-                }j
+                }
             }
             
             message_label = <Label> {
@@ -68,19 +71,30 @@ impl LiveRegister for App {
 }
 
 impl App {
-    // This performs and event-based http request: it has no relationship with the response.
+    // This performs an event-based HTTP request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, message: String) {
-        let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
+        let openai_base_url = env::var(OPENAI_BASE_URL_ENV).unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let openai_api_key = env::var(OPENAI_API_KEY_ENV).unwrap_or_else(|_| "".to_string());
+        let openai_model = env::var(OPENAI_MODEL_ENV).unwrap_or_else(|_| "gpt-4o".to_string());
+        
+        if openai_api_key.is_empty() {
+            eprintln!("Error: The OPENAI_API_KEY environment variable is not set.");
+            std::process::exit(1);
+        }
+        
+        let completion_url = format!("{}/chat/completions", openai_base_url);
         let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
-        request.set_header("Authorization".to_string(), "Bearer <your-token>".to_string());
+        if !openai_api_key.is_empty() {
+            request.set_header("Authorization".to_string(), format!("Bearer {}", openai_api_key));
+        }
         
         request.set_json_body(ChatPrompt {
             messages: vec![Message {content: message, role: "user".to_string()}],
-            model: "gpt-3.5-turbo".to_string(),
+            model: openai_model,
             max_tokens: 100
         });
         
@@ -153,6 +167,7 @@ struct ChatResponse {
     pub model: String,
     pub usage: Usage,
     pub choices: Vec<Choice>,
+    pub system_fingerprint: Option<String>,
 }
 
 #[derive(SerJson, DeJson)]
