@@ -914,7 +914,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_touchstart = e => {
             e.preventDefault()
             this.to_wasm.ToWasmTouchUpdate({
-                time: e.timeStamp,
+                time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 1)
             });
@@ -925,7 +925,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_touchmove = e => {
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
-                time: e.timeStamp,
+                time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 2)
             });
@@ -936,7 +936,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_touch_end_cancel_leave = e => {
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
-                time: e.timeStamp,
+                time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 3)
             });
