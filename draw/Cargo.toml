@@ -21,3 +21,4 @@ makepad-rustybuzz = { version = "0.8.0", path = "../libs/rustybuzz" }
 unicode-bidi = "0.3"
 ab_glyph_rasterizer = "0.1.8"
 sdfer = "0.2.1"
+fxhash = "0.2.1"

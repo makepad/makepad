@@ -23,7 +23,9 @@ pub use {
         makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
     },
+    fxhash::FxHashMap,
     makepad_rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
+    makepad_vector::ttf_parser::GlyphId,
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
@@ -390,13 +392,14 @@ impl<'a> Cx2d<'a> {
 pub struct CxFont {
     pub ttf_font: makepad_vector::font::TTFFont,
     pub owned_font_face: crate::owned_font_face::OwnedFace,
+    pub glyph_ids: Box<[Option<GlyphId>]>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
     pub shape_cache: ShapeCache,
 }
 
 pub struct ShapeCache {
     pub keys: VecDeque<(Direction, Rc<str>)>,
-    pub glyph_ids: HashMap<(Direction, Rc<str>), Vec<usize>>,
+    pub glyph_ids: FxHashMap<(Direction, Rc<str>), Vec<usize>>,
 }
 
 impl ShapeCache {
@@ -406,7 +409,7 @@ impl ShapeCache {
     pub fn new() -> Self {
         Self {
             keys: VecDeque::new(),
-            glyph_ids: HashMap::new(),
+            glyph_ids: FxHashMap::default(),
         }
     }
 
@@ -546,6 +549,7 @@ impl CxFont {
         Ok(Self {
             ttf_font,
             owned_font_face,
+            glyph_ids: vec![None; 0x10FFFF].into_boxed_slice(),
             atlas_pages: Vec::new(),
             shape_cache: ShapeCache::new(),
         })
@@ -566,9 +570,22 @@ impl CxFont {
         self.atlas_pages.len() - 1
     }
 
+    pub fn glyph_id(&mut self, c: char) -> GlyphId {
+        if let Some(id) = self.glyph_ids[c as usize] {
+            id
+        } else {
+            let id = self.owned_font_face.with_ref(|face| {
+                face.glyph_index(c).unwrap_or(GlyphId(0))
+            });
+            self.glyph_ids[c as usize] = Some(id);
+            id
+        }
+    }
+
     pub fn get_glyph(&mut self, c:char)->Option<&Glyph>{
         if c < '\u{10000}' {
-            Some(self.get_glyph_by_id(self.owned_font_face.with_ref(|face| face.glyph_index(c))?.0 as usize).unwrap())
+            let id = self.glyph_id(c);
+            Some(self.get_glyph_by_id(id.0 as usize).unwrap())
         } else {
             None
         }
@@ -576,5 +593,14 @@ impl CxFont {
 
     pub fn get_glyph_by_id(&mut self, id: usize) -> makepad_vector::ttf_parser::Result<&Glyph> {
         self.owned_font_face.with_ref(|face| self.ttf_font.get_glyph_by_id(face, id))
+    }
+
+    pub fn get_advance_width_for_char(&mut self, c: char) -> Option<f64> {
+        let id = self.glyph_id(c);
+        self.get_advance_width_for_glyph(id)
+    }
+
+    pub fn get_advance_width_for_glyph(&mut self, id: GlyphId) -> Option<f64> {
+        self.owned_font_face.with_ref(|face| face.glyph_hor_advance(id).map(|advance_width| advance_width as f64))
     }
 }

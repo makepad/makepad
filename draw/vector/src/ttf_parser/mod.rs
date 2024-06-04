@@ -3,7 +3,7 @@ use crate::geometry::{Point, Rectangle};
 use crate::path::PathCommand;
 use std::result;
 
-pub use ttf_parser::{Face, FaceParsingError};
+pub use ttf_parser::{Face, FaceParsingError, GlyphId};
 
 struct OutlineBuilder(Vec<PathCommand>);
 
