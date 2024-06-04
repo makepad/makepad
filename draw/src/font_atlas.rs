@@ -391,6 +391,7 @@ impl<'a> Cx2d<'a> {
 pub struct CxFont {
     pub ttf_font: makepad_vector::font::TTFFont,
     pub owned_font_face: crate::owned_font_face::OwnedFace,
+    pub glyph_ids: Box<[GlyphId]>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
     pub shape_cache: ShapeCache,
 }
@@ -544,9 +545,21 @@ impl CxFont {
     pub fn load_from_ttf_bytes(bytes: Rc<Vec<u8>>) -> Result<Self, crate::owned_font_face::FaceParsingError> {
         let owned_font_face = crate::owned_font_face::OwnedFace::parse(bytes, 0)?;
         let ttf_font = owned_font_face.with_ref(|face| makepad_vector::ttf_parser::from_ttf_parser_face(face));
+        let glyph_ids = owned_font_face.with_ref(|face| {
+            let mut glyph_ids = Vec::new();
+            for index in 0..0x10FFFF {
+                glyph_ids.push(if let Some(char) = char::from_u32(index) {
+                    face.glyph_index(char).unwrap_or(GlyphId(0))
+                } else {
+                    GlyphId(0)
+                })
+            }
+            glyph_ids.into_boxed_slice()
+        });
         Ok(Self {
             ttf_font,
             owned_font_face,
+            glyph_ids,
             atlas_pages: Vec::new(),
             shape_cache: ShapeCache::new(),
         })
@@ -567,9 +580,13 @@ impl CxFont {
         self.atlas_pages.len() - 1
     }
 
+    pub fn glyph_id(&self, c: char) -> GlyphId {
+        self.glyph_ids[c as usize]
+    }
+
     pub fn get_glyph(&mut self, c:char)->Option<&Glyph>{
         if c < '\u{10000}' {
-            Some(self.get_glyph_by_id(self.owned_font_face.with_ref(|face| face.glyph_index(c))?.0 as usize).unwrap())
+            Some(self.get_glyph_by_id(self.glyph_id(c).0 as usize).unwrap())
         } else {
             None
         }
@@ -580,7 +597,7 @@ impl CxFont {
     }
 
     pub fn get_advance_width_for_char(&mut self, c: char) -> Option<f64> {
-        self.get_advance_width_for_glyph(self.owned_font_face.with_ref(|face| face.glyph_index(c))?)
+        self.get_advance_width_for_glyph(self.glyph_id(c))
     }
 
     pub fn get_advance_width_for_glyph(&mut self, id: GlyphId) -> Option<f64> {
