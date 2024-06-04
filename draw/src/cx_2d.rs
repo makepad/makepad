@@ -20,7 +20,8 @@ use {
         font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
-    }
+    },
+    makepad_rustybuzz::UnicodeBuffer,
 };
 
 pub struct PassStackItem {
@@ -45,6 +46,7 @@ pub struct Cx2d<'a> {
     pub fonts_atlas_rc: CxFontsAtlasRc,
     pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
+    pub rustybuzz_buffer: Option<UnicodeBuffer>, 
 }
 
 impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}
@@ -91,7 +93,8 @@ impl<'a> Cx2d<'a> {
             turtles: Vec::new(),
             align_list: Vec::new(),
             nav_tree_rc,
-            icon_atlas_rc
+            icon_atlas_rc,
+            rustybuzz_buffer: Some(UnicodeBuffer::new()),
         }
     }
     

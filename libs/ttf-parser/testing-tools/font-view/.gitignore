@@ -1,0 +1,7 @@
+*.o
+moc_*.cpp
+moc_*.h
+ui_*.h
+font-view.app
+Makefile
+.qmake.stash
