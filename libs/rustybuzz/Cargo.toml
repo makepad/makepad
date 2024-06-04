@@ -23,7 +23,7 @@ unicode-script = "0.5.2"
 libm = { version = "0.2.2", optional = true }
 
 [dependencies.ttf-parser]
-version = "0.19"
+path = "../ttf-parser"
 default-features = false
 features = [
     "opentype-layout",
