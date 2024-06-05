@@ -43,7 +43,7 @@ live_design!{
                 height: Fill
 
                 message_label = <Label> {
-                    width: 300,
+                    width: 350,
                     height: Fit
                     draw_text: {
                         color: #f
@@ -53,7 +53,8 @@ live_design!{
             }
             
             message_input = <TextInput> {
-                text: "Hi!"
+                text: "Hi!",
+                empty_message: "Type a message...",
                 width: 400,
                 height: Fit
                 draw_bg: {
@@ -63,7 +64,10 @@ live_design!{
             
             send_button = <Button> {
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                text: "send"
+                text: "send",
+                margin: {
+                    bottom: 10,
+                }
             }
         }}
     }
@@ -138,10 +142,14 @@ impl App {
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(send_button)).clicked(&actions) {
-            let user_prompt = self.ui.text_input(id!(message_input)).text();
-            self.send_message(cx, user_prompt);
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let text_input = self.ui.text_input(id!(message_input));
+        let send_button = self.ui.button(id!(send_button));
+
+        if send_button.clicked(&actions) || text_input.returned(&actions).is_some() {
+            self.send_message(cx, text_input.text());
+            text_input.set_text_and_redraw(cx, "");
+            text_input.set_cursor(0, 0);
         }
     }
 
