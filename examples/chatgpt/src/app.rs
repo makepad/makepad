@@ -30,19 +30,31 @@ live_design!{
                     return mix(#3, #1, self.pos.y);
                 }
             }
-            
-            message_label = <Label> {
-                width: 300,
-                height: Fit
-                draw_text: {
-                    color: #f
+
+            <ScrollXYView> {
+                flow: Down,
+                spacing: 20,
+                align: {
+                    x: 0.5,
+                    y: 1.0
                 },
-                text: "hi! how may I assist you today?",
+
+                width: Fill,
+                height: Fill
+
+                message_label = <Label> {
+                    width: 300,
+                    height: Fit
+                    draw_text: {
+                        color: #f
+                    },
+                    text: "hi! how may I assist you today?",
+                }
             }
             
             message_input = <TextInput> {
                 text: "Hi!"
-                width: 300,
+                width: 400,
                 height: Fit
                 draw_bg: {
                     color: #1
