@@ -84,6 +84,18 @@ impl LiveRegister for App {
 }
 
 impl App {
+    fn update_message_label(&mut self, cx: &mut Cx) {
+        let label = self.ui.label(id!(message_label));
+        let mut conversation_text = String::new();
+
+        for message in &self.conversation_history {
+            let role_label = if message.role == "user" { "User:" } else { "Assistant:" };
+            conversation_text.push_str(&format!("{}\n{}\n\n", role_label, message.content));
+        }
+
+        label.set_text_and_redraw(cx, &conversation_text);
+    }
+
     // This performs an event-based HTTP request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
     fn send_message(&mut self, cx: &mut Cx, message: String) {
@@ -101,7 +113,11 @@ impl App {
             content: message.clone(),
             role: "user".to_string()
         });
-        
+
+        // Update the gui 
+        self.update_message_label(cx);
+
+        // Send the request 
         let completion_url = format!("{}/chat/completions", openai_base_url);
         let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
@@ -112,7 +128,7 @@ impl App {
         }
         
         request.set_json_body(ChatPrompt {
-            messages: self.conversation_history.clone(), // Send the conversation history
+            messages: self.conversation_history.clone(),
             model: openai_model,
             max_tokens: 1000
         });
@@ -122,32 +138,31 @@ impl App {
 }
 
 impl MatchEvent for App {
-
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(send_button)).clicked(&actions) {
             let user_prompt = self.ui.text_input(id!(message_input)).text();
             self.send_message(cx, user_prompt);
         }
     }
-    
+
     fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
        for event in responses{
            match &event.response {
                NetworkResponse::HttpResponse(response) => {
-                   let label = self.ui.label(id!(message_label));
                    match event.request_id {
                        live_id!(SendChatMessage) => {
+                           let label = self.ui.label(id!(message_label));
+                           
                            if response.status_code == 200 {
                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
                                let assistant_message = chat_response.choices[0].message.content.clone();
-                               label.set_text_and_redraw(cx, &assistant_message);
-
-                               // Add the assistant's response to the conversation history
+                               
                                self.conversation_history.push(Message {
                                    content: assistant_message,
                                    role: "assistant".to_string()
                                });
-
+                               
+                               self.update_message_label(cx);
                            } else {
                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
                            }
@@ -165,6 +180,7 @@ impl MatchEvent for App {
        } 
     }
 }
+
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
