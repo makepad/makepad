@@ -62,6 +62,7 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
+    #[rust] conversation_history: Vec<Message>,
 }
 
 impl LiveRegister for App {
@@ -73,7 +74,7 @@ impl LiveRegister for App {
 impl App {
     // This performs an event-based HTTP request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
-    fn send_message(cx: &mut Cx, message: String) {
+    fn send_message(&mut self, cx: &mut Cx, message: String) {
         let openai_base_url = env::var(OPENAI_BASE_URL_ENV).unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         let openai_api_key = env::var(OPENAI_API_KEY_ENV).unwrap_or_else(|_| "".to_string());
         let openai_model = env::var(OPENAI_MODEL_ENV).unwrap_or_else(|_| "gpt-4o".to_string());
@@ -82,6 +83,12 @@ impl App {
             eprintln!("Error: The OPENAI_API_KEY environment variable is not set.");
             std::process::exit(1);
         }
+
+        // Add the user message to the conversation history
+        self.conversation_history.push(Message {
+            content: message.clone(),
+            role: "user".to_string()
+        });
         
         let completion_url = format!("{}/chat/completions", openai_base_url);
         let request_id = live_id!(SendChatMessage);
@@ -93,9 +100,9 @@ impl App {
         }
         
         request.set_json_body(ChatPrompt {
-            messages: vec![Message {content: message, role: "user".to_string()}],
+            messages: self.conversation_history.clone(), // Send the conversation history
             model: openai_model,
-            max_tokens: 100
+            max_tokens: 1000
         });
         
         cx.http_request(request_id, request);
@@ -107,7 +114,7 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(send_button)).clicked(&actions) {
             let user_prompt = self.ui.text_input(id!(message_input)).text();
-            Self::send_message(cx, user_prompt);
+            self.send_message(cx, user_prompt);
         }
     }
     
@@ -120,7 +127,15 @@ impl MatchEvent for App {
                        live_id!(SendChatMessage) => {
                            if response.status_code == 200 {
                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
-                               label.set_text_and_redraw(cx, &chat_response.choices[0].message.content);
+                               let assistant_message = chat_response.choices[0].message.content.clone();
+                               label.set_text_and_redraw(cx, &assistant_message);
+
+                               // Add the assistant's response to the conversation history
+                               self.conversation_history.push(Message {
+                                   content: assistant_message,
+                                   role: "assistant".to_string()
+                               });
+
                            } else {
                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
                            }
@@ -146,14 +161,14 @@ impl AppMain for App {
     }
 }
 
-#[derive(SerJson, DeJson)]
+#[derive(SerJson, DeJson, Clone)]
 struct ChatPrompt {
     pub messages: Vec<Message>,
     pub model: String,
     pub max_tokens: i32
 }
 
-#[derive(SerJson, DeJson)]
+#[derive(SerJson, DeJson, Clone)]
 struct Message {
     pub content: String,
     pub role: String
