@@ -160,7 +160,6 @@ impl MatchEvent for App {
                    match event.request_id {
                        live_id!(SendChatMessage) => {
                            let label = self.ui.label(id!(message_label));
-                           
                            if response.status_code == 200 {
                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
                                let assistant_message = chat_response.choices[0].message.content.clone();
@@ -233,4 +232,5 @@ struct Choice {
     message: Message,
     finish_reason: String,
     index: i32,
+    logprobs: Option<String>,
 }
