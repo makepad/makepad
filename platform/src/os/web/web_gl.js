@@ -227,7 +227,7 @@ export class WasmWebGL extends WasmWebBrowser {
             return console.log(
                 gl.getProgramInfoLog(program),
                 add_line_numbers_to_string(args.vertex),
-                add_line_numbers_to_string(args.fragment)
+                add_line_numbers_to_string(args.pixel)
             )
         }
        //console.log(args.pixel)
