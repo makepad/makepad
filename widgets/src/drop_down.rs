@@ -152,7 +152,7 @@ impl DropDown {
                         popup_menu.draw_item(cx, node_id, &item);
                     }
                     
-                    // ok we shift the entire menu. however we shouldnt go outside the screen area
+                    // ok we shift the entire menu. however we shouldn't go outside the screen area
                     popup_menu.end(cx, self.draw_bg.area(), -item_pos.unwrap_or(dvec2(0.0, 0.0)));
                 }
                 PopupMenuPosition::BelowInput => {
