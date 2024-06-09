@@ -262,7 +262,7 @@ impl PortalList {
                             visible_items += 1;
                         }
                     }
-                    // overwrite first scroll for top/bottom aligns if we havent updated already
+                    // overwrite first scroll for top/bottom aligns if we haven't updated already
                     if !first_id_changed {
                         self.first_scroll = start_pos;
                     }

@@ -121,7 +121,7 @@ impl Widget for Markdown {
                     tf.combine_spaces.push(false);
                     tf.fixed.push();
 
-                    // This adjustment is necesary to do not add too much spacing
+                    // This adjustment is necessary to do not add too much spacing
                     // between lines inside the code block.
                     tf.top_drop.push(0.2);
 
