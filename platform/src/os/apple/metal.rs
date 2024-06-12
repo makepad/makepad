@@ -260,6 +260,7 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
+        self.os.draw_calls_done  = 0;
         let draw_list_id = if let Some(draw_list_id) = self.passes[pass_id].main_draw_list_id{
             draw_list_id
         }
