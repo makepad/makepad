@@ -6,6 +6,43 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.1] - 2024-05-11
+### Fixed
+- Delta set length calculation in variable fonts.
+  Thanks to [LaurenzV](https://github.com/LaurenzV).<br>
+  Got broken in the previous version.
+
+## [0.21.0] - 2024-05-10
+### Added
+- `COLR` / `CPAL` v1 support.
+  Thanks to [LaurenzV](https://github.com/LaurenzV).
+
+### Changed
+- Replace `Face::is_bitmap_embedding_allowed` with `Face::is_outline_embedding_allowed`.
+  The old one had a bool flag flipped.
+  Thanks to [Fuzzyzilla](https://github.com/Fuzzyzilla).
+- Increase lenience of embed permissions for older OS/2 versions.
+  Thanks to [Fuzzyzilla](https://github.com/Fuzzyzilla).
+- Bump MSRV to 1.51
+
+## [0.20.0] - 2023-10-15
+### Added
+- `COLR` / `CPAL` v0 support.
+  Thanks to [laurmaedje](https://github.com/laurmaedje).
+
+### Changed
+- `svg::SvgDocumentsList` returns `svg::SvgDocument` and not just `&[u8]` now.
+  Thanks to [wjian23](https://github.com/wjian23).
+- `Face::set_variation` allows duplicated axes now.
+
+## [0.19.2] - 2023-09-13
+### Added
+- `cff::Table::glyph_cid`
+
+## [0.19.1] - 2023-06-20
+### Fixed
+- `cff::Table::glyph_width` returns a correct width when subroutines are present.
+
 ## [0.19.0] - 2023-04-17
 ### Added
 - `bdat`, `bloc`, `EBDT` and `EBLC` tables support.
@@ -391,7 +428,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Removed
 - `GDEF` table parsing.
 
-[Unreleased]: https://github.com/RazrFalcon/ttf-parser/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/RazrFalcon/ttf-parser/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/RazrFalcon/ttf-parser/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/RazrFalcon/ttf-parser/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/RazrFalcon/ttf-parser/compare/v0.19.2...v0.20.0
+[0.19.2]: https://github.com/RazrFalcon/ttf-parser/compare/v0.19.1...v0.19.2
+[0.19.1]: https://github.com/RazrFalcon/ttf-parser/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/RazrFalcon/ttf-parser/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/RazrFalcon/ttf-parser/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/RazrFalcon/ttf-parser/compare/v0.17.0...v0.18.0

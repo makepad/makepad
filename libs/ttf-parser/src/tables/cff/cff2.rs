@@ -13,7 +13,7 @@ use super::index::{parse_index, Index};
 use super::{calc_subroutine_bias, conv_subroutine_index, Builder, CFFError};
 use crate::parser::{NumFrom, Stream, TryNumFrom};
 use crate::var_store::*;
-use crate::{BBox, GlyphId, NormalizedCoordinate, OutlineBuilder, Rect};
+use crate::{GlyphId, NormalizedCoordinate, OutlineBuilder, Rect, RectF};
 
 // https://docs.microsoft.com/en-us/typography/opentype/spec/cff2#7-top-dict-data
 // 'Operators in DICT may be preceded by up to a maximum of 513 operands.'
@@ -249,7 +249,7 @@ fn parse_char_string(
 
     let mut inner_builder = Builder {
         builder,
-        bbox: BBox::new(),
+        bbox: RectF::new(),
     };
 
     let stack = ArgumentsStack {
@@ -264,6 +264,7 @@ fn parse_char_string(
         y: 0.0,
         has_move_to: false,
         is_first_move_to: true,
+        width_only: false,
     };
     _parse_char_string(&mut ctx, data, 0, &mut parser)?;
     // let _ = _parse_char_string(&mut ctx, data, 0.0, 0.0, &mut stack, 0, &mut inner_builder)?;

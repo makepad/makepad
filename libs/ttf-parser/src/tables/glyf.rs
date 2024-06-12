@@ -4,7 +4,7 @@
 use core::num::NonZeroU16;
 
 use crate::parser::{LazyArray16, NumFrom, Stream, F2DOT14};
-use crate::{loca, BBox, GlyphId, OutlineBuilder, Rect};
+use crate::{loca, GlyphId, OutlineBuilder, Rect, RectF, Transform};
 
 pub(crate) struct Builder<'a> {
     pub builder: &'a mut dyn OutlineBuilder,
@@ -12,7 +12,7 @@ pub(crate) struct Builder<'a> {
     is_default_ts: bool, // `bool` is faster than `Option` or `is_default`.
     // We have to always calculate the bbox, because `gvar` doesn't store one
     // and in case of a malformed bbox in `glyf`.
-    pub bbox: BBox,
+    pub bbox: RectF,
     first_on_curve: Option<Point>,
     first_off_curve: Option<Point>,
     last_off_curve: Option<Point>,
@@ -20,7 +20,7 @@ pub(crate) struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     #[inline]
-    pub fn new(transform: Transform, bbox: BBox, builder: &'a mut dyn OutlineBuilder) -> Self {
+    pub fn new(transform: Transform, bbox: RectF, builder: &'a mut dyn OutlineBuilder) -> Self {
         Builder {
             builder,
             transform,
@@ -134,87 +134,6 @@ impl<'a> Builder<'a> {
         self.last_off_curve = None;
 
         self.builder.close();
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct Transform {
-    pub a: f32,
-    pub b: f32,
-    pub c: f32,
-    pub d: f32,
-    pub e: f32,
-    pub f: f32,
-}
-
-impl Transform {
-    #[cfg(feature = "variable-fonts")]
-    #[inline]
-    pub fn new_translate(tx: f32, ty: f32) -> Self {
-        Transform {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: tx,
-            f: ty,
-        }
-    }
-
-    #[inline]
-    pub fn combine(ts1: Self, ts2: Self) -> Self {
-        Transform {
-            a: ts1.a * ts2.a + ts1.c * ts2.b,
-            b: ts1.b * ts2.a + ts1.d * ts2.b,
-            c: ts1.a * ts2.c + ts1.c * ts2.d,
-            d: ts1.b * ts2.c + ts1.d * ts2.d,
-            e: ts1.a * ts2.e + ts1.c * ts2.f + ts1.e,
-            f: ts1.b * ts2.e + ts1.d * ts2.f + ts1.f,
-        }
-    }
-
-    #[inline]
-    fn apply_to(&self, x: &mut f32, y: &mut f32) {
-        let tx = *x;
-        let ty = *y;
-        *x = self.a * tx + self.c * ty + self.e;
-        *y = self.b * tx + self.d * ty + self.f;
-    }
-
-    #[inline]
-    fn is_default(&self) -> bool {
-        // A direct float comparison is fine in our case.
-        self.a == 1.0
-            && self.b == 0.0
-            && self.c == 0.0
-            && self.d == 1.0
-            && self.e == 0.0
-            && self.f == 0.0
-    }
-}
-
-impl Default for Transform {
-    #[inline]
-    fn default() -> Self {
-        Transform {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: 0.0,
-            f: 0.0,
-        }
-    }
-}
-
-impl core::fmt::Debug for Transform {
-    #[inline]
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(
-            f,
-            "Transform({} {} {} {} {} {})",
-            self.a, self.b, self.c, self.d, self.e, self.f
-        )
     }
 }
 
@@ -675,7 +594,7 @@ impl<'a> Table<'a> {
     /// Outlines a glyph.
     #[inline]
     pub fn outline(&self, glyph_id: GlyphId, builder: &mut dyn OutlineBuilder) -> Option<Rect> {
-        let mut b = Builder::new(Transform::default(), BBox::new(), builder);
+        let mut b = Builder::new(Transform::default(), RectF::new(), builder);
         let glyph_data = self.get(glyph_id)?;
         outline_impl(self.loca_table, self.data, glyph_data, 0, &mut b)?
     }

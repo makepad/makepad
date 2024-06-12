@@ -325,7 +325,6 @@ pub struct Table<'a> {
     pub underline_metrics: LineMetrics,
     /// Flag that indicates that the font is monospaced.
     pub is_monospaced: bool,
-
     glyph_indexes: LazyArray16<'a, u16>,
     names_data: &'a [u8],
 }
