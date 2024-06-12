@@ -2,17 +2,15 @@
 ![Build Status](https://github.com/RazrFalcon/ttf-parser/workflows/Rust/badge.svg)
 [![Crates.io](https://img.shields.io/crates/v/ttf-parser.svg)](https://crates.io/crates/ttf-parser)
 [![Documentation](https://docs.rs/ttf-parser/badge.svg)](https://docs.rs/ttf-parser)
-[![Rust 1.42+](https://img.shields.io/badge/rust-1.42+-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.51+](https://img.shields.io/badge/rust-1.51+-orange.svg)](https://www.rust-lang.org)
 ![](https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg)
 
-A high-level, safe, zero-allocation TrueType font parser.
+A high-level, safe, zero-allocation font parser for
+[TrueType](https://docs.microsoft.com/en-us/typography/truetype/),
+[OpenType](https://docs.microsoft.com/en-us/typography/opentype/spec/), and
+[AAT](https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6AATIntro.html).
 
-Supports [TrueType](https://docs.microsoft.com/en-us/typography/truetype/),
-[OpenType](https://docs.microsoft.com/en-us/typography/opentype/spec/)
-and [AAT](https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6AATIntro.html)
-fonts.
-
-Can be used as Rust and as C library.
+Can be used as a Rust or C library.
 
 ### Features
 
@@ -64,8 +62,8 @@ There are roughly three types of TrueType tables:
 | `bloc` table      | ✓                      | ✓                   |                                |
 | `CBDT` table      | ~ (no 8, 9)            | ✓                   |                                |
 | `CBLC` table      | ✓                      | ✓                   |                                |
-| `COLR` table      |                        | ✓                   |                                |
-| `CPAL` table      |                        | ✓                   |                                |
+| `COLR` table      | ✓                      | ✓                   |                                |
+| `CPAL` table      | ✓                      | ✓                   |                                |
 | `CFF `&nbsp;table | ✓                      | ✓                   | ~ (no `seac` support)          |
 | `CFF2` table      | ✓                      | ✓                   |                                |
 | `cmap` table      | ~ (no 8)               | ✓                   | ~ (no 2,8,10,14; Unicode-only) |
