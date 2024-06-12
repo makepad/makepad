@@ -2,7 +2,7 @@ use crate::font::{TTFFont, Glyph, HorizontalMetrics};
 use crate::geometry::{Point, Rectangle};
 use crate::path::PathCommand;
 use resvg::usvg::{Options, Tree};
-use std::result;
+use std::{result, rc::Rc};
 
 pub use ttf_parser::{Face, FaceParsingError, GlyphId};
 
@@ -69,7 +69,18 @@ impl TTFFont {
             let id = ttf_parser::GlyphId(u16::try_from(id).unwrap());
 
             if self.cached_svg_images[id.0 as usize].is_none() {
-                self.cached_svg_images[id.0 as usize] = Some(None);
+                match face.glyph_svg_image(id) {
+                    Some(svg_image) => {
+                        let opt = Options::default();
+                        let tree = Rc::new(Tree::from_data(&svg_image.data, &opt).map_err(|_| Error)?);
+                        for id in svg_image.start_glyph_id.0..svg_image.end_glyph_id.0 {
+                            self.cached_svg_images[id as usize] = Some(Some(tree.clone()));
+                        }
+                    }
+                    None => {
+                        self.cached_svg_images[id.0 as usize] = Some(None);
+                    }
+                }
             }
 
             let horizontal_metrics = HorizontalMetrics {
