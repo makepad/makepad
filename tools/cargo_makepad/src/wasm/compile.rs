@@ -172,14 +172,13 @@ pub fn run(lan:bool, port:u16, strip:bool, args: &[String]) -> Result<(), String
 }
 
 pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
-    
     let addr = if lan{
-        SocketAddr::new("127.0.0.1".parse().unwrap(), port)
+        SocketAddr::new("0.0.0.0".parse().unwrap(), port)
     }
     else{
-        SocketAddr::new("0.0.0.0".parse().unwrap(), port)
+        SocketAddr::new("127.0.0.1".parse().unwrap(), port)
     };
-    println!("Starting webserver on http://127.0.0.1:{}", port);
+    println!("Starting webserver on {:?}", addr);
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
             
     start_http_server(HttpServer {
