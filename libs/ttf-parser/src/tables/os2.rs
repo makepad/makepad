@@ -424,27 +424,58 @@ impl<'a> Table<'a> {
     #[inline]
     pub fn permissions(&self) -> Option<Permissions> {
         let n = Stream::read_at::<u16>(self.data, TYPE_OFFSET).unwrap_or(0);
-        match n & 0xF {
-            0 => Some(Permissions::Installable),
-            2 => Some(Permissions::Restricted),
-            4 => Some(Permissions::PreviewAndPrint),
-            8 => Some(Permissions::Editable),
-            _ => None,
+        if self.version <= 2 {
+            // Version 2 and prior, applications are allowed to take
+            // the most permissive of provided flags
+            let permission = if n & 0xF == 0 {
+                Permissions::Installable
+            } else if n & 8 != 0 {
+                Permissions::Editable
+            } else if n & 4 != 0 {
+                Permissions::PreviewAndPrint
+            } else {
+                Permissions::Restricted
+            };
+
+            Some(permission)
+        } else {
+            // Version 3 onwards, flags must be mutually exclusive.
+            match n & 0xF {
+                0 => Some(Permissions::Installable),
+                2 => Some(Permissions::Restricted),
+                4 => Some(Permissions::PreviewAndPrint),
+                8 => Some(Permissions::Editable),
+                _ => None,
+            }
         }
     }
 
-    /// Checks if the face subsetting is allowed.
+    /// Checks if the face allows embedding a subset, further restricted by [`Self::permissions`].
     #[inline]
     pub fn is_subsetting_allowed(&self) -> bool {
-        let n = Stream::read_at::<u16>(self.data, TYPE_OFFSET).unwrap_or(0);
-        n & 0x0100 == 0
+        if self.version <= 1 {
+            // Flag introduced in version 2
+            true
+        } else {
+            let n = Stream::read_at::<u16>(self.data, TYPE_OFFSET).unwrap_or(0);
+            n & 0x0100 == 0
+        }
     }
 
-    /// Checks if the face bitmaps embedding is allowed.
+    /// Checks if the face allows outline data to be embedded.
+    ///
+    /// If false, only bitmaps may be embedded in accordance with [`Self::permissions`].
+    ///
+    /// If the font contains no bitmaps and this flag is not set, it implies no embedding is allowed.
     #[inline]
-    pub fn is_bitmap_embedding_allowed(&self) -> bool {
-        let n = Stream::read_at::<u16>(self.data, TYPE_OFFSET).unwrap_or(0);
-        n & 0x0200 == 0
+    pub fn is_outline_embedding_allowed(&self) -> bool {
+        if self.version <= 1 {
+            // Flag introduced in version 2
+            true
+        } else {
+            let n = Stream::read_at::<u16>(self.data, TYPE_OFFSET).unwrap_or(0);
+            n & 0x0200 == 0
+        }
     }
 
     /// Returns subscript metrics.

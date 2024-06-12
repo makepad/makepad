@@ -1,9 +1,8 @@
 /*!
-A high-level, safe, zero-allocation TrueType font parser.
-
-Supports [TrueType](https://docs.microsoft.com/en-us/typography/truetype/),
-[OpenType](https://docs.microsoft.com/en-us/typography/opentype/spec/)
-and [AAT](https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6AATIntro.html)
+A high-level, safe, zero-allocation font parser for:
+* [TrueType](https://docs.microsoft.com/en-us/typography/truetype/),
+* [OpenType](https://docs.microsoft.com/en-us/typography/opentype/spec/), and
+* [AAT](https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6AATIntro.html)
 fonts.
 
 Font parsing starts with a [`Face`].
@@ -49,17 +48,10 @@ Font parsing starts with a [`Face`].
 #[macro_use]
 extern crate std;
 
-macro_rules! try_opt_or {
-    ($value:expr, $ret:expr) => {
-        match $value {
-            Some(v) => v,
-            None => return $ret,
-        }
-    };
-}
-
 #[cfg(feature = "apple-layout")]
 mod aat;
+#[cfg(feature = "variable-fonts")]
+mod delta_set;
 #[cfg(feature = "opentype-layout")]
 mod ggg;
 mod language;
@@ -85,7 +77,7 @@ pub use tables::{ankr, feat, kerx, morx, trak};
 pub use tables::{avar, cff2, fvar, gvar, hvar, mvar};
 pub use tables::{cbdt, cblc, cff1 as cff, vhea};
 pub use tables::{
-    cmap, glyf, head, hhea, hmtx, kern, loca, maxp, name, os2, post, sbix, svg, vorg,
+    cmap, colr, cpal, glyf, head, hhea, hmtx, kern, loca, maxp, name, os2, post, sbix, svg, vorg,
 };
 #[cfg(feature = "opentype-layout")]
 pub use tables::{gdef, gpos, gsub, math};
@@ -336,6 +328,16 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[inline]
+    fn zero() -> Self {
+        Self {
+            x_min: 0,
+            y_min: 0,
+            x_max: 0,
+            y_max: 0,
+        }
+    }
+
     /// Returns rect's width.
     #[inline]
     pub fn width(&self) -> i16 {
@@ -349,18 +351,23 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct BBox {
-    x_min: f32,
-    y_min: f32,
-    x_max: f32,
-    y_max: f32,
+/// A rectangle described by the left-lower and upper-right points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RectF {
+    /// The horizontal minimum of the rect.
+    pub x_min: f32,
+    /// The vertical minimum of the rect.
+    pub y_min: f32,
+    /// The horizontal maximum of the rect.
+    pub x_max: f32,
+    /// The vertical maximum of the rect.
+    pub y_max: f32,
 }
 
-impl BBox {
+impl RectF {
     #[inline]
     fn new() -> Self {
-        BBox {
+        RectF {
             x_min: core::f32::MAX,
             y_min: core::f32::MAX,
             x_max: core::f32::MIN,
@@ -392,6 +399,121 @@ impl BBox {
             x_max: i16::try_num_from(self.x_max)?,
             y_max: i16::try_num_from(self.y_max)?,
         })
+    }
+}
+
+/// An affine transform.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Transform {
+    /// The 'a' component of the transform.
+    pub a: f32,
+    /// The 'b' component of the transform.
+    pub b: f32,
+    /// The 'c' component of the transform.
+    pub c: f32,
+    /// The 'd' component of the transform.
+    pub d: f32,
+    /// The 'e' component of the transform.
+    pub e: f32,
+    /// The 'f' component of the transform.
+    pub f: f32,
+}
+
+impl Transform {
+    /// Creates a new transform with the specified components.
+    #[inline]
+    pub fn new(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) -> Self {
+        Transform { a, b, c, d, e, f }
+    }
+
+    /// Creates a new translation transform.
+    #[inline]
+    pub fn new_translate(tx: f32, ty: f32) -> Self {
+        Transform::new(1.0, 0.0, 0.0, 1.0, tx, ty)
+    }
+
+    /// Combines two transforms with each other.
+    #[inline]
+    pub fn combine(ts1: Self, ts2: Self) -> Self {
+        Transform {
+            a: ts1.a * ts2.a + ts1.c * ts2.b,
+            b: ts1.b * ts2.a + ts1.d * ts2.b,
+            c: ts1.a * ts2.c + ts1.c * ts2.d,
+            d: ts1.b * ts2.c + ts1.d * ts2.d,
+            e: ts1.a * ts2.e + ts1.c * ts2.f + ts1.e,
+            f: ts1.b * ts2.e + ts1.d * ts2.f + ts1.f,
+        }
+    }
+
+    #[inline]
+    fn apply_to(&self, x: &mut f32, y: &mut f32) {
+        let tx = *x;
+        let ty = *y;
+        *x = self.a * tx + self.c * ty + self.e;
+        *y = self.b * tx + self.d * ty + self.f;
+    }
+
+    /// Checks whether a transform is the identity transform.
+    #[inline]
+    pub fn is_default(&self) -> bool {
+        // A direct float comparison is fine in our case.
+        self.a == 1.0
+            && self.b == 0.0
+            && self.c == 0.0
+            && self.d == 1.0
+            && self.e == 0.0
+            && self.f == 0.0
+    }
+}
+
+impl Default for Transform {
+    #[inline]
+    fn default() -> Self {
+        Transform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+}
+
+impl core::fmt::Debug for Transform {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(
+            f,
+            "Transform({} {} {} {} {} {})",
+            self.a, self.b, self.c, self.d, self.e, self.f
+        )
+    }
+}
+
+/// A RGBA color in the sRGB color space.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RgbaColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
+impl RgbaColor {
+    /// Creates a new `RgbaColor`.
+    #[inline]
+    pub fn new(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
+        Self {
+            blue,
+            green,
+            red,
+            alpha,
+        }
+    }
+
+    pub(crate) fn apply_alpha(&mut self, alpha: f32) {
+        self.alpha = (((f32::from(self.alpha) / 255.0) * alpha) * 255.0) as u8;
     }
 }
 
@@ -547,13 +669,23 @@ impl FromData for TableRecord {
 }
 
 #[cfg(feature = "variable-fonts")]
-const MAX_VAR_COORDS: usize = 32;
+const MAX_VAR_COORDS: usize = 64;
 
 #[cfg(feature = "variable-fonts")]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct VarCoords {
     data: [NormalizedCoordinate; MAX_VAR_COORDS],
     len: u8,
+}
+
+#[cfg(feature = "variable-fonts")]
+impl Default for VarCoords {
+    fn default() -> Self {
+        Self {
+            data: [NormalizedCoordinate::default(); MAX_VAR_COORDS],
+            len: u8::default(),
+        }
+    }
 }
 
 #[cfg(feature = "variable-fonts")]
@@ -739,6 +871,8 @@ pub struct RawFaceTables<'a> {
     pub cblc: Option<&'a [u8]>,
     pub cff: Option<&'a [u8]>,
     pub cmap: Option<&'a [u8]>,
+    pub colr: Option<&'a [u8]>,
+    pub cpal: Option<&'a [u8]>,
     pub ebdt: Option<&'a [u8]>,
     pub eblc: Option<&'a [u8]>,
     pub glyf: Option<&'a [u8]>,
@@ -810,6 +944,7 @@ pub struct FaceTables<'a> {
     pub cbdt: Option<cbdt::Table<'a>>,
     pub cff: Option<cff::Table<'a>>,
     pub cmap: Option<cmap::Table<'a>>,
+    pub colr: Option<colr::Table<'a>>,
     pub ebdt: Option<cbdt::Table<'a>>,
     pub glyf: Option<glyf::Table<'a>>,
     pub hmtx: Option<hmtx::Table<'a>>,
@@ -953,6 +1088,8 @@ impl<'a> Face<'a> {
                 b"CFF " => tables.cff = table_data,
                 #[cfg(feature = "variable-fonts")]
                 b"CFF2" => tables.cff2 = table_data,
+                b"COLR" => tables.colr = table_data,
+                b"CPAL" => tables.cpal = table_data,
                 b"EBDT" => tables.ebdt = table_data,
                 b"EBLC" => tables.eblc = table_data,
                 #[cfg(feature = "opentype-layout")]
@@ -1084,6 +1221,15 @@ impl<'a> Face<'a> {
             None
         };
 
+        let cpal = raw_tables.cpal.and_then(cpal::Table::parse);
+        let colr = if let Some(cpal) = cpal {
+            raw_tables
+                .colr
+                .and_then(|data| colr::Table::parse(cpal, data))
+        } else {
+            None
+        };
+
         Ok(FaceTables {
             head,
             hhea,
@@ -1093,6 +1239,7 @@ impl<'a> Face<'a> {
             cbdt,
             cff: raw_tables.cff.and_then(cff::Table::parse),
             cmap: raw_tables.cmap.and_then(cmap::Table::parse),
+            colr,
             ebdt,
             glyf,
             hmtx,
@@ -1217,7 +1364,7 @@ impl<'a> Face<'a> {
     /// Returns `false` when OS/2 table is not present.
     #[inline]
     pub fn is_bold(&self) -> bool {
-        try_opt_or!(self.tables.os2, false).is_bold()
+        self.tables.os2.map(|os2| os2.is_bold()).unwrap_or(false)
     }
 
     /// Checks that face is marked as *Oblique*.
@@ -1234,7 +1381,7 @@ impl<'a> Face<'a> {
     /// Returns face style.
     #[inline]
     pub fn style(&self) -> Style {
-        try_opt_or!(self.tables.os2, Style::Normal).style()
+        self.tables.os2.map(|os2| os2.style()).unwrap_or_default()
     }
 
     /// Checks that face is marked as *Monospaced*.
@@ -1242,7 +1389,10 @@ impl<'a> Face<'a> {
     /// Returns `false` when `post` table is not present.
     #[inline]
     pub fn is_monospaced(&self) -> bool {
-        try_opt_or!(self.tables.post, false).is_monospaced
+        self.tables
+            .post
+            .map(|post| post.is_monospaced)
+            .unwrap_or(false)
     }
 
     /// Checks that face is variable.
@@ -1267,7 +1417,7 @@ impl<'a> Face<'a> {
     /// Returns `Weight::Normal` when OS/2 table is not present.
     #[inline]
     pub fn weight(&self) -> Weight {
-        try_opt_or!(self.tables.os2, Weight::default()).weight()
+        self.tables.os2.map(|os2| os2.weight()).unwrap_or_default()
     }
 
     /// Returns face's width.
@@ -1275,7 +1425,7 @@ impl<'a> Face<'a> {
     /// Returns `Width::Normal` when OS/2 table is not present or when value is invalid.
     #[inline]
     pub fn width(&self) -> Width {
-        try_opt_or!(self.tables.os2, Width::default()).width()
+        self.tables.os2.map(|os2| os2.width()).unwrap_or_default()
     }
 
     /// Returns face's italic angle.
@@ -1584,7 +1734,7 @@ impl<'a> Face<'a> {
         self.tables.os2?.permissions()
     }
 
-    /// Checks if the face subsetting is allowed.
+    /// Checks if the face allows embedding a subset, further restricted by [`Self::permissions`].
     #[inline]
     pub fn is_subsetting_allowed(&self) -> bool {
         self.tables
@@ -1593,16 +1743,20 @@ impl<'a> Face<'a> {
             .unwrap_or(false)
     }
 
-    /// Checks if the face bitmaps embedding is allowed.
+    /// Checks if the face allows outline data to be embedded.
+    ///
+    /// If false, only bitmaps may be embedded in accordance with [`Self::permissions`].
+    ///
+    /// If the font contains no bitmaps and this flag is not set, it implies no embedding is allowed.
     #[inline]
-    pub fn is_bitmap_embedding_allowed(&self) -> bool {
+    pub fn is_outline_embedding_allowed(&self) -> bool {
         self.tables
             .os2
-            .map(|t| t.is_bitmap_embedding_allowed())
+            .map(|t| t.is_outline_embedding_allowed())
             .unwrap_or(false)
     }
 
-    /// Checks if the face bitmaps embedding is allowed.
+    /// Returns [Unicode Ranges](https://docs.microsoft.com/en-us/typography/opentype/spec/os2#ur).
     #[inline]
     pub fn unicode_ranges(&self) -> UnicodeRanges {
         self.tables
@@ -2002,8 +2156,61 @@ impl<'a> Face<'a> {
     /// Also, a font can contain both: images and outlines. So when this method returns `None`
     /// you should also try `outline_glyph()` afterwards.
     #[inline]
-    pub fn glyph_svg_image(&self, glyph_id: GlyphId) -> Option<&'a [u8]> {
+    pub fn glyph_svg_image(&self, glyph_id: GlyphId) -> Option<svg::SvgDocument<'a>> {
         self.tables.svg.and_then(|svg| svg.documents.find(glyph_id))
+    }
+
+    /// Returns `true` if the glyph can be colored/painted using the `COLR`+`CPAL` tables.
+    ///
+    /// See [`paint_color_glyph`](Face::paint_color_glyph) for details.
+    pub fn is_color_glyph(&self, glyph_id: GlyphId) -> bool {
+        self.tables()
+            .colr
+            .map(|colr| colr.contains(glyph_id))
+            .unwrap_or(false)
+    }
+
+    /// Returns the number of palettes stored in the `COLR`+`CPAL` tables.
+    ///
+    /// See [`paint_color_glyph`](Face::paint_color_glyph) for details.
+    pub fn color_palettes(&self) -> Option<core::num::NonZeroU16> {
+        Some(self.tables().colr?.palettes.palettes())
+    }
+
+    /// Paints a color glyph from the `COLR` table.
+    ///
+    /// A font can have multiple palettes, which you can check via
+    /// [`color_palettes`](Face::color_palettes).
+    /// If unsure, just pass 0 to the `palette` argument, which is the default.
+    ///
+    /// A font can define a glyph using layers of colored shapes instead of a
+    /// simple outline. Which is primarily used for emojis. This method should
+    /// be used to access glyphs defined in the `COLR` table.
+    ///
+    /// Also, a font can contain both: a layered definition and outlines. So
+    /// when this method returns `None` you should also try
+    /// [`outline_glyph`](Face::outline_glyph) afterwards.
+    ///
+    /// Returns `None` if the glyph has no `COLR` definition or if the glyph
+    /// definition is malformed.
+    ///
+    /// See `examples/font2svg.rs` for usage examples.
+    #[inline]
+    pub fn paint_color_glyph(
+        &self,
+        glyph_id: GlyphId,
+        palette: u16,
+        foreground_color: RgbaColor,
+        painter: &mut dyn colr::Painter<'a>,
+    ) -> Option<()> {
+        self.tables.colr?.paint(
+            glyph_id,
+            palette,
+            painter,
+            #[cfg(feature = "variable-fonts")]
+            self.coords(),
+            foreground_color,
+        )
     }
 
     /// Returns an iterator over variation axes.
@@ -2015,11 +2222,11 @@ impl<'a> Face<'a> {
 
     /// Sets a variation axis coordinate.
     ///
-    /// This is the only mutable method in the library.
+    /// This is one of the two only mutable methods in the library.
     /// We can simplify the API a lot by storing the variable coordinates
     /// in the face object itself.
     ///
-    /// Since coordinates are stored on the stack, we allow only 32 of them.
+    /// Since coordinates are stored on the stack, we allow only 64 of them.
     ///
     /// Returns `None` when face is not variable or doesn't have such axis.
     #[cfg(feature = "variable-fonts")]
@@ -2028,19 +2235,14 @@ impl<'a> Face<'a> {
             return None;
         }
 
-        let v = self
-            .variation_axes()
-            .into_iter()
-            .enumerate()
-            .find(|(_, a)| a.tag == axis);
-        if let Some((idx, a)) = v {
-            if idx >= MAX_VAR_COORDS {
-                return None;
-            }
-
-            self.coordinates.data[idx] = a.normalized_value(value);
-        } else {
+        if usize::from(self.variation_axes().len()) >= MAX_VAR_COORDS {
             return None;
+        }
+
+        for (i, var_axis) in self.variation_axes().into_iter().enumerate() {
+            if var_axis.tag == axis {
+                self.coordinates.data[i] = var_axis.normalized_value(value);
+            }
         }
 
         // TODO: optimize
@@ -2101,30 +2303,6 @@ impl<'a> Face<'a> {
     #[inline]
     fn coords(&self) -> &[NormalizedCoordinate] {
         self.coordinates.as_slice()
-    }
-}
-
-struct DefaultTableProvider<'a> {
-    data: &'a [u8],
-    tables: LazyArrayIter16<'a, TableRecord>,
-}
-
-impl<'a> Iterator for DefaultTableProvider<'a> {
-    type Item = Result<(Tag, Option<&'a [u8]>), FaceParsingError>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.tables.next().map(|table| {
-            Ok((table.tag, {
-                let offset = usize::num_from(table.offset);
-                let length = usize::num_from(table.length);
-                let end = offset
-                    .checked_add(length)
-                    .ok_or(FaceParsingError::MalformedFont)?;
-                let range = offset..end;
-                self.data.get(range)
-            }))
-        })
     }
 }
 

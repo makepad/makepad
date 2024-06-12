@@ -11,9 +11,9 @@ use core::cmp;
 use core::convert::TryFrom;
 use core::num::NonZeroU16;
 
-use crate::glyf::{self, Transform};
+use crate::glyf;
 use crate::parser::{LazyArray16, Offset, Offset16, Offset32, Stream, F2DOT14};
-use crate::{BBox, GlyphId, NormalizedCoordinate, OutlineBuilder, Rect};
+use crate::{GlyphId, NormalizedCoordinate, OutlineBuilder, Rect, RectF, Transform};
 
 /// 'The TrueType rasterizer dynamically generates 'phantom' points for each glyph
 /// that represent horizontal and vertical advance widths and side bearings,
@@ -1626,8 +1626,13 @@ fn infer_delta(
         //
         // 'Target point delta is derived from the adjacent point deltas
         // using linear interpolation.'
-        let d = f32::from(try_opt_or!(target_point.checked_sub(prev_point), 0.0))
-            / f32::from(try_opt_or!(next_point.checked_sub(prev_point), 0.0));
+        let target_sub = target_point.checked_sub(prev_point);
+        let next_sub = next_point.checked_sub(prev_point);
+        let d = if let (Some(target_sub), Some(next_sub)) = (target_sub, next_sub) {
+            f32::from(target_sub) / f32::from(next_sub)
+        } else {
+            return 0.0;
+        };
         (1.0 - d) * prev_delta + d * next_delta
     }
 }
@@ -1739,7 +1744,7 @@ impl<'a> Table<'a> {
         glyph_id: GlyphId,
         builder: &mut dyn OutlineBuilder,
     ) -> Option<Rect> {
-        let mut b = glyf::Builder::new(Transform::default(), BBox::new(), builder);
+        let mut b = glyf::Builder::new(Transform::default(), RectF::new(), builder);
         let glyph_data = glyf_table.get(glyph_id)?;
         outline_var_impl(
             glyf_table,

@@ -2,6 +2,7 @@
 #[rustfmt::skip] mod ankr;
 #[rustfmt::skip] mod cff1;
 #[rustfmt::skip] mod cmap;
+#[rustfmt::skip] mod colr;
 #[rustfmt::skip] mod feat;
 #[rustfmt::skip] mod glyf;
 #[rustfmt::skip] mod hmtx;
