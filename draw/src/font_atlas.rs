@@ -266,6 +266,10 @@ impl<'a> Cx2d<'a> {
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
+        let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
+        let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
+        let glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
+
         self.swrast_atlas_todo_sdf(fonts_atlas, todo, reuse_sdfer_bufs);
     }
 

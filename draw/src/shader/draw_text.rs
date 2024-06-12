@@ -520,8 +520,9 @@ impl DrawText {
             // Advance to the next position.
             position_x += advance_width_in_logical_pixels * self.font_scale;
         }
-        
     }
+
+    
     pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
         self.compute_geom_inner(cx, walk, text, &mut *cx.fonts_atlas_rc.0.borrow_mut())
     }
