@@ -1,6 +1,7 @@
 use crate::font::{TTFFont, Glyph, HorizontalMetrics};
 use crate::geometry::{Point, Rectangle};
 use crate::path::PathCommand;
+use resvg::usvg::{Options, Tree};
 use std::result;
 
 pub use ttf_parser::{Face, FaceParsingError, GlyphId};
@@ -51,6 +52,7 @@ pub fn from_ttf_parser_face(face: &Face<'_>) -> TTFFont {
             )
         },
         cached_decoded_glyphs: vec![],
+        cached_svg_images: vec![],
     }
 }
 
@@ -59,9 +61,17 @@ impl TTFFont {
         if self.cached_decoded_glyphs.len() <= id {
             self.cached_decoded_glyphs.resize(id + 1, None);
         }
+        if self.cached_svg_images.len() <= id {
+            self.cached_svg_images.resize(id + 1, None);
+        }
         let glyph_slot = &mut self.cached_decoded_glyphs[id];
         if glyph_slot.is_none() {
             let id = ttf_parser::GlyphId(u16::try_from(id).unwrap());
+
+            if self.cached_svg_images[id.0 as usize].is_none() {
+                self.cached_svg_images[id.0 as usize] = Some(None);
+            }
+
             let horizontal_metrics = HorizontalMetrics {
                 advance_width: face.glyph_hor_advance(id).ok_or(Error)? as f64,
                 left_side_bearing: face.glyph_hor_side_bearing(id).ok_or(Error)? as f64,
@@ -79,6 +89,7 @@ impl TTFFont {
                 horizontal_metrics,
                 bounds,
                 outline: outline_builder.0,
+                svg_image: self.cached_svg_images[id.0 as usize].as_ref().unwrap().clone(),
             }));
         }
         Ok(glyph_slot.as_ref().unwrap())
