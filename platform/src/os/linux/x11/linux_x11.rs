@@ -361,6 +361,11 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
+        for v in std::env::args(){
+            if let Some(opt) = v.strip_prefix("--package=") {
+                self.live_registry.borrow_mut().package_root = Some(opt.to_string());
+            }
+        }
         self.live_expand();
         self.live_scan_dependencies();
         self.native_load_dependencies();
