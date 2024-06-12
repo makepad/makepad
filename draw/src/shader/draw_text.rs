@@ -370,7 +370,7 @@ impl DrawText {
     }
     
     pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontsAtlas) {
-        self.draw_vars.texture_slots[0] = Some(font_atlas.texture.clone());
+        self.draw_vars.texture_slots[0] = Some(font_atlas.texture_sdf.clone());
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
         let (sdf_radius, sdf_cutoff) = font_atlas.alloc.sdf.as_ref()
