@@ -623,7 +623,6 @@ impl GlShader{
                             _ => (),
                         };
 
-                        // add .bin
                         filename = format!("{}.bin", filename);
 
                         binary.resize(return_size as usize, 0u8);
