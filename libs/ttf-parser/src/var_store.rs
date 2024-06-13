@@ -5,7 +5,7 @@
 use crate::parser::{FromData, LazyArray16, NumFrom, Stream};
 use crate::NormalizedCoordinate;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ItemVariationStore<'a> {
     data: &'a [u8],
     data_offsets: LazyArray16<'a, u32>,
@@ -80,7 +80,7 @@ impl<'a> ItemVariationStore<'a> {
         let offset = self.data_offsets.get(outer_index)?;
         let mut s = Stream::new_at(self.data, usize::num_from(offset))?;
         let item_count = s.read::<u16>()?;
-        let short_delta_count = s.read::<u16>()?;
+        let word_delta_count = s.read::<u16>()?;
         let region_index_count = s.read::<u16>()?;
         let region_indices = s.read_array16::<u16>(region_index_count)?;
 
@@ -88,20 +88,41 @@ impl<'a> ItemVariationStore<'a> {
             return None;
         }
 
-        let delta_set_len = usize::from(short_delta_count) + usize::from(region_index_count);
-        s.advance(usize::from(inner_index).checked_mul(delta_set_len)?);
+        let has_long_words = (word_delta_count & 0x8000) != 0;
+        let word_delta_count = word_delta_count & 0x7FFF;
+
+        // From the spec: The length of the data for each row, in bytes, is
+        // regionIndexCount + (wordDeltaCount & WORD_DELTA_COUNT_MASK)
+        // if the LONG_WORDS flag is not set, or 2 x that amount if the flag is set.
+        let mut delta_set_len = word_delta_count + region_index_count;
+        if has_long_words {
+            delta_set_len = delta_set_len * 2;
+        }
+
+        s.advance(usize::from(inner_index).checked_mul(usize::from(delta_set_len))?);
 
         let mut delta = 0.0;
         let mut i = 0;
-        while i < short_delta_count {
+        while i < word_delta_count {
             let idx = region_indices.get(i)?;
-            delta += f32::from(s.read::<i16>()?) * self.regions.evaluate_region(idx, coordinates);
+            let num = if has_long_words {
+                // TODO: use f64?
+                s.read::<i32>()? as f32
+            } else {
+                f32::from(s.read::<i16>()?)
+            };
+            delta += num * self.regions.evaluate_region(idx, coordinates);
             i += 1;
         }
 
         while i < region_index_count {
             let idx = region_indices.get(i)?;
-            delta += f32::from(s.read::<i8>()?) * self.regions.evaluate_region(idx, coordinates);
+            let num = if has_long_words {
+                f32::from(s.read::<i16>()?)
+            } else {
+                f32::from(s.read::<i8>()?)
+            };
+            delta += num * self.regions.evaluate_region(idx, coordinates);
             i += 1;
         }
 
@@ -109,7 +130,7 @@ impl<'a> ItemVariationStore<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct VariationRegionList<'a> {
     axis_count: u16,
     regions: LazyArray16<'a, RegionAxisCoordinatesRecord>,
@@ -137,7 +158,7 @@ impl<'a> VariationRegionList<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RegionAxisCoordinatesRecord {
     start_coord: i16,
     peak_coord: i16,

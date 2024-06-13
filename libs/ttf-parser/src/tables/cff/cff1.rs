@@ -20,7 +20,7 @@ use super::index::{parse_index, skip_index, Index};
 use super::std_names::STANDARD_NAMES;
 use super::{calc_subroutine_bias, conv_subroutine_index, Builder, CFFError, IsEven, StringId};
 use crate::parser::{LazyArray16, NumFrom, Stream, TryNumFrom};
-use crate::{BBox, Fixed, GlyphId, OutlineBuilder, Rect};
+use crate::{DummyOutline, GlyphId, OutlineBuilder, Rect, RectF};
 
 // Limits according to the Adobe Technical Note #5176, chapter 4 DICT Data.
 const MAX_OPERANDS_LEN: usize = 48;
@@ -344,7 +344,7 @@ fn parse_cid_local_subrs<'a>(
 
 struct CharStringParserContext<'a> {
     metadata: &'a Table<'a>,
-    width_parsed: bool,
+    width: Option<f32>,
     stems_len: u32,
     has_endchar: bool,
     has_seac: bool,
@@ -356,8 +356,9 @@ fn parse_char_string(
     data: &[u8],
     metadata: &Table,
     glyph_id: GlyphId,
+    width_only: bool,
     builder: &mut dyn OutlineBuilder,
-) -> Result<Rect, CFFError> {
+) -> Result<(Rect, Option<f32>), CFFError> {
     let local_subrs = match metadata.kind {
         FontKind::SID(ref sid) => Some(sid.local_subrs),
         FontKind::CID(_) => None, // Will be resolved on request.
@@ -365,7 +366,7 @@ fn parse_char_string(
 
     let mut ctx = CharStringParserContext {
         metadata,
-        width_parsed: false,
+        width: None,
         stems_len: 0,
         has_endchar: false,
         has_seac: false,
@@ -375,7 +376,7 @@ fn parse_char_string(
 
     let mut inner_builder = Builder {
         builder,
-        bbox: BBox::new(),
+        bbox: RectF::new(),
     };
 
     let stack = ArgumentsStack {
@@ -390,8 +391,13 @@ fn parse_char_string(
         y: 0.0,
         has_move_to: false,
         is_first_move_to: true,
+        width_only,
     };
     _parse_char_string(&mut ctx, data, 0, &mut parser)?;
+
+    if width_only {
+        return Ok((Rect::zero(), ctx.width));
+    }
 
     if !ctx.has_endchar {
         return Err(CFFError::MissingEndChar);
@@ -404,7 +410,8 @@ fn parse_char_string(
         return Err(CFFError::ZeroBBox);
     }
 
-    bbox.to_rect().ok_or(CFFError::BboxOverflow)
+    let rect = bbox.to_rect().ok_or(CFFError::BboxOverflow)?;
+    Ok((rect, ctx.width))
 }
 
 fn _parse_char_string(
@@ -431,8 +438,8 @@ fn _parse_char_string(
                 // x dx {dxa dxb}* vstemhm
 
                 // If the stack length is uneven, than the first value is a `width`.
-                let len = if p.stack.len().is_odd() && !ctx.width_parsed {
-                    ctx.width_parsed = true;
+                let len = if p.stack.len().is_odd() && ctx.width.is_none() {
+                    ctx.width = Some(p.stack.at(0));
                     p.stack.len() - 1
                 } else {
                     p.stack.len()
@@ -445,9 +452,9 @@ fn _parse_char_string(
             }
             operator::VERTICAL_MOVE_TO => {
                 let mut i = 0;
-                if p.stack.len() == 2 && !ctx.width_parsed {
+                if p.stack.len() == 2 && ctx.width.is_none() {
                     i += 1;
-                    ctx.width_parsed = true;
+                    ctx.width = Some(p.stack.at(0));
                 }
 
                 p.parse_vertical_move_to(i)?;
@@ -517,7 +524,7 @@ fn _parse_char_string(
                 }
             }
             operator::ENDCHAR => {
-                if p.stack.len() == 4 || (!ctx.width_parsed && p.stack.len() == 5) {
+                if p.stack.len() == 4 || (ctx.width.is_none() && p.stack.len() == 5) {
                     // Process 'seac'.
                     let accent_char = seac_code_to_glyph_id(&ctx.metadata.charset, p.stack.pop())
                         .ok_or(CFFError::InvalidSeacCode)?;
@@ -526,9 +533,8 @@ fn _parse_char_string(
                     let dy = p.stack.pop();
                     let dx = p.stack.pop();
 
-                    if !ctx.width_parsed && !p.stack.is_empty() {
-                        p.stack.pop();
-                        ctx.width_parsed = true;
+                    if ctx.width.is_none() && !p.stack.is_empty() {
+                        ctx.width = Some(p.stack.pop())
                     }
 
                     ctx.has_seac = true;
@@ -552,9 +558,8 @@ fn _parse_char_string(
                         .get(u32::from(accent_char.0))
                         .ok_or(CFFError::InvalidSeacCode)?;
                     _parse_char_string(ctx, accent_char_string, depth + 1, p)?;
-                } else if p.stack.len() == 1 && !ctx.width_parsed {
-                    p.stack.pop();
-                    ctx.width_parsed = true;
+                } else if p.stack.len() == 1 && ctx.width.is_none() {
+                    ctx.width = Some(p.stack.pop());
                 }
 
                 if !p.is_first_move_to {
@@ -577,9 +582,9 @@ fn _parse_char_string(
                 p.stack.clear();
 
                 // If the stack length is uneven, than the first value is a `width`.
-                if len.is_odd() && !ctx.width_parsed {
+                if len.is_odd() && ctx.width.is_none() {
                     len -= 1;
-                    ctx.width_parsed = true;
+                    ctx.width = Some(p.stack.at(0));
                 }
 
                 ctx.stems_len += len as u32 >> 1;
@@ -588,18 +593,18 @@ fn _parse_char_string(
             }
             operator::MOVE_TO => {
                 let mut i = 0;
-                if p.stack.len() == 3 && !ctx.width_parsed {
+                if p.stack.len() == 3 && ctx.width.is_none() {
                     i += 1;
-                    ctx.width_parsed = true;
+                    ctx.width = Some(p.stack.at(0));
                 }
 
                 p.parse_move_to(i)?;
             }
             operator::HORIZONTAL_MOVE_TO => {
                 let mut i = 0;
-                if p.stack.len() == 2 && !ctx.width_parsed {
+                if p.stack.len() == 2 && ctx.width.is_none() {
                     i += 1;
-                    ctx.width_parsed = true;
+                    ctx.width = Some(p.stack.at(0));
                 }
 
                 p.parse_horizontal_move_to(i)?;
@@ -665,6 +670,10 @@ fn _parse_char_string(
                 p.parse_fixed(&mut s)?;
             }
         }
+
+        if p.width_only && ctx.width.is_some() {
+            break;
+        }
     }
 
     // TODO: 'A charstring subroutine must end with either an endchar or a return operator.'
@@ -690,82 +699,6 @@ fn seac_code_to_glyph_id(charset: &Charset, n: f32) -> Option<GlyphId> {
         Charset::Expert | Charset::ExpertSubset => None,
         _ => charset.sid_to_gid(sid),
     }
-}
-
-// The first number of the first char string operator (well, some of them) can be a width.
-// This width is different from glyph's bbox width and somewhat relates to
-// glyph's advance (`hmtx`).
-//
-// We ignore this width during glyph outlining, because we don't really care about it.
-// But when parsing standalone CFF tables/fonts it might be useful.
-fn parse_char_string_width(data: &[u8]) -> Option<f32> {
-    let mut stack = ArgumentsStack {
-        data: &mut [0.0; MAX_ARGUMENTS_STACK_LEN], // 192B
-        len: 0,
-        max_len: MAX_ARGUMENTS_STACK_LEN,
-    };
-    _parse_char_string_width(data, &mut stack)
-}
-
-// Just like `_parse_char_string`, but parses only the first operator.
-fn _parse_char_string_width(char_string: &[u8], stack: &mut ArgumentsStack) -> Option<f32> {
-    let mut s = Stream::new(char_string);
-    while !s.at_end() {
-        let op = s.read::<u8>()?;
-        match op {
-            operator::HORIZONTAL_STEM
-            | operator::VERTICAL_STEM
-            | operator::HORIZONTAL_STEM_HINT_MASK
-            | operator::VERTICAL_STEM_HINT_MASK
-            | operator::HINT_MASK
-            | operator::COUNTER_MASK
-            | operator::MOVE_TO
-            | operator::ENDCHAR => {
-                return if stack.len().is_odd() {
-                    Some(stack.at(0))
-                } else {
-                    None
-                };
-            }
-            operator::HORIZONTAL_MOVE_TO | operator::VERTICAL_MOVE_TO => {
-                return if stack.len() == 2 {
-                    Some(stack.at(0))
-                } else {
-                    None
-                };
-            }
-            operator::RETURN => {
-                break;
-            }
-            operator::SHORT_INT => {
-                let n = s.read::<i16>()?;
-                stack.push(f32::from(n)).ok()?;
-            }
-            32..=246 => {
-                let n = i16::from(op) - 139;
-                stack.push(f32::from(n)).ok()?;
-            }
-            247..=250 => {
-                let b1 = s.read::<u8>()?;
-                let n = (i16::from(op) - 247) * 256 + i16::from(b1) + 108;
-                debug_assert!((108..=1131).contains(&n));
-                stack.push(f32::from(n)).ok()?;
-            }
-            251..=254 => {
-                let b1 = s.read::<u8>()?;
-                let n = -(i16::from(op) - 251) * 256 - i16::from(b1) - 108;
-                debug_assert!((-1131..=-108).contains(&n));
-                stack.push(f32::from(n)).ok()?;
-            }
-            operator::FIXED_16_16 => {
-                let n = s.read::<Fixed>()?;
-                stack.push(n.0).ok()?;
-            }
-            _ => return None,
-        }
-    }
-
-    None
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1016,7 +949,7 @@ impl<'a> Table<'a> {
             .char_strings
             .get(u32::from(glyph_id.0))
             .ok_or(CFFError::NoGlyph)?;
-        parse_char_string(data, self, glyph_id, builder)
+        parse_char_string(data, self, glyph_id, false, builder).map(|v| v.0)
     }
 
     /// Resolves a Glyph ID for a code point.
@@ -1048,7 +981,9 @@ impl<'a> Table<'a> {
         match self.kind {
             FontKind::SID(ref sid) => {
                 let data = self.char_strings.get(u32::from(glyph_id.0))?;
-                let width = parse_char_string_width(data)
+                let (_, width) =
+                    parse_char_string(data, self, glyph_id, true, &mut DummyOutline).ok()?;
+                let width = width
                     .map(|w| sid.nominal_width + w)
                     .unwrap_or(sid.default_width);
                 u16::try_from(width as i32).ok()
@@ -1095,6 +1030,17 @@ impl<'a> Table<'a> {
                 }
             }
             FontKind::CID(_) => None,
+        }
+    }
+
+    /// Returns the CID corresponding to a glyph ID.
+    ///
+    /// Returns `None` if this is not a CIDFont.
+    #[cfg(feature = "glyph-names")]
+    pub fn glyph_cid(&self, glyph_id: GlyphId) -> Option<u16> {
+        match self.kind {
+            FontKind::SID(_) => None,
+            FontKind::CID(_) => self.charset.gid_to_sid(glyph_id).map(|id| id.0),
         }
     }
 }

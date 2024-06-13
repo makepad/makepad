@@ -127,6 +127,12 @@ impl F2DOT14 {
     pub fn to_f32(self) -> f32 {
         f32::from(self.0) / 16384.0
     }
+
+    #[cfg(feature = "variable-fonts")]
+    #[inline]
+    pub fn apply_float_delta(&self, delta: f32) -> f32 {
+        self.to_f32() + (delta as f64 * (1.0 / 16384.0)) as f32
+    }
 }
 
 impl FromData for F2DOT14 {
@@ -149,6 +155,14 @@ impl FromData for Fixed {
     fn parse(data: &[u8]) -> Option<Self> {
         // TODO: is it safe to cast?
         i32::parse(data).map(|n| Fixed(n as f32 / 65536.0))
+    }
+}
+
+impl Fixed {
+    #[cfg(feature = "variable-fonts")]
+    #[inline]
+    pub(crate) fn apply_float_delta(&self, delta: f32) -> f32 {
+        self.0 + (delta as f64 * (1.0 / 65536.0)) as f32
     }
 }
 
@@ -771,7 +785,7 @@ impl<'a> Stream<'a> {
 
     #[allow(dead_code)]
     #[inline]
-    pub(crate) fn read_at_offset16(&mut self, data: &'a [u8]) -> Option<&'a [u8]> {
+    pub fn read_at_offset16(&mut self, data: &'a [u8]) -> Option<&'a [u8]> {
         let offset = self.read::<Offset16>()?.to_usize();
         data.get(offset..)
     }
@@ -781,11 +795,6 @@ impl<'a> Stream<'a> {
 pub trait Offset {
     /// Converts the offset to `usize`.
     fn to_usize(&self) -> usize;
-
-    /// Checks that offset is null.
-    fn is_null(&self) -> bool {
-        self.to_usize() == 0
-    }
 }
 
 /// A type-safe u16 offset.
@@ -814,6 +823,40 @@ impl FromData for Option<Offset16> {
     #[inline]
     fn parse(data: &[u8]) -> Option<Self> {
         let offset = Offset16::parse(data)?;
+        if offset.0 != 0 {
+            Some(Some(offset))
+        } else {
+            Some(None)
+        }
+    }
+}
+
+/// A type-safe u24 offset.
+#[derive(Clone, Copy, Debug)]
+pub struct Offset24(pub u32);
+
+impl Offset for Offset24 {
+    #[inline]
+    fn to_usize(&self) -> usize {
+        usize::num_from(self.0)
+    }
+}
+
+impl FromData for Offset24 {
+    const SIZE: usize = 3;
+
+    #[inline]
+    fn parse(data: &[u8]) -> Option<Self> {
+        U24::parse(data).map(|n| Offset24(n.0))
+    }
+}
+
+impl FromData for Option<Offset24> {
+    const SIZE: usize = Offset24::SIZE;
+
+    #[inline]
+    fn parse(data: &[u8]) -> Option<Self> {
+        let offset = Offset24::parse(data)?;
         if offset.0 != 0 {
             Some(Some(offset))
         } else {
@@ -857,13 +900,13 @@ impl FromData for Option<Offset32> {
 }
 
 #[inline]
-pub(crate) fn i16_bound(min: i16, val: i16, max: i16) -> i16 {
+pub fn i16_bound(min: i16, val: i16, max: i16) -> i16 {
     use core::cmp;
     cmp::max(min, cmp::min(max, val))
 }
 
 #[inline]
-pub(crate) fn f32_bound(min: f32, val: f32, max: f32) -> f32 {
+pub fn f32_bound(min: f32, val: f32, max: f32) -> f32 {
     debug_assert!(min.is_finite());
     debug_assert!(val.is_finite());
     debug_assert!(max.is_finite());
