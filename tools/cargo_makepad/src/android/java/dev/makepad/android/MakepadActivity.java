@@ -75,7 +75,10 @@ import android.media.MediaFormat;
 
 import java.nio.ByteBuffer;
 import android.media.MediaDataSource;
+
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 
 import dev.makepad.android.MakepadNative;
 
@@ -278,8 +281,11 @@ MidiManager.OnDeviceOpenedListener{
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
         boolean isEmulator = this.isEmulator();
+        String androidVersion = Build.VERSION.RELEASE;
+        String buildNumber = Build.DISPLAY;
+        String kernelVersion = this.getKernelVersion();
 
-        MakepadNative.onAndroidParams(cache_path, density, isEmulator);
+        MakepadNative.onAndroidParams(cache_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
@@ -602,5 +608,20 @@ MidiManager.OnDeviceOpenedListener{
             || Build.PRODUCT == "sdk"
             || Build.PRODUCT == "google_sdk"
             || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
+    }
+
+    private String getKernelVersion() {
+        try {
+            Process process = Runtime.getRuntime().exec("uname -r");
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder stringBuilder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                stringBuilder.append(line);
+            }
+            return stringBuilder.toString();
+        } catch (IOException e) {
+            return "Unknown";
+        }
     }
 }
