@@ -13,7 +13,7 @@ mod std_names;
 use core::convert::TryFrom;
 
 use crate::parser::{FromData, TryNumFrom};
-use crate::{BBox, OutlineBuilder};
+use crate::{OutlineBuilder, RectF};
 
 /// A list of errors that can occur during a CFF glyph outlining.
 #[allow(missing_docs)]
@@ -44,7 +44,7 @@ pub enum CFFError {
 
 pub(crate) struct Builder<'a> {
     builder: &'a mut dyn OutlineBuilder,
-    bbox: BBox,
+    bbox: RectF,
 }
 
 impl<'a> Builder<'a> {
