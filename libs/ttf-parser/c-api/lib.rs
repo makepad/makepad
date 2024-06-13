@@ -197,7 +197,7 @@ pub extern "C" fn ttfp_face_init(data: *const c_char, len: usize, index: u32, fa
     // This method invokes a lot of parsing, so let's catch any panics just in case.
     std::panic::catch_unwind(|| {
         let data = unsafe { std::slice::from_raw_parts(data as *const _, len) };
-        let face_rs = match ttf_parser::Face::from_slice(data, index) {
+        let face_rs = match ttf_parser::Face::parse(data, index) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -866,8 +866,8 @@ pub extern "C" fn ttfp_get_glyph_svg_image(
     match face_from_ptr(face).glyph_svg_image(glyph_id) {
         Some(image) => {
             unsafe {
-                *svg = image.as_ptr() as *const c_char;
-                *len = image.len() as u32;
+                *svg = image.data.as_ptr() as *const c_char;
+                *len = image.data.len() as u32;
             }
 
             true

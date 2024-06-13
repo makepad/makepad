@@ -9,6 +9,7 @@ pub(crate) struct CharStringParser<'a> {
     pub y: f32,
     pub has_move_to: bool,
     pub is_first_move_to: bool,
+    pub width_only: bool, // Exit right after the glyph width is parsed.
 }
 
 impl CharStringParser<'_> {

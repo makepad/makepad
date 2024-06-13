@@ -10,6 +10,7 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "DB7HhhdiYtBivuq_IBnVPCc32tU="
 
 [dependencies]
+resvg = { version = "0.42.0", default-features = false }
 
 [dependencies.ttf-parser]
 path = "../../libs/ttf-parser"
