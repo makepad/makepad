@@ -34,7 +34,8 @@ pub(crate) const ATLAS_HEIGHT: usize = 4096;
 pub struct CxFontsAtlas {
     pub fonts: Vec<Option<CxFont >>,
     pub path_to_font_id: HashMap<String, usize>,
-    pub texture: Texture,
+    pub texture_sdf: Texture,
+    pub texture_svg: Texture,
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc
 }
@@ -55,11 +56,12 @@ pub struct CxFontsAtlasSdfConfig {
 }
 
 impl CxFontsAtlas {
-    pub fn new(texture: Texture) -> Self {
+    pub fn new(texture_sdf: Texture, texture_svg: Texture) -> Self {
         Self {
             fonts: Vec::new(),
             path_to_font_id: HashMap::new(),
-            texture,
+            texture_sdf,
+            texture_svg,
             clear_buffer: false,
             alloc: CxFontsAtlasAlloc {
                 full: false,
@@ -207,7 +209,7 @@ impl CxFontsAtlas {
     }
     
     pub fn get_internal_font_atlas_texture_id(&self) -> Texture {
-        self.texture.clone()
+        self.texture_sdf.clone()
     }
 }
 
@@ -216,14 +218,20 @@ impl<'a> Cx2d<'a> {
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
             
-            let texture = Texture::new_with_format(cx, TextureFormat::VecRu8 {
+            let texture_sdf = Texture::new_with_format(cx, TextureFormat::VecRu8 {
                 width: ATLAS_WIDTH,
                 height: ATLAS_HEIGHT,
                 data: vec![],
                 unpack_row_length: None
             });
+
+            let texture_svg = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
+                data: vec![],
+            });
             
-            let fonts_atlas = CxFontsAtlas::new(texture);
+            let fonts_atlas = CxFontsAtlas::new(texture_sdf, texture_svg);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
     }
@@ -259,7 +267,19 @@ impl<'a> Cx2d<'a> {
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
         let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
-        let units_per_em = cxfont.ttf_font.units_per_em;
+        let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
+        let glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
+
+        self.swrast_atlas_todo_sdf(fonts_atlas, todo, reuse_sdfer_bufs);
+    }
+
+    fn swrast_atlas_todo_sdf(
+        &mut self,
+        fonts_atlas: &mut CxFontsAtlas,
+        todo: CxFontsAtlasTodo,
+        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
+    ) {
+        let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
         let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
         let glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
 
@@ -272,8 +292,7 @@ impl<'a> Cx2d<'a> {
 
         let glyphtc = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
 
-        let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * units_per_em);
-        let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
+        let font_scale_pixels = atlas_page.font_size_in_device_pixels;
 
         // HACK(eddyb) ideally these values computed by `DrawText::draw_inner`
         // would be kept in each `CxFontsAtlasTodo`, to avoid recomputation here.
@@ -365,8 +384,8 @@ impl<'a> Cx2d<'a> {
         };
 
         let mut atlas_data = vec![];
-        fonts_atlas.texture.swap_vec_u8(self.cx, &mut atlas_data);
-        let (atlas_w, atlas_h) = fonts_atlas.texture.get_format(self.cx).vec_width_height().unwrap();
+        fonts_atlas.texture_sdf.swap_vec_u8(self.cx, &mut atlas_data);
+        let (atlas_w, atlas_h) = fonts_atlas.texture_sdf.get_format(self.cx).vec_width_height().unwrap();
         if atlas_data.is_empty() {
             atlas_data = vec![0; atlas_w*atlas_h];
         } else {
@@ -385,7 +404,7 @@ impl<'a> Cx2d<'a> {
                 src.advance((1, 0));
             }
         }
-        fonts_atlas.texture.swap_vec_u8(self.cx, &mut atlas_data);
+        fonts_atlas.texture_sdf.swap_vec_u8(self.cx, &mut atlas_data);
     }
 }
 
@@ -524,8 +543,7 @@ impl ShapeCacheKey for (Direction, Rc<str>) {
 
 #[derive(Clone)]
 pub struct CxFontAtlasPage {
-    pub dpi_factor: f64,
-    pub font_size: f64,
+    pub font_size_in_device_pixels: f64,
     pub atlas_glyphs: HashMap<usize, CxFontAtlasGlyph>
 }
 
@@ -555,16 +573,14 @@ impl CxFont {
         })
     }
     
-    pub fn get_atlas_page_id(&mut self, dpi_factor: f64, font_size: f64) -> usize {
+    pub fn get_atlas_page_id(&mut self, font_size_in_device_pixels: f64) -> usize {
         for (index, sg) in self.atlas_pages.iter().enumerate() {
-            if sg.dpi_factor == dpi_factor
-                && sg.font_size == font_size {
+            if sg.font_size_in_device_pixels == font_size_in_device_pixels {
                 return index
             }
         }
         self.atlas_pages.push(CxFontAtlasPage {
-            dpi_factor: dpi_factor,
-            font_size: font_size,
+            font_size_in_device_pixels,
             atlas_glyphs: HashMap::new(),
         });
         self.atlas_pages.len() - 1

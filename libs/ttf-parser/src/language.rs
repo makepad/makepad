@@ -208,11 +208,11 @@ static TABLE: &[(u16, Language, &str, &str)] = &[
     (0x046A, Language::Yoruba_Nigeria, "Yoruba", "Nigeria"),
 ];
 
-/// A [`Name`] language.
+/// A [`Name`](crate::name::Name) language.
 ///
 /// Consists of Language + Region pairs.
 ///
-/// https://learn.microsoft.com/en-us/typography/opentype/spec/name#windows-language-ids
+/// <https://learn.microsoft.com/en-us/typography/opentype/spec/name#windows-language-ids>
 #[allow(missing_docs)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
