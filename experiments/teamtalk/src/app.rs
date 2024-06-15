@@ -41,7 +41,7 @@ live_design!{
                     height: Fit,
                     width: 125,
                     min: 0.0,
-                    max: 11.0,
+                    max: 20.0,
                     margin: {top: 1, left: 2}
                     text: "Out Volume"
                 }
@@ -64,7 +64,7 @@ app_main!(App);
 #[derive(Live, LiveAtomic, LiveHook, LiveRead, LiveRegister)]
 #[live_ignore]
 pub struct Store{
-    #[live(3.0f64)] global_volume: f64a,
+    #[live(11.0f64)] global_volume: f64a,
     #[live(0.000f64)] min_volume: f64a,
 }
 
