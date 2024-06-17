@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         turtle::{Walk, Size, Align},
-        font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
+        font_atlas::{CxFontsAtlasTodo, CxFont, CxFontAtlas, Font},
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d
@@ -352,7 +352,7 @@ impl DrawText {
         self.begin_many_instances_internal(cx, &*fonts_atlas);
     }
     
-    fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, fonts_atlas: &CxFontsAtlas) {
+    fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, fonts_atlas: &CxFontAtlas) {
         self.update_draw_call_vars(fonts_atlas);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = mi;
@@ -369,7 +369,7 @@ impl DrawText {
         cx.new_draw_call(&self.draw_vars);
     }
     
-    pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontsAtlas) {
+    pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontAtlas) {
         self.draw_vars.texture_slots[0] = Some(font_atlas.texture_sdf.clone());
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
@@ -379,7 +379,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[3] = sdf_cutoff;
     }
     
-    fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
+    fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, fonts_atlas: &mut CxFontAtlas) {
         const LOGICAL_PIXELS_PER_INCH: f64 = 96.0;
         const POINTS_PER_INCH: f64 = 72.0;
         const GLYPH_PADDING_IN_DEVICE_PIXELS: f64 = 2.0;
@@ -419,6 +419,10 @@ impl DrawText {
         let font_size_in_logical_pixels = font_size_in_inches * LOGICAL_PIXELS_PER_INCH;
         let font_size_in_device_pixels = font_size_in_logical_pixels * device_pixel_ratio;
         
+        // Compute the glyph ids.
+        let buffer = font.shape(Direction::LeftToRight, chunk);
+        let glyph_ids: Vec<_> = buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize).collect();
+
         // Use the font size in device pixels the atlas page id from the font.
         let atlas_page_id = font.get_atlas_page_id(font_size_in_device_pixels);
         
@@ -430,26 +434,12 @@ impl DrawText {
         let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
         let zbias_step = 0.00001;
         let mut char_depth = self.draw_depth;
-        
-        // Compute the glyph ids.
-        let rustybuzz_buffer = cx.rustybuzz_buffer.take().unwrap();
-        let (glyph_ids, rustybuzz_buffer) = font
-            .shape_cache
-            .get_or_compute_glyph_ids(
-            (
-                    Direction::LeftToRight,
-                    chunk,
-                ),
-                rustybuzz_buffer,
-                owned_font_face
-            );
-        cx.rustybuzz_buffer = Some(rustybuzz_buffer);
 
         // Compute the glyph padding.
         let glyph_padding_in_logical_pixels = GLYPH_PADDING_IN_DEVICE_PIXELS / device_pixel_ratio;
 
         let mut position_x = position.x;
-        for &glyph_id in glyph_ids {
+        for glyph_id in glyph_ids {
             // Get the glyph.
             let glyph = owned_font_face.with_ref(|face| font.ttf_font.get_glyph_by_id(face, glyph_id).unwrap());
 
@@ -527,7 +517,7 @@ impl DrawText {
         self.compute_geom_inner(cx, walk, text, &mut *cx.fonts_atlas_rc.0.borrow_mut())
     }
     
-    fn compute_geom_inner(&self, cx: &Cx2d, walk: Walk, text: &str, fonts_atlas: &mut CxFontsAtlas) -> Option<TextGeom> {
+    fn compute_geom_inner(&self, cx: &Cx2d, walk: Walk, text: &str, fonts_atlas: &mut CxFontAtlas) -> Option<TextGeom> {
         // we include the align factor and the width/height
         let font_id = self.text_style.font.font_id.unwrap();
         
@@ -1016,6 +1006,142 @@ impl DrawText {
         DVec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
             y: self.text_style.line_spacing
+        }
+    }
+}
+
+impl DrawText {
+    fn draw_glyphs(
+        &mut self,
+        cx: &mut Cx2d,
+        font_atlas: &mut CxFontAtlas,
+        position: DVec2,
+        font_glyph_ids: &[(usize, u32)]
+    ) {
+        const LOGICAL_PIXELS_PER_INCH: f64 = 96.0;
+        const POINTS_PER_INCH: f64 = 72.0;
+        const ZBIAS_STEP: f32 = 0.00001;
+
+        if !self.draw_vars.can_instance() {
+            return;
+        }
+
+        if position.x.is_infinite() || position.x.is_nan() {
+            return;
+        }
+
+        if font_glyph_ids.is_empty() {
+            return;
+        }
+
+        // Lock the instance buffer.
+        if !self.many_instances.is_some() {
+            self.begin_many_instances_internal(cx, font_atlas);
+        }
+        
+        // Get the device pixel ratio.
+        let device_pixel_ratio = cx.current_dpi_factor();
+
+        // Compute the glyph padding.
+        let glyph_padding_in_device_pixels = 2.0;
+        let glyph_padding_in_logical_pixels = glyph_padding_in_device_pixels / device_pixel_ratio;
+
+        let Some(mi) = &mut self.many_instances else {
+            return;
+        };
+        
+        let mut position = position;
+        for &(font_id, glyph_id) in font_glyph_ids {
+            // Use the font id to get the font from the font atlas.
+            let font = font_atlas.fonts[font_id].as_mut().unwrap();
+
+            // Compute the font size.
+            let font_size_in_points = self.text_style.font_size / font.ttf_font.units_per_em;
+            let font_size_in_inches = font_size_in_points / POINTS_PER_INCH;
+            let font_size_in_logical_pixels = font_size_in_inches * LOGICAL_PIXELS_PER_INCH;
+            let font_size_in_device_pixels = font_size_in_logical_pixels * device_pixel_ratio;
+
+            // Use the glyph id to get the glyph from the font.
+            let glyph = font.owned_font_face.with_ref(|face| {
+                font.ttf_font.get_glyph_by_id(face, glyph_id as usize).unwrap()
+            });
+
+            // Compute the glyph position.
+            let glyph_position_x_in_font_units = glyph.bounds.p_min.x;
+            let glyph_position_x_in_logical_pixels = glyph_position_x_in_font_units * font_size_in_logical_pixels;
+            let glyph_position_y_in_font_units = glyph.bounds.p_min.y;
+            let glyph_position_y_in_logical_pixels = glyph_position_y_in_font_units * font_size_in_logical_pixels;
+
+            // Compute the glyph size.
+            let glyph_size_x_in_font_units = glyph.bounds.p_max.x - glyph.bounds.p_min.x;
+            let glyph_size_x_in_device_pixels = glyph_size_x_in_font_units * font_size_in_device_pixels;
+            let glyph_size_y_in_font_units = glyph.bounds.p_max.y - glyph.bounds.p_min.y;
+            let glyph_size_y_in_device_pixels = glyph_size_y_in_font_units * font_size_in_device_pixels;
+
+            // Compute the padded glyph size.
+            let padded_glyph_size_x_in_device_pixels = if glyph_size_x_in_device_pixels == 0.0 {
+                0.0
+            } else {
+                glyph_size_x_in_device_pixels.ceil() + glyph_padding_in_device_pixels * 2.0
+            };
+            let padded_glyph_size_x_in_logical_pixels = padded_glyph_size_x_in_device_pixels / device_pixel_ratio;
+            let padded_glyph_size_y_in_device_pixels = if glyph_size_y_in_device_pixels == 0.0 {
+                0.0
+            } else {
+                glyph_size_y_in_device_pixels.ceil() + glyph_padding_in_device_pixels * 2.0
+            };
+            let padded_glyph_size_y_in_logical_pixels = padded_glyph_size_y_in_device_pixels / device_pixel_ratio;
+
+            // Compute the advance width.
+            let advance_width_in_font_units = glyph.horizontal_metrics.advance_width;
+            let advance_width_in_logical_pixels = advance_width_in_font_units * font_size_in_logical_pixels;
+
+            // Use the font size in device pixels to get the atlas page id from the font.
+            let atlas_page_id = font.get_atlas_page_id(font_size_in_device_pixels);
+
+            // Use the atlas page id to get the atlas page from the font.
+            let atlas_page = &mut font.atlas_pages[atlas_page_id];
+
+            // Use the padded glyph size in device pixels to get the atlas glyph from the atlas page.
+            let atlas_glyph = *atlas_page.atlas_glyphs.entry(glyph_id as usize).or_insert_with(|| {
+                font_atlas
+                    .alloc
+                    .alloc_atlas_glyph(
+                        padded_glyph_size_x_in_device_pixels,
+                        padded_glyph_size_y_in_device_pixels,
+                        CxFontsAtlasTodo {
+                            font_id,
+                            atlas_page_id,
+                            glyph_id: glyph_id as usize,
+                        }
+                    )
+            });
+
+            // Compute the distance from the current position to the rect.
+            let delta_x = glyph_position_x_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels;
+            let delta_y = -(glyph_position_y_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels);
+
+            let fudge = self.text_style.font_size * self.font_scale * self.text_style.top_drop;
+            let delta_y = delta_y + fudge;
+
+            // Compute the rect size.
+            let rect_size_x = padded_glyph_size_x_in_logical_pixels * self.font_scale;
+            let rect_size_y = padded_glyph_size_y_in_logical_pixels * self.font_scale;
+            
+            // Emit the instance data.
+            self.font_t1 = atlas_glyph.t1;
+            self.font_t2 = atlas_glyph.t2;
+            self.char_depth = self.draw_depth;
+            self.rect_pos = dvec2(position.x + delta_x, position.y + delta_y).into();
+            self.rect_size = dvec2(rect_size_x, rect_size_y).into();
+            self.delta.x = delta_x as f32;
+            self.delta.y = delta_y as f32;
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());
+
+            self.draw_depth += ZBIAS_STEP;
+            
+            // Advance to the next position.
+            position.x += advance_width_in_logical_pixels * self.font_scale;
         }
     }
 }
