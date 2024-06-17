@@ -41,16 +41,27 @@ pub struct CxFontAtlas {
     pub texture_svg: Texture,
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc,
-    pub shape_keys: VecDeque<OwnedShapeKey>,
-    pub shapes: FxHashMap<OwnedShapeKey, Box<[(usize, u32)]>>,
 }
 
-impl CxFontAtlas {
+pub struct ShapeCache {
+    shape_keys: VecDeque<OwnedShapeKey>,
+    shapes: FxHashMap<OwnedShapeKey, Box<[(usize, u32)]>>,
+}
+
+impl ShapeCache {
+    pub fn new() -> Self {
+        Self {
+            shape_keys: VecDeque::new(),
+            shapes: FxHashMap::default(),
+        }
+    }
+
     pub fn shape(
         &mut self,
         direction: Direction,
         text: &str,
         font_ids: &[usize],
+        font_atlas: &CxFontAtlas,
     ) -> &[(usize, u32)] {
         if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
             let shape_key = (direction, text.into(), font_ids.into());
@@ -58,6 +69,7 @@ impl CxFontAtlas {
             let _ = self.shape_internal(
                 text,
                 font_ids,
+                font_atlas,
                 &mut font_glyph_ids,
             );
             if self.shape_keys.len() == 4096 {
@@ -74,13 +86,14 @@ impl CxFontAtlas {
         &mut self,
         text: &str,
         font_ids: &[usize],
+        font_atlas: &CxFontAtlas,
         font_glyph_ids: &mut Vec<(usize, u32)>,
     ) -> Result<(), ()> {
         let Some((&font_id, font_ids)) = font_ids.split_first() else {
             return Err(());
         };
-        let Some(font) = &self.fonts[font_id] else {
-            return self.shape_internal(text, font_ids, font_glyph_ids);
+        let Some(font) = &font_atlas.fonts[font_id] else {
+            return self.shape_internal(text, font_ids, font_atlas, font_glyph_ids);
         };
 
         let mut buffer = UnicodeBuffer::new();
@@ -107,7 +120,12 @@ impl CxFontAtlas {
                         break text.len()
                     }
                 };
-                if self.shape_internal(&text[start..end], font_ids, font_glyph_ids).is_err() {
+                if self.shape_internal(
+                    &text[start..end],
+                    font_ids,
+                    font_atlas,
+                    font_glyph_ids,
+                ).is_err() {
                     font_glyph_ids.push((font_id, info.glyph_id));
                 }
             }
@@ -226,8 +244,6 @@ impl CxFontAtlas {
                     },
                 })
             },
-            shape_keys: VecDeque::new(),
-            shapes: FxHashMap::default(),
         }
     }
 }
@@ -299,7 +315,10 @@ pub struct Font {
 }
 
 #[derive(Clone)]
-pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontAtlas >>);
+pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontAtlas>>);
+
+#[derive(Clone)]
+pub struct ShapeCacheRc(pub Rc<RefCell<ShapeCache>>);
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
@@ -378,6 +397,12 @@ impl<'a> Cx2d<'a> {
             
             let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
+        }
+    }
+
+    pub fn lazy_construct_shape_cache(cx: &mut Cx) {
+        if !cx.has_global::<ShapeCacheRc>() {
+            cx.set_global(ShapeCacheRc(Rc::new(RefCell::new(ShapeCache::new()))));
         }
     }
     
@@ -558,7 +583,7 @@ pub struct CxFont {
     pub owned_font_face: crate::owned_font_face::OwnedFace,
     pub glyph_ids: Box<[Option<GlyphId>]>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
-    pub shape_cache: ShapeCache,
+    pub shape_cache: OldShapeCache,
 }
 
 impl CxFont {
@@ -576,12 +601,12 @@ impl CxFont {
     }
 }
 
-pub struct ShapeCache {
+pub struct OldShapeCache {
     pub keys: VecDeque<(Direction, Rc<str>)>,
     pub buffers: FxHashMap<(Direction, Rc<str>), GlyphBuffer>,
 }
 
-impl ShapeCache {
+impl OldShapeCache {
     const MAX_SIZE: usize = 4096;
 
     pub fn new() -> Self {
@@ -592,11 +617,11 @@ impl ShapeCache {
     }
 
     pub fn contains(&self, direction: Direction, string: &str) -> bool {
-        self.buffers.contains_key(&(direction, string) as &(dyn ShapeCacheKey))
+        self.buffers.contains_key(&(direction, string) as &(dyn OldShapeKey))
     }
 
     pub fn get(&mut self, direction: Direction, string: &str) -> Option<&GlyphBuffer> {
-        self.buffers.get(&(direction, string) as &(dyn ShapeCacheKey))
+        self.buffers.get(&(direction, string) as &(dyn OldShapeKey))
     }
 
     pub fn insert(&mut self, direction: Direction, string: Rc<str>, buffer: GlyphBuffer) {
@@ -609,27 +634,27 @@ impl ShapeCache {
     }
 }
 
-pub trait ShapeCacheKey {
+pub trait OldShapeKey {
     fn direction(&self) -> Direction;
     fn string(&self) -> &str;
 }
 
-impl<'a> Borrow<dyn ShapeCacheKey + 'a> for (Direction, Rc<str>) {
-    fn borrow(&self) -> &(dyn ShapeCacheKey + 'a) {
+impl<'a> Borrow<dyn OldShapeKey + 'a> for (Direction, Rc<str>) {
+    fn borrow(&self) -> &(dyn OldShapeKey + 'a) {
         self
     }
 }
 
-impl Eq for dyn ShapeCacheKey + '_ {}
+impl Eq for dyn OldShapeKey + '_ {}
 
-impl Hash for dyn ShapeCacheKey + '_ {
+impl Hash for dyn OldShapeKey + '_ {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         self.direction().hash(hasher);
         self.string().hash(hasher);
     }
 }
 
-impl PartialEq for dyn ShapeCacheKey + '_ {
+impl PartialEq for dyn OldShapeKey + '_ {
     fn eq(&self, other: &Self) -> bool {
         if self.direction() != other.direction() {
             return false;
@@ -641,7 +666,7 @@ impl PartialEq for dyn ShapeCacheKey + '_ {
     }
 }
 
-impl ShapeCacheKey for (Direction, &str) {
+impl OldShapeKey for (Direction, &str) {
     fn direction(&self) -> Direction {
         self.0
     }
@@ -651,7 +676,7 @@ impl ShapeCacheKey for (Direction, &str) {
     }
 }
 
-impl ShapeCacheKey for (Direction, Rc<str>) {
+impl OldShapeKey for (Direction, Rc<str>) {
     fn direction(&self) -> Direction {
         self.0
     }
@@ -689,7 +714,7 @@ impl CxFont {
             owned_font_face,
             glyph_ids: vec![None; 0x10FFFF].into_boxed_slice(),
             atlas_pages: Vec::new(),
-            shape_cache: ShapeCache::new(),
+            shape_cache: OldShapeCache::new(),
         })
     }
     
