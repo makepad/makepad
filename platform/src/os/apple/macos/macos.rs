@@ -569,10 +569,8 @@ impl CxOsApi for Cx {
     
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        for v in std::env::args(){
-            if let Some(opt) = v.strip_prefix("--package=") {
-                self.live_registry.borrow_mut().package_root = Some(opt.to_string());
-            }
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+            self.live_registry.borrow_mut().package_root = Some(item.to_string());
         }
         self.live_expand();
         if !Self::has_studio_web_socket() {

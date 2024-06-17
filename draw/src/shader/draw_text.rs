@@ -10,6 +10,7 @@ use {
     makepad_rustybuzz::Direction,
 };
 
+
 live_design!{
     
     DrawText = {{DrawText}} {
@@ -158,7 +159,6 @@ pub enum TextWrap {
     Line
 }
 
-#[derive(Clone)]
 struct WordIterator<'a> {
     char_iter: std::str::CharIndices<'a >,
     eval_width: f64,
@@ -220,8 +220,8 @@ impl<'a> WordIterator<'a> {
             return Some(WordItem::Newline);
         }
         else if self.last_char == ' '{
-            let adv = if let Some(advance_width) = font.get_advance_width_for_char(' ') {
-                advance_width * self.font_size_total
+            let adv = if let Some(glyph) = font.get_glyph(' ') {
+                glyph.horizontal_metrics.advance_width * self.font_size_total
             }else {0.0};
             let start = self.last_index;
             let mut width = 0.0;
@@ -254,8 +254,8 @@ impl<'a> WordIterator<'a> {
             let start = self.last_index;
             let mut width = 0.0;
             while self.last_char != ' ' && self.last_char != '\0' && self.last_char != '\n' {
-                let adv = if let Some(advance_width) = font.get_advance_width_for_char(self.last_char) {
-                    advance_width * self.font_size_total
+                let adv = if let Some(glyph) = font.get_glyph(self.last_char) {
+                    glyph.horizontal_metrics.advance_width * self.font_size_total
                 }else {0.0};
                 if width + adv >= self.eval_width{
                     if start == self.last_index{// advance atleast one char
@@ -274,6 +274,7 @@ impl<'a> WordIterator<'a> {
                 width,
             });
         }
+        
     }
 }
 
