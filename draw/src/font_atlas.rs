@@ -1,4 +1,7 @@
-use sdfer::NDCursor as _;
+use {
+    makepad_rustybuzz::UnicodeBuffer,
+    sdfer::NDCursor as _
+};
 
 pub use {
     std::{
@@ -24,20 +27,160 @@ pub use {
         makepad_vector::path::PathIterator,
     },
     fxhash::FxHashMap,
-    makepad_rustybuzz::{Direction, GlyphInfo, UnicodeBuffer},
+    makepad_rustybuzz::{Direction, GlyphBuffer, GlyphInfo},
     makepad_vector::ttf_parser::GlyphId,
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
 pub(crate) const ATLAS_HEIGHT: usize = 4096;
 
-pub struct CxFontsAtlas {
+pub struct CxFontAtlas {
     pub fonts: Vec<Option<CxFont >>,
     pub path_to_font_id: HashMap<String, usize>,
     pub texture_sdf: Texture,
     pub texture_svg: Texture,
     pub clear_buffer: bool,
-    pub alloc: CxFontsAtlasAlloc
+    pub alloc: CxFontsAtlasAlloc,
+    pub shape_keys: VecDeque<OwnedShapeKey>,
+    pub shapes: FxHashMap<OwnedShapeKey, Box<[(usize, u32)]>>,
+}
+
+impl CxFontAtlas {
+    pub fn shape(
+        &mut self,
+        direction: Direction,
+        text: &str,
+        font_ids: &[usize],
+    ) -> &[(usize, u32)] {
+        if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
+            let shape_key = (direction, text.into(), font_ids.into());
+            let mut font_glyph_ids = Vec::new();
+            let _ = self.shape_internal(
+                text,
+                font_ids,
+                &mut font_glyph_ids,
+            );
+            if self.shape_keys.len() == 4096 {
+                let shape_key = self.shape_keys.pop_front().unwrap();
+                self.shapes.remove(&shape_key as &(dyn ShapeKey));
+            }
+            self.shape_keys.push_back(shape_key.clone());
+            self.shapes.insert(shape_key, font_glyph_ids.into());
+        }
+        &self.shapes[&(direction, text, font_ids) as &(dyn ShapeKey)]
+    }
+
+    fn shape_internal(
+        &mut self,
+        text: &str,
+        font_ids: &[usize],
+        font_glyph_ids: &mut Vec<(usize, u32)>,
+    ) -> Result<(), ()> {
+        let Some((&font_id, font_ids)) = font_ids.split_first() else {
+            return Err(());
+        };
+        let Some(font) = &self.fonts[font_id] else {
+            return self.shape_internal(text, font_ids, font_glyph_ids);
+        };
+
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(text);
+        let buffer = font.owned_font_face.with_ref(|face| {
+            makepad_rustybuzz::shape(face, &[], buffer)
+        });
+
+        let infos = buffer.glyph_infos();
+        let mut info_iter = infos.iter();
+        let mut info_slot = info_iter.next();
+        while let Some(info) = info_slot {
+            if info.glyph_id == 0 {
+                font_glyph_ids.push((font_id, info.glyph_id));
+            } else {
+                let start = info.cluster as usize;
+                let end = loop {
+                    info_slot = info_iter.next();
+                    if let Some(info) = info_slot {
+                        if info.glyph_id != 0 {
+                            break info.cluster as usize;
+                        }
+                    } else {
+                        break text.len()
+                    }
+                };
+                if self.shape_internal(&text[start..end], font_ids, font_glyph_ids).is_err() {
+                    font_glyph_ids.push((font_id, info.glyph_id));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+trait ShapeKey {
+    fn direction(&self) -> Direction;
+    fn text(&self) -> &str;
+    fn font_ids(&self) -> &[usize];
+}
+
+impl<'a> Borrow<dyn ShapeKey + 'a> for (Direction, Rc<str>, Rc<[usize]>) {
+    fn borrow(&self) -> &(dyn ShapeKey + 'a) {
+        self
+    }
+}
+
+impl Eq for dyn ShapeKey + '_ {}
+
+impl Hash for dyn ShapeKey + '_ {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.direction().hash(hasher);
+        self.text().hash(hasher);
+        self.font_ids().hash(hasher);
+    }
+}
+
+impl PartialEq for dyn ShapeKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        if self.direction() != other.direction() {
+            return false;
+        }
+        if self.text() != other.text() {
+            return false;
+        }
+        true
+    }
+}
+
+type OwnedShapeKey = (Direction, Rc<str>, Rc<[usize]>);
+
+impl ShapeKey for OwnedShapeKey {
+    fn direction(&self) -> Direction {
+        self.0
+    }
+
+    fn text(&self) -> &str {
+        &self.1
+    }
+
+    fn font_ids(&self) -> &[usize] {
+        &self.2
+    }
+}
+
+type BorrowedShapeKey<'a> = (Direction, &'a str, &'a [usize]);
+
+impl<'a> ShapeKey for BorrowedShapeKey<'a> {
+    fn direction(&self) -> Direction {
+        self.0
+    }
+
+    fn text(&self) -> &str {
+        &self.1
+    }
+
+    fn font_ids(&self) -> &[usize] {
+        &self.2
+    }
 }
 
 #[derive(Default)]
@@ -55,7 +198,7 @@ pub struct CxFontsAtlasSdfConfig {
     pub params: sdfer::esdt::Params,
 }
 
-impl CxFontsAtlas {
+impl CxFontAtlas {
     pub fn new(texture_sdf: Texture, texture_svg: Texture) -> Self {
         Self {
             fonts: Vec::new(),
@@ -83,6 +226,8 @@ impl CxFontsAtlas {
                     },
                 })
             },
+            shape_keys: VecDeque::new(),
+            shapes: FxHashMap::default(),
         }
     }
 }
@@ -154,7 +299,7 @@ pub struct Font {
 }
 
 #[derive(Clone)]
-pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontsAtlas >>);
+pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontAtlas >>);
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
@@ -164,7 +309,7 @@ impl LiveHook for Font {
     }
 }
 
-impl CxFontsAtlas {
+impl CxFontAtlas {
     pub fn get_font_by_path(&mut self, cx: &mut Cx, path: &str) -> usize {
         if path.len() == 0{
             return 0
@@ -231,7 +376,7 @@ impl<'a> Cx2d<'a> {
                 data: vec![],
             });
             
-            let fonts_atlas = CxFontsAtlas::new(texture_sdf, texture_svg);
+            let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
     }
@@ -262,7 +407,7 @@ impl<'a> Cx2d<'a> {
 
     fn swrast_atlas_todo(
         &mut self,
-        fonts_atlas: &mut CxFontsAtlas,
+        fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
@@ -275,7 +420,7 @@ impl<'a> Cx2d<'a> {
 
     fn swrast_atlas_todo_sdf(
         &mut self,
-        fonts_atlas: &mut CxFontsAtlas,
+        fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
@@ -416,79 +561,54 @@ pub struct CxFont {
     pub shape_cache: ShapeCache,
 }
 
+impl CxFont {
+    pub fn shape(&mut self, direction: Direction, string: &str) -> &GlyphBuffer {
+        if !self.shape_cache.contains(direction, string) {
+            let mut buffer = UnicodeBuffer::new();
+            buffer.set_direction(direction);
+            buffer.push_str(string);
+            let buffer = self.owned_font_face.with_ref(|face| {
+                makepad_rustybuzz::shape(face, &[], buffer)
+            });
+            self.shape_cache.insert(direction, Rc::from(string), buffer);
+        }
+        self.shape_cache.get(direction, string).unwrap()
+    }
+}
+
 pub struct ShapeCache {
     pub keys: VecDeque<(Direction, Rc<str>)>,
-    pub glyph_ids: FxHashMap<(Direction, Rc<str>), Vec<usize>>,
+    pub buffers: FxHashMap<(Direction, Rc<str>), GlyphBuffer>,
 }
 
 impl ShapeCache {
-    // The maximum number of keys that can be stored in the cache.
     const MAX_SIZE: usize = 4096;
 
     pub fn new() -> Self {
         Self {
             keys: VecDeque::new(),
-            glyph_ids: FxHashMap::default(),
+            buffers: FxHashMap::default(),
         }
     }
 
-    // If there is an entry for the given key in the cache, returns the corresponding list of
-    // glyph indices for that key. Otherwise, uses the given UnicodeBuffer and OwnedFace to
-    // compute the list of glyph indices for the key, inserts that in the cache and then returns
-    // the corresponding list.
-    //
-    // This method takes a UnicodeBuffer by value, and then returns the same buffer by value. This
-    // is necessary because rustybuzz::shape consumes the UnicodeBuffer and then returns a
-    // GlyphBuffer that reuses the same storage. Once we are done with the GlyphBuffer, we consume
-    // it and then return yet another UnicodeBuffer that reuses the same storage. This allows us to
-    // avoid unnecessary heap allocations.
-    //
-    // Note that owned_font_face should be the same as the CxFont to which this cache belongs,
-    // otherwise you will not get correct results.
-    pub fn get_or_compute_glyph_ids(
-        &mut self, 
-        key: (Direction, &str),
-        mut rustybuzz_buffer: UnicodeBuffer,
-        owned_font_face: &crate::owned_font_face::OwnedFace
-    ) -> (&[usize], UnicodeBuffer) {
-        if !self.glyph_ids.contains_key(&key as &dyn ShapeCacheKey) {
-            if self.keys.len() == Self::MAX_SIZE {
-                for run in self.keys.drain(..Self::MAX_SIZE / 2) {
-                    self.glyph_ids.remove(&run);
-                }
-            }
+    pub fn contains(&self, direction: Direction, string: &str) -> bool {
+        self.buffers.contains_key(&(direction, string) as &(dyn ShapeCacheKey))
+    }
 
-            let (direction, string) = key;
-            rustybuzz_buffer.set_direction(direction);
-            rustybuzz_buffer.push_str(string);
-            let glyph_buffer = owned_font_face.with_ref( | face | makepad_rustybuzz::shape(face, &[], rustybuzz_buffer));
-            let glyph_ids: Vec<_> = glyph_buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize).collect();
-            rustybuzz_buffer = glyph_buffer.clear();
+    pub fn get(&mut self, direction: Direction, string: &str) -> Option<&GlyphBuffer> {
+        self.buffers.get(&(direction, string) as &(dyn ShapeCacheKey))
+    }
 
-            let owned_string: Rc<str> = string.into();
-            self.keys.push_back((direction, owned_string.clone()));
-            self.glyph_ids.insert((direction, owned_string), glyph_ids);
+    pub fn insert(&mut self, direction: Direction, string: Rc<str>, buffer: GlyphBuffer) {
+        if self.keys.len() == Self::MAX_SIZE {
+            let (direction, string) = self.keys.pop_front().unwrap();
+            self.buffers.remove(&(direction, string));
         }
-        (&self.glyph_ids[&key as &dyn ShapeCacheKey], rustybuzz_buffer)
+        self.keys.push_back((direction, string.clone()));
+        self.buffers.insert((direction, string), buffer);
     }
 }
 
-// When doing inserts on the shape cache, we want to use (Direction, Rc<str>) as our key type. When
-// doing lookups on the shape cache, we want to use (Direction, &str) as our key type.
-// Unfortunately, Rust does not allow this, since (Direction, Rc<str>) can only be borrowed as
-// &(Direction, Rc<str>). So we'd have to create a temporary key, and then borrow from that.
-//
-// This is unacceptable, because creating a temporary key requires us to do a heap allocation every
-// time we want to do a lookup on the shape cache, which is on a very hot path. Instead, we resort
-// to a bit of trickery, inspired by the following post on Stackoverflow:
-// https://stackoverflow.com/questions/45786717/how-to-implement-hashmap-with-two-keys/46044391#46044391
-//
-// The idea is that we cannot borrow (Direction, Rc<str>) as a (Direction, &str). But what we *can* do is
-// define a trait ShapeCacheKey to represent our key, with methods to access both the direction and the
-// string, implement that for both (Direction, Rc<str>) and (Direction, &str), and then borrow
-// (Direction, Rc<str>) as &dyn ShapeCacheKey (that is, a reference to a trait object). We can turn a
-// (Direction, &str) into a &dyn ShapeCacheKey without creating a temporary key or doing any heap
-// allocations, so this allows us to do what we want.
 pub trait ShapeCacheKey {
     fn direction(&self) -> Direction;
     fn string(&self) -> &str;
