@@ -380,137 +380,16 @@ impl DrawText {
         self.draw_vars.user_uniforms[3] = sdf_cutoff;
     }
     
-    fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, fonts_atlas: &mut CxFontAtlas) {
-        const LOGICAL_PIXELS_PER_INCH: f64 = 96.0;
-        const POINTS_PER_INCH: f64 = 72.0;
-        const GLYPH_PADDING_IN_DEVICE_PIXELS: f64 = 2.0;
-        
-        if !self.draw_vars.can_instance()
-            || position.x.is_nan()
-            || position.y.is_nan()
-            || self.text_style.font.font_id.is_none() {
-            return
-        }
-
-        if position.x.is_infinite() || position.x.is_nan() {
-            return
-        }
-
-        // Get the font id.
-        let font_id = self.text_style.font.font_id.unwrap();
-        
-        if fonts_atlas.fonts[font_id].is_none() {
-            return
-        }
-
-        // Lock the instance buffer.
-        if !self.many_instances.is_some() {
-            self.begin_many_instances_internal(cx, fonts_atlas);
-        }
-
-        // Use the font id to get the font from the font atlas.
-        let font = fonts_atlas.fonts[font_id].as_mut().unwrap();
-
-        // Get the device pixel ratio.
-        let device_pixel_ratio = cx.current_dpi_factor();
-
-        // Compute the font size in device pixels.
-        let font_size_in_points = self.text_style.font_size / font.ttf_font.units_per_em;
-        let font_size_in_inches = font_size_in_points / POINTS_PER_INCH;
-        let font_size_in_logical_pixels = font_size_in_inches * LOGICAL_PIXELS_PER_INCH;
-        let font_size_in_device_pixels = font_size_in_logical_pixels * device_pixel_ratio;
-        
-        // Compute the glyph ids.
-        let buffer = font.shape(Direction::LeftToRight, chunk);
-        let glyph_ids: Vec<_> = buffer.glyph_infos().iter().map( | glyph | glyph.glyph_id as usize).collect();
-
-        // Use the font size in device pixels the atlas page id from the font.
-        let atlas_page_id = font.get_atlas_page_id(font_size_in_device_pixels);
-        
-        // Use the atlas page id to get the atlas page from the font.
-        let atlas_page = &mut font.atlas_pages[atlas_page_id];
-
-        let owned_font_face = &font.owned_font_face;
-        
-        let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
-        let zbias_step = 0.00001;
-        let mut char_depth = self.draw_depth;
-
-        // Compute the glyph padding.
-        let glyph_padding_in_logical_pixels = GLYPH_PADDING_IN_DEVICE_PIXELS / device_pixel_ratio;
-
-        let mut position_x = position.x;
-        for glyph_id in glyph_ids {
-            // Get the glyph.
-            let glyph = owned_font_face.with_ref(|face| font.ttf_font.get_glyph_by_id(face, glyph_id).unwrap());
-
-            // Compute the glyph size in device pixels.
-            let glyph_size_x_in_font_units = glyph.bounds.p_max.x - glyph.bounds.p_min.x;
-            let glyph_size_x_in_device_pixels = glyph_size_x_in_font_units * font_size_in_device_pixels;
-            let glyph_size_y_in_font_units = glyph.bounds.p_max.y - glyph.bounds.p_min.y;
-            let glyph_size_y_in_device_pixels = glyph_size_y_in_font_units * font_size_in_device_pixels;
-
-            // Compute the padded glyph size in device pixels.
-            let padded_glyph_size_x_in_device_pixels = if glyph_size_x_in_device_pixels == 0.0 {
-                0.0
-            } else {
-                glyph_size_x_in_device_pixels.ceil() + GLYPH_PADDING_IN_DEVICE_PIXELS * 2.0
-            };
-            let padded_glyph_size_y_in_device_pixels = if glyph_size_y_in_device_pixels == 0.0 {
-                0.0
-            } else {
-                glyph_size_y_in_device_pixels.ceil() + GLYPH_PADDING_IN_DEVICE_PIXELS * 2.0
-            };
-
-            // Use the padded glyph size in device pixels to get the atlas glyph from the atlas page.
-            let atlas_glyph = *atlas_page.atlas_glyphs.entry(glyph_id).or_insert_with(|| {
-                fonts_atlas
-                    .alloc
-                    .alloc_atlas_glyph(
-                        padded_glyph_size_x_in_device_pixels,
-                        padded_glyph_size_y_in_device_pixels,
-                        CxFontsAtlasTodo {
-                            font_id,
-                            atlas_page_id,
-                            glyph_id,
-                        }
-                    )
-            });
-
-            // Compute the glyph position in logical pixels.
-            let glyph_position_x_in_font_units = glyph.bounds.p_min.x;
-            let glyph_position_x_in_logical_pixels = glyph_position_x_in_font_units * font_size_in_logical_pixels;
-            let glyph_position_y_in_font_units = glyph.bounds.p_min.y;
-            let glyph_position_y_in_logical_pixels = glyph_position_y_in_font_units * font_size_in_logical_pixels;
-
-            // Compute the glyph size in logical pixels.
-            let padded_glyph_size_x_in_logical_pixels = padded_glyph_size_x_in_device_pixels / device_pixel_ratio;
-            let padded_glyph_size_y_in_logical_pixels = padded_glyph_size_y_in_device_pixels / device_pixel_ratio;
-
-            let w = padded_glyph_size_x_in_logical_pixels * self.font_scale;
-            let h = padded_glyph_size_y_in_logical_pixels * self.font_scale;
-
-            let delta_x = glyph_position_x_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels;
-            let delta_y = -(glyph_position_y_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels);
-            let fudge = self.text_style.font_size * self.font_scale * self.text_style.top_drop;
-            
-            self.font_t1 = atlas_glyph.t1;
-            self.font_t2 = atlas_glyph.t2;
-            self.rect_pos = dvec2(position_x + delta_x, position.y + delta_y + fudge).into();
-            self.rect_size = dvec2(w, h).into();
-            self.char_depth = char_depth;
-            self.delta.x = delta_x as f32;
-            self.delta.y = (delta_y + fudge) as f32;
-            char_depth += zbias_step;
-            mi.instances.extend_from_slice(self.draw_vars.as_slice());
-
-            // Compute the advance width.
-            let advance_width_in_font_units = glyph.horizontal_metrics.advance_width;
-            let advance_width_in_logical_pixels = advance_width_in_font_units * font_size_in_logical_pixels;
-
-            // Advance to the next position.
-            position_x += advance_width_in_logical_pixels * self.font_scale;
-        }
+    fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, font_atlas: &mut CxFontAtlas) {
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache = shape_cache_rc.0.borrow_mut();
+        let font_glyph_ids = shape_cache.shape(
+            Direction::LeftToRight,
+            chunk,
+            &[self.text_style.font.font_id.unwrap()],
+            font_atlas
+        );
+        self.draw_glyphs(cx, font_atlas, position, &font_glyph_ids);
     }
 
     
