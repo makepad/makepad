@@ -637,7 +637,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
                 let v = parsed.profile(v).expect("cannot find provisioning profile");
                 ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v)))
             }
-        }
+            }
     );
     
     if provision.is_none() || apple_args.provisioning_profile.is_none() || apple_args.signing_identity.is_none() || apple_args.device_identifier.is_none(){

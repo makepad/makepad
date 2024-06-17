@@ -151,7 +151,7 @@ self.hue_poll = cx.start_interval(0.1);
         };
     }
     
-    fn handle_signal(&mut self, cx: &mut Cx){
+    fn handle_signal(&mut self, _cx: &mut Cx){
         // lets fetch the latest hue IDs
         while let Ok((id,data)) = self.hue_light_change.try_recv(){
             if self.hue_light_last.get(&id) != Some(&data){
