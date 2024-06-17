@@ -35,12 +35,24 @@ live_design!{
             
             body = <View>{
                 padding:20
+                flow:Down
                 global_volume = <Slider> {
                     padding: 0
                     height: Fit,
                     width: 125,
+                    min: 0.0,
+                    max: 20.0,
                     margin: {top: 1, left: 2}
-                    text: "1344"
+                    text: "Out Volume"
+                }
+                min_volume = <Slider> {
+                    padding: 0
+                    height: Fit,
+                    width: 125,
+                    min: 0.0,
+                    max: 1.0,
+                    margin: {top: 1, left: 2}
+                    text: "Min Volume"
                 }
             }
         }
@@ -52,7 +64,8 @@ app_main!(App);
 #[derive(Live, LiveAtomic, LiveHook, LiveRead, LiveRegister)]
 #[live_ignore]
 pub struct Store{
-    #[live(0.5f64)] global_volume: f64a,
+    #[live(11.0f64)] global_volume: f64a,
+    #[live(0.000f64)] min_volume: f64a,
 }
 
 #[derive(Live, LiveHook)]
@@ -78,6 +91,7 @@ impl App{
     
     pub fn data_bind_map(mut db: DataBindingMap) {
         db.bind(id!(global_volume), ids!(global_volume));
+        db.bind(id!(min_volume), ids!(min_volume));
     }
 }
 
@@ -94,6 +108,7 @@ impl MatchEvent for App{
     
     fn handle_startup(&mut self,  cx: &mut Cx){
         self.start_network_stack(cx);
+        self.store_to_widgets(cx);
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
@@ -103,8 +118,8 @@ impl MatchEvent for App{
     }
     
     fn handle_audio_devices(&mut self, cx:& mut Cx, devices:&AudioDevicesEvent){
-        for _desc in &devices.descs{
-            //println!("{}", desc)
+        for desc in &devices.descs{
+            println!("{}", desc)
         }
         cx.use_audio_inputs(&devices.default_input());
         cx.use_audio_outputs(&devices.default_output());
@@ -120,7 +135,7 @@ impl AppMain for App {
 // this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
 #[derive(SerBin, DeBin, Debug)]
 enum TeamTalkWire {
-    Volume{client_uid: u64, volume: f64},
+    //Volume{client_uid: u64, volume: f64},
     Silence {client_uid: u64, frame_count: u32},
     Audio {client_uid: u64, channel_count: u32, data: Vec<i16>},
 }
@@ -140,7 +155,8 @@ impl App {
         write_audio.set_broadcast(true).unwrap();
 
         let read_audio = write_audio.try_clone().unwrap();
-        let volume_changed_by_ui = self.volume_changed_by_ui.clone();
+        /*let volume_changed_by_ui = self.volume_changed_by_ui.clone();
+        */
         let store = self.store.clone();
         // our microphone broadcast network thread
         std::thread::spawn(move || {
@@ -160,12 +176,13 @@ impl App {
                         sum += v.abs();
                     }
                     let peak = sum / buf.len() as f32;
-                    if volume_changed_by_ui.check_and_clear(){
-                        wire_data.clear();
-                        TeamTalkWire::Volume{client_uid:my_client_uid, volume: store.global_volume.get()}.ser_bin(&mut wire_data);
-                        write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();
-                    }
-                    let wire_packet = if peak>0.005 {
+                    //println!("{}", peak);
+                    /*if volume_changed_by_ui.check_and_clear(){
+                        /*wire_data.clear();*/
+                        /*TeamTalkWire::Volume{client_uid:my_client_uid, volume: store.global_volume.get()}.ser_bin(&mut wire_data);
+                        write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();*/
+                    }*/
+                    let wire_packet = if peak > store.min_volume.get() as f32 *0.01 {
                         TeamTalkWire::Audio {client_uid:my_client_uid, channel_count: 1, data: output_buffer.to_i16()}
                     }
                     else {
@@ -179,8 +196,8 @@ impl App {
                 };
             }
         });
-        let volume_changed_by_network = self.volume_changed_by_network.clone();
-        let store = self.store.clone();
+        //let volume_changed_by_network = self.volume_changed_by_network.clone();
+        /*let store = self.store.clone();*/
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
@@ -198,13 +215,13 @@ impl App {
                     TeamTalkWire::Silence {client_uid, frame_count} => {
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
                     }
-                    TeamTalkWire::Volume{client_uid, volume}=>{
+                    /*TeamTalkWire::Volume{client_uid, volume}=>{
                         if client_uid != my_client_uid{
                             store.global_volume.set(volume);
                             volume_changed_by_network.set();
                         }
                         continue
-                    }
+                    }*/
                 };
                 
                 if client_uid != my_client_uid{
