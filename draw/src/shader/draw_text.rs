@@ -1016,6 +1016,7 @@ impl DrawText {
             self.rect_size = dvec2(rect_size_x, rect_size_y).into();
             self.delta.x = delta_x as f32;
             self.delta.y = delta_y as f32;
+            self.advance = (advance_width_in_logical_pixels * self.font_scale) as f32;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
             self.draw_depth += ZBIAS_STEP;
