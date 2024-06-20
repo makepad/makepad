@@ -27,7 +27,7 @@ pub use {
         makepad_vector::path::PathIterator,
     },
     fxhash::FxHashMap,
-    makepad_rustybuzz::{Direction, GlyphBuffer, GlyphInfo},
+    makepad_rustybuzz::{Direction, GlyphBuffer},
     makepad_vector::ttf_parser::GlyphId,
 };
 
@@ -45,7 +45,7 @@ pub struct CxFontAtlas {
 
 pub struct ShapeCache {
     shape_keys: VecDeque<OwnedShapeKey>,
-    shapes: FxHashMap<OwnedShapeKey, Box<[(usize, u32)]>>,
+    shapes: FxHashMap<OwnedShapeKey, Box<[GlyphInfo]>>,
 }
 
 impl ShapeCache {
@@ -62,22 +62,22 @@ impl ShapeCache {
         text: &str,
         font_ids: &[usize],
         font_atlas: &CxFontAtlas,
-    ) -> &[(usize, u32)] {
+    ) -> &[GlyphInfo] {
         if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
             let shape_key = (direction, text.into(), font_ids.into());
-            let mut font_glyph_ids = Vec::new();
+            let mut glyph_infos = Vec::new();
             let _ = self.shape_internal(
                 text,
                 font_ids,
                 font_atlas,
-                &mut font_glyph_ids,
+                &mut glyph_infos,
             );
             if self.shape_keys.len() == 4096 {
                 let shape_key = self.shape_keys.pop_front().unwrap();
                 self.shapes.remove(&shape_key as &(dyn ShapeKey));
             }
             self.shape_keys.push_back(shape_key.clone());
-            self.shapes.insert(shape_key, font_glyph_ids.into());
+            self.shapes.insert(shape_key, glyph_infos.into());
         }
         &self.shapes[&(direction, text, font_ids) as &(dyn ShapeKey)]
     }
@@ -87,13 +87,13 @@ impl ShapeCache {
         text: &str,
         font_ids: &[usize],
         font_atlas: &CxFontAtlas,
-        font_glyph_ids: &mut Vec<(usize, u32)>,
+        glyph_infos: &mut Vec<GlyphInfo>,
     ) -> Result<(), ()> {
         let Some((&font_id, font_ids)) = font_ids.split_first() else {
             return Err(());
         };
         let Some(font) = &font_atlas.fonts[font_id] else {
-            return self.shape_internal(text, font_ids, font_atlas, font_glyph_ids);
+            return self.shape_internal(text, font_ids, font_atlas, glyph_infos);
         };
 
         let mut buffer = UnicodeBuffer::new();
@@ -107,7 +107,11 @@ impl ShapeCache {
         let mut info_slot = info_iter.next();
         while let Some(info) = info_slot {
             if info.glyph_id == 0 {
-                font_glyph_ids.push((font_id, info.glyph_id));
+                glyph_infos.push(GlyphInfo {
+                    font_id,
+                    glyph_id: info.glyph_id,
+                    byte_index: info.cluster as usize,
+                });
             } else {
                 let start = info.cluster as usize;
                 let end = loop {
@@ -124,15 +128,26 @@ impl ShapeCache {
                     &text[start..end],
                     font_ids,
                     font_atlas,
-                    font_glyph_ids,
+                    glyph_infos,
                 ).is_err() {
-                    font_glyph_ids.push((font_id, info.glyph_id));
+                    glyph_infos.push(GlyphInfo {
+                        font_id,
+                        glyph_id: info.glyph_id,
+                        byte_index: info.cluster as usize,
+                    });
                 }
             }
         }
 
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphInfo {
+    pub font_id: usize,
+    pub glyph_id: u32,
+    pub byte_index: usize,
 }
 
 trait ShapeKey {
