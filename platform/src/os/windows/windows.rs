@@ -21,7 +21,7 @@ use {
         },
         makepad_math::*,
         pass::CxPassParent,
-        cx_api::{CxOsApi, CxOsOp},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
     }
@@ -432,6 +432,10 @@ impl CxOsApi for Cx {
     
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
 }
 
