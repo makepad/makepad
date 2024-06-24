@@ -21,7 +21,7 @@ use {
         //libc_sys,
     },
     crate::{
-        cx_api::{CxOsOp, CxOsApi},
+        cx_api::{CxOsOp, CxOsApi, OpenUrlInPlace},
         cx_stdin::{PollTimers,PollTimer},
         makepad_math::*,
         makepad_live_id::*,
@@ -801,6 +801,10 @@ impl CxOsApi for Cx {
     
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time).as_secs_f64()
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
 }
 

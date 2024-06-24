@@ -96,6 +96,18 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
     
+    FromWasmOpenUrl(args){
+        if(args.in_place){
+            window.location.href = args.url;
+        }
+        else{
+            var link = document.createElement("a");
+            link.href = args.url;
+            link.target = "_blank";
+            link.click();
+        }
+    }
+    
     FromWasmLoadDeps(args) {
         let promises = [];
         for (let path of args.deps) {
