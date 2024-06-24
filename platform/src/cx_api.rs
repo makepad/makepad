@@ -21,7 +21,10 @@ use {
         rc::Rc,
     },
 };
-
+pub enum OpenUrlInPlace{
+    Yes,
+    No
+}
 pub trait CxOsApi {
     fn init_cx_os(&mut self);
 
@@ -33,6 +36,8 @@ pub trait CxOsApi {
     fn pre_start() -> bool {
         false
     }
+    
+    fn open_url(&mut self, url:&str, in_place:OpenUrlInPlace);
     
     fn seconds_since_app_start(&self)->f64;
 

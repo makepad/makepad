@@ -14,7 +14,7 @@ use {
         linux_media::CxLinuxMedia
     },
     crate::{
-        cx_api::{CxOsOp, CxOsApi}, 
+        cx_api::{CxOsOp, CxOsApi, OpenUrlInPlace}, 
         makepad_math::dvec2,
         makepad_live_id::*,
         thread::SignalToUI,
@@ -375,6 +375,10 @@ impl CxOsApi for Cx {
     
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
 }
 

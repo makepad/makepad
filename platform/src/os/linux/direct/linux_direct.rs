@@ -12,7 +12,7 @@ use {
         linux_media::CxLinuxMedia
     },
     crate::{
-        cx_api::{CxOsOp, CxOsApi},
+        cx_api::{CxOsOp, CxOsApi, OpenUrlInPlace},
         makepad_live_id::*,
         makepad_math::*,
         thread::Signal,
@@ -313,6 +313,10 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
 }
 

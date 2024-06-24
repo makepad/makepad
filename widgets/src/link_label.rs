@@ -11,7 +11,9 @@ live_design!{
 
 #[derive(Live, LiveHook, Widget)]
 pub struct LinkLabel {
-    #[deref] button: Button
+    #[deref] button: Button,
+    #[live] url: String,
+    #[live] open_in_place: bool
 }
 
 impl Widget for LinkLabel {
@@ -21,7 +23,13 @@ impl Widget for LinkLabel {
         event: &Event,
         scope: &mut Scope,
     ) {
-        self.button.handle_event(cx, event, scope)
+        let actions = cx.capture_actions(|cx|{
+            self.button.handle_event(cx, event, scope);
+        });
+        if self.url.len()>0 && self.clicked(&actions){
+            cx.open_url(&self.url, if self.open_in_place{OpenUrlInPlace::Yes}else{OpenUrlInPlace::No});
+        }
+        cx.extend_actions(actions);
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
