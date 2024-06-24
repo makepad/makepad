@@ -79,6 +79,7 @@ export class WasmWebBrowser extends WasmBridge {
             window_info: this.window_info,
             deps: deps
         });
+        
         this.do_wasm_pump();
         // only bind the event handlers now
         // to stop them firing into wasm early
@@ -620,6 +621,19 @@ export class WasmWebBrowser extends WasmBridge {
     
 
     wasm_process_msg(to_wasm) {
+        if(this.debug_sum_ptr !== undefined){
+            console.log("CECKING IN PROCESS MSG");
+            let ptr = this.debug_sum_ptr;
+            this.debug_sum_ptr = undefined;
+            var u8_out = new Uint8Array(this.memory.buffer, ptr.ptr, ptr.len);
+            let sum = 0
+            for(let i = 0; i<ptr.len;i++){
+                sum += u8_out[i];
+            }
+            console.log("Got sum"+sum);
+        }
+        
+        
         let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership(), this.wasm_app)
         this.update_array_buffer_refs();
         return this.new_from_wasm(ret_ptr);

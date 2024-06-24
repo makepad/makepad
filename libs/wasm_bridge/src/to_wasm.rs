@@ -59,7 +59,7 @@ pub trait ToWasm {
         wrapper.push_str(&format!("this.reserve_u32({});\n", 4 + Self::u32_size()));
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", id.0 & 0xffff_ffff));
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", (id.0 >> 32)));
-        wrapper.push_str("let block_len_offset = this.u32_offset ++;\n\n");
+        wrapper.push_str("let block_len_offset = this.u32_offset ++ - this.u32_ptr;\n\n");
         
         let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
         
@@ -77,7 +77,7 @@ pub trait ToWasm {
         
         wrapper.push_str("if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}\n");
         wrapper.push_str("let new_len = (this.u32_offset - this.u32_ptr) >> 1;\n");
-        wrapper.push_str("app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];\n");
+        wrapper.push_str("app.u32[this.u32_ptr + block_len_offset] = new_len - app.u32[this.u32_ptr + 1];\n");
         wrapper.push_str("app.u32[this.u32_ptr + 1] = new_len;\n");
         wrapper.push_str("}\n");
         wrapper
