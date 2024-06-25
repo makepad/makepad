@@ -14,9 +14,15 @@ live_design!{
             
             flow: Down,
             spacing: 20,
+	    /*
             align: {
                 x: 0.5,
                 y: 1.0
+            },
+	    */
+	    padding: {
+		left: 100.0,
+		top: 100.0,
             },
             
             width: Fill,
@@ -34,7 +40,7 @@ live_design!{
                 draw_text: {
                     color: #f
                 },
-                text: "hi! how may I assist you today?",
+                text: "hi! how may I assist you today?\n\nI can help you with anything you need.\nJust ask me anything!",
             }
             
             message_input = <TextInput> {
