@@ -143,8 +143,13 @@ live_design!{
                     }
 
                     body: "
-                        <a href=\"https://github.com/element-hq/element-web/releases/tag/v1.11.48\">https://github.com/element-hq/element-web/releases/tag/v1.11.48</a> I can find it? <b>text</b><br>
-                        
+                    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed venenatis, lorem sodales lacinia ornare, nisi lorem congue urna, eget dictum urna lacus ut quam. Duis elementum vehicula tellus vel mollis. Vivamus ut orci sed lorem aliquet posuere. Ut sem augue, gravida vitae luctus placerat, vulputate at ligula. Ut sit amet commodo massa. Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere cubilia curae; Pellentesque sodales, eros id dictum bibendum, nisi neque iaculis augue, ac suscipit dolor nisi et velit. Integer dignissim interdum metus. Etiam ultricies nibh eu bibendum ultricies. Maecenas dictum maximus mollis.
+
+                    Morbi sit amet placerat metus. Vivamus eleifend elementum lectus, in dignissim elit pulvinar sed. Nam eleifend a dui condimentum vestibulum. Nam nec orci pretium, sodales orci quis, aliquam dolor. Maecenas id neque tempor, sollicitudin nisi at, bibendum turpis. Donec consectetur tellus a ornare dictum. Mauris mollis laoreet consequat. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Nunc in fermentum velit.
+                    
+                    Curabitur aliquam lectus id erat sagittis vulputate. Sed aliquet et nisl vel rutrum. Morbi imperdiet condimentum pellentesque. Sed tincidunt facilisis tortor a tincidunt. Nullam congue consequat finibus. Etiam placerat, ipsum vel faucibus commodo, metus velit efficitur felis, sit amet viverra neque sem quis neque. Vivamus convallis tellus aliquet, aliquet turpis non, hendrerit dolor. Mauris vestibulum dictum sem, vel rutrum metus pretium id. Praesent vehicula arcu gravida tortor interdum, mattis tincidunt ante ornare. Quisque sed magna convallis, pretium nisi a, mattis diam. Donec et arcu venenatis, dapibus eros eu, finibus quam. Nullam et luctus tellus, sit amet vehicula neque. Integer pulvinar vitae nunc in placerat. Aliquam sollicitudin sed tellus eu eleifend.
+                    
+                    Mauris vitae lobortis libero, sed euismod augue. Sed varius pulvinar consectetur. Sed blandit luctus dignissim. Fusce tortor neque, scelerisque ac elit at, scelerisque hendrerit odio. Nullam nec pulvinar nisi, id dignissim est. Fusce aliquet diam libero, eu malesuada nibh fermentum in. Integer tempor auctor magna, a varius quam placerat ut. Aenean sed ex sed velit elementum condimentum. Maecenas ac lobortis ipsum, fermentum auctor felis. Duis sollicitudin id felis ullamcorper euismod. Ut quis ante sed urna semper sodales. Donec sit amet est sagittis, auctor est elementum, consectetur augue. Mauris rhoncus mi a neque malesuada ultrices. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Quisque a erat vel orci rhoncus condimentum vitae vitae odio. Vestibulum facilisis nunc neque, ut porta quam commodo eu.
                     "
 
                 }
