@@ -903,7 +903,6 @@ impl DrawText {
         walk_words(
             &mut position,
             width,
-            self.text_style.line_spacing,
             self.font_scale,
             &line_infos,
             &word_infos,
@@ -919,11 +918,12 @@ impl DrawText {
             height: Size::Fixed(height),
         });
 
+        cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
+        
         let mut position = DVec2::new();
         walk_words(
             &mut position,
             width,
-            self.text_style.line_spacing,
             self.font_scale,
             &line_infos,
             &word_infos,
@@ -990,8 +990,8 @@ impl DrawText {
                 let rect = cx.walk_turtle(Walk {
                     abs_pos: None,
                     margin: Margin::default(),
-                    width: Size::Fixed(word_info.width),
-                    height: Size::Fixed(line_info.height * self.text_style.top_drop)
+                    width: Size::Fixed(word_info.width.0),
+                    height: Size::Fixed(line_info.height.0 * self.text_style.top_drop)
                 });
 
                 if let Some(prev_rect) = &mut prev_rect_slot {
@@ -1069,6 +1069,11 @@ impl DrawText {
             let font_size_in_logical_pixels = font_size_in_inches * LOGICAL_PIXELS_PER_INCH;
             let font_size_in_device_pixels = font_size_in_logical_pixels * device_pixel_ratio;
 
+            // Compute the ascender.
+            let ascender_in_points = self.text_style.font_size * font.ttf_font.ascender / font.ttf_font.units_per_em;
+            let ascender_in_inches = ascender_in_points / POINTS_PER_INCH;
+            let ascender_in_logical_pixels = ascender_in_inches * LOGICAL_PIXELS_PER_INCH;
+
             // Use the glyph id to get the glyph from the font.
             let glyph = font.owned_font_face.with_ref(|face| {
                 font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
@@ -1129,7 +1134,7 @@ impl DrawText {
             let delta_x = glyph_position_x_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels;
             let delta_y = -(glyph_position_y_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels);
 
-            let fudge = self.text_style.font_size * self.font_scale * self.text_style.top_drop;
+            let fudge = ascender_in_logical_pixels * self.font_scale;
             let delta_y = delta_y + fudge;
 
             // Compute the rect size.
@@ -1159,14 +1164,14 @@ impl DrawText {
 struct LineInfo {
     word_info_start: usize,
     word_info_end: usize,
-    height: f64,
+    height: LogicalPixels,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct WordInfo {
     glyph_info_start: usize,
     glyph_info_end: usize,
-    width: f64,
+    width: LogicalPixels,
 }
 
 fn compute_infos(
@@ -1201,9 +1206,11 @@ fn compute_infos(
                 });
             }
 
-            let mut width = 0.0;
+            let mut width = LogicalPixels(0.0);
             for glyph_info in &glyph_infos[glyph_info_start..] {
-                width += compute_glyph_width_in_logical_pixels(glyph_info, font_size, font_atlas);
+                let font = &font_atlas.fonts[glyph_info.font_id].as_ref().unwrap();
+                let units_per_em = font.ttf_font.units_per_em;
+                width.0 += glyph_width(font_atlas, glyph_info).to_logical_pixels(units_per_em, font_size).0;
             }
 
             word_infos.push(WordInfo {
@@ -1213,10 +1220,13 @@ fn compute_infos(
             });
         }
 
+
+        let font = &font_atlas.fonts[font_ids[0]].as_ref().unwrap();
+        let units_per_em = font.ttf_font.units_per_em;
         line_infos.push(LineInfo {
             word_info_start,
             word_info_end: word_infos.len(),
-            height: compute_line_height_in_logical_pixels(font_ids[0], font_size, font_atlas),
+            height: line_height(font_atlas, font_ids[0]).to_logical_pixels(units_per_em, font_size)
         });
     }
 }
@@ -1242,56 +1252,9 @@ fn word_byte_ranges(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
         })
 }
 
-fn compute_line_height_in_logical_pixels(
-    font_id: usize,
-    font_size: f64,
-    font_atlas: &mut CxFontAtlas,
-) -> f64 {
-    // Use the font id to get the font from the font atlas.
-    let font = font_atlas.fonts[font_id].as_mut().unwrap();
-
-    // Compute the font size in logical pixels.
-    let font_size_in_points = font_size / font.ttf_font.units_per_em;
-    let font_size_in_inches = font_size_in_points / POINTS_PER_INCH;
-    let font_size_in_logical_pixels = font_size_in_inches * LOGICAL_PIXELS_PER_INCH;
-    
-    // Compute the height of the em square in logical pixels.
-    let em_square_height = font.ttf_font.units_per_em * font_size_in_logical_pixels;
-
-    // We assume the line height equals the height of the em square.
-    em_square_height
-}
-
-fn compute_glyph_width_in_logical_pixels(
-    glyph_info: &GlyphInfo,
-    font_size: f64,
-    font_atlas: &mut CxFontAtlas
-) -> f64 {
-    // Use the font id to get the font from the font atlas.
-    let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
-    
-    // Compute the font size in logical pixels.
-    let font_size_in_points = font_size / font.ttf_font.units_per_em;
-    let font_size_in_inches = font_size_in_points / POINTS_PER_INCH;
-    let font_size_in_logical_pixels = font_size_in_inches * LOGICAL_PIXELS_PER_INCH;
-
-    // Use the glyph id to get the glyph from the font.
-    let glyph = font.owned_font_face.with_ref(|face| {
-        font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
-    });
-
-    // Compute the advance width in logical pixels.
-    let advance_width_in_font_units = glyph.horizontal_metrics.advance_width;
-    let advance_width_in_logical_pixels = advance_width_in_font_units * font_size_in_logical_pixels;
-
-    // We assume the glyph width equals the advance width.
-    advance_width_in_logical_pixels
-}
-
 fn walk_words(
     position: &mut DVec2,
     width: f64,
-    line_spacing: f64,
     font_scale: f64,
     line_infos: &[LineInfo],
     word_infos: &[WordInfo],
@@ -1300,14 +1263,86 @@ fn walk_words(
 ) {
     for line_info in line_infos {
         for word_info in &word_infos[line_info.word_info_start..line_info.word_info_end] {
-            if position.x + word_info.width * font_scale > width && position.x > 0.0 {
+            if position.x + word_info.width.0 * font_scale > width && position.x > 0.0 {
                 position.x = 0.0;
-                position.y += line_info.height * line_spacing * font_scale;
+                position.y += line_info.height.0 * font_scale;
             }
             f(*position, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]);
-            position.x += word_info.width * font_scale
+            position.x += word_info.width.0 * font_scale
         }
         position.x = 0.0;
-        position.y += line_info.height * line_spacing * font_scale
+        position.y += line_info.height.0 * font_scale
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EmUnits(f64);
+
+impl EmUnits {
+    fn to_em(self, units_per_em: f64) -> Em {
+        Em(self.0 / units_per_em)
+    }
+
+    fn to_logical_pixels(self, units_per_em: f64, points_per_em: f64) -> LogicalPixels {
+        self.to_em(units_per_em).to_points(points_per_em).to_inches().to_logical_pixels()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Em(f64);
+
+impl Em {
+    fn to_points(self, points_per_em: f64) -> Points {
+        Points(self.0 * points_per_em)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Points(f64);
+
+impl Points {
+    fn to_inches(self) -> Inches {
+        const POINTS_PER_INCH: f64 = 72.0;
+
+        Inches(self.0 / POINTS_PER_INCH)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Inches(f64);
+
+impl Inches {
+    fn to_logical_pixels(self) -> LogicalPixels {
+        const LOGICAL_PIXELS_PER_INCH: f64 = 96.0;
+
+        LogicalPixels(self.0 * LOGICAL_PIXELS_PER_INCH)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LogicalPixels(f64);
+
+impl LogicalPixels {
+    fn to_device_pixels(self, device_pixel_ratio: f64) -> DevicePixels {
+        DevicePixels(self.0 * device_pixel_ratio)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DevicePixels(f64);
+
+fn line_height(font_atlas: &CxFontAtlas, font_id: usize) -> EmUnits {
+    let font = font_atlas.fonts[font_id].as_ref().unwrap();
+    EmUnits(font.ttf_font.ascender - font.ttf_font.descender)
+}
+
+fn glyph_width(
+    font_atlas: &mut CxFontAtlas,
+    glyph_info: &GlyphInfo,
+) -> EmUnits {
+    let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
+    let glyph = font.owned_font_face.with_ref(|face| {
+        font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
+    });
+    EmUnits(glyph.horizontal_metrics.advance_width)
 }
