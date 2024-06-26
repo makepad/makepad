@@ -110,7 +110,7 @@ impl ShapeCache {
                 glyph_infos.push(GlyphInfo {
                     font_id,
                     glyph_id: info.glyph_id,
-                    byte_index: info.cluster as usize,
+                    index: info.cluster as usize,
                 });
             } else {
                 let start = info.cluster as usize;
@@ -133,7 +133,7 @@ impl ShapeCache {
                     glyph_infos.push(GlyphInfo {
                         font_id,
                         glyph_id: info.glyph_id,
-                        byte_index: info.cluster as usize,
+                        index: info.cluster as usize,
                     });
                 }
             }
@@ -147,7 +147,7 @@ impl ShapeCache {
 pub struct GlyphInfo {
     pub font_id: usize,
     pub glyph_id: u32,
-    pub byte_index: usize,
+    pub index: usize,
 }
 
 trait ShapeKey {
