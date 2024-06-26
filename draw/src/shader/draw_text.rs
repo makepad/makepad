@@ -149,7 +149,8 @@ pub struct TextStyle {
     #[live(9.0)] pub font_size: f64,
     #[live(1.0)] pub brightness: f32,
     #[live(0.5)] pub curve: f32,
-    #[live(1.4)] pub line_spacing: f64,
+    #[live(1.4)] pub line_spacing_factor: f64,
+    #[live(0.0)] pub line_spacing_offset: f64,
     #[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
 }
@@ -475,12 +476,12 @@ impl DrawText {
                 while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
                     match word{
                         WordItem::Newline=>{
-                            measured_height += line_height * self.text_style.line_spacing;
+                            measured_height += line_height * self.text_style.line_spacing_factor;
                             measured_width = 0.0;
                         }
                         WordItem::Spaces{width,..} | WordItem::Word{width,..}=>{
                             if measured_width + width >= eval_width {
-                                measured_height += line_height * self.text_style.line_spacing;
+                                measured_height += line_height * self.text_style.line_spacing_factor;
                                 measured_width = width;
                             }
                             else {
@@ -506,7 +507,7 @@ impl DrawText {
                 
                 for c in text.chars() {
                     if c == '\n' {
-                        measured_height += line_height * self.text_style.line_spacing;
+                        measured_height += line_height * self.text_style.line_spacing_factor;
                     }
                     if let Some(glyph) = fonts_atlas.fonts[font_id].as_mut().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -688,7 +689,7 @@ impl DrawText {
                     let mut ypos = 0.0;
                     for line in text.split('\n') {
                         self.draw_inner(cx, rect.pos + dvec2(0.0, y_align + ypos), line, fonts_atlas);
-                        ypos += line_height * self.text_style.line_spacing;
+                        ypos += line_height * self.text_style.line_spacing_factor;
                     }
                     
                 }
@@ -839,7 +840,7 @@ impl DrawText {
     }
     
     pub fn get_line_spacing(&self) -> f64 {
-        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing
+        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing_factor
     }
     
     pub fn get_font_size(&self) -> f64 {
@@ -862,7 +863,7 @@ impl DrawText {
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
-            y: self.text_style.line_spacing
+            y: self.text_style.line_spacing_factor
         }
     }
 }

@@ -21,7 +21,7 @@ live_design!{
         font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
         font_size: (MESSAGE_FONT_SIZE),
         height_factor: (MESSAGE_TEXT_HEIGHT_FACTOR),
-        line_spacing: (MESSAGE_TEXT_LINE_SPACING),
+        line_spacing_factor: (MESSAGE_TEXT_LINE_SPACING),
     }
 
     GO_NOTO_CURRENT_REGULAR = {
@@ -115,11 +115,11 @@ live_design!{
                     line_spacing: (HTML_LINE_SPACING),
                     width: Fill, height: Fit,
                     font_size: (MESSAGE_FONT_SIZE),
-                    draw_normal:      { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
-                    draw_italic:      { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
-                    draw_bold:        { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
-                    draw_bold_italic: { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
-                    draw_fixed:       {                              text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING) } }
+                    draw_normal:      { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing_factor: (HTML_LINE_SPACING) } }
+                    draw_italic:      { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing_factor: (HTML_LINE_SPACING) } }
+                    draw_bold:        { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing_factor: (HTML_LINE_SPACING) } }
+                    draw_bold_italic: { color: (MESSAGE_TEXT_COLOR), text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing_factor: (HTML_LINE_SPACING) } }
+                    draw_fixed:       {                              text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing_factor: (HTML_LINE_SPACING) } }
                     draw_block:{ 
                         line_color: (MESSAGE_TEXT_COLOR)
                         sep_color: (MESSAGE_TEXT_COLOR)
@@ -138,7 +138,7 @@ live_design!{
 
                     a = {
                         draw_text: {
-                            text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING), top_drop: 1.2}
+                            text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing_factor: (HTML_LINE_SPACING), top_drop: 1.2}
                         }
                     }
 
