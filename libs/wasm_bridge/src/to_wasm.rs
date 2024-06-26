@@ -77,7 +77,7 @@ pub trait ToWasm {
         
         wrapper.push_str("if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}\n");
         wrapper.push_str("let new_len = (this.u32_offset - this.u32_ptr) >> 1;\n");
-        wrapper.push_str("app.u32[this.u32_ptr + block_len_offset] = new_len - app.u32[this.u32_ptr + 1];\n");
+        wrapper.push_str("app.u32[this.u32_ptr + block_len_offset] = new_len;\n");
         wrapper.push_str("app.u32[this.u32_ptr + 1] = new_len;\n");
         wrapper.push_str("}\n");
         wrapper
