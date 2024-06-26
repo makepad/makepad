@@ -84,7 +84,7 @@ live_design!{
             let dxt = length(dFdx(texel_coords));
             let dyt = length(dFdy(texel_coords));
             let scale = (dxt + dyt) * 4096.0 *0.5;
-            return self.sample_color(scale, self.tex_coord1.xy);
+            return self.sample_color(scale, self.tex_coord1.xy) + vec4(1.0, 0.0, 0.0, 0.0);
             // ok lets take our delta in the x direction
             /*
             //4x AA
@@ -149,7 +149,7 @@ pub struct TextStyle {
     #[live(9.0)] pub font_size: f64,
     #[live(1.0)] pub brightness: f32,
     #[live(0.5)] pub curve: f32,
-    #[live(1.4)] pub line_spacing_factor: f64,
+    #[live(1.4)] pub line_spacing: f64,
     #[live(0.0)] pub line_spacing_offset: f64,
     #[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
@@ -476,12 +476,12 @@ impl DrawText {
                 while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_mut().unwrap()) {
                     match word{
                         WordItem::Newline=>{
-                            measured_height += line_height * self.text_style.line_spacing_factor;
+                            measured_height += line_height * self.text_style.line_spacing;
                             measured_width = 0.0;
                         }
                         WordItem::Spaces{width,..} | WordItem::Word{width,..}=>{
                             if measured_width + width >= eval_width {
-                                measured_height += line_height * self.text_style.line_spacing_factor;
+                                measured_height += line_height * self.text_style.line_spacing;
                                 measured_width = width;
                             }
                             else {
@@ -507,7 +507,7 @@ impl DrawText {
                 
                 for c in text.chars() {
                     if c == '\n' {
-                        measured_height += line_height * self.text_style.line_spacing_factor;
+                        measured_height += line_height * self.text_style.line_spacing;
                     }
                     if let Some(glyph) = fonts_atlas.fonts[font_id].as_mut().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -685,11 +685,14 @@ impl DrawText {
                         width: Size::Fixed(geom.measured_width),
                         height: Size::Fixed(height)
                     });
+
+                    cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
+
                     // lets do our y alignment
                     let mut ypos = 0.0;
                     for line in text.split('\n') {
                         self.draw_inner(cx, rect.pos + dvec2(0.0, y_align + ypos), line, fonts_atlas);
-                        ypos += line_height * self.text_style.line_spacing_factor;
+                        ypos += line_height * self.text_style.line_spacing;
                     }
                     
                 }
@@ -840,7 +843,7 @@ impl DrawText {
     }
     
     pub fn get_line_spacing(&self) -> f64 {
-        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing_factor
+        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing
     }
     
     pub fn get_font_size(&self) -> f64 {
@@ -863,7 +866,7 @@ impl DrawText {
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
-            y: self.text_style.line_spacing_factor
+            y: self.text_style.line_spacing
         }
     }
 }
@@ -904,6 +907,7 @@ impl DrawText {
         walk_words(
             &mut position,
             width,
+            self.text_style.line_spacing,
             self.font_scale,
             &line_infos,
             &word_infos,
@@ -925,6 +929,7 @@ impl DrawText {
         walk_words(
             &mut position,
             width,
+            self.text_style.line_spacing,
             self.font_scale,
             &line_infos,
             &word_infos,
@@ -1059,10 +1064,12 @@ impl DrawText {
             return;
         };
         
+        let font_size = self.text_style.font_size;
+
         let mut position = position;
         for glyph_info in glyph_infos {
-            // Use the font id to get the font from the font atlas.
             let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
+            let units_per_em = font.ttf_font.units_per_em;
 
             // Compute the font size.
             let font_size_in_points = self.text_style.font_size / font.ttf_font.units_per_em;
@@ -1071,21 +1078,17 @@ impl DrawText {
             let font_size_in_device_pixels = font_size_in_logical_pixels * device_pixel_ratio;
 
             // Compute the ascender.
-            let ascender_in_points = self.text_style.font_size * font.ttf_font.ascender / font.ttf_font.units_per_em;
-            let ascender_in_inches = ascender_in_points / POINTS_PER_INCH;
-            let ascender_in_logical_pixels = ascender_in_inches * LOGICAL_PIXELS_PER_INCH;
-
+            let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size);
+            
             // Use the glyph id to get the glyph from the font.
             let glyph = font.owned_font_face.with_ref(|face| {
                 font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
             });
 
             // Compute the glyph position.
-            let glyph_position_x_in_font_units = glyph.bounds.p_min.x;
-            let glyph_position_x_in_logical_pixels = glyph_position_x_in_font_units * font_size_in_logical_pixels;
-            let glyph_position_y_in_font_units = glyph.bounds.p_min.y;
-            let glyph_position_y_in_logical_pixels = glyph_position_y_in_font_units * font_size_in_logical_pixels;
-
+            let glyph_p_min_x = units_to_lpxs(glyph.bounds.p_min.x, units_per_em, font_size);
+            let glyph_p_min_y = units_to_lpxs(glyph.bounds.p_min.y, units_per_em, font_size);
+            
             // Compute the glyph size.
             let glyph_size_x_in_font_units = glyph.bounds.p_max.x - glyph.bounds.p_min.x;
             let glyph_size_x_in_device_pixels = glyph_size_x_in_font_units * font_size_in_device_pixels;
@@ -1106,10 +1109,12 @@ impl DrawText {
             };
             let padded_glyph_size_y_in_logical_pixels = padded_glyph_size_y_in_device_pixels / device_pixel_ratio;
 
+            // Compute the left side bearing.
+            let left_side_bearing = units_to_lpxs(glyph.horizontal_metrics.left_side_bearing, units_per_em, self.text_style.font_size);
+            
             // Compute the advance width.
-            let advance_width_in_font_units = glyph.horizontal_metrics.advance_width;
-            let advance_width_in_logical_pixels = advance_width_in_font_units * font_size_in_logical_pixels;
-
+            let advance_width = units_to_lpxs(glyph.horizontal_metrics.advance_width, units_per_em, self.text_style.font_size);
+            
             // Use the font size in device pixels to get the atlas page id from the font.
             let atlas_page_id = font.get_atlas_page_id(font_size_in_device_pixels);
 
@@ -1132,10 +1137,10 @@ impl DrawText {
             });
 
             // Compute the distance from the current position to the rect.
-            let delta_x = glyph_position_x_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels;
-            let delta_y = -(glyph_position_y_in_logical_pixels * self.font_scale - glyph_padding_in_logical_pixels);
+            let delta_x = left_side_bearing * self.font_scale; // - glyph_padding_in_logical_pixels;
+            let delta_y = -(glyph_p_min_y * self.font_scale - glyph_padding_in_logical_pixels);
 
-            let fudge = ascender_in_logical_pixels * self.font_scale;
+            let fudge = ascender * self.font_scale;
             let delta_y = delta_y + fudge;
 
             // Compute the rect size.
@@ -1150,13 +1155,13 @@ impl DrawText {
             self.rect_size = dvec2(rect_size_x, rect_size_y).into();
             self.delta.x = delta_x as f32;
             self.delta.y = delta_y as f32;
-            self.advance = (advance_width_in_logical_pixels * self.font_scale) as f32;
+            self.advance = (advance_width * self.font_scale) as f32;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
             self.draw_depth += ZBIAS_STEP;
             
             // Advance to the next position.
-            position.x += advance_width_in_logical_pixels * self.font_scale;
+            position.x += advance_width * self.font_scale;
         }
     }
 }
@@ -1185,25 +1190,25 @@ fn compute_infos(
     font_atlas: &mut CxFontAtlas,
     shape_cache: &mut ShapeCache,
 ) {
-    for (line_byte_start, line_byte_end) in line_byte_ranges(text) {
-        let line = &text[line_byte_start..line_byte_end];
+    for (line_start, line_end) in line_ranges(text) {
+        let line = &text[line_start..line_end];
 
         let word_info_start = word_infos.len();
-        for (word_byte_start, word_byte_end) in word_byte_ranges(line) {
-            let word_byte_start = line_byte_start + word_byte_start;
-            let word_byte_end = line_byte_start + word_byte_end;
+        for (word_start, word_end) in word_ranges(line) {
+            let word_start = line_start + word_start;
+            let word_end = line_start + word_end;
 
             let glyph_info_start = glyph_infos.len();
             for glyph_info in shape_cache.shape(
                 Direction::LeftToRight,
-                &text[word_byte_start..word_byte_end],
+                &text[word_start..word_end],
                 font_ids,
                 font_atlas
             ) {
                 glyph_infos.push(GlyphInfo {
                     font_id: glyph_info.font_id,
                     glyph_id: glyph_info.glyph_id,
-                    byte_index: glyph_info.byte_index + word_byte_start,
+                    index: glyph_info.index + word_start,
                 });
             }
 
@@ -1221,7 +1226,6 @@ fn compute_infos(
             });
         }
 
-
         let font = &font_atlas.fonts[font_ids[0]].as_ref().unwrap();
         let units_per_em = font.ttf_font.units_per_em;
         line_infos.push(LineInfo {
@@ -1232,47 +1236,52 @@ fn compute_infos(
     }
 }
 
-fn line_byte_ranges(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+fn line_ranges(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     text
         .lines()
-        .scan(0, |byte_start, line| {
-            let byte_end = *byte_start + line.len();
-            let byte_range = (*byte_start, byte_end);
-            *byte_start = byte_end + 1;
-            Some(byte_range)
+        .scan(0, |start, line| {
+            let end = *start + line.len();
+            let range = (*start, end);
+            *start = end + 1;
+            Some(range)
         })
 }
 
-fn word_byte_ranges(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+fn word_ranges(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     unicode_linebreak::linebreaks(line)
-        .map(|(byte_index, _)| byte_index)
-        .scan(0, |byte_start, byte_end| {
-            let byte_range = (*byte_start, byte_end);
-            *byte_start = byte_end;
-            Some(byte_range)
+        .map(|(index, _)| index)
+        .scan(0, |start, end| {
+            let range = (*start, end);
+            *start = end;
+            Some(range)
         })
 }
 
 fn walk_words(
     position: &mut DVec2,
     width: f64,
+    line_spacing: f64,
     font_scale: f64,
     line_infos: &[LineInfo],
     word_infos: &[WordInfo],
     glyph_infos: &[GlyphInfo],
     mut f: impl FnMut(DVec2, &[GlyphInfo]),
 ) {
-    for line_info in line_infos {
+    for (index, line_info) in line_infos.iter().enumerate() {
         for word_info in &word_infos[line_info.word_info_start..line_info.word_info_end] {
             if position.x + word_info.width * font_scale > width && position.x > 0.0 {
                 position.x = 0.0;
-                position.y += line_info.height * font_scale;
+                position.y += (line_info.height * line_spacing) * font_scale;
             }
             f(*position, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]);
             position.x += word_info.width * font_scale
         }
         position.x = 0.0;
-        position.y += line_info.height * font_scale
+        if index == line_infos.len() - 1 {
+            position.y += line_info.height * font_scale;
+        } else {
+            position.y += line_info.height * line_spacing * font_scale;
+        }
     }
 }
 
