@@ -187,7 +187,7 @@ live_design! {
         font_size: (THEME_FONT_SIZE_CODE)
         brightness: 1.1
         top_drop: 1.3
-        line_spacing_factor: 2.0
+        line_spacing: 2.0
     }
 
     Label = <LabelBase> {
@@ -205,7 +205,7 @@ live_design! {
         draw_text: {
             wrap: Word
             text_style: <THEME_FONT_BOLD> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_1)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -218,7 +218,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_1)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_1)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -231,7 +231,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_2)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_2)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -244,7 +244,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_2)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_2)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -257,7 +257,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_3)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_3)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -270,7 +270,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_3)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_3)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -283,7 +283,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_4)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_4)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -296,7 +296,7 @@ live_design! {
         margin: {top: (THEME_FONT_SIZE_4)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_4)
             }
             color: (THEME_COLOR_TEXT_HL)
@@ -309,7 +309,7 @@ live_design! {
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
             color: (THEME_COLOR_TEXT_DEFAULT)
@@ -322,7 +322,7 @@ live_design! {
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
             color: (THEME_COLOR_TEXT_DEFAULT)
@@ -335,7 +335,7 @@ live_design! {
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_ITALIC> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
             color: (THEME_COLOR_TEXT_DEFAULT)
@@ -348,7 +348,7 @@ live_design! {
         margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
             color: (THEME_COLOR_TEXT_DEFAULT)
@@ -660,7 +660,7 @@ live_design! {
         flow: RightWrap,
         padding: <THEME_MSPACE_1> {}
 
-        line_spacing_factor: (THEME_FONT_LINE_SPACING),
+        line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         paragraph_spacing: 16,
 
@@ -3225,7 +3225,7 @@ live_design! {
             instance focus: 0.0
             wrap: Word,
             text_style: <THEME_FONT_REGULAR> {
-                line_spacing_factor: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
