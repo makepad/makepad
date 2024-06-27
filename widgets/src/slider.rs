@@ -62,7 +62,7 @@ pub struct Slider {
     
     #[live] bind: String,
     
-    #[rust] pub value: f64,
+    #[rust] pub relative_value: f64,
     #[rust] pub dragging: Option<f64>,
 }
 
@@ -78,7 +78,7 @@ pub enum SliderAction {
 impl Slider {
     
     fn to_external(&self) -> f64 {
-        let val = self.value * (self.max - self.min) + self.min;
+        let val = self.relative_value * (self.max - self.min) + self.min;
         if self.step != 0.0{
             return (val / self.step).floor()* self.step
         }
@@ -88,9 +88,9 @@ impl Slider {
     }
     
     fn set_internal(&mut self, external: f64) -> bool {
-        let old = self.value;
-        self.value = (external - self.min) / (self.max - self.min);
-        old != self.value
+        let old = self.relative_value;
+        self.relative_value = (external - self.min) / (self.max - self.min);
+        old != self.relative_value
     }
     
     pub fn update_text_input(&mut self) {
@@ -115,7 +115,7 @@ impl Slider {
     }
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.value as f32;
+        self.draw_slider.slide_pos = self.relative_value as f32;
         self.draw_slider.begin(cx, walk, self.layout);
         
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
@@ -126,6 +126,15 @@ impl Slider {
         }
         
         self.draw_slider.end(cx);
+    }
+
+    pub fn value(&self) -> f64 {
+        self.to_external()
+    }
+
+    pub fn set_value(&mut self, v: f64) {
+        self.set_internal(v);
+        self.update_text_input();
     }
 }
 
@@ -173,7 +182,7 @@ impl Widget for Slider {
                 self.text_input.redraw(cx);
                                 
                 self.animator_play(cx, id!(drag.on));
-                self.dragging = Some(self.value);
+                self.dragging = Some(self.relative_value);
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
@@ -193,7 +202,7 @@ impl Widget for Slider {
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
-                    self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
+                    self.relative_value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input_and_redraw(cx);
@@ -244,11 +253,18 @@ impl Widget for Slider {
 }
 
 impl SliderRef{
-    pub fn value(&self)->Option<f64>{
+    pub fn value(&self)->Option<f64> {
         if let Some(inner) = self.borrow(){
-            return Some(inner.to_external())
+            return Some(inner.value())
         }
+
         return None
+    }
+
+    pub fn set_value(&self, v: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value(v)
+        }
     }
     
     pub fn slided(&self, actions:&Actions)->Option<f64>{
