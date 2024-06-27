@@ -3710,7 +3710,11 @@ live_design! {
                 width: Fill, height: Fit,
                 align: {x: 0.5, y: 0.5}
 
-                title = <H4> { text: "Stack View Title" }
+                title = <H4> {
+                    width: Fit, height: Fit,
+                    margin: 0,
+                    text: "Stack View Title"
+                }
             }
 
             button_container = <View> {
