@@ -19,11 +19,11 @@ impl OsWebSocket{
     pub fn send_message(&mut self, message:WebSocketMessage)->Result<(),()>{
         let frame = match &message{
             WebSocketMessage::String(data)=>{
-                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, false);
                 ServerWebSocket::build_message(header, &data.to_string().into_bytes())
             }
             WebSocketMessage::Binary(data)=>{
-                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
                 ServerWebSocket::build_message(header, &data)
             }
             _=>panic!()

@@ -235,7 +235,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    text: "@GOSIM· 13h"
+                    text: "@User 13h"
                 }
                 text = <Label> {
                     width: Fill,
@@ -352,7 +352,7 @@ impl Widget for NewsFeed{
                     let item = list.item(cx, item_id, template).unwrap();
                     let text = match item_id % 4 {
                         1 => format!("Hello! {}", item_id),
-                        2 => format!("Hello GOSIM\n With lines {}", item_id),
+                        2 => format!("Hello world\n With lines {}", item_id),
                         3 => format!("Random numbers {}", item_id),
                         _ => format!("Text body 4 id {}", item_id),
                     };
