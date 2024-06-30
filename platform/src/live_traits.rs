@@ -102,12 +102,16 @@ pub trait LiveNew: LiveApply {
     
     fn new_main(cx: &mut Cx) -> Self where Self: Sized {
         let lti = Self::live_type_info(cx);
+        Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
+    }
+    
+    fn register_main_module(cx: &mut Cx) {
+        let lti = Self::live_type_info(cx);
         {
             let live_registry_rc = cx.live_registry.clone();
             let mut live_registry = live_registry_rc.borrow_mut();
             live_registry.main_module = Some(lti.clone());
         }
-        Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
     }
     
     fn update_main(&mut self, cx:&mut Cx){

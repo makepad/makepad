@@ -18,11 +18,12 @@ pub enum NetworkResponse{
     HttpResponse(HttpResponse),
     HttpProgress{loaded:u64, total:u64},
 }
-
+/*
 pub struct NetworkResponseIter<I> {
     iter: Option<I>,
 }
-
+*/
+/*
 impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
     type Item = I::Item;
     
@@ -32,7 +33,7 @@ impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
             Some(v)=>v.next()
         }
     }
-}
+}*/
 
 pub struct NetworkResponseChannel {
     pub receiver: Receiver<NetworkResponseItem>,
