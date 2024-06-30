@@ -181,12 +181,15 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                     let _ = tx_socket.send(Vec::new());
                     break 
                 }
+                println!("RECEIVED {:?}", &data[0..n]);
                 web_socket.parse(&data[0..n], | result | {
                     match result {
                         Ok(ServerWebSocketMessage::Ping(_)) => {
                             let _ = tx_socket.send(SERVER_WEB_SOCKET_PONG_MESSAGE.to_vec());
+                            println!("GOT PING");
                         },
                         Ok(ServerWebSocketMessage::Pong(_)) => {
+                            println!("GOT PONG");
                         },
                         Ok(ServerWebSocketMessage::Text(_text)) => {
                         }

@@ -73,7 +73,7 @@ macro_rules!app_main {
                     }
                     app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
                 })));
-                $app::register_main_module(&mut *cx.borrow_mut());
+                $app::register_main_module(&mut cx);
                 cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
                 live_design(&mut cx);
                 cx.init_cx_os();

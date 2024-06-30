@@ -43,7 +43,7 @@ public class MakepadWebSocketReader implements Runnable {
             while ((readBytes = mWebSocket.getInputStream().read(rawbuffer)) != -1) {
                 if (readBytes == 2 && rawbuffer[0] == PING[0] && rawbuffer[1] == PING[1]) {
                     OutputStream ostream = mWebSocket.getOutputStream();
-                    ostream.write(PONG, 0, 1);
+                    ostream.write(PONG, 0, 2);
                     ostream.flush();
                     continue;
                 }

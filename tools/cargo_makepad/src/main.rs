@@ -41,6 +41,7 @@ println!("    wasm [options] run <cargo args>              Build and run a wasm 
     println!(" in order for makepad to be able to install an ios application on a real device a provisioning");
     println!(" profile is needed. To create one make an empty application in xcode and give it an organisation");
     println!(" name and product name you copy exactly and without spaces/odd characters into --org=x and --app=x");
+    println!("                         --stable use stable compiler");
     println!(" Also run it on the device it at least once, so the profile is created");
     println!("                         --org=organisation_name");
     println!("                         --app=product_name");
