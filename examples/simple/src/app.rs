@@ -26,7 +26,7 @@ live_design!{
                         y: 0.5
                     },
                     button1 = <Button> {
-                        text: "Hello world"
+                        text: "Hello world "
                         draw_text:{color:#f00}
                     }
                     input1 = <TextInput> {
@@ -73,7 +73,7 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
-            log!("BUTTON jk {}", self.counter); 
+            log!("Press button {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));

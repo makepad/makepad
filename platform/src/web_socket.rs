@@ -170,8 +170,7 @@ impl Cx{
         }
         self.studio_http = studio_http.into();
         
-        #[cfg(not(target_os="tvos"))]{
-
+        #[cfg(all(not(target_os="tvos"), not(target_os="ios")))]{
             // lets open a websocket
             HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
             let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
@@ -180,8 +179,8 @@ impl Cx{
         
     }
     
-    #[cfg(target_os="tvos")]
-    pub fn start_studio_websocket_tvos(&mut self) {
+    #[cfg(any(target_os="tvos", target_os="ios"))]
+    pub fn start_studio_websocket_delayed(&mut self) {
         HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
         let request = HttpRequest::new(self.studio_http.clone(), HttpMethod::GET);
         self.studio_web_socket = Some(WebSocket::open(request));
