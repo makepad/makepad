@@ -609,10 +609,10 @@ pub enum PackType {
     Packed,
     Unpacked
 }
-
+/*
 pub struct SlErr {
     _msg: String
-}
+}*/
 
 impl MetalCx {
     

@@ -54,13 +54,13 @@ app_main!(App);
 pub struct Store{
     #[live(0.5f64)] global_volume: f64a,
 }
-
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[live] store: Arc<Store>,
     #[rust] volume_changed_by_ui: SignalFromUI,
-    #[rust] volume_changed_by_network: SignalToUI,
+    //#[rust] volume_changed_by_network: SignalToUI,
     #[rust] hue_light_change: ToUIReceiver<(usize,HueLight)>,
     #[rust] hue_light_last: HashMap<usize, HueLight>,
     #[rust] hue_light_set: HashMap<usize, HueLight>,

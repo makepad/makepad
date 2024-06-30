@@ -1003,7 +1003,7 @@ live_design! {
         }
     }
 
-    ModEnvelopePanel = <View dx:380.0 dy:1985.9 dw:397.1 dh:299.0> {
+    ModEnvelopePanel = <View dx:373.2 dy:1984.5 dw:405.1 dh:299.0> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1014,7 +1014,7 @@ live_design! {
             height: Fit
                 <View> {
                 flow: Right,
-                align: {x: 0.0, y: 0.0}
+                align: {x: 0.5, y: 0.0}
                 width: Fill,
                 height: Fit
 
