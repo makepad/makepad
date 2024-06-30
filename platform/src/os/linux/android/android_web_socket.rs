@@ -8,7 +8,7 @@ use crate::LiveId;
 use makepad_http::websocket::{ServerWebSocketMessageHeader, ServerWebSocketMessageFormat, ServerWebSocket};
 
 pub struct OsWebSocket{
-    pub sender_ref: Arc<Box<Sender<WebSocketMessage>>>,
+    pub sender_ref: Arc<Box<(u64,Sender<WebSocketMessage>)>>,
     pub request_id: LiveId,
 }
 
@@ -36,7 +36,7 @@ impl OsWebSocket{
     pub fn open(_socket_id:u64,  request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         let request_id = LiveId::unique();
 
-        let sender_ref = Arc::new(Box::new(rx_sender));
+        let sender_ref = Arc::new(Box::new((_socket_id,rx_sender)));
         let pointer = Arc::as_ptr(&sender_ref);
 
         unsafe {android_jni::to_java_websocket_open(request_id, request, pointer);}

@@ -63,7 +63,7 @@ use {
     makepad_http::websocket::ServerWebSocket as WebSocketImpl,
     makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
-/*
+
 fn android_debug_log(msg:&str){
     use std::ffi::c_int;
     extern "C" { 
@@ -72,7 +72,7 @@ fn android_debug_log(msg:&str){
     let msg = format!("{}\0", msg);
     unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
 }
-*/
+
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
@@ -82,7 +82,7 @@ impl Cx {
         self.redraw_all();
 
         self.start_network_live_file_watcher();
-
+        let mut websocket_parsers = HashMap::new();
         while !self.os.quit {
             for event in self.os.timers.get_dispatch() {
                 self.call_event_handler(&event);
@@ -285,16 +285,16 @@ impl Cx {
                         self.call_event_handler(&e);
                     }
                     FromJavaMessage::WebSocketMessage {message, sender} => {
-                        let mut ws_message_parser = WebSocketImpl::new();
+                        let ws_message_parser = websocket_parsers.entry(sender.0).or_insert_with(||  WebSocketImpl::new());
                         ws_message_parser.parse(&message, | result | {
                             match result {
                                 Ok(WebSocketMessageImpl::Text(text_msg)) => {
                                     let message = WebSocketMessage::String(text_msg.to_string());
-                                    sender.send(message).unwrap();
+                                    sender.1.send(message).unwrap();
                                 },
                                 Ok(WebSocketMessageImpl::Binary(data)) => {
                                     let message = WebSocketMessage::Binary(data.to_vec());
-                                    sender.send(message).unwrap();
+                                    sender.1.send(message).unwrap();
                                 },
                                 Err(e) => {
                                     println!("Websocket message parse error {:?}", e);
@@ -304,12 +304,14 @@ impl Cx {
                         });
                     }
                     FromJavaMessage::WebSocketClosed {sender} => {
+                        websocket_parsers.remove(&sender.0);
                         let message = WebSocketMessage::Closed;
-                        sender.send(message).unwrap();
+                        sender.1.send(message).unwrap();
                     }
                     FromJavaMessage::WebSocketError {error, sender} => {
+                        websocket_parsers.remove(&sender.0);
                         let message = WebSocketMessage::Error(error);
-                        sender.send(message).unwrap();
+                        sender.1.send(message).unwrap();
                     }
                     FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -414,6 +416,7 @@ impl Cx {
 
 
             if self.handle_live_edit() {
+                crate::log!("LIVE EDIT!");
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
             }

@@ -68,14 +68,14 @@ pub enum FromJavaMessage {
     },
     WebSocketMessage {
         message: Vec<u8>,
-        sender: Box<Sender<WebSocketMessage>>,
+        sender: Box<(u64,Sender<WebSocketMessage>)>,
     },
     WebSocketClosed {
-        sender: Box<Sender<WebSocketMessage>>,
+        sender: Box<(u64,Sender<WebSocketMessage>)>,
     },
     WebSocketError {
         error: String,
-        sender: Box<Sender<WebSocketMessage>>,
+        sender: Box<(u64,Sender<WebSocketMessage>)>,
     },
     MidiDeviceOpened{
         name: String,
@@ -414,7 +414,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
     callback: jni_sys::jlong,
 ) {
     let message = unsafe { java_byte_array_to_vec(env, message) };
-    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+    let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
     send_from_java_message(FromJavaMessage::WebSocketMessage {
         message,
@@ -428,7 +428,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
     _: jni_sys::jobject,
     callback: jni_sys::jlong,
 ) {
-    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+    let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
     send_from_java_message(FromJavaMessage::WebSocketClosed {
         sender: sender.clone(),
@@ -443,7 +443,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
     callback: jni_sys::jlong,
 ) {
     let error = unsafe { jstring_to_string(env, error) };
-    let sender = unsafe { &*(callback as *const Box<Sender<WebSocketMessage>>) };
+    let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
     send_from_java_message(FromJavaMessage::WebSocketError {
         error,
@@ -645,7 +645,7 @@ pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
 pub unsafe fn to_java_websocket_open(
     request_id: LiveId,
     request: HttpRequest,
-    recv: *const Box<std::sync::mpsc::Sender<WebSocketMessage>>
+    recv: *const Box<(u64,std::sync::mpsc::Sender<WebSocketMessage>)>
 ) {
     let env = attach_jni_env();
     let url = CString::new(request.url.clone()).unwrap();
