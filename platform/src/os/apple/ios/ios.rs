@@ -169,6 +169,7 @@ impl Cx {
             }
             IosEvent::Init=>{
                 get_ios_app_global().start_timer(0, 0.008, true);
+                self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
