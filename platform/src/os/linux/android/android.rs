@@ -63,7 +63,7 @@ use {
     makepad_http::websocket::ServerWebSocket as WebSocketImpl,
     makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
-
+/*
 fn android_debug_log(msg:&str){
     use std::ffi::c_int;
     extern "C" { 
@@ -71,7 +71,7 @@ fn android_debug_log(msg:&str){
     }
     let msg = format!("{}\0", msg);
     unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
-}
+}*/
 
 
 impl Cx {
@@ -416,7 +416,6 @@ impl Cx {
 
 
             if self.handle_live_edit() {
-                crate::log!("LIVE EDIT!");
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
             }
