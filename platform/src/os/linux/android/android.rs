@@ -63,6 +63,16 @@ use {
     makepad_http::websocket::ServerWebSocket as WebSocketImpl,
     makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
+/*
+fn android_debug_log(msg:&str){
+    use std::ffi::c_int;
+    extern "C" { 
+        pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
+    }
+    let msg = format!("{}\0", msg);
+    unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
+}
+*/
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
@@ -79,6 +89,7 @@ impl Cx {
             }
 
             while let Ok(msg) = from_java_rx.try_recv() {
+                
                 // crate::log!("log main_loop: {:?}", msg);
                 match msg {
                     FromJavaMessage::BackPressed => {
@@ -104,6 +115,7 @@ impl Cx {
                         let window_id = CxWindowPool::id_zero();
                         let window = &mut self.windows[window_id];
                         let old_geom = window.window_geom.clone();
+                        
                         let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                         let size = self.os.display_size / dpi_factor;
                         window.window_geom = WindowGeom {
@@ -363,6 +375,7 @@ impl Cx {
                     }
                     FromJavaMessage::Start => {
                         self.call_event_handler(&Event::Foreground);
+                        
                     }
                     FromJavaMessage::Stop => {
                         self.call_event_handler(&Event::Background);
