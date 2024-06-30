@@ -39,6 +39,9 @@ live_design!{
                     width: Fill,
                     height: Fill,
                     margin: 0
+                    fn get_color(self) -> vec4 {
+                        return self.get_color_scale_pan(self.image_scale, self.image_pan)*2.0
+                    }
                 }
                 
             }

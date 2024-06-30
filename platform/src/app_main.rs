@@ -25,6 +25,7 @@ macro_rules!app_main {
                 }
                 <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
+            $app::register_main_module(&mut *cx.borrow_mut());
             cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
             //cx.borrow_mut().init_websockets("");
             live_design(&mut *cx.borrow_mut());
@@ -72,6 +73,7 @@ macro_rules!app_main {
                     }
                     app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
                 })));
+                $app::register_main_module(&mut *cx.borrow_mut());
                 cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
                 live_design(&mut cx);
                 cx.init_cx_os();
@@ -96,6 +98,7 @@ macro_rules!app_main {
                 }
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
+            $app::register_main_module(&mut cx);
             cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
             live_design(&mut cx);
             cx.init_cx_os();

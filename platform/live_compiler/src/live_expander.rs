@@ -188,6 +188,8 @@ impl<'a> LiveExpander<'a> {
                     
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
                     if in_node.is_expr() {
+                        // lets eval the expression
+                        
                         // splice it in
                         let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());

@@ -6,13 +6,13 @@ export class WasmWebBrowser extends WasmBridge {
         if (wasm === undefined) {
             return
         }
-        
+        /*
         window.onbeforeunload = _ => {
             this.clear_memory_refs();
             for (let worker of this.workers) {
                 worker.terminate();
             }
-        }
+        }*/
         
         this.wasm_app = this.wasm_create_app();
         

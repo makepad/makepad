@@ -609,7 +609,7 @@ impl DrawText {
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
         
-        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
+        let _font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
         let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
                 
         //let in_many = self.many_instances.is_some();
@@ -892,7 +892,7 @@ impl DrawText {
             for (word_byte_start, word_byte_end) in word_byte_ranges(line) {
                 let word_byte_start = line_byte_start + word_byte_start;
                 let word_byte_end = line_byte_start + word_byte_end;
-                let word = &text[word_byte_start..word_byte_end];
+                let _word = &text[word_byte_start..word_byte_end];
                 // println!("WORD {:?}", word);
 
                 let glyph_info_start = glyph_infos.len();
@@ -1032,7 +1032,7 @@ impl DrawText {
         // Compute the glyph padding.
         let glyph_padding_in_device_pixels = 2.0;
         let glyph_padding_in_logical_pixels = glyph_padding_in_device_pixels / device_pixel_ratio;
-
+        self.char_depth = self.draw_depth;
         let Some(mi) = &mut self.many_instances else {
             return;
         };
@@ -1126,7 +1126,7 @@ impl DrawText {
             self.advance = (advance_width_in_logical_pixels * self.font_scale) as f32;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
-            self.draw_depth += ZBIAS_STEP;
+            self.char_depth += ZBIAS_STEP;
             
             // Advance to the next position.
             position.x += advance_width_in_logical_pixels * self.font_scale;
