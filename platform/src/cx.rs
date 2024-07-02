@@ -130,6 +130,9 @@ pub struct AndroidParams {
     pub cache_path: String,
     pub density: f64,
     pub is_emulator: bool,
+    pub android_version: String,
+    pub build_number: String,
+    pub kernel_version: String
 }
 
 #[derive(Clone, Debug)]

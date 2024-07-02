@@ -165,11 +165,17 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     cache_path: jni_sys::jstring,
     density: jni_sys::jfloat,
     is_emulator: jni_sys::jboolean,
+    android_version: jni_sys::jstring,
+    build_number: jni_sys::jstring,
+    kernel_version: jni_sys::jstring,
 ) {
     send_from_java_message(FromJavaMessage::Init(AndroidParams {
         cache_path: jstring_to_string(env, cache_path),
         density: density as f64,
         is_emulator: is_emulator != 0,
+        android_version: jstring_to_string(env, android_version),
+        build_number: jstring_to_string(env, build_number),
+        kernel_version: jstring_to_string(env, kernel_version),
     }));
 }
 
