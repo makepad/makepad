@@ -133,8 +133,11 @@ impl Slider {
     }
 
     pub fn set_value(&mut self, v: f64) {
+        let prev_value = self.value();
         self.set_internal(v);
-        self.update_text_input();
+        if v != prev_value {
+            self.update_text_input();
+        }
     }
 }
 
