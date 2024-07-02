@@ -5,7 +5,7 @@ use {
         rc::Rc,
         os::raw::{c_ulong, c_long, c_void, c_char},
         ptr,
-        ffi::{CStr,CString}, 
+        ffi::{CStr, CString, OsStr},
     },
     self::super::{
         x11_sys,
@@ -15,7 +15,7 @@ use {
     crate::{
         area::Area,
         window::WindowId,
-        makepad_math::{DVec2},
+        makepad_math::DVec2,
         event::*,
         cursor::MouseCursor,
     },
@@ -143,12 +143,40 @@ impl XlibWindow {
             
             get_xlib_app_global().dnd.enable_for_window(window);
             
+            // The title should be set prior to mapping the window.
+            let title_bytes = format!("{}\0", title);
+            x11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const c_char);
+
+            // Set the WM_CLASS before mapping the window.
+            // Based on <https://www.x.org/releases/X11R7.5/doc/man/man3/XSetWMProperties.3.html>
+            {
+                // Use the binary name by default (the first arg).
+                let class = std::env::args_os().next().as_ref()
+                    .and_then(|arg0| std::path::Path::new(arg0).file_name())
+                    .and_then(OsStr::to_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| String::from("Makepad"));
+                let instance = std::env::var("RESOURCE_NAME").ok()
+                    .unwrap_or_else(|| class.clone());
+                let wm_class = format!("{instance}\0{class}\0");
+
+                x11_sys::XChangeProperty(
+                    display,
+                    window,
+                    get_xlib_app_global().atoms.wm_class,
+                    get_xlib_app_global().atoms.string,
+                    // the wm_class is passed in as a string of bytes
+                    (core::mem::size_of::<u8>() * 8) as i32,
+                    x11_sys::PropModeReplace as i32,
+                    wm_class.as_ptr(),
+                    wm_class.len() as i32
+                );
+
+            }
+
             // Map the window to the screen
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
-            
-            let title_bytes = format!("{}\0", title);
-            x11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const c_char);
             
             let xic = x11_sys::XCreateIC(
                 get_xlib_app_global().xim,
