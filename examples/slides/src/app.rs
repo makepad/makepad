@@ -15,64 +15,56 @@ live_design!{
                 <SlidesView> {
                     //current_slide:2.0
                     <Slide> {
-                        title = {text: "Hello RustNL!"},
+                        title = {text: "Welcome!"},
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "Visual application design\nin Rust"},
+                        title = {text: "Visual application development\nin Rust"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
-                        title = {text:"Makepad"},
-                        <SlideBody> {text: "- Reimagining VB/Delphi\n- A new IDE and designtool"}
+                        title = {text:"Our mission"},
+                        <SlideBody> {text: "- Reimagining VB/Delphi for Rust\n- Integrated design workflow\n- All platforms: Web Desktop Mobile"}
                     }
                     <Slide> {
-                        title = {text:"Why"},
-                        <SlideBody> {text: "- I love to have fun with code\n- Sound, Graphics, Robots"}
+                        title = {text:"What is Rust"},
+                        <SlideBody> {text: "- Originated at mozilla\n- Open Source\n- Systems language\n- Memory safe\n- No GC\n- Can compile fast\n- Large package ecosystem  "}
                     }
                     <Slide> {
-                        title = {text:"Rust"},
-                        <SlideBody> {text: "- Fast, reliable\n- Focus on compiletime"}
-                    }
-                    <Slide> {
-                        title = {text: "Lets use the side screens!"},
-                        <SlideBody> {text: "- Simple app on appleTV"}
-                    }
-                    <Slide> {
-                        title = {text: "AI SDXL"},
-                        <SlideBody> {text: "- Fun with GenAI\n- Server IO test"}
-                    }
-                    <Slide> {
-                        title = {text: "Lets add a camera"},
-                        <SlideBody> {text: "- Smile :)"}
-                    }
-                    <Slide> {
-                        title = {text: "Team"},
-                        <SlideBody> {text: "- Design: Sebastian Michailidis\n- Hard things: Eddy Bruël\n- Cheerleader: Rik Arends"}
+                        title = {text:"Makepad Framework"},
+                        <SlideBody> {text: "- Our flutter/swiftUI\n- Designed for live coding / editing\n- DSL: Live\n- Rust: Compiled "}
                     }
                     <Slide> {
                         title = {text: "Makepad Studio"},
-                        <SlideBody> {text: "- Hybrid code and design"}
+                        <SlideBody> {text: "- Code editor (vscode)\n- Build system\n- Visual designer (figma)  "}
                     }
                     <Slide> {
-                        title = {text: "UI Framework"},
-                        <SlideBody> {text: "- Shader based DSL\n- High performance\n- Query based model"}
+                        title = {text: "Examples"},
+                        <SlideBody> {text: "- Makepad studio\n- Fractals\n- Ironfish\n- AI "}
                     }
                     <Slide> {
-                        title = {text: "Future"},
-                        <SlideBody> {text: "- Tool assisted instancing"}
+                        title = {text: "Build to"},
+                        <SlideBody> {text: "- Web\n- Mobile\n- Desktop "}
                     }
                     <Slide> {
-                        title = {text: "IDE Extensions"},
-                        <SlideBody> {text: "- WASM engine: Stitch\n- Eddy Bruël"}
-                    }
-                    <Slide> {                        
-                        title = {text: "Embedded Rust"},
-                        <SlideBody> {text: "- Lets drive"}
+                        title = {text: "Architecture"},
+                        <SlideBody> {text: "- DSL for UI structure\n- Shaders for styling\n- Fast GPU instancing, low CPU overhead\n- Scalable: Rust for all application code"}
                     }
                     <Slide> {
-                        title = {text: "Embedded and UI workshop!"},
-                        <SlideBody> {text: "- Today! 14:00 - 17:30"}
+                        title = {text: "Example code"},
+                        <SlideBody> {text: "- DSL at the top\n- Rust app below "}
+                    }
+                    <Slide> {
+                        title = {text: "More apps"},
+                        <SlideBody> {text: "- Moxin, LM Studio-like\n- Robrix, matrix client "}
+                    }
+                    <Slide> {
+                        title = {text: "Challenges"},
+                        <SlideBody> {text: "- Many mobile APIs (Robius)\n- App store packaging (Robius)\n- Font rendering\n- Visual design tool "}
+                    }
+                    <Slide> {
+                        title = {text: "Extensions / micro apps"},
+                        <SlideBody> {text: "- WASM engine: Stitch\n- Fastest interpreter: iOS possible\n- Eddy Bruël"}
                     }
                     <Slide> {
                         title = {text: "Links"}, 
