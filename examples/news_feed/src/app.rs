@@ -342,7 +342,7 @@ impl Widget for NewsFeed{
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(item) =  self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, 10);
+                list.set_item_range(cx, 0, 1000);
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let template = match item_id {
                         0 => live_id!(TopSpace),
@@ -351,10 +351,10 @@ impl Widget for NewsFeed{
                     };
                     let item = list.item(cx, item_id, template).unwrap();
                     let text = match item_id % 4 {
-                        1 => format!("Hello! {}", item_id),
-                        2 => format!("Hello world\n With lines {}", item_id),
-                        3 => format!("Random numbers {}", item_id),
-                        _ => format!("Text body 4 id {}", item_id),
+                        1 => format!("Message id: {}", item_id),
+                        2 => format!("How are you\nItem id: {}", item_id),
+                        3 => format!("Item id: {}", item_id),
+                        _ => format!("Message 4 id {}", item_id),
                     };
                     item.label(id!(content.text)).set_text(&text);
                     item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
@@ -387,7 +387,7 @@ impl MatchEvent for App {
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             if item.button(id!(likes)).clicked(&actions) {
                 log!("hello {}", item_id);
-            }
+            }  
         }
     }
 }

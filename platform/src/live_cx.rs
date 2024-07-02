@@ -316,7 +316,7 @@ impl Cx {
     pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
         for file in &live_registry.live_files {
-            if file.module_id == live_registry.main_module.as_ref().unwrap().module_id{
+            //if file.module_id == //live_registry.main_module.as_ref().unwrap().module_id{
                 for node in &file.expanded.nodes {
                     match &node.value {
                         LiveValue::Dependency(dep)=> {
@@ -328,7 +328,7 @@ impl Cx {
                         }
                     }
                 }
-            }
+            //}
         }
     }
     
