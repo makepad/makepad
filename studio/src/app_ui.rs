@@ -309,7 +309,7 @@ live_design!{
             }*/
 
             file_tree_tabs = Tabs {
-                tabs: [file_tree_tab, search, run_list_tab],
+                tabs: [file_tree_tab, run_list_tab, search],
                 selected: 0
             }
 
