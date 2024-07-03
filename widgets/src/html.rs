@@ -455,7 +455,6 @@ impl Widget for HtmlLink {
         match event {
             Event::Actions(actions) => {
                 if let Some(key_modifiers) = self.link.clicked_modifiers(actions) {
-                    log!("HtmlLink::handle_actions(): clicked! URL: {:?}", self.url);
                     cx.widget_action(
                         self.widget_uid(),
                         &scope.path,
@@ -464,14 +463,6 @@ impl Widget for HtmlLink {
                             key_modifiers,
                         },
                     );
-                }
-        
-                if self.link.released(actions) {
-                    log!("HtmlLink::handle_actions(): released! URL: {:?}", self.url);
-                }
-        
-                if self.link.pressed(actions) {
-                    log!("HtmlLink::handle_actions(): pressed! URL: {:?}", self.url);
                 }
             }
             _ => ()
