@@ -9,11 +9,14 @@ live_design!{
     LinkLabelBase = {{LinkLabel}} {}
 }
 
+/// A clickable label widget that opens a URL when clicked.
+///
+/// This is a wrapper around (and derefs to) a [`Button`] widget.
 #[derive(Live, LiveHook, Widget)]
 pub struct LinkLabel {
     #[deref] button: Button,
-    #[live] url: String,
-    #[live] open_in_place: bool
+    #[live] pub url: String,
+    #[live] pub open_in_place: bool,
 }
 
 impl Widget for LinkLabel {
@@ -45,42 +48,34 @@ impl Widget for LinkLabel {
     }
 }
 
-impl LinkLabel {
-    pub fn clicked(&self, actions:&Actions) -> bool {
-        self.button.clicked(actions)
-    }
-
-    pub fn pressed(&self, actions:&Actions) -> bool {
-        self.button.pressed(actions)
-    }
-
-    pub fn released(&self, actions:&Actions) -> bool {
-        self.button.released(actions)
-    }
-}
-
 impl LinkLabelRef {
-    pub fn clicked(&self, actions:&Actions) -> bool {
-        if let Some(inner) = self.borrow(){ 
-            inner.clicked(actions)
-        } else {
-            false
-        }
-    }
-    
-    pub fn pressed(&self, actions:&Actions) -> bool {
-        if let Some(inner) = self.borrow(){ 
-            inner.pressed(actions)
-        } else {
-            false
-        }
+    /// See [`Button::clicked()`].
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        self.borrow().map_or(false, |b| b.clicked(actions))
     }
 
-    pub fn released(&self, actions:&Actions) -> bool {
-        if let Some(inner) = self.borrow(){ 
-            inner.released(actions)
-        } else {
-            false
-        }
+    /// See [`Button::pressed()`].
+    pub fn pressed(&self, actions: &Actions) -> bool {
+        self.borrow().map_or(false, |b| b.pressed(actions))
+    }
+
+    /// See [`Button::released()`].
+    pub fn released(&self, actions: &Actions) -> bool {
+        self.borrow().map_or(false, |b| b.released(actions))
+    }
+
+    /// See [`Button::clicked_modifiers()`].
+    pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        self.borrow().and_then(|b| b.clicked_modifiers(actions))
+    }
+
+    /// See [`Button::pressed_modifiers()`].
+    pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        self.borrow().and_then(|b| b.pressed_modifiers(actions))
+    }
+
+    /// See [`Button::released_modifiers()`].
+    pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
+        self.borrow().and_then(|b| b.released_modifiers(actions))
     }
 }

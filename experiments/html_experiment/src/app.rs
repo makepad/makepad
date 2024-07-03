@@ -76,7 +76,7 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return #fff
+                    return #999
                     // test
                     // return mix(#7, #3, self.pos.y);
                 }
@@ -136,12 +136,6 @@ live_design!{
                     img = <HtmlImage> {
                     }
 
-                    a = {
-                        draw_text: {
-                            text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING), top_drop: 1.2}
-                        }
-                    }
-
                     body: "
                         <a href=\"https://github.com/element-hq/element-web/releases/tag/v1.11.48\">https://github.com/element-hq/element-web/releases/tag/v1.11.48</a> I can find it? <b>text</b><br>
                         
@@ -174,6 +168,12 @@ impl MatchEvent for App {
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+        }
+
+        for action in actions {
+            if let HtmlLinkAction::Clicked { url, .. } = action.as_widget_action().cast() {
+                log!("got HtmlLinkAction::Clicked: url: {:?}", url);
+            }
         }
     }
 }
