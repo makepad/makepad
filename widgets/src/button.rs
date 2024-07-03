@@ -3,14 +3,27 @@ live_design! {
     ButtonBase = {{Button}} {}
 }
 
+/// Actions emitted by a button widget, including the key modifiers
+/// that were active when the action occurred.
+///
+/// The sequence of actions emitted by a button is as follows:
+/// 1. `ButtonAction::Pressed` when the button is pressed.
+/// 2. Then, either one of the following, but not both:
+///    * `ButtonAction::Clicked` when the mouse/finger is lifted up while over the button area.
+///    * `ButtonAction::Released` when the mouse/finger is lifted up while *not* over the button area.
 #[derive(Clone, Debug, DefaultNone)]
 pub enum ButtonAction {
     None,
-    Clicked(KeyModifiers),
+    /// The button was pressed (a "down" event).
     Pressed(KeyModifiers),
+    /// The button was clicked (an "up" event).
+    Clicked(KeyModifiers),
+    /// The button was released (an "up" event), but should not be considered clicked
+    /// because the mouse/finger was not over the button area when released.
     Released(KeyModifiers),
 }
- 
+
+/// A clickable button widget that emits actions when pressed, and when either released or clicked.
 #[derive(Live, LiveHook, Widget)]
 pub struct Button {
     #[animator]
@@ -71,7 +84,6 @@ impl Widget for Button {
                 Hit::FingerUp(fe) => {
                     if fe.is_over {
                         cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
-                        cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
                         if fe.device.has_hovers() {
                             self.animator_play(cx, id!(hover.on));
                         } else {
@@ -115,35 +127,34 @@ impl Button {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
-        .draw_walk(cx, self.label_walk, Align::default(), label);
+            .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_bg.end(cx);
     }
     
-    
+    /// Returns `true` if this button was clicked.
+    ///
+    /// See [`ButtonAction`] for more details.
     pub fn clicked(&self, actions: &Actions) -> bool {
-        if let ButtonAction::Clicked(_) = actions.find_widget_action(self.widget_uid()).cast() {
-            true
-        } else {
-            false
-        }
+        self.clicked_modifiers(actions).is_some()
     }
 
+    /// Returns `true` if this button was pressed down.
+    ///
+    /// See [`ButtonAction`] for more details.
     pub fn pressed(&self, actions: &Actions) -> bool {
-        if let ButtonAction::Pressed(_) = actions.find_widget_action(self.widget_uid()).cast() {
-            true
-        } else {
-            false
-        }
+        self.pressed_modifiers(actions).is_some()
     }
 
+    /// Returns `true` if this button was released, which is *not* considered to be clicked.
+    ///
+    /// See [`ButtonAction`] for more details.
     pub fn released(&self, actions: &Actions) -> bool {
-        if let ButtonAction::Released(_) = actions.find_widget_action(self.widget_uid()).cast() {
-            true
-        } else {
-            false
-        }
+        self.released_modifiers(actions).is_some()
     }
-    
+
+    /// Returns `Some` (with active keyboard modifiers) if this button was clicked.
+    ///
+    /// See [`ButtonAction`] for more details.
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
         if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast() {
             Some(m)
@@ -151,15 +162,22 @@ impl Button {
             None
         }
     }
-    
-    pub fn pressed_modifiers(&self, actions: &Actions) ->  Option<KeyModifiers> {
+
+    /// Returns `Some` (with active keyboard modifiers) if this button was pressed down.
+    ///
+    /// See [`ButtonAction`] for more details.
+    pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
         if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast() {
             Some(m)
         } else {
             None
         }
     }
-    
+
+    /// Returns `Some` (with active keyboard modifiers) if this button was released,
+    /// which is *not* considered to be clicked.
+    ///
+    /// See [`ButtonAction`] for more details.
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
         if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast() {
             Some(m)
@@ -170,63 +188,45 @@ impl Button {
 }
 
 impl ButtonRef {
+    /// See [`Button::clicked()`].
     pub fn clicked(&self, actions: &Actions) -> bool {
-        if let Some(inner) = self.borrow() {
-            inner.clicked(actions)
-        } else {
-            false
-        }
+        self.borrow().map_or(false, |inner| inner.clicked(actions))
     }
 
+    /// See [`Button::pressed()`].
     pub fn pressed(&self, actions: &Actions) -> bool {
-        if let Some(inner) = self.borrow() {
-            inner.pressed(actions)
-        } else {
-            false
-        }
+        self.borrow().map_or(false, |inner| inner.pressed(actions))
     }
-    
+
+    /// See [`Button::released()`].
     pub fn released(&self, actions: &Actions) -> bool {
-        if let Some(inner) = self.borrow() {
-            inner.released(actions)
-        } else {
-            false
-        }
+        self.borrow().map_or(false, |inner| inner.released(actions))
     }
-    
+
+    /// See [`Button::clicked_modifiers()`].
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
-        } else {
-            None
-        }
+        self.borrow().and_then(|inner| inner.clicked_modifiers(actions))
     }
-        
+
+    /// See [`Button::pressed_modifiers()`].
     pub fn pressed_modifiers(&self, actions: &Actions) ->  Option<KeyModifiers> {
-        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
-        } else {
-            None
-        }
+        self.borrow().and_then(|inner| inner.pressed_modifiers(actions))
     }
-        
+
+    /// See [`Button::released_modifiers()`].
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
-        } else {
-            None
-        }
+        self.borrow().and_then(|inner| inner.released_modifiers(actions))
     }
 
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.visible = visible
+            inner.visible = visible;
         }
     }
 
     pub fn set_enabled(&self, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.enabled = enabled
+            inner.enabled = enabled;
         }
     }
 }
