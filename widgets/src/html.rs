@@ -408,11 +408,18 @@ fn handle_custom_widget(
 }
 
 
+#[derive(Debug, Clone, DefaultNone)]
+pub enum HtmlLinkAction {
+    Clicked {
+        url: String,
+        key_modifiers: KeyModifiers,
+    },
+    None,
+}
 
 #[derive(Live, Widget)]
 struct HtmlLink {
     #[deref] link: LinkLabel,
-    #[live] href: String,
 }
 
 impl LiveHook for HtmlLink {
@@ -421,15 +428,15 @@ impl LiveHook for HtmlLink {
     fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         //log!("HtmlLink::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
         match apply.from {
-            ApplyFrom::NewFromDoc {..}=> {
+            ApplyFrom::NewFromDoc {..} => {
                 let scope = apply.scope.as_ref().unwrap();
                 let doc =  scope.props.get::<HtmlDoc>().unwrap();
                 let mut walker = doc.new_walker_with_index(scope.index + 1);
                 
-                if let Some((lc, attr)) = walker.while_attr_lc(){
+                if let Some((lc, attr)) = walker.while_attr_lc() {
                     match lc {
-                        live_id!(href)=>{
-                            self.href = attr.into()
+                        live_id!(href)=> {
+                            self.link.url = attr.into()
                         }
                         _=>()
                     }
@@ -440,27 +447,26 @@ impl LiveHook for HtmlLink {
     }
 }
 
-impl MatchEvent for HtmlLink {
-    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions) {
-        if self.link.clicked(actions) {
-            log!("HtmlLink::handle_actions(): clicked! href: {:?}", self.href);
-        }
-
-        if self.link.released(actions) {
-            log!("HtmlLink::handle_actions(): released! href: {:?}", self.href);
-        }
-    }
-}
-
 impl Widget for HtmlLink {
-    fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        scope: &mut Scope,
-    ) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.link.handle_event(cx, event, scope);
-        self.match_event(cx, event)
+
+        // Handle the action of the HtmlLink being clicked
+        match event {
+            Event::Actions(actions) => {
+                if let Some(key_modifiers) = self.link.clicked_modifiers(actions) {
+                    cx.widget_action(
+                        self.widget_uid(),
+                        &scope.path,
+                        HtmlLinkAction::Clicked {
+                            url: self.url.clone(),
+                            key_modifiers,
+                        },
+                    );
+                }
+            }
+            _ => ()
+        }
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
