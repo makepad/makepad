@@ -137,6 +137,8 @@ live_design!{
                     }
 
                     body: "
+                        If registration is disabled... no user name is available 🙂
+                        <br>
                         <a href=\"https://github.com/element-hq/element-web/releases/tag/v1.11.48\">https://github.com/element-hq/element-web/releases/tag/v1.11.48</a> I can find it? <b>text</b><br>
                         
                     "

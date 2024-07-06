@@ -386,6 +386,7 @@ impl DrawText {
     fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, font_atlas: &mut CxFontAtlas) {
         let shape_cache_rc = cx.shape_cache_rc.clone();
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
+        warning!("DrawText::draw_inner(): chunk={chunk:?}");
         let glyph_infos = shape_cache.shape(
             Direction::LeftToRight,
             chunk,

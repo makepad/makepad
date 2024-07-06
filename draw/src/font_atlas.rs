@@ -89,10 +89,12 @@ impl ShapeCache {
         font_atlas: &CxFontAtlas,
         glyph_infos: &mut Vec<GlyphInfo>,
     ) -> Result<(), ()> {
+        warning!("Shape internal: text: {text:?} \n  font_ids: {font_ids:?} \n  glyph_infos: {glyph_infos:?}");
         let Some((&font_id, font_ids)) = font_ids.split_first() else {
             return Err(());
         };
         let Some(font) = &font_atlas.fonts[font_id] else {
+            warning!("No font with ID {}", font_id);
             return self.shape_internal(text, font_ids, font_atlas, glyph_infos);
         };
 
@@ -107,11 +109,13 @@ impl ShapeCache {
         let mut info_slot = info_iter.next();
         while let Some(info) = info_slot {
             if info.glyph_id == 0 {
-                glyph_infos.push(GlyphInfo {
+                let gli = GlyphInfo {
                     font_id,
                     glyph_id: info.glyph_id,
                     byte_index: info.cluster as usize,
-                });
+                };
+                warning!("Glyph Id is 0, {gli:#?}");
+                glyph_infos.push(gli);
             } else {
                 let start = info.cluster as usize;
                 let end = loop {
