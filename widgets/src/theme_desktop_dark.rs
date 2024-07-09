@@ -3457,7 +3457,7 @@ live_design! {
             }
         }
 
-        label_walk: { width: Fill, height: Fill }
+        label_walk: { width: Fill, height: Fit }
 
         text_input: <TextInput> {
             width: Fit, padding: 0.,
