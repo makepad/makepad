@@ -40,7 +40,14 @@ live_design!{
                 draw_text: {
                     color: #f
                 },
-                text: "hi! how may I assist you today?\n\nI can help you with anything you need.\nJust ask me anything!",
+                text: r#"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut vel velit ac urna imperdiet fermentum. Nullam eu quam elit. Cras condimentum purus quam, ac pellentesque arcu facilisis placerat. Maecenas accumsan sem quis mattis dignissim. Integer eget lacinia eros. Donec hendrerit nisl et ligula ornare, quis commodo lacus hendrerit. Morbi facilisis risus sit amet vestibulum malesuada. Duis nec ligula quis enim accumsan accumsan a et felis. Fusce orci nisl, scelerisque ac elit ut, eleifend sodales nisi."#
+                /*
+
+Etiam scelerisque, turpis eget finibus convallis, diam sapien gravida erat, eu ornare dolor mauris quis leo. Morbi eget porttitor purus, a sagittis erat. Duis porttitor bibendum porttitor. Quisque aliquam eros quam, at interdum ipsum elementum non. Morbi mollis nunc ut luctus iaculis. Mauris turpis mauris, ultrices eget pharetra at, finibus pellentesque magna. Aliquam pulvinar cursus erat, non interdum lorem accumsan sit amet. Ut placerat ante eu mauris consequat, non volutpat leo hendrerit. Nam volutpat malesuada nunc. Quisque tincidunt malesuada est, vitae faucibus massa egestas vitae. Integer at purus elit. Proin nec ipsum arcu. Integer sit amet arcu a libero posuere congue. Cras eu venenatis lacus, nec fermentum eros. Vivamus ut tristique mauris, a porta ipsum.
+
+Integer eu enim finibus, aliquet nunc sit amet, tincidunt quam. Proin accumsan massa in lacus hendrerit, ut vulputate nisl blandit. Quisque tincidunt hendrerit libero at congue. Sed ultrices, nunc in auctor porta, dolor sem commodo arcu, ut mollis tortor arcu eu mi. Pellentesque in enim non risus fringilla aliquam. Cras quis erat non risus maximus volutpat. Interdum et malesuada fames ac ante ipsum primis in faucibus. Nullam iaculis interdum felis, eget vestibulum libero feugiat in. Suspendisse nibh metus, tempor eu viverra sed, semper eget risus. Praesent mauris quam, tempor id lectus vitae, consequat bibendum ligula. Nunc eu nulla accumsan, pharetra tellus id, egestas tellus. In pretium augue eu quam tempus, at congue quam rutrum. Etiam quis mauris sed enim tristique rhoncus quis a massa. In et neque lacus.
+"#,
+*/
             }
             
             message_input = <TextInput> {
@@ -53,7 +60,6 @@ live_design!{
             }
             
             send_button = <Button> {
-                padding: 0.0,
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: "send"
             }
