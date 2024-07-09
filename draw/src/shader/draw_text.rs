@@ -529,11 +529,11 @@ impl DrawText {
     }
 
     pub fn draw_walk_word(&mut self, cx: &mut Cx2d, text: &str){
-        self.draw_walk_wrap_resumable(cx, text);
+        self.draw_walk_resumable(cx, text);
     }
     
     pub fn draw_walk_word_with<F>(&mut self, cx: &mut Cx2d, text: &str, cb:F) where F: FnMut(&mut Cx2d, Rect){
-        self.draw_walk_wrap_resumable_with(cx, text, cb);
+        self.draw_walk_resumable_with(cx, text, cb);
 
         /*
         // this walks the turtle per word
@@ -675,26 +675,10 @@ impl DrawText {
                     }
                 }
                 TextWrap::Word => {
-                    self.draw_walk_wrap(cx, walk, text, fonts_atlas);
+                    self.draw_walk_wrap(cx, walk, text, true, fonts_atlas);
                 }
                 TextWrap::Line => {
-                    // lets just output it and walk it
-                    let rect = cx.walk_turtle(Walk {
-                        abs_pos: walk.abs_pos,
-                        margin: walk.margin,
-                        width: Size::Fixed(geom.measured_width),
-                        height: Size::Fixed(height)
-                    });
-
-                    cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
-
-                    // lets do our y alignment
-                    let mut ypos = 0.0;
-                    for line in text.split('\n') {
-                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align + ypos), line, fonts_atlas);
-                        ypos += line_height * self.text_style.line_spacing;
-                    }
-                    
+                    self.draw_walk_wrap(cx, walk, text, false, fonts_atlas);
                 }
             }
         }
@@ -877,6 +861,7 @@ impl DrawText {
         cx: &mut Cx2d,
         walk: Walk,
         text: &str,
+        wrap: bool,
         font_atlas: &mut CxFontAtlas,
     ) {
         let Some(font_id) = self.text_style.font.font_id else {
@@ -902,11 +887,13 @@ impl DrawText {
             shape_cache,
         );
 
-        let width = cx.turtle().eval_width(walk.width, walk.margin, cx.turtle().layout().flow);
-        let mut position = DVec2::new();
-        walk_words(
-            &mut position,
-            width,
+        let max_width = if wrap {
+            Some(cx.turtle().eval_width(walk.width, walk.margin, cx.turtle().layout().flow))
+        } else {
+            None
+        };
+        let mut size = walk_words(
+            max_width,
             self.text_style.line_spacing,
             self.font_scale,
             &line_infos,
@@ -914,21 +901,21 @@ impl DrawText {
             &glyph_infos,
             |_, _| {}
         );
-        let height = position.y;
-
+        if let Some(max_width) = max_width {
+            size.x = max_width;
+        }
+        
         let rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
-            width: Size::Fixed(width),
-            height: Size::Fixed(height),
+            width: Size::Fixed(size.x),
+            height: Size::Fixed(size.y),
         });
 
         cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
         
-        let mut position = DVec2::new();
         walk_words(
-            &mut position,
-            width,
+            max_width,
             self.text_style.line_spacing,
             self.font_scale,
             &line_infos,
@@ -945,15 +932,15 @@ impl DrawText {
         );
     }
 
-    fn draw_walk_wrap_resumable(
+    fn draw_walk_resumable(
         &mut self,
         cx: &mut Cx2d,
         text: &str,
     ) {
-        self.draw_walk_wrap_resumable_with(cx, text, |_, _| {});
+        self.draw_walk_resumable_with(cx, text, |_, _| {});
     }
 
-    fn draw_walk_wrap_resumable_with(
+    fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
         text: &str,
@@ -1258,24 +1245,28 @@ fn word_ranges(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
 }
 
 fn walk_words(
-    position: &mut DVec2,
-    width: f64,
+    max_width: Option<f64>,
     line_spacing: f64,
     font_scale: f64,
     line_infos: &[LineInfo],
     word_infos: &[WordInfo],
     glyph_infos: &[GlyphInfo],
     mut f: impl FnMut(DVec2, &[GlyphInfo]),
-) {
+) -> DVec2 {
+    let mut width = 0.0;
+    let mut position = DVec2::new();
     for (index, line_info) in line_infos.iter().enumerate() {
         for word_info in &word_infos[line_info.word_info_start..line_info.word_info_end] {
-            if position.x + word_info.width * font_scale > width && position.x > 0.0 {
-                position.x = 0.0;
-                position.y += (line_info.height * line_spacing) * font_scale;
+            if let Some(max_width) = max_width {
+                if position.x + word_info.width * font_scale > max_width && position.x > 0.0 {
+                    position.x = 0.0;
+                    position.y += (line_info.height * line_spacing) * font_scale;
+                }
             }
-            f(*position, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]);
+            f(position, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]);
             position.x += word_info.width * font_scale
         }
+        width = width.max(position.x);
         position.x = 0.0;
         if index == line_infos.len() - 1 {
             position.y += line_info.height * font_scale;
@@ -1283,6 +1274,7 @@ fn walk_words(
             position.y += line_info.height * line_spacing * font_scale;
         }
     }
+    dvec2(width, position.y)
 }
 
 fn line_height(font_atlas: &CxFontAtlas, font_id: usize, units_per_em: f64, font_size: f64) -> f64 {
