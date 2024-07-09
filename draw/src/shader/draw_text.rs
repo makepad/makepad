@@ -148,8 +148,8 @@ pub struct TextStyle {
     #[live(9.0)] pub font_size: f64,
     #[live(1.0)] pub brightness: f32,
     #[live(0.5)] pub curve: f32,
+    #[live(1.0)] pub line_scale: f64,
     #[live(1.4)] pub line_spacing: f64,
-    #[live(0.0)] pub line_spacing_offset: f64,
     #[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
 }
@@ -506,7 +506,7 @@ impl DrawText {
         let mut size = walk_words(
             wrap_width,
             self.font_scale,
-            1.05,
+            self.text_style.line_scale,
             self.text_style.line_spacing,
             &line_infos,
             &word_infos,
@@ -538,7 +538,7 @@ impl DrawText {
         walk_words(
             wrap_width,
             self.font_scale,
-            1.05,
+            self.text_style.line_scale,
             self.text_style.line_spacing,
             &line_infos,
             &word_infos,
@@ -706,8 +706,8 @@ impl DrawText {
         
         let font_size = self.text_style.font_size;
 
+        self.char_depth = self.draw_depth;
         let mut position = position;
-        let mut char_depth = self.draw_depth;
         for glyph_info in glyph_infos {
             let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
             let units_per_em = font.ttf_font.units_per_em;
@@ -783,7 +783,6 @@ impl DrawText {
             // Emit the instance data.
             self.font_t1 = atlas_glyph.t1;
             self.font_t2 = atlas_glyph.t2;
-            self.char_depth = char_depth;
             self.rect_pos = (position + delta).into();
             self.rect_size = (padded_glyph_size_lpx * self.font_scale).into();
             self.delta.x = delta.x as f32;
@@ -791,9 +790,8 @@ impl DrawText {
             self.advance = (advance_width * self.font_scale) as f32;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
-            self.draw_depth = char_depth;
-            char_depth += ZBIAS_STEP;
-            
+            self.char_depth += ZBIAS_STEP;
+
             // Advance to the next position.
             position.x += advance_width * self.font_scale;
         }
@@ -896,7 +894,13 @@ fn word_ranges(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
         })
 }
 
-// Walk the words in a text using the given line, word, and glyph info vectors.
+/// Walk the words in a text using the given line, word, and glyph info vectors.
+///
+/// This function also takes several 'fudge factors' which can be used to tweak the way the text is
+/// layed out:
+/// - font_scale: used to scale the width of every glyph and the height of every line.
+/// - line_scale: used to scale the height of every line.
+/// - line_spacing: used to scale the height of every line except the last.
 fn walk_words(
     wrap_width: Option<f64>,
     font_scale: f64,
