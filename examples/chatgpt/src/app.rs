@@ -53,6 +53,7 @@ live_design!{
             }
             
             send_button = <Button> {
+                padding: 0.0,
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: "send"
             }
