@@ -46,6 +46,7 @@ pub struct Slider {
     #[layout] layout: Layout,
     #[animator] animator: Animator,
     
+    #[rust] label_area: Area,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     #[live] draw_text: DrawText,
@@ -72,6 +73,8 @@ pub enum SliderAction {
     TextSlide(f64),
     Slide(f64),
     EndSlide,
+    LabelHoverIn(Rect),
+    LabelHoverOut,
     None
 }
 
@@ -122,7 +125,11 @@ impl Slider {
             //, (self.value*100.0) as usize);
             let walk = self.text_input.walk(cx);
             self.text_input.draw_walk_text_input(cx, walk);
-            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
+
+            let label_walk = dw.resolve(cx);
+            cx.begin_turtle(label_walk, Layout::default());
+            self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
+            cx.end_turtle_with_area(&mut self.label_area);
         }
         
         self.draw_slider.end(cx);
@@ -169,6 +176,17 @@ impl Widget for Slider {
                 _ => ()
             }
         };
+
+        match event.hits_with_capture_overload(cx, self.label_area, true) {
+            Hit::FingerHoverIn(fh) => {
+                cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+            }
+            Hit::FingerHoverOut(_) => {
+                cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
+            },
+            _ => ()
+        }
+
         match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
@@ -280,5 +298,27 @@ impl SliderRef{
             }
         }
         None
+    }
+
+    pub fn label_hover_in(&self, actions:&Actions)->Option<Rect>{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast(){
+                SliderAction::LabelHoverIn(rect) => Some(rect),
+                _=> None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn label_hover_out(&self, actions:&Actions)->bool{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast(){
+                SliderAction::LabelHoverOut => true,
+                _=> false
+            }
+        } else {
+            false
+        }
     }
 }
