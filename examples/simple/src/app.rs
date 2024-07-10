@@ -37,7 +37,12 @@ live_design!{
                         draw_text: {
                             color: #f
                         },
-                        text: "Counter: 0"
+                        text: r#"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Praesent tristique condimentum tristique. Donec sapien arcu, molestie vitae neque pretium, ultrices luctus diam. Aenean a eros ac lectus sollicitudin eleifend non in tellus. Nullam sapien velit, sodales et tincidunt vestibulum, sollicitudin et purus. Praesent elementum risus rhoncus enim consectetur pulvinar. Quisque rutrum leo quis odio mattis blandit. Etiam sit amet nibh felis. Vivamus maximus hendrerit turpis, vitae efficitur risus faucibus in. Vestibulum lorem dui, consectetur consectetur magna nec, hendrerit bibendum magna. Mauris faucibus rhoncus turpis luctus porta. Aenean interdum auctor sapien ac hendrerit.
+
+                        Aliquam erat volutpat. Praesent velit felis, iaculis at interdum sed, pellentesque nec tortor. Nulla mauris augue, sollicitudin non nisi ac, consequat dapibus lorem. Maecenas mollis, nulla id tincidunt finibus, neque enim ultricies libero, vel accumsan metus libero vel mauris. Vivamus et suscipit nisl, vel lacinia massa. Sed et bibendum lectus, nec pellentesque tortor. Cras non est ut eros venenatis volutpat quis quis risus. Suspendisse convallis vestibulum orci. Etiam sit amet nisl eleifend, semper nibh sit amet, tincidunt leo. Sed ut tristique nunc. Nulla dictum hendrerit augue.
+                        
+                        Vivamus ac porttitor sem. In auctor posuere velit ac molestie. Suspendisse ornare ex quis eros porttitor tincidunt. Praesent tincidunt purus tellus, vel malesuada dui condimentum at. Morbi pellentesque, velit euismod tristique rhoncus, metus mi tincidunt lacus, at faucibus tortor nunc ut nibh. Etiam efficitur est diam, ut commodo enim bibendum at. Suspendisse accumsan gravida nisi, sit amet sodales lectus maximus eu."#,
+                        width: 200.0,
                     }
                 }
             }

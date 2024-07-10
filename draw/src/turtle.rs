@@ -794,6 +794,10 @@ impl Turtle {
     pub fn layout(&self)->&Layout{
         &self.layout
     }
+
+    pub fn layout_mut(&mut self)-> &mut Layout {
+        &mut self.layout
+    }
     
     pub fn used(&self) -> DVec2 {
         dvec2(self.width_used, self.height_used)
