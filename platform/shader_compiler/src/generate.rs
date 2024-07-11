@@ -129,6 +129,13 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
                     sep = ", ";
                 }
             }
+            Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
+                let mut sep = "";
+                for _ in 0..ty.slots() {
+                    write!(string, "{}x", sep).unwrap();
+                    sep = ", ";
+                }
+            }
             Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
                 let dst_size = match ty {
                     Ty::Mat2 => 2,
@@ -161,7 +168,7 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
                     }
                 }
             }
-            _ => panic!(),
+            _ => panic!("{} type not implemented for hsls shader generator", ty),
         }
     } else {
         let mut sep = "";
