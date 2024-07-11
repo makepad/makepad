@@ -275,6 +275,8 @@ impl DrawText {
                 font_id: glyph_info.font_id,
                 glyph_id: glyph_info.glyph_id,
                 width: glyph_width(font_atlas, glyph_info.font_id, glyph_info.glyph_id, self.text_style.font_size),
+                start: 0,
+                end: 0,
             });
         }
 
@@ -456,19 +458,23 @@ impl DrawText {
 impl DrawText {
     pub fn pick_walk(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut Cx,
         walk: Walk,
         _align: Align,
         text: &str,
-    ) {
+        position: DVec2,
+    ) -> Option<usize> {
+        let draw_event = DrawEvent::default();
+        let cx = &mut Cx2d::new(cx, &draw_event);
+
         // If the text is empty, there is nothing to pick.
         if text.is_empty() {
-            return;
+            return None;
         }
 
         // If the font did not load, there is nothing to pick.
         let Some(font_id) = self.text_style.font.font_id else {
-            return;
+            return None;
         };
 
         // Borrow the font atlas from the context.
@@ -498,38 +504,46 @@ impl DrawText {
             shape_cache,
         );
 
-        // Compute the fixed width of the bounding box, if it has one.
-        let fixed_width = if !walk.width.is_fit() {
-            Some(cx.turtle().eval_width(walk.width, walk.margin, cx.turtle().layout().flow))
-        } else {
-            None
-        };
-
-        // If word wrapping is enabled, set the wrap width to the fixed width of the bounding box.
-        let wrap_width = if !walk.width.is_fit() && self.wrap == TextWrap::Word {
-            fixed_width
-        } else {
-            None
-        };
+        let wrap_width = None;
 
         // Walk over the words of the text.
+        let mut index = None;
+        let font_scale = self.font_scale;
+        let line_scale = self.text_style.line_scale;
+        let line_spacing = self.text_style.line_spacing;
+        let mut prev_end = None;
+        println!("Looking for {:?}", position);
         walk_words(
             wrap_width,
-            self.font_scale,
-            self.text_style.line_scale,
-            self.text_style.line_spacing,
+            font_scale,
+            line_scale,
+            line_spacing,
             &line_infos,
             &word_infos,
             &glyph_infos,
-            |position, glyph_infos| {
-                let mut position = position;
+            |current, line_info, glyph_infos| {
+                let height = line_info.height * font_scale * line_scale * line_spacing;
+                let mut current = current;
                 for glyph_info in glyph_infos {
-                    // At this point, we know the position of the glyph, and its width. However, we
-                    // still need to know the line height, and take the fudge factors into account.
-                    position += glyph_info.width;
+                    let width = glyph_info.width * font_scale;
+                    if let Some(prev_end) = prev_end {
+                        if position.y < current.y {
+                            index = Some(prev_end);
+                            return true;
+                        }
+                    }
+                    println!(" {:?} < {:?} && {:?} < {:?}?", position.x, current.x + width * 0.5, position.y, current.y + height);
+                    if position.x < current.x + width * 0.5 && position.y < current.y + height {
+                        index = Some(glyph_info.start);
+                        return true;
+                    }
+                    prev_end = Some(glyph_info.end);
+                    current.x += width;
                 }
+                false
             }
         );
+        Some(text[..index.unwrap_or(text.len())].chars().count())
     }
 
     /// Draws the given text with the turtle, using the given walk and alignment.
@@ -607,7 +621,7 @@ impl DrawText {
             &line_infos,
             &word_infos,
             &glyph_infos,
-            |_, _| {}
+            |_, _, _| false
         );
 
         // If the bounding box has a fixed width, it overrides the actual width.
@@ -639,13 +653,14 @@ impl DrawText {
             &line_infos,
             &word_infos,
             &glyph_infos,
-            |position, glyph_infos| {
+            |position, _, glyph_infos| {
                 self.draw_glyphs(
                     cx,
                     dvec2(rect.pos.x + position.x, rect.pos.y + position.y),
                     glyph_infos,
                     font_atlas
                 );
+                false
             }
         );
 
@@ -912,6 +927,8 @@ pub(crate) struct GlyphInfo {
     font_id: usize,
     glyph_id: u32,
     width: f64,
+    start: usize,
+    end: usize,
 }
 
 /// Computes info vectors for each line, word, and glyph in the text.
@@ -934,19 +951,21 @@ fn compute_infos(
             let word_end = line_start + word_end;
 
             let glyph_info_start = glyph_infos.len();
-            glyph_infos.extend(shape_cache.shape(
+            let mut iter = shape_cache.shape(
                 Direction::LeftToRight,
                 &text[word_start..word_end],
                 font_ids,
                 font_atlas
-            ).iter().map(|glyph_info| {
-                GlyphInfo {
+            ).iter().peekable();
+            while let Some(glyph_info) = iter.next() {
+                glyph_infos.push(GlyphInfo {
                     font_id: glyph_info.font_id,
                     glyph_id: glyph_info.glyph_id,
                     width: glyph_width(font_atlas, glyph_info.font_id, glyph_info.glyph_id, font_size),
-                    // index: glyph_info.index + word_start,
-                }
-            }));
+                    start: glyph_info.index + word_start,
+                    end: iter.peek().map_or(word_end, |glyph_info| glyph_info.index + word_start)
+                });
+            }
 
             word_infos.push(WordInfo {
                 glyph_info_start,
@@ -1003,7 +1022,7 @@ fn walk_words(
     line_infos: &[LineInfo],
     word_infos: &[WordInfo],
     glyph_infos: &[GlyphInfo],
-    mut f: impl FnMut(DVec2, &[GlyphInfo]),
+    mut f: impl FnMut(DVec2, &LineInfo, &[GlyphInfo]) -> bool,
 ) -> DVec2 {
     let mut width = 0.0;
     let mut position = DVec2::new();
@@ -1012,19 +1031,21 @@ fn walk_words(
             if let Some(max_width) = wrap_width {
                 if position.x + word_info.width * font_scale > max_width && position.x > 0.0 {
                     position.x = 0.0;
-                    position.y += (line_info.height * line_spacing) * font_scale;
+                    position.y += line_info.height * font_scale * line_scale * line_spacing;
                 }
             }
-            f(position, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]);
+            if f(position, line_info, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]) {
+                return dvec2(width, position.y);
+            }
             position.x += word_info.width * font_scale
         }
         width = width.max(position.x);
         position.x = 0.0;
-        if index == line_infos.len() - 1 {
-            position.y += line_info.height * font_scale * line_scale;
+        position.y += line_info.height * font_scale * line_scale * if index == line_infos.len() - 1 {
+            1.0
         } else {
-            position.y += line_info.height * font_scale * line_scale * line_spacing;
-        }
+            line_spacing
+        };
     }
     dvec2(width, position.y)
 }
