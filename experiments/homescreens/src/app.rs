@@ -9,6 +9,7 @@ live_design!{
     import makepad_experiments_homescreens::iconbutton::IconButton;
     
     import makepad_experiments_homescreens::diffuse::DiffuseThing;
+    import makepad_experiments_homescreens::particles::ParticleSystem;
     ContainerStage = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -107,7 +108,7 @@ live_design!{
             flow: Right,
          
             <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon9.png")}, button={text: "P-Express"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon10.png")}, button={text: "Fishness"}}
+            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon10.png")}, button={text: "The Stare"}}
             <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon11.png")}, button={text: "ZenTea"}}
             <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon12.png")}, button={text: "Fishness"}}
         }
@@ -160,23 +161,26 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab], selected:0}
+                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab], selected:3}
 
                     screen1tab = Tab{
-                        name: "Screen 1"
+                        name: "FloatTexture"
                         kind: screen1
                     }
 
                     screen2tab = Tab{
-                        name: "Screen 2"
+                        name: "Silly Gradient"
                         kind: screen2
                     }
 
                     screen3tab = Tab{
-                        name: "Screen 3"
+                        name: "Wavy"
                         kind: screen3
                     }
-    
+                    screen4tab = Tab{
+                        name: "WaterColour"
+                        kind: screen4
+                    }
                     screen1 = <View>
                     {
                         flow: Overlay,                
@@ -244,19 +248,15 @@ live_design!{
                             width: Fill,
                             height: Fill,
                             draw: {
-                                // this example shader is ported from kishimisu's tutorial
+                              
                                 fn pixel(self) -> vec4 {
-                                // let uv = self.pos - 0.5;
-                                //  let uv0 = uv;
-
+                              
 
                                
                                 
                                 let fragColor = mix( vec4(.8,0.8,.8, 1.),vec4(0.0,0.1,0.3, 1.0), self.pos.y);
 
 
-
-                                    //let finalColor = vec3(0.3+0.01*sin(uv.x*6.283*4));
                                     return fragColor;
                                 }
                             }
@@ -284,12 +284,9 @@ live_design!{
                             draw: {
                                 // this example shader is ported from kishimisu's tutorial
                                 fn pixel(self) -> vec4 {
-                                // let uv = self.pos - 0.5;
-                                //  let uv0 = uv;
-
+                                
 
                                 let time = self.time * .15+23.0;
-                                // uv should be the 0-1 uv of texture...
                                 let uv = self.pos;
                                 
                                 let p = mod(uv*6.283, 6.283)-250.0;
@@ -326,6 +323,27 @@ live_design!{
                         
                     }   
 
+                
+                    screen4 = <View>
+                    {
+                        flow: Overlay,                
+                        width: Fill,
+                        height: Fill
+                        spacing: 0,
+                        padding: 0,
+                        align: {
+                            x: 0.5,
+                            y: 0.5
+                        },
+                
+                       
+                        <ContainerStage>{   
+                            <ParticleSystem> {}              
+                         }
+                
+                        
+                    }   
+
                 }
             }
         }
@@ -345,6 +363,7 @@ impl LiveRegister for App {
         crate::my_widget::live_design(cx);
         crate::iconbutton::live_design(cx);
         crate::diffuse::live_design(cx);
+        crate::particles::live_design(cx);
     }
 }
 
