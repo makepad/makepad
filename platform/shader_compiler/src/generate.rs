@@ -130,11 +130,7 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
                 }
             }
             Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
-                let mut sep = "";
-                for _ in 0..ty.slots() {
-                    write!(string, "{}x", sep).unwrap();
-                    sep = ", ";
-                }
+                write!(string,"x");
             }
             Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
                 let dst_size = match ty {
