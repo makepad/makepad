@@ -1,9 +1,4 @@
 workspace.members = [
-#    "code_editor",
-#    "experiments/websocket-tcpstream",
-#   "experiments/websocket-windows",
-#   "experiments/svgloader",
-#    "experiments/empty",
     "experiments/dual-contouring",
     "experiments/emoji",
     "experiments/esp-peer-0",
@@ -35,17 +30,24 @@ workspace.members = [
     "examples/slides",
     "examples/graph",
     "examples/image_viewer",
-#    "libs/stitch",
-#    "libs/futures",
-#    "libs/wasm_bridge/test",
     "studio",
-#    "tools/video_mixer",
     "tools/cargo_makepad",
-#    "tools/windows_strip",
      "tools/auto_version",
-#    "tools/web_server", 
-#    "tools/file_router", 
-#    "tools/wasm_strip",
+]
+
+workspace.exclude = [
+    "code_editor",
+    "libs/stitch",
+    "libs/futures",
+    "libs/wasm_bridge/test",
+    "experiments/websocket-tcpstream",
+    "experiments/websocket-windows",
+    "experiments/svgloader",
+    "experiments/empty","tools/windows_strip",
+    "tools/video_mixer",
+    "tools/web_server", 
+    "tools/file_router", 
+    "tools/wasm_strip"
 ]
 
 workspace.resolver = "2"
