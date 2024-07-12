@@ -43,12 +43,12 @@ pub struct CxFontAtlas {
     pub alloc: CxFontsAtlasAlloc,
 }
 
-pub struct ShapeCache {
+pub struct CxShapeCache {
     shape_keys: VecDeque<OwnedShapeKey>,
     shapes: FxHashMap<OwnedShapeKey, Box<[GlyphInfo]>>,
 }
 
-impl ShapeCache {
+impl CxShapeCache {
     pub fn new() -> Self {
         Self {
             shape_keys: VecDeque::new(),
@@ -109,8 +109,8 @@ impl ShapeCache {
             if info.glyph_id == 0 {
                 glyph_infos.push(GlyphInfo {
                     font_id,
-                    glyph_id: info.glyph_id,
-                    index: info.cluster as usize,
+                    glyph_id: info.glyph_id as usize,
+                    cluster: info.cluster as usize,
                 });
             } else {
                 let start = info.cluster as usize;
@@ -132,8 +132,8 @@ impl ShapeCache {
                 ).is_err() {
                     glyph_infos.push(GlyphInfo {
                         font_id,
-                        glyph_id: info.glyph_id,
-                        index: info.cluster as usize,
+                        glyph_id: info.glyph_id as usize,
+                        cluster: info.cluster as usize,
                     });
                 }
             }
@@ -146,8 +146,8 @@ impl ShapeCache {
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphInfo {
     pub font_id: usize,
-    pub glyph_id: u32,
-    pub index: usize,
+    pub glyph_id: usize,
+    pub cluster: usize,
 }
 
 trait ShapeKey {
@@ -333,7 +333,7 @@ pub struct Font {
 pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontAtlas>>);
 
 #[derive(Clone)]
-pub struct ShapeCacheRc(pub Rc<RefCell<ShapeCache>>);
+pub struct ShapeCacheRc(pub Rc<RefCell<CxShapeCache>>);
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
@@ -417,7 +417,7 @@ impl<'a> Cx2d<'a> {
 
     pub fn lazy_construct_shape_cache(cx: &mut Cx) {
         if !cx.has_global::<ShapeCacheRc>() {
-            cx.set_global(ShapeCacheRc(Rc::new(RefCell::new(ShapeCache::new()))));
+            cx.set_global(ShapeCacheRc(Rc::new(RefCell::new(CxShapeCache::new()))));
         }
     }
     
