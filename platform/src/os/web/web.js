@@ -529,6 +529,8 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmHTTPResponse({
                 request_id_lo: args.request_id_lo,
                 request_id_hi: args.request_id_hi,
+                metadata_id_lo: args.metadata_id_lo,
+                metadata_id_hi: args.metadata_id_hi,
                 status: responseEvent.status,
                 body: responseEvent.response,
                 headers: responseEvent.getAllResponseHeaders()
