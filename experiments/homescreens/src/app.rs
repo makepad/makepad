@@ -336,10 +336,12 @@ live_design!{
                             y: 0.5
                         },
                 
-                       
-                        <ContainerStage>{   
-                            <ParticleSystem> {}              
-                         }
+                    
+                        <ParticleSystem> {
+                            width: Fill,
+                            height: Fill,
+                        }              
+                        
                 
                         
                     }   

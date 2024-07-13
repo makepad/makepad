@@ -17,7 +17,7 @@ live_design! {
        spawnrate: 10.,
         draw_quad: {
             fn pixel(self) -> vec4{
-                return vec4(0.05,0.34,1.0,1.)
+                return vec4(0.05,0.05,0.05,0.3)
             }
         }   
     }
@@ -28,7 +28,8 @@ pub struct Particle
     pub position: DVec2,
     pub velocity: DVec2,
     pub acceleration: DVec2,
-    pub life: f64
+    pub life: f64,
+    pub scale: f64
 }
 
 impl Particle {
@@ -124,7 +125,7 @@ impl Widget for ParticleSystem {
         while self.spawncounter * self.spawnrate > 1.0 && self.particles.len() < self.maxparticles as usize
         {
             self.spawncounter -= 1.0/self.spawnrate.max(0.00001);
-            self.particles.push(Particle{position: dvec2(random_f64(&mut self.seed) *  fullrect.size.x,-10.0), velocity: dvec2(0.0,random_f64(&mut self.seed) * 100.0), acceleration: dvec2(0.0,0.0), life: 10.0});
+            self.particles.push(Particle{scale: random_f64(&mut self.seed) *3.0+ 0.2,position: dvec2(random_f64(&mut self.seed) *  fullrect.size.x,-10.0), velocity: dvec2(0.0,250.0+ random_f64(&mut self.seed) * 1300.0), acceleration: dvec2(0.0,0.0), life: 4.0});
         }
 
         if (self.spawncounter > 1.0) {
@@ -137,7 +138,7 @@ impl Widget for ParticleSystem {
             let mut rect = fullrect;
 
             rect.pos = particle.position + fullrect.pos;
-            rect.size = dvec2(10.,10.);
+            rect.size = dvec2(5.,60.*particle.scale);
             self.draw_quad.draw_abs(cx, rect);
         
         }
