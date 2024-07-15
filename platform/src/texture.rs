@@ -22,6 +22,20 @@ impl Texture {
 pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
 
 impl CxTexturePool {
+    // Allocates a new texture in the pool, potentially reusing an existing texture slot.
+    ///
+    /// This method attempts to find a compatible texture slot for reuse. If found, it preserves
+    /// the old os-specific resources for proper cleanup. If not, it allocates a new slot.
+    ///
+    /// # Arguments
+    /// * `requested_format` - The format of the texture to be allocated.
+    ///
+    /// # Returns
+    /// A `Texture` instance representing the allocated or reused texture.
+    ///
+    /// # Note
+    /// When a texture slot is reused, the old platofrm-specific resources are stored in the `previous_platform_resource` field
+    /// of the new `CxTexture`. This allows for proper resource management and cleanup in the corresponding platform.
     pub fn alloc(&mut self, requested_format: TextureFormat) -> Texture {
         let is_video = requested_format.is_video();
         let cx_texture = CxTexture {
@@ -30,10 +44,15 @@ impl CxTexturePool {
             ..Default::default()
         };
 
-        let new_id = self.0.alloc_with_reuse_filter(|item| {
-            // check for compatibility, not using `is_compatible_with` to avoid passing the whole format and cloning vec contents
+        let (new_id, previous_item) = self.0.alloc_with_reuse_filter(|item| {
+            // Check for compatibility, intentionally not using `is_compatible_with` to avoid passing the whole format and cloning vec contents    
             is_video == item.item.format.is_video()
         }, cx_texture);
+
+        if let Some(previous_item) = previous_item {
+            // We know this index is valid because it was just reused
+            self.0.pool[new_id.id].item.previous_platform_resource = Some(previous_item.os);
+        }
 
         Texture(Rc::new(new_id))
     }
@@ -510,4 +529,5 @@ pub struct CxTexture {
     pub (crate) format: TextureFormat,
     pub (crate) alloc: Option<TextureAlloc>,
     pub os: CxOsTexture,
+    pub previous_platform_resource: Option<CxOsTexture>,
 }
