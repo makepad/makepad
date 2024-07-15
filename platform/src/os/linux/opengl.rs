@@ -191,7 +191,7 @@ impl Cx {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
-                        
+
                         if cxtexture.format.is_vec(){
                             cxtexture.update_vec_texture();
                         } else if cxtexture.format.is_video() {
@@ -901,10 +901,17 @@ pub struct CxOsTexture {
 }
 
 impl CxTexture {
-    
+
     pub fn update_vec_texture(&mut self) {
         if self.alloc_vec() {
-            self.free_resources();
+
+            // This frees the previous texture if one is present, eventually we could just update this texture instead
+            // of freeing and reallocating constantly, unsure of performance implications of either.
+            if self.previous_platform_resource.is_some() {
+                self.os = self.previous_platform_resource.take().unwrap();
+            }
+
+            self.free_previous_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -1033,7 +1040,7 @@ impl CxTexture {
         while unsafe { gl_sys::GetError() } != 0 {}
 
         if self.alloc_video() {
-            self.free_resources();
+            self.free_previous_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -1159,15 +1166,16 @@ impl CxTexture {
         }
     }
     
-    pub fn free_resources(&mut self){
-        if let Some(gl_texture) = self.os.gl_texture.take(){
-            unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
-        }
-        if let Some(gl_renderbuffer) = self.os.gl_renderbuffer.take(){
-            unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
+    pub fn free_previous_resources(&mut self){
+        if let Some(mut old_os) = self.previous_platform_resource.take(){
+            if let Some(gl_texture) = old_os.gl_texture.take(){
+                unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
+            }
+            if let Some(gl_renderbuffer) = old_os.gl_renderbuffer.take(){
+                unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
+            }
         }
     }
-    
 }
 
 #[derive(Default, Clone)]
