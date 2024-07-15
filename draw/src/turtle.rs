@@ -71,7 +71,7 @@ impl Default for Axis2 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
 #[live_ignore]
 pub enum Flow {
     #[pick] Right,
