@@ -3,6 +3,7 @@ use {
         cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{self, CxFontAtlas, CxFontsAtlasTodo, CxShapeCache, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk}
     },
     makepad_rustybuzz::Direction,
+    unicode_segmentation::UnicodeSegmentation,
 };
 
 const ZBIAS_STEP: f32 = 0.00001;
@@ -424,8 +425,9 @@ impl DrawText {
         walk: Walk,
         _align: Align,
         text: &str,
-        position: DVec2,
+        target: DVec2,
     ) -> Option<usize> {
+        // Obtain a 2d context from the context.
         let draw_event = DrawEvent::default();
         let cx = &mut Cx2d::new(cx, &draw_event);
 
@@ -438,10 +440,8 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return None;
         };
+        let font_ids = &[font_id];
 
-        return None;
-
-        /*
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas = font_atlas_rc.0.borrow_mut();
@@ -452,22 +452,62 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        // Take the line, word, and glyph info vectors from the context.
-        let mut line_infos = mem::take(&mut cx.line_infos);
-        let mut word_infos = mem::take(&mut cx.word_infos);
-        let mut glyph_infos = mem::take(&mut cx.glyph_infos);
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
 
-        // Compute info for each line, word, and glyph in the text.
-        compute_infos(
+        let wrap_width = None;
+
+        let height = compute_line_height(font_ids, font_size, font_atlas);
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
             text,
-            &[font_id],
-            self.text_style.font_size,
-            &mut line_infos,
-            &mut word_infos,
-            &mut glyph_infos,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
             font_atlas,
             shape_cache,
+            |position, event, font_atlas| {
+                match event {
+                    LayoutEvent::Chunk {
+                        string,
+                        glyph_infos,
+                        ..
+                    } => {
+                        let mut iter = glyph_infos.iter().peekable();
+                        while let Some(glyph_info) = iter.next() {
+                            let byte_start = glyph_info.cluster;
+                            let byte_end = iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            
+                            let width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
+                            let grapheme_count = string.graphemes(true).count();
+                            let width_per_grapheme = width / (grapheme_count + 1) as f64;
+                            for grapheme_index in 0..grapheme_count {
+                                if target.x < position.x + grapheme_index as f64 * width_per_grapheme && position.y < position.y + height {
+                                    // TODO: Find the byte index of the grapheme.
+                                }
+                            }
+                        }
+                    }
+                    LayoutEvent::Newline => {
+                        if target.y < position.y {
+                            // TODO: Find the byte index of the previous grapheme.
+                        }
+                    }
+                    _ => {}
+                
+                }
+            }
         );
+
+        None
+
+        /*
+        // Borrow the font atlas from the context.
+        let mut glyph_infos = mem::take(&mut cx.glyph_infos);
+
 
         let wrap_width = None;
 
@@ -529,10 +569,9 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
-        let line_height = compute_line_height(font_ids, font_size, font_atlas);
-        let line_spacing = line_height * self.text_style.line_scale;
-        let font_scale = self.font_scale;
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
         
         let origin = position;
         let mut position = DVec2::new();
@@ -540,8 +579,8 @@ impl DrawText {
             &mut position,
             line,
             font_ids,
-            font_size * font_scale,
-            line_spacing * font_scale,
+            font_size,
+            line_spacing,
             None,
             font_atlas,
             shape_cache,
@@ -585,11 +624,9 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
-        let line_height = compute_line_height(font_ids, font_size, font_atlas);
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
-        let line_scale = self.text_style.line_scale;
-        let font_scale = self.font_scale;
 
         // Compute the fixed width of the bounding box, if it has one.
         let fixed_width = if !walk.width.is_fit() {
@@ -619,8 +656,8 @@ impl DrawText {
             &mut position,
             text,
             font_ids,
-            font_size * font_scale,
-            line_spacing * line_scale * font_scale,
+            font_size,
+            line_spacing,
             wrap_width,
             font_atlas,
             shape_cache,
@@ -634,7 +671,7 @@ impl DrawText {
             }
         );
         let mut width = max_width;
-        let mut height = position.y + line_height * line_scale * font_scale;
+        let mut height = position.y + line_height;
 
         // If the bounding box has a fixed width, it overrides the computed width.
         if let Some(fixed_width) = fixed_width {
@@ -662,8 +699,8 @@ impl DrawText {
             &mut position,
             text,
             font_ids,
-            font_size * font_scale,
-            line_spacing * line_scale * font_scale,
+            font_size,
+            line_spacing,
             wrap_width,
             font_atlas,
             shape_cache,
@@ -723,11 +760,9 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
-        let line_height = compute_line_height(font_ids, font_size, font_atlas);
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
-        let line_scale = self.text_style.line_scale;
-        let font_scale = self.font_scale;
 
         let fixed_width = if cx.turtle().padded_rect().size.x.is_nan() {
             None
@@ -747,8 +782,8 @@ impl DrawText {
             &mut position,
             text,
             font_ids,
-            font_size * font_scale,
-            line_spacing * line_scale * font_scale,
+            font_size,
+            line_spacing,
             wrap_width,
             font_atlas,
             shape_cache,
@@ -757,6 +792,7 @@ impl DrawText {
                     LayoutEvent::Chunk {
                         width,
                         glyph_infos,
+                        ..
                     } => {
                         let rect = cx.walk_turtle(Walk {
                             abs_pos: None,
@@ -1027,6 +1063,7 @@ fn layout_word(
     } else {
         f(*position, LayoutEvent::Chunk {
             width,
+            string: word,
             glyph_infos
         }, font_atlas);
         position.x += width;
@@ -1056,6 +1093,7 @@ fn layout_grapheme(
     }
     f(*position, LayoutEvent::Chunk {
         width,
+        string: grapheme,
         glyph_infos
     }, font_atlas);
     position.x += width;
@@ -1064,6 +1102,7 @@ fn layout_grapheme(
 enum LayoutEvent<'a> {
     Chunk {
         width: f64,
+        string: &'a str,
         glyph_infos: &'a [font_atlas::GlyphInfo],
     },
     Newline,
