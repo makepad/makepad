@@ -458,7 +458,9 @@ impl DrawText {
 
         let wrap_width = None;
 
+        let mut index = None;
         let height = compute_line_height(font_ids, font_size, font_atlas);
+        let mut prev_end = None;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -478,78 +480,34 @@ impl DrawText {
                     } => {
                         let mut iter = glyph_infos.iter().peekable();
                         while let Some(glyph_info) = iter.next() {
-                            let byte_start = glyph_info.cluster;
-                            let byte_end = iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let base = string.as_ptr() as usize - text.as_ptr() as usize;
+                            let start = base + glyph_info.cluster;
+                            let end = base + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
                             
                             let width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
                             let grapheme_count = string.graphemes(true).count();
                             let width_per_grapheme = width / (grapheme_count + 1) as f64;
                             for grapheme_index in 0..grapheme_count {
-                                if target.x < position.x + grapheme_index as f64 * width_per_grapheme && position.y < position.y + height {
-                                    // TODO: Find the byte index of the grapheme.
+                                if target.x < position.x + grapheme_index as f64 * width_per_grapheme && target.y < position.y + height {
+                                    index = Some(start + string.grapheme_indices(true).nth(grapheme_index).unwrap().0);
+                                    return true;
                                 }
                             }
+                            prev_end = Some(end);
                         }
                     }
                     LayoutEvent::Newline => {
-                        if target.y < position.y {
-                            // TODO: Find the byte index of the previous grapheme.
-                        }
-                    }
-                    _ => {}
-                
-                }
-            }
-        );
-
-        None
-
-        /*
-        // Borrow the font atlas from the context.
-        let mut glyph_infos = mem::take(&mut cx.glyph_infos);
-
-
-        let wrap_width = None;
-
-        // Walk over the words of the text.
-        let mut index = None;
-        let font_scale = self.font_scale;
-        let line_scale = self.text_style.line_scale;
-        let line_spacing = self.text_style.line_spacing;
-        let mut prev_end = None;
-        println!("Looking for {:?}", position);
-        walk_words(
-            wrap_width,
-            font_scale,
-            line_scale,
-            line_spacing,
-            &line_infos,
-            &word_infos,
-            &glyph_infos,
-            |current, line_info, glyph_infos| {
-                let height = line_info.height * font_scale * line_scale * line_spacing;
-                let mut current = current;
-                for glyph_info in glyph_infos {
-                    let width = glyph_info.width * font_scale;
-                    if let Some(prev_end) = prev_end {
-                        if position.y < current.y {
-                            index = Some(prev_end);
+                        if target.y < position.y + height {
+                            index = Some(prev_end.unwrap());
                             return true;
                         }
                     }
-                    println!(" {:?} < {:?} && {:?} < {:?}?", position.x, current.x + width * 0.5, position.y, current.y + height);
-                    if position.x < current.x + width * 0.5 && position.y < current.y + height {
-                        index = Some(glyph_info.start);
-                        return true;
-                    }
-                    prev_end = Some(glyph_info.end);
-                    current.x += width;
                 }
                 false
             }
         );
+
         Some(text[..index.unwrap_or(text.len())].chars().count())
-        */
     }
 
     fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, line: &str, font_atlas: &mut CxFontAtlas) {
@@ -591,8 +549,9 @@ impl DrawText {
                 } = event {
                     self.draw_glyphs(cx, origin + position, &glyph_infos, font_atlas);
                 }
+                false
             }
-        )
+        );
     }
 
     /// Draws the given text with the turtle, using the given walk and alignment.
@@ -668,6 +627,7 @@ impl DrawText {
                 } = event {
                     max_width = width.max(position.x + width);
                 }
+                false
             }
         );
         let mut width = max_width;
@@ -707,6 +667,7 @@ impl DrawText {
             |position, event, font_atlas| {
                 if let LayoutEvent::Chunk {
                     glyph_infos,
+                    string,
                     ..
                 } = event {
                     self.draw_glyphs(
@@ -716,6 +677,7 @@ impl DrawText {
                         font_atlas,
                     );
                 }
+                false
             }
         );
 
@@ -823,6 +785,7 @@ impl DrawText {
                         cx.turtle_new_line();
                     }
                 }
+                false
             }
         );
         if let Some(prev_rect) = prev_rect_slot {
@@ -976,14 +939,14 @@ fn layout_text(
     wrap_width: Option<f64>,
     font_atlas: &mut CxFontAtlas,
     shape_cache: &mut CxShapeCache,
-    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas),
-) {
+    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
     for (index, line) in lines(text).enumerate() {
         if index > 0 {
             position.x = 0.0;
             position.y += line_spacing;
         }
-        layout_line(
+        if layout_line(
             position,
             line,
             font_ids,
@@ -993,8 +956,11 @@ fn layout_text(
             font_atlas,
             shape_cache,
             &mut f,
-        );
+        ) {
+            return true;
+        }
     }
+    false
 }
 
 fn layout_line(
@@ -1006,10 +972,10 @@ fn layout_line(
     wrap_width: Option<f64>,
     font_atlas: &mut CxFontAtlas,
     shape_cache: &mut CxShapeCache,
-    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas),
-) {
+    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
     for (index, word) in words(line).enumerate() {
-        layout_word(
+        if layout_word(
             position,
             index == 0,
             word,
@@ -1020,8 +986,11 @@ fn layout_line(
             font_atlas, 
             shape_cache,
             &mut f,
-        );
+        ) {
+            return true;
+        }
     }
+    false
 }
 
 fn layout_word(
@@ -1031,43 +1000,50 @@ fn layout_word(
     font_ids: &[usize],
     font_size: f64,
     line_spacing: f64,
-    max_width: Option<f64>,
+    wrap_width: Option<f64>,
     font_atlas: &mut CxFontAtlas,
     shape_cache: &mut CxShapeCache,
-    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas),
-) {
+    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
     let glyph_infos = shape(word, font_ids, font_atlas, shape_cache);
     let width: f64 = glyph_infos.iter().map(|glyph_info| {
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
     }).sum();
-    if max_width.map_or(false, |max_width| position.x + width > max_width) && !is_first {
-        f(*position, LayoutEvent::Newline, font_atlas);
+    if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) && !is_first {
+        if f(*position, LayoutEvent::Newline, font_atlas) {
+            return true;
+        }
         position.x = 0.0;
         position.y += line_spacing;
     }
-    if max_width.map_or(false, |max_width| position.x + width > max_width) {
+    if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) {
         for (index, grapheme) in graphemes(word).enumerate() {
-            layout_grapheme(
+            if layout_grapheme(
                 position,
                 index == 0,
                 grapheme,
                 font_ids,
                 font_size,
                 line_spacing,
-                max_width,
+                wrap_width,
                 font_atlas,
                 shape_cache,
                 &mut f,
-            );
+            ) {
+                return true;
+            }
         }
     } else {
-        f(*position, LayoutEvent::Chunk {
+        if f(*position, LayoutEvent::Chunk {
             width,
             string: word,
             glyph_infos
-        }, font_atlas);
+        }, font_atlas) {
+            return true;
+        }
         position.x += width;
     }
+    false
 }
 
 fn layout_grapheme(
@@ -1077,26 +1053,31 @@ fn layout_grapheme(
     font_ids: &[usize],
     font_size: f64,
     line_spacing: f64,
-    max_width: Option<f64>,
+    wrap_width: Option<f64>,
     font_atlas: &mut CxFontAtlas,
     shape_cache: &mut CxShapeCache,
-    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas),
-) {
+    mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
     let glyph_infos = shape(grapheme, font_ids, font_atlas, shape_cache);
     let width: f64 = glyph_infos.iter().map(|glyph_info| {
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
     }).sum();
-    if max_width.map_or(false, |max_width| position.x + width > max_width) && !is_first {
-        f(*position, LayoutEvent::Newline, font_atlas);
+    if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) && !is_first {
+        if f(*position, LayoutEvent::Newline, font_atlas) {
+            return true;
+        }
         position.x = 0.0;
         position.y += line_spacing;
     }
-    f(*position, LayoutEvent::Chunk {
+    if f(*position, LayoutEvent::Chunk {
         width,
         string: grapheme,
         glyph_infos
-    }, font_atlas);
+    }, font_atlas) {
+        return true;
+    }
     position.x += width;
+    false
 }
 
 enum LayoutEvent<'a> {
@@ -1123,7 +1104,11 @@ fn graphemes(word: &str) -> impl Iterator<Item = &str> {
 }
 
 fn break_opportunities(line: &str) -> impl Iterator<Item = usize> + '_ {
-    unicode_linebreak::linebreaks(line).map(|(index, _)| index)
+    unicode_linebreak::linebreaks(line).map(|(index, _)| index).chain(if line.is_empty() {
+        Some(0)
+    } else {
+        None
+    })
 }
 
 fn split_at_indices(
