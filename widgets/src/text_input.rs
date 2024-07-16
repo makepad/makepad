@@ -70,9 +70,7 @@ pub struct TextInput {
     #[rust] undo_stack: Vec<UndoItem>,
     #[rust] redo_stack: Vec<UndoItem>,
     #[rust] cursor_tail: usize,
-    #[rust] cursor_head: usize,
-
-    #[rust] draw_area: Area,
+    #[rust] cursor_head: usize
 }
 
 impl Widget for TextInput {
@@ -266,8 +264,7 @@ impl Widget for TextInput {
                 self.set_key_focus(cx);
                 // ok so we need to calculate where we put the cursor down.
                 //elf.
-                let pos = fe.abs - self.draw_area.rect(cx).pos;
-                if let Some(pos) = self.draw_text.pick_walk(cx, Walk::default(), Align::default(), &self.text, pos) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 1 {
@@ -311,8 +308,7 @@ impl Widget for TextInput {
                 }
             }
             Hit::FingerMove(fe) => {
-                let pos = fe.abs - self.draw_area.rect(cx).pos;
-                if let Some(pos) = self.draw_text.pick_walk(cx, Walk::default(), Align::default(), &self.text, pos) {
+                if let Some(pos) = self.draw_text.closest_offset(cx, self.newline_indexes(), fe.abs) {
                     let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 2 {
                         let (head, tail) = self.double_tap_start.unwrap();
@@ -578,8 +574,7 @@ impl TextInput {
         
         self.draw_bg.begin(cx, walk, self.layout);
         let turtle_rect = cx.turtle().rect();
-        cx.add_rect_area(&mut self.draw_area, cx.turtle().padded_rect());
-
+        
         // this makes sure selection goes behind the text
         self.draw_select.append_to_draw_call(cx);
         
