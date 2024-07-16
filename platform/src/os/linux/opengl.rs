@@ -191,7 +191,7 @@ impl Cx {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
-                        
+
                         if cxtexture.format.is_vec(){
                             cxtexture.update_vec_texture();
                         } else if cxtexture.format.is_video() {
@@ -901,11 +901,29 @@ pub struct CxOsTexture {
 }
 
 impl CxTexture {
-    
+
+    /// Updates or creates a texture based on the current texture format.
+    ///
+    /// This method optimizes texture management by:
+    /// 1. Reusing existing OpenGL textures when possible.
+    /// 2. Using `glTexSubImage2D` for updates when dimensions haven't changed.
+    /// 3. Falling back to `glTexImage2D` for new textures or when dimensions change.
+    ///
+    /// Internal workings:
+    /// - If a previous platform resource exists, it's reused to avoid unnecessary allocations.
+    /// - If no texture exists, a new OpenGL texture is generated.
+    /// - The method checks current texture dimensions to decide between `glTexSubImage2D` (update) 
+    ///   and `glTexImage2D` (new allocation).
+    ///
+    /// Note: This method assumes that the texture format doesn't change between updates. 
+    /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
     pub fn update_vec_texture(&mut self) {
         if self.alloc_vec() {
-            self.free_resources();
-            if self.os.gl_texture.is_none() { 
+            if let Some(previous) = self.previous_platform_resource.take() {
+                self.os = previous;
+            } 
+            
+            if self.os.gl_texture.is_none() {
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
                     gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
@@ -913,119 +931,84 @@ impl CxTexture {
                 }
             }
         }
-        if self.check_updated(){
-            unsafe{
-                gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
-                gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
-            }                       
-            match &self.format{
-                TextureFormat::VecBGRAu8_32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::BGRA as i32,
-                        *width as i32,
-                        *height as i32,
-                        0,
-                        gl_sys::BGRA,
-                        gl_sys::UNSIGNED_BYTE,
-                        data.as_ptr() as *const _
-                    );
-                }
-                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR_MIPMAP_LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::BGRA as i32,
-                        *width as i32,
-                        *height as i32,
-                        0,
-                        gl_sys::BGRA,
-                        gl_sys::UNSIGNED_BYTE,
-                        data.as_ptr() as *const _
-                    );
+    
+        if !self.check_updated() {
+            return;
+        }
+    
+        unsafe {
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+    
+            // Set texture parameters based on the format
+            let (width, height, internal_format, format, data_type, data, use_mipmaps) = match &self.format {
+                TextureFormat::VecBGRAu8_32{width, height, data} => 
+                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false),
+                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _} => 
+                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, true),
+                TextureFormat::VecRGBAf32{width, height, data} => 
+                    (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ptr() as *const std::ffi::c_void, false),
+                TextureFormat::VecRu8{width, height, data, unpack_row_length} => {
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    if let Some(row_length) = unpack_row_length {
+                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                    }
+                    (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false)
+                },
+                TextureFormat::VecRGu8{width, height, data, unpack_row_length} => {
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    if let Some(row_length) = unpack_row_length {
+                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                    }
+                    (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false)
+                },
+                TextureFormat::VecRf32{width, height, data} => 
+                    (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ptr() as *const std::ffi::c_void, false),
+                _ => panic!("Unsupported texture format"),
+            };
+    
+            let mut current_width = 0;
+            let mut current_height = 0;
+            gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_WIDTH, &mut current_width);
+            gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_HEIGHT, &mut current_height);
+    
+            // Update the texture if the dimensions match the previously allocated image
+            if current_width == width as i32 && current_height == height as i32 {
+                gl_sys::TexSubImage2D(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    0, 0,
+                    width as i32, height as i32,
+                    format,
+                    data_type,
+                    data
+                );
+            } else {
+                gl_sys::TexImage2D(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    internal_format as i32,
+                    width as i32, height as i32,
+                    0,
+                    format,
+                    data_type,
+                    data
+                );
+            }
+    
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+    
+            if use_mipmaps {
+                if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
-                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);  
-                },
-                TextureFormat::VecRGBAf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::RGBA as i32,
-                        *width as i32,
-                        *height as i32,
-                        0,
-                        gl_sys::RGBA,
-                        gl_sys::FLOAT,
-                        data.as_ptr() as *const _
-                    );
-                },
-                TextureFormat::VecRu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
-                    if let Some(row_length) = unpack_row_length {
-                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
-                    }
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::R8 as i32,
-                        *width as i32,
-                        *height as i32,
-                        0,
-                        gl_sys::RED,
-                        gl_sys::UNSIGNED_BYTE,
-                        data.as_ptr() as *const _
-                    );
-                },
-                TextureFormat::VecRGu8{width, height, data, unpack_row_length}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
-                    if let Some(row_length) = unpack_row_length {
-                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
-                    }
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::RG as i32,
-                        *width as i32,
-                        *height as i32,
-                        0,
-                        gl_sys::RG,
-                        gl_sys::UNSIGNED_BYTE,
-                        data.as_ptr() as *const _
-                    );
-                },
-                TextureFormat::VecRf32{width, height, data}=>unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::RED as i32,
-                        *width as i32,
-                        *height as i32,
-                        0,
-                        gl_sys::RED,
-                        gl_sys::FLOAT,
-                        data.as_ptr() as *const _
-                    );
-                },
-                _=>{panic!()}
+                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
+                }
             }
-            unsafe{
-                gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
-            }
+    
+            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
 
@@ -1033,7 +1016,7 @@ impl CxTexture {
         while unsafe { gl_sys::GetError() } != 0 {}
 
         if self.alloc_video() {
-            self.free_resources();
+            self.free_previous_resources();
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -1159,15 +1142,17 @@ impl CxTexture {
         }
     }
     
-    pub fn free_resources(&mut self){
-        if let Some(gl_texture) = self.os.gl_texture.take(){
-            unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
-        }
-        if let Some(gl_renderbuffer) = self.os.gl_renderbuffer.take(){
-            unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
+    pub fn free_previous_resources(&mut self){
+        if let Some(mut old_os) = self.previous_platform_resource.take(){
+            if let Some(gl_texture) = old_os.gl_texture.take(){
+                unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
+                crate::log!("Deleted texture: {}", gl_texture);
+            }
+            if let Some(gl_renderbuffer) = old_os.gl_renderbuffer.take(){
+                unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
+            }
         }
     }
-    
 }
 
 #[derive(Default, Clone)]
