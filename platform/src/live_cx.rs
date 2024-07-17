@@ -303,7 +303,7 @@ impl Cx {
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-                println!("Error expanding live file {}", err);
+                //println!("Error expanding live file {}", err);
                 crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
@@ -322,7 +322,7 @@ impl Cx {
     pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
         for file in &live_registry.live_files {
-            //if file.module_id == //live_registry.main_module.as_ref().unwrap().module_id{
+            if file.module_id == live_registry.main_module.as_ref().unwrap().module_id{
                 for node in &file.expanded.nodes {
                     match &node.value {
                         LiveValue::Dependency(dep)=> {
@@ -334,7 +334,7 @@ impl Cx {
                         }
                     }
                 }
-            //}
+            }
         }
     }
     
