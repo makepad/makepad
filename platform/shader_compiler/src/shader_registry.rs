@@ -196,26 +196,19 @@ impl ShaderRegistry {
                 }
                 LiveValue::Expr{..} => {
                     // ok lets eval the expr to get a type
-                    match live_eval(live_registry, index, &mut (index + 1), nodes){
-                        Ok(value) => {
-                            if let Some(ty) = Ty::from_live_eval(value){
-                                if let Some(ty_lit) = ty.maybe_ty_lit(){
-                                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
-                                }
-                            }
-                            return LiveNodeFindResult::Error(
-                                LiveError {
-                                    origin: live_error_origin!(),
-                                    message: format!("Type of eval result not valid for shader"),
-                                    span: nodes[index].origin.token_id().unwrap().into()
-                                }
-                            );
-                        }
-                        Err(err)=>{
-                            println!("find_live_node_by_path - Cannot find node in expression");
-                            return LiveNodeFindResult::Error(err)
+                    
+                    if let Ok(ty) = Ty::from_live_node(live_registry, index, nodes){
+                        if let Some(ty_lit) = ty.maybe_ty_lit(){
+                            return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
                         }
                     }
+                    return LiveNodeFindResult::Error(
+                        LiveError {
+                            origin: live_error_origin!(),
+                            message: format!("Type of eval result not valid for shader"),
+                            span: nodes[index].origin.token_id().unwrap().into()
+                        }
+                    );
                 }
                 LiveValue::DSL {token_start, ..} => {
                     // lets get the first token
