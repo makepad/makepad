@@ -1290,22 +1290,8 @@ impl LiveHook for Size {
                 Some(nodes.skip_node(index))
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {
-                            *self = Self::Fixed(v);
-                        }
-                        LiveEval::Int64(v) => {
-                            *self = Self::Fixed(v as f64);
-                        }
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "bool", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                Some(nodes.skip_node(index))
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::Float32(v) => {
                 *self = Self::Fixed(*v as f64);
                 Some(index + 1)

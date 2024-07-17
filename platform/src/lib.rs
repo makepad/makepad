@@ -86,8 +86,6 @@ pub use {
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
-        live_eval,
-        LiveEval,
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
