@@ -1,5 +1,5 @@
 use {
-    crate::makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*}, makepad_widgets::Button
+    crate::makepad_widgets::{ makepad_draw::*}, makepad_widgets::Button
 };
 
 // the "IconButton" on the *left* hand side of the below is the name we will refer to the
