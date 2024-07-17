@@ -8,7 +8,6 @@ use {
             LiveValue,
             LiveNode,
             LiveId,
-            LiveEval,
             LiveProp,
             LiveError,
             LiveModuleId,
@@ -98,10 +97,10 @@ impl Cx {
     pub fn apply_error_wrong_value_type_for_primitive(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], prim: &str) {
         self.apply_error(origin, index, nodes, format!("wrong value type. Prop: {} primitive: {} value: {:?}", nodes[index].id, prim, nodes[index].value))
     }
-    
+    /*
     pub fn apply_error_wrong_expression_type_for_primitive(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], prim: &str, b: LiveEval) {
         self.apply_error(origin, index, nodes, format!("wrong expression return. Prop: {} primitive: {} value: {:?}", nodes[index].id, prim, b))
-    }
+    }*/
     
     pub fn apply_error_animation_missing_state(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], track: LiveId, state_id: LiveId, ids: &[LiveProp]) {
         self.apply_error(origin, index, nodes, format!("animation missing animator: {} {} {:?}", track, state_id, ids))
@@ -294,11 +293,18 @@ impl Cx {
             log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
         }*/
         live_registry.expand_all_documents(&mut errs);
+        // lets evaluate all expressions in the main module
+       /* for file in &live_registry.live_files {
+            if file.module_id == live_registry.main_module.as_ref().unwrap().module_id{
+                println!("GOT HERE");
+            }
+        }*/
                 
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
-               crate::log::log_with_level(
+                println!("Error expanding live file {}", err);
+                crate::log::log_with_level(
                     &err.file,
                     err.span.start.line,
                     err.span.start.column,
@@ -309,7 +315,7 @@ impl Cx {
                 );
                 continue
             }
-            error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
+            println!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
     }
     

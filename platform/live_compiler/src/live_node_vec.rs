@@ -712,8 +712,8 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::BareEnum(variant) => {
                     writeln!(f, "{}{} <BareEnum> {}", node.id, pt, variant).unwrap();
                 },
-                LiveValue::Expr {expand_index} => {
-                    writeln!(f, "{}{} <Expr> {:?}", node.id, pt, expand_index).unwrap();
+                LiveValue::Expr => {
+                    writeln!(f, "{} <Expr> {:?}", node.id, pt).unwrap();
                     stack_depth += 1;
                 },
                 LiveValue::ExprCall {ident, args} => {

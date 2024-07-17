@@ -131,18 +131,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Bool(v) => {
-                            *self = v;
-                        }
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "bool", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
@@ -179,17 +168,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as f32;}
-                        LiveEval::Int64(v) => {*self = v as f32;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f32", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
@@ -231,17 +210,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as f64;}
-                        LiveEval::Int64(v) => {*self = v as f64;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f64", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
@@ -283,17 +252,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as i64;}
-                        LiveEval::Int64(v) => {*self = v as i64;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
@@ -335,17 +294,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as u64;}
-                        LiveEval::Int64(v) => {*self = v as u64;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
@@ -387,17 +336,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as i32;}
-                        LiveEval::Int64(v) => {*self = v as i32;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
@@ -439,17 +378,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as u32;}
-                        LiveEval::Int64(v) => {*self = v as u32;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
+                panic!("Expr node found whilst deserialising DSL")
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
@@ -491,18 +420,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {*self = v as usize;}
-                        LiveEval::Int64(v) => {*self = v as usize;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "usize", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
@@ -554,23 +473,8 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                       LiveEval::Int64(v) => {
-                            *self = DVec2::all(v as f64);
-                        }
-                        LiveEval::Float64(v) => {
-                            *self = DVec2::all(v as f64);
-                        }
-                        LiveEval::Vec2(v) => {*self = v.into();}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2");
@@ -615,23 +519,8 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                       LiveEval::Int64(v) => {
-                            *self = Vec2::all(v as f32);
-                        }
-                        LiveEval::Float64(v) => {
-                            *self = Vec2::all(v as f32);
-                        }
-                        LiveEval::Vec2(v) => {*self = v;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2");
@@ -680,26 +569,8 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Vec2(v) => {
-                            *self = Vec3{x:v.x, y:v.y, z:0.0};
-                        }
-                        LiveEval::Int64(v) => {
-                            *self = Vec3::all(v as f32);
-                        }
-                        LiveEval::Float64(v) => {
-                            *self = Vec3::all(v as f32);
-                        }
-                        LiveEval::Vec3(v) => {*self = v;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec3", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec3");
@@ -756,29 +627,8 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Vec2(v) => {
-                            *self = Vec4{x:v.x, y:v.y, z:v.x, w:v.y};
-                        }
-                        LiveEval::Vec3(v) => {
-                            *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
-                        }
-                        LiveEval::Int64(v) => {
-                            *self = Vec4::all(v as f32);
-                        }
-                        LiveEval::Float64(v) => {
-                            *self = Vec4::all(v as f32);
-                        }
-                        LiveEval::Vec4(v) => {*self = v;}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec4", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4");
@@ -812,20 +662,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::String(v) => {
-                            self.clear();
-                            self.push_str(v.as_str());                            
-                        }
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
@@ -914,17 +752,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = RcStringMut::Rc(v.clone());}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
@@ -970,17 +799,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = v.clone();}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
@@ -1048,17 +868,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = Self(v.clone());}
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                nodes.skip_node(index)
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
 
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Dependency");
