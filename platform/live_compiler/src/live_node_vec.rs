@@ -789,9 +789,12 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
 
 impl LiveNodeVecApi for LiveNodeVec {
     fn insert_children_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) {
-        
         if !other[source_index].is_open() {
-            panic!();
+            panic!("Failed to insert non-open LiveNode: {:?}, \
+                \n\t --> Double-check your usage of {:?}!",
+                &other[source_index],
+                &other[source_index].id,
+            );
         }
         let next_source = other.skip_node(source_index);
         let num_children = (next_source - source_index) - 2;
