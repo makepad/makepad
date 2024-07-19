@@ -65,9 +65,12 @@ impl Widget for Button {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-        if self.enabled && self.visible {
+        if self.visible {
+            // The button only handles hits when it's visible and enabled.
+            // If it's not enabled, we still show the button, but we set
+            // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
             match event.hits(cx, self.draw_bg.area()) {
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe) if self.enabled => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
@@ -75,13 +78,17 @@ impl Widget for Button {
                     self.animator_play(cx, id!(hover.pressed));
                 }
                 Hit::FingerHoverIn(_) => {
-                    cx.set_cursor(MouseCursor::Hand);
-                    self.animator_play(cx, id!(hover.on));
+                    if self.enabled {
+                        cx.set_cursor(MouseCursor::Hand);
+                        self.animator_play(cx, id!(hover.on));
+                    } else {
+                        cx.set_cursor(MouseCursor::NotAllowed);
+                    }
                 }
-                Hit::FingerHoverOut(_) => {
+                Hit::FingerHoverOut(_) if self.enabled => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerUp(fe) => {
+                Hit::FingerUp(fe) if self.enabled => {
                     if fe.is_over {
                         cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                         if fe.device.has_hovers() {
