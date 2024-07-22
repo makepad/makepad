@@ -62,6 +62,11 @@ pub struct Slider {
     #[live] default: f64,
     
     #[live] bind: String,
+
+    // Indicates if the label of the slider responds to hover events
+    // The primary use case for this kind of emitted actions is for tooltips displaying
+    // and it is turned on by default, since this component already consumes finger events
+    #[live(true)] hover_actions_enabled: bool,
     
     #[rust] pub relative_value: f64,
     #[rust] pub dragging: Option<f64>,
@@ -177,14 +182,16 @@ impl Widget for Slider {
             }
         };
 
-        match event.hits_with_capture_overload(cx, self.label_area, true) {
-            Hit::FingerHoverIn(fh) => {
-                cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+        if self.hover_actions_enabled {
+            match event.hits_with_capture_overload(cx, self.label_area, true) {
+                Hit::FingerHoverIn(fh) => {
+                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+                }
+                Hit::FingerHoverOut(_) => {
+                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
+                },
+                _ => ()
             }
-            Hit::FingerHoverOut(_) => {
-                cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
-            },
-            _ => ()
         }
 
         match event.hits(cx, self.draw_slider.area()) {
