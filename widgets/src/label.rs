@@ -27,6 +27,12 @@ pub struct Label {
     #[rust] area: Area,
     //margin: Margin,
     #[live] text: RcStringMut,
+
+    // Indicates if this label responds to hover events
+    // It is not turned on by default because it will consume finger events
+    // and prevent other widgets from receiving them, if it is not considered with care
+    // The primary use case for this kind of emitted actions is for tooltips displaying
+    #[live(false)] hover_actions_enabled: bool
 } 
 
 impl Widget for Label {
@@ -48,15 +54,17 @@ impl Widget for Label {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let uid = self.widget_uid();
-        match event.hits_with_capture_overload(cx, self.area, true) {
-            Hit::FingerHoverIn(fh) => {
-                cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));
+        if self.hover_actions_enabled {
+            let uid = self.widget_uid();
+            match event.hits_with_capture_overload(cx, self.area, true) {
+                Hit::FingerHoverIn(fh) => {
+                    cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));
+                }
+                Hit::FingerHoverOut(_) => {
+                    cx.widget_action(uid, &scope.path, LabelAction::HoverOut);
+                },
+                _ => ()
             }
-            Hit::FingerHoverOut(_) => {
-                cx.widget_action(uid, &scope.path, LabelAction::HoverOut);
-            },
-            _ => ()
         }
     }
 }
