@@ -51,7 +51,7 @@ Integer eu enim finibus, aliquet nunc sit amet, tincidunt quam. Proin accumsan m
             }
             
             message_input = <TextInput> {
-                text: "Hi!"
+                text: "xxxflyyy"
                 width: 300,
                 height: Fit
                 draw_bg: {
