@@ -32,8 +32,8 @@ impl WidgetNode for SlidesView{
         self.area.redraw(cx)
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for child in self.children.values_mut() {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        for child in self.children.values() {
             child.find_widgets(path, cached, results);
         }
     }
