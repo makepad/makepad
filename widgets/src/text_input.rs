@@ -1,3 +1,150 @@
+use std::sync::Arc;
+
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+};
+
+live_design!{
+    DrawLabel = {{DrawLabel}} {}
+    TextInputBase = {{TextInput}} {}
+}
+
+#[derive(Clone)]
+struct UndoItem {
+    text: String,
+    undo_group: UndoGroup,
+    cursor_head: usize,
+    cursor_tail: usize
+}
+
+#[derive(PartialEq, Copy, Clone)]
+pub enum UndoGroup {
+    TextInput(u64),
+    Backspace(u64),
+    Delete(u64),
+    External(u64),
+    Cut(u64),
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawLabel {
+    #[deref] draw_super: DrawText,
+    #[live] is_empty: f32,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct TextInput {
+    #[live] pub read_only: bool,
+    #[live] pub text: String,
+    
+    #[redraw] #[live] draw_bg: DrawColor,
+    #[live] draw_text: DrawLabel,
+    #[live] draw_cursor: DrawQuad,
+    
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+    #[live] label_align: Align,
+    #[live] cursor_size: f64,
+
+    #[rust] cursor: Cursor,
+}
+
+impl TextInput {
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
+    }
+
+    pub fn select_all(&mut self) {
+        unimplemented!()
+    }
+
+    pub fn create_external_undo(&mut self) {
+        unimplemented!()
+    }
+}
+
+impl Widget for TextInput {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                ..
+            }) => {
+                if self.cursor.head > 0 {
+                    self.cursor.head -= 1;
+                }
+                self.cursor.tail = self.cursor.head;
+                self.draw_bg.redraw(cx);
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                ..
+            }) => {
+                println!("ARROW RIGHT");
+                if self.cursor.head < self.text.len() {
+                    self.cursor.head += 1;
+                }
+                self.cursor.tail = self.cursor.head;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerDown(_) => {
+                println!("SET KEY FOCUS");
+                self.set_key_focus(cx);
+            }
+            _ => {}
+        }
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_text.is_empty = 0.0;
+        self.draw_text.draw_walk(cx, self.walk, self.label_align, &self.text);
+        
+        let cursor_pos = cx.turtle().padded_rect_used().pos + self.draw_text.reverse_pick_walk(cx, self.walk, self.label_align, &self.text, self.cursor.head);
+        let cursor_height = self.draw_text.get_line_spacing();
+        println!("REVERSE PICKED CURSOR POS {:?} {:?}", self.cursor.head, cursor_pos);
+        self.draw_cursor.draw_abs(cx, Rect {
+            pos: dvec2(cursor_pos.x - 0.5 * self.cursor_size, cursor_pos.y),
+            size: dvec2(self.cursor_size, cursor_height)
+        });
+
+
+        // cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
+
+        self.draw_bg.end(cx);
+
+        DrawStep::done()
+    }
+    
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+    
+    fn set_text(&mut self, text: &str) {
+        self.text = text.to_string();
+    }
+}
+
+#[derive(Default)]
+struct Cursor {
+    head: usize,
+    tail: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, DefaultNone)]
+pub enum TextInputAction {
+    Change(String),
+    Return(String),
+    Escape,
+    KeyFocus,
+    KeyFocusLost,
+    None
+}
+
+/*
 use {
     crate::{
         makepad_derive_widget::*,
@@ -667,3 +814,4 @@ impl TextInputRef {
         }
     }
 }
+*/
