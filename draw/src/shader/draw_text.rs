@@ -425,20 +425,20 @@ impl DrawText {
         walk: Walk,
         _align: Align,
         text: &str,
-        target: DVec2,
-    ) -> Option<usize> {
+        target_position: DVec2,
+    ) -> usize {
         // Obtain a 2d context from the context.
         let draw_event = DrawEvent::default();
         let cx = &mut Cx2d::new(cx, &draw_event);
 
         // If the text is empty, there is nothing to pick.
         if text.is_empty() {
-            return None;
+            return 0;
         }
 
         // If the font did not load, there is nothing to pick.
         let Some(font_id) = self.text_style.font.font_id else {
-            return None;
+            return 0;
         };
         let font_ids = &[font_id];
 
@@ -458,7 +458,7 @@ impl DrawText {
 
         let wrap_width = None;
 
-        let mut index = None;
+        let mut closest_index = text.len();
         let height = compute_line_height(font_ids, font_size, font_atlas);
         let mut prev_end = None;
         let mut position = DVec2::new();
@@ -480,25 +480,26 @@ impl DrawText {
                     } => {
                         let mut iter = glyph_infos.iter().peekable();
                         while let Some(glyph_info) = iter.next() {
-                            let base = string.as_ptr() as usize - text.as_ptr() as usize;
-                            let start = base + glyph_info.cluster;
-                            let end = base + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let base_index = string.as_ptr() as usize - text.as_ptr() as usize;
+                            let start_index = base_index + glyph_info.cluster;
+                            let end_index = base_index + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
                             
                             let width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
                             let grapheme_count = string.graphemes(true).count();
                             let width_per_grapheme = width / (grapheme_count + 1) as f64;
-                            for grapheme_index in 0..grapheme_count {
-                                if target.x < position.x + grapheme_index as f64 * width_per_grapheme && target.y < position.y + height {
-                                    index = Some(start + string.grapheme_indices(true).nth(grapheme_index).unwrap().0);
+
+                            for index in 0..grapheme_count {
+                                if target_position.x < position.x + index as f64 * width_per_grapheme && target_position.y < position.y + height {
+                                    closest_index = start_index + string.grapheme_indices(true).nth(index).unwrap().0;
                                     return true;
                                 }
                             }
-                            prev_end = Some(end);
+                            prev_end = Some(end_index);
                         }
                     }
                     LayoutEvent::Newline => {
-                        if target.y < position.y + height {
-                            index = Some(prev_end.unwrap());
+                        if target_position.y < position.y + height {
+                            closest_index = prev_end.unwrap();
                             return true;
                         }
                     }
@@ -507,7 +508,89 @@ impl DrawText {
             }
         );
 
-        Some(text[..index.unwrap_or(text.len())].chars().count())
+        closest_index
+    }
+
+    pub fn reverse_pick_walk(
+        &mut self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        _align: Align,
+        text: &str,
+        target_index: usize,
+    ) -> DVec2 {
+        println!("REVERSE PICKING {:?}", target_index);
+
+        // If the text is empty, there is nothing to pick.
+        if text.is_empty() {
+            return DVec2::new();
+        }
+
+        // If the font did not load, there is nothing to pick.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return DVec2::new();
+        };
+        let font_ids = &[font_id];
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas;
+
+        // Borrow the shape cache from the context.
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache = shape_cache_rc.0.borrow_mut();
+        let shape_cache = &mut *shape_cache;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        let wrap_width = None;
+
+        let mut closest_position = None;
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            |position, event, font_atlas| {
+                match event {
+                    LayoutEvent::Chunk {
+                        string,
+                        glyph_infos,
+                        ..
+                    } => {
+                        let start = string.as_ptr() as usize - text.as_ptr() as usize;
+                        let mut position = position;
+                        let mut iter = glyph_infos.iter().peekable();
+                        while let Some(glyph_info) = iter.next() {
+                            let glyph_start = start + glyph_info.cluster;
+                            let glyph_end = start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let glyph_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
+                            let grapheme_count = string[glyph_start..glyph_end].graphemes(true).count();
+                            let glyph_width_per_grapheme = glyph_width / grapheme_count as f64;
+                            for (grapheme_start, grapheme) in string[glyph_start..glyph_end].grapheme_indices(true) {
+                                if target_index < glyph_start + grapheme_start + grapheme.len() {
+                                    closest_position = Some(position);
+                                    return true;
+                                }
+                                position.x += glyph_width_per_grapheme;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                false
+            }
+        );
+
+        closest_position.unwrap_or(position)
     }
 
     fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, line: &str, font_atlas: &mut CxFontAtlas) {
@@ -651,7 +734,7 @@ impl DrawText {
             height: Size::Fixed(height),
         });
 
-        cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
+        // cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
         
         // Lay out the text again to draw the glyphs in the draw rectangle.
         let mut position = DVec2::new();
