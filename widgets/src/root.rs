@@ -53,8 +53,8 @@ impl WidgetNode for Root{
     }
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
         
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
-        for window in self.windows.values_mut() {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
+        for window in self.windows.values() {
             window.find_widgets(path, cached, results);
         }
     }
