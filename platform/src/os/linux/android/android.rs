@@ -27,6 +27,8 @@ use {
         makepad_live_id::*,
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
+        studio::{AppToStudio,GPUSample},
+        
         event::{
             VirtualKeyboardEvent,
             NetworkResponseItem,
@@ -63,6 +65,7 @@ use {
     makepad_http::websocket::ServerWebSocket as WebSocketImpl,
     makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
+
 /*
 fn android_debug_log(msg:&str){
     use std::ffi::c_int;
@@ -72,7 +75,6 @@ fn android_debug_log(msg:&str){
     let msg = format!("{}\0", msg);
     unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
 }*/
-
 
 impl Cx {
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
@@ -433,12 +435,20 @@ impl Cx {
                 if self.os.first_after_resize {
                     self.os.first_after_resize = false;
                     self.redraw_all();
-                }
-
+                } 
                 self.handle_repaint();
             }
             else {
-                std::thread::sleep(Duration::from_millis(8));
+                //std::thread::sleep(Duration::from_millis(8));
+                
+                unsafe{
+                    let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
+                    if let Some(display) = &mut self.os.display {
+                        (display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_PRESERVED);
+                        (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                    }
+                }
+                
             }
         }
     }
@@ -506,7 +516,7 @@ impl Cx {
                 window as _,
                 std::ptr::null_mut(),
             )};
-
+            
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
@@ -680,9 +690,18 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
+                    let start = self.seconds_since_app_start();
                     self.draw_pass_to_fullscreen(*pass_id);
+                    let end = self.seconds_since_app_start(); 
+                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
+                        start, end 
+                    }));
                     unsafe {
-                        if let Some(display) = &mut self.os.display {
+                        //let frame_time = (1000_0000_0000f64 / 120.0) as i64;
+                        ////self.os.frame_time += frame_time;
+                        let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
+                        if let Some(display) = &mut self.os.display { 
+                            (display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_DESTROYED);
                             (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
 
                         }
@@ -719,7 +738,8 @@ impl Cx {
                         outer_size: size,
                     };
                     window.is_created = true;
-
+                    //let ret = unsafe{ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.0, 0)};
+                    //crate::log!("{}",ret);
                     let new_geom = window.window_geom.clone();
                     let old_geom = window.window_geom.clone();
                     self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -828,6 +848,7 @@ impl Default for CxOs {
         Self {
             start_time: Instant::now(),
             first_after_resize: true,
+            frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             keyboard_closed: 0.0,
@@ -857,7 +878,7 @@ pub struct CxOs {
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub keyboard_closed: f64,
-
+    pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,
     pub (crate) start_time: Instant,
