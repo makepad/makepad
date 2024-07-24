@@ -77,6 +77,11 @@ fn android_debug_log(msg:&str){
 }*/
 
 impl Cx {
+
+    /// Main event loop for the Android platform.
+    /// This method waits for messages from the Java side, particularly the RenderLoop message,
+    /// which is sent on Android Choreographer callbacks to sync with vsync.
+    /// It handles all incoming messages, processes other events, and manages drawing operations.
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
 
@@ -84,158 +89,161 @@ impl Cx {
         self.redraw_all();
 
         self.start_network_live_file_watcher();
-        let mut websocket_parsers = HashMap::new();
         while !self.os.quit {
-            for event in self.os.timers.get_dispatch() {
-                self.call_event_handler(&event);
+            // Wait for the next message, blocking until one is received.
+            // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
+            match from_java_rx.recv() {
+                Ok(FromJavaMessage::RenderLoop) => {
+                    self.handle_all_pending_messages(&from_java_rx);
+                    self.handle_other_events();
+                    self.handle_drawing();
+                },
+                Ok(message) => {
+                    self.handle_message(message);
+                },
+                Err(e) => {
+                    // Handle potential errors, like disconnection
+                    println!("Error receiving message: {:?}", e);
+                    break; // or handle appropriately
+                }
             }
+        }
+    }
 
-            while let Ok(msg) = from_java_rx.try_recv() {
+    fn handle_all_pending_messages(&mut self, from_java_rx: &mpsc::Receiver<FromJavaMessage>) {
+        // Handle the messages that arrived during the last frame
+        while let Ok(msg) = from_java_rx.try_recv() {
+            self.handle_message(msg);
+        }
+    }
+
+    fn handle_message(&mut self, msg: FromJavaMessage) {
+        match msg {
+            FromJavaMessage::RenderLoop => {
+                // This should not happen here, as it's handled in the main loop
+            },
+            FromJavaMessage::BackPressed => {
+                self.call_event_handler(&Event::BackPressed);
+            }
+            FromJavaMessage::SurfaceCreated {window} => unsafe {
+                self.os.display.as_mut().unwrap().update_surface(window);
+            },
+            FromJavaMessage::SurfaceDestroyed => unsafe {
+                self.os.display.as_mut().unwrap().destroy_surface();
+            },
+            FromJavaMessage::SurfaceChanged {
+                window,
+                width,
+                height,
+            } => {
+
+                unsafe {
+                    self.os.display.as_mut().unwrap().update_surface(window);
+                }
+                self.os.display_size = dvec2(width as f64, height as f64);
+                let window_id = CxWindowPool::id_zero();
+                let window = &mut self.windows[window_id];
+                let old_geom = window.window_geom.clone();
                 
-                // crate::log!("log main_loop: {:?}", msg);
-                match msg {
-                    FromJavaMessage::BackPressed => {
-                        crate::log!("FromJava: onBackPressed");
-                        self.call_event_handler(&Event::BackPressed);
+                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                let size = self.os.display_size / dpi_factor;
+                window.window_geom = WindowGeom {
+                    dpi_factor,
+                    can_fullscreen: false,
+                    xr_is_presenting: false,
+                    is_fullscreen: true,
+                    is_topmost: true,
+                    position: dvec2(0.0, 0.0),
+                    inner_size: size,
+                    outer_size: size,
+                };
+                let new_geom = window.window_geom.clone();
+                self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                    window_id,
+                    new_geom,
+                    old_geom
+                }));
+                if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                    self.redraw_pass_and_child_passes(main_pass_id);
+                }
+                self.redraw_all();
+                self.os.first_after_resize = true;
+                self.call_event_handler(&Event::ClearAtlasses);
+            }
+            FromJavaMessage::Touch(mut touches) => {
+                let time = touches[0].time;
+                let window = &mut self.windows[CxWindowPool::id_zero()];
+                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                for touch in &mut touches {
+                    // When the software keyboard shifted the UI in the vertical axis,
+                    //we need to make the math here to keep touch events positions synchronized.
+                    //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
+                    //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
+                    touch.abs /= dpi_factor;
+                }
+                self.fingers.process_touch_update_start(time, &touches);
+                let e = Event::TouchUpdate(
+                    TouchUpdateEvent {
+                        time,
+                        window_id: CxWindowPool::id_zero(),
+                        touches,
+                        modifiers: Default::default()
                     }
-                    FromJavaMessage::SurfaceCreated {window} => unsafe {
-                        self.os.display.as_mut().unwrap().update_surface(window);
-                    },
-                    FromJavaMessage::SurfaceDestroyed => unsafe {
-                        self.os.display.as_mut().unwrap().destroy_surface();
-                    },
-                    FromJavaMessage::SurfaceChanged {
-                        window,
-                        width,
-                        height,
-                    } => {
-
-                        unsafe {
-                            self.os.display.as_mut().unwrap().update_surface(window);
+                );
+                self.call_event_handler(&e);
+                let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
+                self.fingers.process_touch_update_end(&e.touches);
+            }
+            FromJavaMessage::Character {character} => {
+                if let Some(character) = char::from_u32(character) {
+                    let e = Event::TextInput(
+                        TextInputEvent {
+                            input: character.to_string(),
+                            replace_last: false,
+                            was_paste: false,
                         }
-                        self.os.display_size = dvec2(width as f64, height as f64);
-                        let window_id = CxWindowPool::id_zero();
-                        let window = &mut self.windows[window_id];
-                        let old_geom = window.window_geom.clone();
-                        
-                        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                        let size = self.os.display_size / dpi_factor;
-                        window.window_geom = WindowGeom {
-                            dpi_factor,
-                            can_fullscreen: false,
-                            xr_is_presenting: false,
-                            is_fullscreen: true,
-                            is_topmost: true,
-                            position: dvec2(0.0, 0.0),
-                            inner_size: size,
-                            outer_size: size,
-                        };
-                        let new_geom = window.window_geom.clone();
-                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id,
-                            new_geom,
-                            old_geom
-                        }));
-                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
-                            self.redraw_pass_and_child_passes(main_pass_id);
-                        }
-                        self.redraw_all();
-                        self.os.first_after_resize = true;
-                        self.call_event_handler(&Event::ClearAtlasses);
-                    }
-                    FromJavaMessage::Touch(mut touches) => {
-                        let time = touches[0].time;
-                        let window = &mut self.windows[CxWindowPool::id_zero()];
-                        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                        for touch in &mut touches {
-                            // When the software keyboard shifted the UI in the vertical axis,
-                            //we need to make the math here to keep touch events positions synchronized.
-                            //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
-                            //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
-                            touch.abs /= dpi_factor;
-                        }
-                        self.fingers.process_touch_update_start(time, &touches);
-                        let e = Event::TouchUpdate(
-                            TouchUpdateEvent {
-                                time,
-                                window_id: CxWindowPool::id_zero(),
-                                touches,
-                                modifiers: Default::default()
-                            }
-                        );
-                        self.call_event_handler(&e);
-                        let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
-                        self.fingers.process_touch_update_end(&e.touches);
-                    }
-                    FromJavaMessage::Character {character} => {
-                        if let Some(character) = char::from_u32(character) {
-                            let e = Event::TextInput(
-                                TextInputEvent {
-                                    input: character.to_string(),
-                                    replace_last: false,
-                                    was_paste: false,
-                                }
-                            );
+                    );
+                    self.call_event_handler(&e);
+                }
+            }
+            FromJavaMessage::KeyDown {keycode, meta_state} => {
+                let e: Event;
+                let makepad_keycode = android_to_makepad_key_code(keycode);
+                if !makepad_keycode.is_unknown() {
+                    let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                    let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+                    let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+                    let is_shortcut = control || alt;
+                    if is_shortcut {
+                        if makepad_keycode == KeyCode::KeyC {
+                            let response = Rc::new(RefCell::new(None));
+                            e = Event::TextCopy(TextClipboardEvent {
+                                response: response.clone()
+                            });
                             self.call_event_handler(&e);
+                            // let response = response.borrow();
+                            // if let Some(response) = response.as_ref(){
+                            //     to_java.copy_to_clipboard(response);
+                            // }
+                        } else if makepad_keycode == KeyCode::KeyX {
+                            let response = Rc::new(RefCell::new(None));
+                            let e = Event::TextCut(TextClipboardEvent {
+                                response: response.clone()
+                            });
+                            self.call_event_handler(&e);
+                            // let response = response.borrow();
+                            // if let Some(response) = response.as_ref(){
+                            //     to_java.copy_to_clipboard(response);
+                            // }
+                        } else if makepad_keycode == KeyCode::KeyV {
+                            //to_java.paste_from_clipboard();
                         }
-                    }
-                    FromJavaMessage::KeyDown {keycode, meta_state} => {
-                        let e: Event;
-                        let makepad_keycode = android_to_makepad_key_code(keycode);
-                        if !makepad_keycode.is_unknown() {
-                            let control = meta_state & ANDROID_META_CTRL_MASK != 0;
-                            let alt = meta_state & ANDROID_META_ALT_MASK != 0;
-                            let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
-                            let is_shortcut = control || alt;
-                            if is_shortcut {
-                                if makepad_keycode == KeyCode::KeyC {
-                                    let response = Rc::new(RefCell::new(None));
-                                    e = Event::TextCopy(TextClipboardEvent {
-                                        response: response.clone()
-                                    });
-                                    self.call_event_handler(&e);
-                                    // let response = response.borrow();
-                                    // if let Some(response) = response.as_ref(){
-                                    //     to_java.copy_to_clipboard(response);
-                                    // }
-                                } else if makepad_keycode == KeyCode::KeyX {
-                                    let response = Rc::new(RefCell::new(None));
-                                    let e = Event::TextCut(TextClipboardEvent {
-                                        response: response.clone()
-                                    });
-                                    self.call_event_handler(&e);
-                                    // let response = response.borrow();
-                                    // if let Some(response) = response.as_ref(){
-                                    //     to_java.copy_to_clipboard(response);
-                                    // }
-                                } else if makepad_keycode == KeyCode::KeyV {
-                                    //to_java.paste_from_clipboard();
-                                }
-                            } else {
-                                if makepad_keycode == KeyCode::Back {
-                                    crate::log!("FromJava: KeyCode BackPressed");
-                                    self.call_event_handler(&Event::BackPressed);
-                                }
-
-                                e = Event::KeyDown(
-                                    KeyEvent {
-                                        key_code: makepad_keycode,
-                                        is_repeat: false,
-                                        modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
-                                        time: self.os.timers.time_now()
-                                    }
-                                );
-                                self.call_event_handler(&e);
-                            }
+                    } else {
+                        if makepad_keycode == KeyCode::Back {
+                            self.call_event_handler(&Event::BackPressed);
                         }
-                    }
-                    FromJavaMessage::KeyUp {keycode, meta_state} => {
-                        let makepad_keycode = android_to_makepad_key_code(keycode);
-                        let control = meta_state & ANDROID_META_CTRL_MASK != 0;
-                        let alt = meta_state & ANDROID_META_ALT_MASK != 0;
-                        let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
 
-                        let e = Event::KeyUp(
+                        e = Event::KeyDown(
                             KeyEvent {
                                 key_code: makepad_keycode,
                                 is_repeat: false,
@@ -245,212 +253,233 @@ impl Cx {
                         );
                         self.call_event_handler(&e);
                     }
-                    FromJavaMessage::ResizeTextIME {keyboard_height, is_open} => {
-                        let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
-                        if !is_open {
-                            self.os.keyboard_closed = keyboard_height;
-                        }
-                        if is_open {
-                            self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidShow {
-                                height: keyboard_height - self.os.keyboard_closed,
-                                time: self.os.timers.time_now()
-                            }))
-                        }
-                        else {
-                            self.text_ime_was_dismissed();
-                            self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
-                                time: self.os.timers.time_now()
-                            }))
-                        }
-                    }
-                    FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
-                        let e = Event::NetworkResponses(vec![
-                            NetworkResponseItem {
-                                request_id: LiveId(request_id),
-                                response: NetworkResponse::HttpResponse(HttpResponse::new(
-                                    LiveId(metadata_id),
-                                    status_code,
-                                    headers,
-                                    Some(body)
-                                ))
-                            }
-                        ]);
-                        self.call_event_handler(&e);
-                    }
-                    FromJavaMessage::HttpRequestError {request_id, error, ..} => {
-                        let e = Event::NetworkResponses(vec![
-                            NetworkResponseItem {
-                                request_id: LiveId(request_id),
-                                response: NetworkResponse::HttpRequestError(error)
-                            }
-                        ]);
-                        self.call_event_handler(&e);
-                    }
-                    FromJavaMessage::WebSocketMessage {message, sender} => {
-                        let ws_message_parser = websocket_parsers.entry(sender.0).or_insert_with(||  WebSocketImpl::new());
-                        ws_message_parser.parse(&message, | result | {
-                            match result {
-                                Ok(WebSocketMessageImpl::Text(text_msg)) => {
-                                    let message = WebSocketMessage::String(text_msg.to_string());
-                                    sender.1.send(message).unwrap();
-                                },
-                                Ok(WebSocketMessageImpl::Binary(data)) => {
-                                    let message = WebSocketMessage::Binary(data.to_vec());
-                                    sender.1.send(message).unwrap();
-                                },
-                                Err(e) => {
-                                    println!("Websocket message parse error {:?}", e);
-                                },
-                                _ => ()
-                            }
-                        });
-                    }
-                    FromJavaMessage::WebSocketClosed {sender} => {
-                        websocket_parsers.remove(&sender.0);
-                        let message = WebSocketMessage::Closed;
-                        sender.1.send(message).unwrap();
-                    }
-                    FromJavaMessage::WebSocketError {error, sender} => {
-                        websocket_parsers.remove(&sender.0);
-                        let message = WebSocketMessage::Error(error);
-                        sender.1.send(message).unwrap();
-                    }
-                    FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
-                        self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
-                    }
-                    FromJavaMessage::VideoPlaybackPrepared {video_id, video_width, video_height, duration, surface_texture} => {
-                        let e = Event::VideoPlaybackPrepared(
-                            VideoPlaybackPreparedEvent {
-                                video_id: LiveId(video_id),
-                                video_width,
-                                video_height,
-                                duration,
-                            }
-                        );
-
-                        self.os.video_surfaces.insert(LiveId(video_id), surface_texture);
-                        self.call_event_handler(&e);
-                    },
-                    FromJavaMessage::VideoPlaybackCompleted {video_id} => {
-                        let e = Event::VideoPlaybackCompleted(
-                            VideoPlaybackCompletedEvent {
-                                video_id: LiveId(video_id)
-                            }
-                        );
-                        self.call_event_handler(&e);
-                    },
-                    FromJavaMessage::VideoPlayerReleased {video_id} => {
-                        if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
-                            unsafe {
-                                let env = attach_jni_env();
-                                android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
-                            }
-                        }
-
-                        let e = Event::VideoPlaybackResourcesReleased(
-                            VideoPlaybackResourcesReleasedEvent {
-                                video_id: LiveId(video_id)
-                            }
-                        );
-                        self.call_event_handler(&e);
-                    },
-                    FromJavaMessage::VideoDecodingError {video_id, error} => {
-                        let e = Event::VideoDecodingError(
-                            VideoDecodingErrorEvent {
-                                video_id: LiveId(video_id),
-                                error,
-                            }
-                        );
-                        self.call_event_handler(&e);
-                    },
-                    FromJavaMessage::Pause => {
-                        self.call_event_handler(&Event::Pause);
-                    }
-                    FromJavaMessage::Resume => {
-                        if self.os.fullscreen {
-                            unsafe {
-                                let env = attach_jni_env();
-                                android_jni::to_java_set_full_screen(env, true);
-                            }
-                        }
-                        self.redraw_all();
-                        self.reinitialise_media();
-                        self.call_event_handler(&Event::Resume);
-                    }
-                    FromJavaMessage::Start => {
-                        self.call_event_handler(&Event::Foreground);
-                        
-                    }
-                    FromJavaMessage::Stop => {
-                        self.call_event_handler(&Event::Background);
-                    }
-                    FromJavaMessage::Destroy => {
-                        self.call_event_handler(&Event::Shutdown);
-                        self.os.quit = true;
-                    }
-                    FromJavaMessage::WindowFocusChanged { has_focus } => {
-                        if has_focus {
-                            self.call_event_handler(&Event::AppGotFocus);
-                        } else {
-                            self.call_event_handler(&Event::AppLostFocus);
-                        }
-                    }
-                    FromJavaMessage::Init(_) => {
-                        panic!()
-                    }
                 }
             }
+            FromJavaMessage::KeyUp {keycode, meta_state} => {
+                let makepad_keycode = android_to_makepad_key_code(keycode);
+                let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+                let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
 
-            if SignalToUI::check_and_clear_ui_signal() {
-                self.handle_media_signals();
-                self.call_event_handler(&Event::Signal);
-            }
-
-            let to_dispatch = self.get_video_updates();
-            for video_id in to_dispatch {
-                let e = Event::VideoTextureUpdated(
-                    VideoTextureUpdatedEvent {
-                        video_id,
+                let e = Event::KeyUp(
+                    KeyEvent {
+                        key_code: makepad_keycode,
+                        is_repeat: false,
+                        modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
+                        time: self.os.timers.time_now()
                     }
                 );
                 self.call_event_handler(&e);
             }
-
-
-            if self.handle_live_edit() {
-                self.call_event_handler(&Event::LiveEdit);
-                self.redraw_all();
-            }
-            self.handle_platform_ops();
-
-            if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
-                if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(self.os.timers.time_now());
+            FromJavaMessage::ResizeTextIME {keyboard_height, is_open} => {
+                let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
+                if !is_open {
+                    self.os.keyboard_closed = keyboard_height;
                 }
-                if self.need_redrawing() {
-                    self.call_draw_event();
-                    self.opengl_compile_shaders();
+                if is_open {
+                    self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidShow {
+                        height: keyboard_height - self.os.keyboard_closed,
+                        time: self.os.timers.time_now()
+                    }))
                 }
-
-                if self.os.first_after_resize {
-                    self.os.first_after_resize = false;
-                    self.redraw_all();
-                } 
-                self.handle_repaint();
+                else {
+                    self.text_ime_was_dismissed();
+                    self.call_event_handler(&Event::VirtualKeyboard(VirtualKeyboardEvent::DidHide {
+                        time: self.os.timers.time_now()
+                    }))
+                }
             }
-            else {
-                //std::thread::sleep(Duration::from_millis(8));
-                
-                unsafe{
-                    let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
-                    if let Some(display) = &mut self.os.display {
-                        (display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_PRESERVED);
-                        (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+            FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
+                let e = Event::NetworkResponses(vec![
+                    NetworkResponseItem {
+                        request_id: LiveId(request_id),
+                        response: NetworkResponse::HttpResponse(HttpResponse::new(
+                            LiveId(metadata_id),
+                            status_code,
+                            headers,
+                            Some(body)
+                        ))
+                    }
+                ]);
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::HttpRequestError {request_id, error, ..} => {
+                let e = Event::NetworkResponses(vec![
+                    NetworkResponseItem {
+                        request_id: LiveId(request_id),
+                        response: NetworkResponse::HttpRequestError(error)
+                    }
+                ]);
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::WebSocketMessage {message, sender} => {
+                let ws_message_parser = self.os.websocket_parsers.entry(sender.0).or_insert_with(||  WebSocketImpl::new());
+                ws_message_parser.parse(&message, | result | {
+                    match result {
+                        Ok(WebSocketMessageImpl::Text(text_msg)) => {
+                            let message = WebSocketMessage::String(text_msg.to_string());
+                            sender.1.send(message).unwrap();
+                        },
+                        Ok(WebSocketMessageImpl::Binary(data)) => {
+                            let message = WebSocketMessage::Binary(data.to_vec());
+                            sender.1.send(message).unwrap();
+                        },
+                        Err(e) => {
+                            println!("Websocket message parse error {:?}", e);
+                        },
+                        _ => ()
+                    }
+                });
+            }
+            FromJavaMessage::WebSocketClosed {sender} => {
+                self.os.websocket_parsers.remove(&sender.0);
+                let message = WebSocketMessage::Closed;
+                sender.1.send(message).unwrap();
+            }
+            FromJavaMessage::WebSocketError {error, sender} => {
+                self.os.websocket_parsers.remove(&sender.0);
+                let message = WebSocketMessage::Error(error);
+                sender.1.send(message).unwrap();
+            }
+            FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
+                self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
+            }
+            FromJavaMessage::VideoPlaybackPrepared {video_id, video_width, video_height, duration, surface_texture} => {
+                let e = Event::VideoPlaybackPrepared(
+                    VideoPlaybackPreparedEvent {
+                        video_id: LiveId(video_id),
+                        video_width,
+                        video_height,
+                        duration,
+                    }
+                );
+
+                self.os.video_surfaces.insert(LiveId(video_id), surface_texture);
+                self.call_event_handler(&e);
+            },
+            FromJavaMessage::VideoPlaybackCompleted {video_id} => {
+                let e = Event::VideoPlaybackCompleted(
+                    VideoPlaybackCompletedEvent {
+                        video_id: LiveId(video_id)
+                    }
+                );
+                self.call_event_handler(&e);
+            },
+            FromJavaMessage::VideoPlayerReleased {video_id} => {
+                if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
                     }
                 }
+
+                let e = Event::VideoPlaybackResourcesReleased(
+                    VideoPlaybackResourcesReleasedEvent {
+                        video_id: LiveId(video_id)
+                    }
+                );
+                self.call_event_handler(&e);
+            },
+            FromJavaMessage::VideoDecodingError {video_id, error} => {
+                let e = Event::VideoDecodingError(
+                    VideoDecodingErrorEvent {
+                        video_id: LiveId(video_id),
+                        error,
+                    }
+                );
+                self.call_event_handler(&e);
+            },
+            FromJavaMessage::Pause => {
+                self.call_event_handler(&Event::Pause);
+            }
+            FromJavaMessage::Resume => {
+                if self.os.fullscreen {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, true);
+                    }
+                }
+                self.redraw_all();
+                self.reinitialise_media();
+                self.call_event_handler(&Event::Resume);
+            }
+
+            FromJavaMessage::Start => {
+                self.call_event_handler(&Event::Foreground);
                 
             }
+            FromJavaMessage::Stop => {
+                self.call_event_handler(&Event::Background);
+            }
+            FromJavaMessage::Destroy => {
+                self.call_event_handler(&Event::Shutdown);
+                self.os.quit = true;
+            }
+            FromJavaMessage::WindowFocusChanged { has_focus } => {
+                if has_focus {
+                    self.call_event_handler(&Event::AppGotFocus);
+                } else {
+                    self.call_event_handler(&Event::AppLostFocus);
+                }
+            }
+            FromJavaMessage::Init(_) => {
+                panic!()
+            }
         }
+    }
+
+    fn handle_drawing(&mut self) {
+        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+            if !self.new_next_frames.is_empty() {
+                self.call_next_frame_event(self.os.timers.time_now());
+            }
+            if self.need_redrawing() {
+                self.call_draw_event();
+                self.opengl_compile_shaders();
+            }
+
+            if self.os.first_after_resize {
+                self.os.first_after_resize = false;
+                self.redraw_all();
+            }
+
+            self.handle_repaint();
+        }
+    }
+
+    /// Processes events that need to be checked regularly, regardless of incoming messages.
+    /// This includes timers, signals, video updates, live edits, and platform operations.
+    fn handle_other_events(&mut self) {
+        // Timers
+        for event in self.os.timers.get_dispatch() {
+            self.call_event_handler(&event);
+        }
+    
+        // Signals
+        if SignalToUI::check_and_clear_ui_signal() {
+            self.handle_media_signals();
+            self.call_event_handler(&Event::Signal);
+        }
+    
+        // Video updates
+        let to_dispatch = self.get_video_updates();
+        for video_id in to_dispatch {
+            let e = Event::VideoTextureUpdated(
+                VideoTextureUpdatedEvent {
+                    video_id,
+                }
+            );
+            self.call_event_handler(&e);
+        }
+
+        // Live edits
+        if self.handle_live_edit() {
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+
+        // Platform operations
+        self.handle_platform_ops();
     }
 
     fn get_video_updates(&mut self) -> Vec<LiveId> {
@@ -858,6 +887,7 @@ impl Default for CxOs {
             fullscreen: false,
             timers: Default::default(),
             video_surfaces: HashMap::new(),
+            websocket_parsers: HashMap::new(),
         }
     }
 }
@@ -886,6 +916,7 @@ pub struct CxOs {
     pub (crate) display: Option<CxAndroidDisplay>,
     pub (crate) media: CxAndroidMedia,
     pub (crate) video_surfaces: HashMap<LiveId, jobject>,
+    websocket_parsers: HashMap<u64, WebSocketImpl>,
 }
 
 impl CxAndroidDisplay {
