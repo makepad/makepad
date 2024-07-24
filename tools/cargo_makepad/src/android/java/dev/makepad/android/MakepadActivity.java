@@ -306,7 +306,7 @@ MidiManager.OnDeviceOpenedListener{
     protected void onStart() {
         super.onStart();
 
-        // this forces a high framerate default 
+       /* this forces a high framerate default 
            
         Window w = getWindow();
         WindowManager.LayoutParams p = w.getAttributes();
@@ -319,7 +319,7 @@ MidiManager.OnDeviceOpenedListener{
                 Log.w("Makepad", "width"+mode.getRefreshRate()+" id "+mode.getModeId());
                 break;
             }
-        }
+        }*/
 
         MakepadNative.activityOnStart();
     }
