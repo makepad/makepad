@@ -114,6 +114,7 @@ class MakepadSurface
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i("SAPP", "surfaceCreated");
         Surface surface = holder.getSurface();
+        //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceCreated(surface);
     }
 
@@ -131,6 +132,7 @@ class MakepadSurface
                                int height) {
         Log.i("SAPP", "surfaceChanged");
         Surface surface = holder.getSurface();
+        //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
@@ -270,11 +272,11 @@ MidiManager.OnDeviceOpenedListener{
   
         MakepadNative.activityOnCreate(this);
 
-/*        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
+        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
         decoderThreadHandler.start(); // TODO: only start this if its needed.
         mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
-*/
+
         HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
         webSocketsThreadHandler.start();
         mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
@@ -306,8 +308,8 @@ MidiManager.OnDeviceOpenedListener{
     protected void onStart() {
         super.onStart();
 
-       /* this forces a high framerate default 
-           
+       // this forces a high framerate default 
+           /*
         Window w = getWindow();
         WindowManager.LayoutParams p = w.getAttributes();
         Display.Mode[] modes = getDisplay().getSupportedModes();
@@ -319,8 +321,8 @@ MidiManager.OnDeviceOpenedListener{
                 Log.w("Makepad", "width"+mode.getRefreshRate()+" id "+mode.getModeId());
                 break;
             }
-        }*/
-
+        }
+*/      
         MakepadNative.activityOnStart();
     }
 
