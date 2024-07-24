@@ -23,7 +23,7 @@ pub trait WidgetDesign {
 }
 
 pub trait WidgetNode: LiveApply{
-    fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
+    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
 }
@@ -32,13 +32,13 @@ pub trait Widget: WidgetNode {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
-    fn widget(&mut self, path: &[LiveId]) -> WidgetRef {
+    fn widget(&self, path: &[LiveId]) -> WidgetRef {
         let mut results = WidgetSet::default();
         self.find_widgets(path, WidgetCache::Yes, &mut results);
         return results.into_first()
     }
     
-    fn widgets(&mut self, paths: &[&[LiveId]]) -> WidgetSet {
+    fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         for path in paths {
             self.find_widgets(path, WidgetCache::Yes, &mut results);
@@ -259,7 +259,7 @@ impl WidgetSet {
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         for widget in self.iter() {
-            if let Some(inner) = widget.0.borrow_mut().as_mut() {
+            if let Some(inner) = widget.0.borrow().as_ref() {
                 for path in paths {
                     inner.widget.find_widgets(path, WidgetCache::Yes, &mut results);
                 }
@@ -401,12 +401,12 @@ impl WidgetRef {
     }
     
     pub fn find_widgets(
-        &mut self,
+        &self,
         path: &[LiveId],
         cached: WidgetCache,
         results: &mut WidgetSet
     ) {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
+        if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.find_widgets(path, cached, results)
         }
     }

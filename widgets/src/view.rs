@@ -1,6 +1,9 @@
 use {
     crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
-    std::collections::hash_map::HashMap,
+    std::{
+        cell::RefCell,
+        collections::HashMap,
+    },
 };
 
 live_design! {
@@ -153,7 +156,7 @@ pub struct View {
     design_mode: bool,
 
     #[rust]
-    find_cache: HashMap<u64, WidgetSet>,
+    find_cache: RefCell<HashMap<u64, WidgetSet>>,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
@@ -196,7 +199,7 @@ impl LiveHook for View {
     ) {
         if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             self.draw_order.clear();
-            self.find_cache.clear();
+            self.find_cache.get_mut().clear();
         }
     }
 
@@ -517,45 +520,45 @@ impl WidgetNode for View {
         }
     }
 
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         match cached {
             WidgetCache::Yes | WidgetCache::Clear => {
                 if let WidgetCache::Clear = cached {
-                    self.find_cache.clear();
+                    self.find_cache.borrow_mut().clear();
                 }
                 let mut hash = 0u64;
                 for i in 0..path.len() {
                     hash ^= path[i].0
                 }
-                if let Some(widget_set) = self.find_cache.get(&hash) {
+                if let Some(widget_set) = self.find_cache.borrow().get(&hash) {
                     results.extend_from_set(widget_set);
                     return;
                 }
                 let mut local_results = WidgetSet::empty();
-                if let Some(child) = self.children.get_mut(&path[0]) {
+                if let Some(child) = self.children.get(&path[0]) {
                     if path.len() > 1 {
                         child.find_widgets(&path[1..], WidgetCache::No, &mut local_results);
                     } else {
                         local_results.push(child.clone());
                     }
                 }
-                for child in self.children.values_mut() {
+                for child in self.children.values() {
                     child.find_widgets(path, WidgetCache::No, &mut local_results);
                 }
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-                self.find_cache.insert(hash, local_results);
+                self.find_cache.borrow_mut().insert(hash, local_results);
             }
             WidgetCache::No => {
-                if let Some(child) = self.children.get_mut(&path[0]) {
+                if let Some(child) = self.children.get(&path[0]) {
                     if path.len() > 1 {
                         child.find_widgets(&path[1..], WidgetCache::No, results);
                     } else {
                         results.push(child.clone());
                     }
                 }
-                for child in self.children.values_mut() {
+                for child in self.children.values() {
                     child.find_widgets(path, WidgetCache::No, results);
                 }
             }
