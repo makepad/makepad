@@ -155,6 +155,9 @@ impl Widget for Slider {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         
+        // alright lets match our designer against the slider backgdrop
+        //match event.designer_hit(cx, self.draw_)
+        
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
                 TextInputAction::KeyFocus => {

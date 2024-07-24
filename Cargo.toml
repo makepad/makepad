@@ -16,6 +16,7 @@ workspace.members = [
     "examples/ui_zoo", 
     "examples/news_feed", 
 #    "makepad_wonderous",
+    "complex_layout",
     "examples/web_cam", 
     "examples/ironfish",
     "examples/simple",
