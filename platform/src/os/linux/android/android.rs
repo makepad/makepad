@@ -97,7 +97,6 @@ impl Cx {
                     self.handle_drawing();
                 },
                 Ok(message) => {
-                    crate::log!("HANDLE OTHER MESSAGE");
                     self.handle_message(message);
                 },
                 Err(e) => {
@@ -122,7 +121,6 @@ impl Cx {
                 // This should not happen here, as it's handled in the main loop
             },
             FromJavaMessage::BackPressed => {
-                crate::log!("FromJava: onBackPressed");
                 self.call_event_handler(&Event::BackPressed);
             }
             FromJavaMessage::SurfaceCreated {window} => unsafe {
@@ -240,7 +238,6 @@ impl Cx {
                         }
                     } else {
                         if makepad_keycode == KeyCode::Back {
-                            crate::log!("FromJava: KeyCode BackPressed");
                             self.call_event_handler(&Event::BackPressed);
                         }
 
