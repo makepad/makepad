@@ -41,4 +41,10 @@ extern "C" {
         env: *mut jni_sys::JNIEnv,
         assetManager: jni_sys::jobject,
     ) -> *mut AAssetManager;
+    
+    pub fn  ANativeWindow_setFrameRate(
+         window: *mut ANativeWindow,
+         frameRate:f32,
+         compatibility:i8
+    )->i32;
 }
