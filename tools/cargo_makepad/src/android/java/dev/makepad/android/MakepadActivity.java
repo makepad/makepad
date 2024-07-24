@@ -5,6 +5,7 @@ import javax.microedition.khronos.opengles.GL10;
 
 import android.app.Activity;
 import android.view.View;
+import android.view.Choreographer;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
@@ -283,6 +284,17 @@ MidiManager.OnDeviceOpenedListener{
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
+
+        // Use the Choreographer callbacks to trigger the main render loop
+        Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+            @Override
+            public void doFrame(long frameTimeNanos) {
+                MakepadNative.onRenderLoop();
+
+                // Post the callback again to continue the loop
+                Choreographer.getInstance().postFrameCallback(this);
+            }
+        });
 
         //% MAIN_ACTIVITY_ON_CREATE
     }
