@@ -185,6 +185,12 @@ impl StackNavigationViewRef {
             inner.offset_to_hide = offset_to_hide;
         }
     }
+
+    pub fn hide_stack_view(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.hide_stack_view(cx);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -322,6 +328,15 @@ impl StackNavigationRef {
     pub fn show_stack_view_by_id(&mut self, stack_view_id: LiveId, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show_stack_view_by_id(stack_view_id, cx);
+        }
+    }
+
+    pub fn back(&mut self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if let ActiveStackView::Active(stack_view_id) = inner.active_stack_view {
+                let mut stack_view_ref = inner.stack_navigation_view(&[stack_view_id]);
+                stack_view_ref.hide_stack_view(cx);
+            }
         }
     }
 
