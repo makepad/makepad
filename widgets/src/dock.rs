@@ -74,8 +74,8 @@ impl WidgetNode for Dock{
         self.area.redraw(cx)
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if let Some((_, widget)) = self.items.get(&path[0]) {
             if path.len()>1 {
                 widget.find_widgets(&path[1..], cached, results);
             }
@@ -84,7 +84,7 @@ impl WidgetNode for Dock{
             }
         }
         else {
-            for (_, widget) in self.items.values_mut() {
+            for (_, widget) in self.items.values() {
                 widget.find_widgets(path, cached, results);
             }
         }
