@@ -38,6 +38,7 @@ pub enum FromJavaMessage {
         window: *mut ndk_sys::ANativeWindow,
     },
     SurfaceDestroyed,
+    RenderLoop,
     Touch(Vec<TouchPoint>),
     Character {
         character: u32,
@@ -365,6 +366,14 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
         keyboard_height: keyboard_height as u32,
         is_open: is_open != 0
     });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onRenderLoop(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::RenderLoop);
 }
 
 #[no_mangle]
