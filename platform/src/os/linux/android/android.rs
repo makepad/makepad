@@ -5,7 +5,7 @@ use {
     std::cell::{RefCell},
     std::ffi::CString,
     //std::os::raw::{c_void},
-    std::time::{Instant, Duration},
+    std::time::{Instant},
     std::sync::{mpsc},
     std::collections::HashMap,
     jni_sys::jobject,
@@ -445,6 +445,15 @@ impl Cx {
 
             self.handle_repaint();
         }
+        else{
+            /*unsafe{
+               let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
+                if let Some(display) = &mut self.os.display {
+                    (display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_PRESERVED);
+                    (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                }
+            }*/
+        }
     }
 
     /// Processes events that need to be checked regularly, regardless of incoming messages.
@@ -728,9 +737,9 @@ impl Cx {
                     unsafe {
                         //let frame_time = (1000_0000_0000f64 / 120.0) as i64;
                         ////self.os.frame_time += frame_time;
-                        let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
+                        //let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
                         if let Some(display) = &mut self.os.display { 
-                            (display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_DESTROYED);
+                            //(display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_DESTROYED);
                             (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
 
                         }
