@@ -296,7 +296,7 @@ impl Widget for LogList {
                                     file_name:msg.file_name.clone(), 
                                     line: msg.start.line_index as u32,
                                     column: msg.start.byte_index as u32
-                                })); 
+                                }));
                             }
                             _ => ()
                         }
