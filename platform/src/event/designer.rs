@@ -1,7 +1,10 @@
 use {
     crate::{
         DVec2,
-        
+        event::Event,
+        cx::Cx,
+        area::Area,
+        Margin,
     }
 };
 
@@ -9,17 +12,23 @@ use {
 pub struct DesignerPickEvent {
     pub abs: DVec2,
 }
-/*
+
+pub enum DesignerHit{
+    DesignerPick(DesignerPickEvent),
+    Nothing
+}
+
 impl Event{
-    fn designer_hit()    
-    Event::DesignerPick(e) => {
-                       
-        let rect = area.clipped_rect(&cx);
-        if !hit_test(e.abs, &rect, &options.margin) {
-            return Hit::Nothing
+    pub fn hit_designer(&mut self, cx: &mut Cx, area:Area)->DesignerHit{
+        match self{
+            Event::DesignerPick(e) => {
+                let rect = area.clipped_rect(&cx);
+                if Margin::rect_contains_with_margin(e.abs, &rect, &None){
+                    return DesignerHit::DesignerPick(e.clone())
+                }
+            }
+            _=>{}
         }
-        // lets add our area to a handled vec?
-        // but how will we communicate the widget?
-        return Hit::DesignerPick(e.clone())
-    },
-}*/
+        DesignerHit::Nothing
+    }
+}
