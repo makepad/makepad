@@ -730,10 +730,6 @@ impl Cx {
                     //let window = &self.windows[window_id];
                     let start = self.seconds_since_app_start();
                     self.draw_pass_to_fullscreen(*pass_id);
-                    let end = self.seconds_since_app_start(); 
-                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
-                        start, end 
-                    }));
                     unsafe {
                         //let frame_time = (1000_0000_0000f64 / 120.0) as i64;
                         ////self.os.frame_time += frame_time;
@@ -744,6 +740,10 @@ impl Cx {
 
                         }
                     }
+                    let end = self.seconds_since_app_start(); 
+                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
+                        start, end 
+                    }));
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);

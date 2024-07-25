@@ -364,7 +364,7 @@ pub enum DragHit{
 }
 
 impl Event{
-    pub fn requires_visibility(&self)->bool{
+    pub fn requires_visibility(&self) -> bool{
         match self{
             Self::MouseDown(_)|
             Self::MouseMove(_)|
