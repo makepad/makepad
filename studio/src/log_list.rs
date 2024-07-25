@@ -309,7 +309,7 @@ impl Widget for LogList {
 
 impl LogListRef{
     pub fn reset_scroll(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.borrow_mut() {
+        if let Some(inner) = self.borrow_mut() {
             let log_list = inner.view.portal_list(id!(list));
             log_list.set_first_id_and_scroll(0,0.0);
             log_list.redraw(cx);
