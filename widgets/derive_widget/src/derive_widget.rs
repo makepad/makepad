@@ -60,7 +60,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         if let Some(wrap_field) = &wrap_field{
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
-            tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
+            tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
         }
         else{
             if let Some(walk_field) = &walk_field{
@@ -86,17 +86,17 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
                 return error("Need either a field marked redraw or deref or wrap to find redraw method")
             }
             if find_fields.len()>0{
-                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){");
+                tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){");
                 for find_field in find_fields{
                     tb.add("    self.").ident(&find_field).add(".find_widgets(path, cached, results);");
                 }
                 tb.add("    }");
             }
             else if let Some(deref_field) = &deref_field{
-                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");
+                tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");
             }
             else{
-                tb.add("    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
+                tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
             }
             
         }
@@ -299,11 +299,11 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("}");
             
             tb.add("pub trait").ident(&widget_ext).add("{");
-            tb.add("    fn ").ident(&get_fn).add("(&mut self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
             tb.add("}");
             
             tb.add("impl<T> ").ident(&widget_ext).add(" for T where T: Widget{");
-            tb.add("    fn ").ident(&get_fn).add("(&mut self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("}");
