@@ -430,18 +430,11 @@ live_design!{
                                 
                                     let v= ((vec2(1.0,1.0)-self.pos) * 2.0 - vec2(1.0, 1.0));
                                     let org = vec3(0., -2., 4.);
-                                    let dir = normalize(vec3(v.x*1.6, -v.y, -1.5));
-                                    
+                                    let dir = normalize(vec3(v.x*1.6, -v.y, -1.5));                                    
                                     let  p = raymarch(org, dir,self.time);
-                                    let glow = p.w;
-                                    
+                                    let glow = p.w;                                    
                                     let col = mix(vec4(1.,.5,.1,1.), vec4(0.1,.5,1.,1.), p.y*.02+.4);
-                                    let fragColor = mix(vec4(0.), col, pow(glow*2.,4.));
-                                //let fragColor = vec4(noise(vec3(self.pos*100., 1.0)),0.,0. , 1.0);
-
-
-
-                                    //let finalColor = vec3(0.3+0.01*sin(uv.x*6.283*4));
+                                    let fragColor = mix(vec4(0.,0.,0.,1.), col, pow(glow*2.,4.));                        
                                     return fragColor;
                                 }
                             }
