@@ -18,11 +18,11 @@ pub enum WidgetCache {
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub struct WidgetUid(pub u64);
-
-pub trait WidgetDesign {
-}
+ 
+pub trait WidgetDesign:WidgetNode{}
 
 pub trait WidgetNode: LiveApply{
+    fn find_widget_design(&self, _uid:WidgetUid)->Option<&mut dyn WidgetDesign>{None}
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
