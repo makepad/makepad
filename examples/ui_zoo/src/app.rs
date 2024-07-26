@@ -112,7 +112,7 @@ live_design!{
                         width: Fill, height: Fit,
                         flow: Right,
                         spacing: (THEME_SPACE_1)
-                        <P> { text: "TestButtong", width: Fit}
+                        <P> { text: "TestButton", width: Fit}
                         <LinkLabel> { text: "TestButton", width: Fit}
                         <CheckBox> { text: "TestButton"}
                         <CheckBoxToggle> { text: "TestButton"}

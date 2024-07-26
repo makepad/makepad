@@ -161,7 +161,7 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab], selected:3}
+                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab, screen5tab], selected:4}
 
                     screen1tab = Tab{
                         name: "FloatTexture"
@@ -180,6 +180,10 @@ live_design!{
                     screen4tab = Tab{
                         name: "WaterColour"
                         kind: screen4
+                    }
+                    screen5tab = Tab{
+                        name: "Fire"
+                        kind: screen5
                     }
                     screen1 = <View>
                     {
@@ -346,6 +350,103 @@ live_design!{
                             height: Fill,
                         }              
                         
+                
+                        
+                    }   
+                    screen5 = <View>
+                    {
+                        flow: Overlay,                
+                        width: Fill,
+                        height: Fill
+                        spacing: 0,
+                        padding: 0,
+                        align: {
+                            x: 0.5,
+                            y: 0.5
+                        },
+                
+                        quad = <MyWidget> {
+                            align:{x:0.,y:0.0}
+                            width: Fill,
+                            height: Fill,
+                            
+                            draw: {
+                                
+                                // ported from a creation by anatole duprat - XT95/2013
+                                // License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
+                                // see https://www.shadertoy.com/view/MdX3zr
+                                fn noise( p: vec3)-> float //Thx to Las^Mercury
+                                {
+                                    let  i = floor(p);
+                                    let a=  dot(i, vec3(1., 57., 21.)) + vec4(0., 57., 21., 78.);
+                                    let f = cos((p-i)*acos(-1.))*(-.5)+.5;
+                                    a = mix(sin(cos(a)*a),sin(cos(1.+a)*(1.+a)), f.x);
+                                    a.xy = mix(a.xz, a.yw, f.y);
+                                    return mix(a.x, a.y, f.z);
+                                }
+
+                                fn sphere(p:vec3,  spr:vec4) -> float
+                                {
+                                    return length(spr.xyz-p) - spr.w;
+                                }
+                                
+                                fn flame( p:vec3, time: float) ->float
+                                {
+                                    let d = sphere(p*vec3(1.,.5,1.), vec4(.0,-1.,.0,1.));
+                                    return d + (noise(p+vec3(.0,time*2.,.0)) + noise(p*3.)*.5)*.25*(p.y) ;
+                                }
+                                
+                                fn scene(p:vec3, time: float) -> float
+                                {
+                                    return min(100.-length(p) , abs(flame(p, time)) );
+                                }
+                                
+                                fn raymarch( org:vec3,  dir:vec3, time: float) -> vec4
+                                {
+                                    let  d = 0.0;
+                                    let  glow = 0.0;
+                                    let eps = 0.02;
+                                    let   p = org;
+                                    let glowed = 0.0;
+                                    let floati = 0.0;
+                                    for i in 0..64
+                                    {
+                                        d = scene(p, time) + eps;
+                                        p += d * dir;
+                                        if( d>eps )
+                                        {
+                                            if(flame(p, time) < .0)
+                                            {
+                                                glowed=1.0;
+                                            }
+                                            if(glowed>0.0)
+                                            {
+                                                   glow = floati/64.;
+                                            }
+                                        }
+                                        floati = floati+ 1.0;
+                                    }
+                                    return vec4(p,glow);
+                                }
+                                
+
+                                fn pixel(self) -> vec4 {
+                                
+                                    let v= ((vec2(1.0,1.0)-self.pos) * 2.0 - vec2(1.0, 1.0));
+                                    let org = vec3(0., -2., 4.);
+                                    let dir = normalize(vec3(v.x*1.6, -v.y, -1.5));                                    
+                                    let  p = raymarch(org, dir,self.time);
+                                    let glow = p.w;                                    
+                                    let col = mix(vec4(1.,.5,.1,1.), vec4(0.1,.5,1.,1.), p.y*.02+.4);
+                                    let fragColor = mix(vec4(0.,0.,0.,1.), col, pow(glow*2.,4.));                        
+                                    return fragColor;
+                                }
+                            }
+                        }
+                        <ContainerStage>{   
+                            <IconSet> {}              
+                         }
+                
                 
                         
                     }   
