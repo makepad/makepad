@@ -292,7 +292,11 @@ impl Cx {
         for file in &live_registry.live_files {
             log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
         }*/
+        //let dt = crate::profile_start();
+        
         live_registry.expand_all_documents(&mut errs);
+        //crate::profile_end!(dt);
+        
         // lets evaluate all expressions in the main module
        /* for file in &live_registry.live_files {
             if file.module_id == live_registry.main_module.as_ref().unwrap().module_id{

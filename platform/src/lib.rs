@@ -203,6 +203,7 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
+            DesignerPickEvent,
         },
         action::{
             Action,
