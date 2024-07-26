@@ -161,7 +161,7 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab], selected:3}
+                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:5}
 
                     screen1tab = Tab{
                         name: "FloatTexture"
@@ -180,6 +180,14 @@ live_design!{
                     screen4tab = Tab{
                         name: "WaterColour"
                         kind: screen4
+                    }
+                    screen5tab = Tab{
+                        name: "Fire"
+                        kind: screen5
+                    }
+                    screen6tab = Tab{
+                        name: "Drops"
+                        kind: screen6
                     }
                     screen1 = <View>
                     {
@@ -335,8 +343,12 @@ live_design!{
                             x: 0.5,
                             y: 0.5
                         },
-                
-                    
+                        show_bg: true,
+                        draw_bg: {
+                            fn pixel(self) -> vec4{
+                                return vec4(0.70,0.72,0.72,1)
+                            }
+                        }   
                         <ParticleSystem> {
                             width: Fill,
                             height: Fill,
@@ -345,7 +357,264 @@ live_design!{
                 
                         
                     }   
+                    screen5 = <View>
+                    {
+                        flow: Overlay,                
+                        width: Fill,
+                        height: Fill
+                        spacing: 0,
+                        padding: 0,
+                        align: {
+                            x: 0.5,
+                            y: 0.5
+                        },
+                
+                        quad = <MyWidget> {
+                            align:{x:0.,y:0.0}
+                            width: Fill,
+                            height: Fill,
+                            
+                            draw: {
+                                
+                                // ported from a creation by anatole duprat - XT95/2013
+                                // License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
+                                // see https://www.shadertoy.com/view/MdX3zr
+                                fn noise( p: vec3)-> float //Thx to Las^Mercury
+                                {
+                                    let  i = floor(p);
+                                    let a=  dot(i, vec3(1., 57., 21.)) + vec4(0., 57., 21., 78.);
+                                    let f = cos((p-i)*acos(-1.))*(-.5)+.5;
+                                    a = mix(sin(cos(a)*a),sin(cos(1.+a)*(1.+a)), f.x);
+                                    a.xy = mix(a.xz, a.yw, f.y);
+                                    return mix(a.x, a.y, f.z);
+                                }
 
+                                fn sphere(p:vec3,  spr:vec4) -> float
+                                {
+                                    return length(spr.xyz-p) - spr.w;
+                                }
+                                
+                                fn flame( p:vec3, time: float) ->float
+                                {
+                                    let d = sphere(p*vec3(1.,.5,1.), vec4(.0,-1.,.0,1.));
+                                    return d + (noise(p+vec3(.0,time*2.,.0)) + noise(p*3.)*.5)*.25*(p.y) ;
+                                }
+                                
+                                fn scene(p:vec3, time: float) -> float
+                                {
+                                    return min(100.-length(p) , abs(flame(p, time)) );
+                                }
+                                
+                                fn raymarch( org:vec3,  dir:vec3, time: float) -> vec4
+                                {
+                                    let  d = 0.0;
+                                    let  glow = 0.0;
+                                    let eps = 0.02;
+                                    let   p = org;
+                                    let glowed = 0.0;
+                                    let floati = 0.0;
+                                    for i in 0..64
+                                    {
+                                        d = scene(p, time) + eps;
+                                        p += d * dir;
+                                        if( d>eps )
+                                        {
+                                            if(flame(p, time) < .0)
+                                            {
+                                                glowed=1.0;
+                                            }
+                                            if(glowed>0.0)
+                                            {
+                                                   glow = floati/64.;
+                                            }
+                                        }
+                                        floati = floati+ 1.0;
+                                    }
+                                    return vec4(p,glow);
+                                }
+                                
+
+                                fn pixel(self) -> vec4 {
+                                
+                                    let v= ((vec2(1.0,1.0)-self.pos) * 2.0 - vec2(1.0, 1.0));
+                                    let org = vec3(0., -2., 4.);
+                                    let dir = normalize(vec3(v.x*1.6, -v.y, -1.5));                                    
+                                    let  p = raymarch(org, dir,self.time);
+                                    let glow = p.w;                                    
+                                    let col = mix(vec4(1.,.5,.1,1.), vec4(0.1,.5,1.,1.), p.y*.02+.4);
+                                    let fragColor = mix(vec4(0.,0.,0.,1.), col, pow(glow*2.,4.));                        
+                                    return fragColor;
+                                }
+                            }
+                        }
+                        <ContainerStage>{   
+                            <IconSet> {}              
+                         }
+                
+                
+                        
+                    }   
+
+                
+                    screen6 = <View>{
+                        flow: Overlay,                
+                        width: Fill,
+                        height: Fill
+                        spacing: 0,
+                        padding: 0,
+                        align: {
+                            x: 0.5,
+                            y: 0.5
+                        },
+                
+                        quad = <MyWidget> {
+                            align:{x:0.,y:0.0}
+                            width: Fill,
+                            height: Fill,
+                            
+                            draw: {
+                                
+                                // ported from https://www.shadertoy.com/view/ltffzl
+                                // Heartfelt - by Martijn Steinrucken aka BigWings - 2017
+
+                                // Email:countfrolic@gmail.com Twitter:@The_ArtOfCode
+                                // License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
+
+
+                                fn N13( p:float) -> vec3{
+                                    //  from DAVE HOSKINS
+                                   let p3 = fract(vec3(p) * vec3(.1031,.11369,.13787));
+                                   p3 += dot(p3, p3.yzx + 19.19);
+                                   return fract(vec3((p3.x + p3.y)*p3.z, (p3.x+p3.z)*p3.y, (p3.y+p3.z)*p3.x));
+                                }
+                                
+                                fn N14( t:float)->vec4 {
+                                    return fract(sin(t*vec4(123., 1024., 1456., 264.))*vec4(6547., 345., 8799., 1564.));
+                                }
+                                 fn N( t:float)-> float {
+                                    return fract(sin(t*12345.564)*7658.76);
+                                }
+                                
+                                fn S( a:float, b:float, t: float) ->float {
+                                    return smoothstep(a, b, t);
+                                }
+
+                                fn Saw( b:float,  t: float) ->float {
+                                    return S(0., b, t)*S(1., b, t);
+                                }
+
+                                
+                                fn DropLayer2( uv: vec2, t:float) -> vec2{
+                                    let UV = uv;
+                                    
+                                    uv.y += t*0.75;
+                                    let a = vec2(6., 1.);
+                                    let grid = a*2.;
+                                    let id = floor(uv*grid);
+                                    
+                                    let colShift = N(id.x); 
+                                    uv.y += colShift;
+                                    
+                                    id = floor(uv*grid);
+                                    let n = N13(id.x*35.2+id.y*2376.1);
+                                    let st = fract(uv*grid)-vec2(.5, 0);
+                                    
+                                    let x = n.x-.5;
+                                    
+                                    let y = UV.y*20.;
+                                    let wiggle = sin(y+sin(y));
+                                    x += wiggle*(.5-abs(x))*(n.z-.5);
+                                    x *= .7;
+                                    let ti = fract(t+n.z);
+                                    y = (Saw(.85, ti)-.5)*.9+.5;
+                                    let p = vec2(x, y);
+                                    
+                                    let d = length((st-p)*a.yx);
+                                    
+                                    let mainDrop = S(.4, .0, d);
+                                    
+                                    let r = sqrt(S(1., y, st.y));
+                                    let cd = abs(st.x-x);
+                                    let trail = S(.23*r, .15*r*r, cd);
+                                    let trailFront = S(-.02, .02, st.y-y);
+                                    trail *= trailFront*r*r;
+                                    
+                                    y = UV.y;
+                                    let trail2 = S(.2*r, .0, cd);
+                                    let droplets = max(0., (sin(y*(1.-y)*120.)-st.y))*trail2*trailFront*n.z;
+                                    y = fract(y*10.)+(st.y-.5);
+                                    let dd = length(st-vec2(x, y));
+                                    droplets = S(.3, 0., dd);
+                                    let m = mainDrop+droplets*r*trailFront;
+                                    
+                                    //m += st.x>a.y*.45 || st.y>a.x*.165 ? 1.2 : 0.;
+                                    return vec2(m, trail);
+                                }
+
+                                fn StaticDrops( uv: vec2,  t: float) -> float{
+                                    uv *= 40.;
+                                    
+                                    let id = floor(uv);
+                                    uv = fract(uv)-.5;
+                                    let n = N13(id.x*107.45+id.y*3543.654);
+                                    let p = (n.xy-.5)*.7;
+                                    let d = length(uv-p);
+                                    
+                                    let fade = Saw(.025, fract(t+n.z));
+                                    let c = S(.3, 0., d)*fract(n.z*10.)*fade;
+                                    return c;
+                                }
+
+                                fn Drops( uv:vec2,  t:float,  l0:float,  l1:float,  l2:float) -> vec2 {
+                                    let s = StaticDrops(uv, t)*l0; 
+                                    let m1 = DropLayer2(uv, t)*l1;
+                                    let m2 = DropLayer2(uv*1.85, t)*l2;
+                                    
+                                    let c = s+m1.x+m2.x;
+                                    c = S(.3, 1., c);
+                                    
+                                    return vec2(c, max(m1.y*l0, m2.y*l1));
+                                }
+
+
+                                fn pixel(self) -> vec4 {
+                                
+                                    let ipos = vec2(1.0) - self.pos;
+                                    let uv = ipos * 2.0 - vec2(1.0);
+                                    let UV = ipos;
+                                    let col = vec4(StaticDrops(ipos, self.time),DropLayer2(ipos, self.time).x,0.,1.);
+                                    let T = self.time;
+                                    let t = T*.2;
+                                    let rainAmount =  sin(T*.05)*.3+.7;
+                                    let maxBlur = mix(3., 6., rainAmount);
+                                    let minBlur = 2.;
+                                    let story = 0.;
+                                    let heart = 0.;
+                                    let zoom = -cos(T*.2);
+                                    uv *= .7+zoom*.3;
+                                    UV = (UV-.5)*(.9+zoom*.1)+.5;
+                                    let staticDrops = S(-.5, 1., rainAmount)*2.;
+                                    let layer1 = S(.25, .75, rainAmount);
+                                    let layer2 = S(.0, .5, rainAmount);
+                                    let c = Drops(uv, t, staticDrops, layer1, layer2);
+                                    let e = vec2(.001, 0.);
+                                    let cx = Drops(uv+e, t, staticDrops, layer1, layer2).x;
+                                    let cy = Drops(uv+e.yx, t, staticDrops, layer1, layer2).x;
+                                    let  n = vec2(cx-c.x, cy-c.x);		// expensive normals
+                                    let focus = mix(maxBlur-c.y, minBlur, S(.1, .2, c.x));
+                                    let L = UV + n;
+                                    let col = vec4(sin(L.x*100.), cos(L.y*100.), sin(L.x*100.0),1.0);
+                                    
+                                    let fragColor =col;
+                                    return fragColor;
+                                }
+                            }
+                        }
+                        <ContainerStage>{   
+                            <IconSet> {}              
+                         }
+                
+                    }
                 }
             }
         }
