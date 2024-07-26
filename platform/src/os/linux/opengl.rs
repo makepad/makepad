@@ -934,7 +934,7 @@ impl CxTexture {
         if !self.check_updated() {
             return;
         }
-    
+        
         unsafe {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
