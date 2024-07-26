@@ -252,7 +252,7 @@ impl Cx {
             live_file_change_receiver: recv,
             live_file_change_sender: send,
             
-            shader_registry: ShaderRegistry::new(Cx::has_studio_web_socket()),
+            shader_registry: ShaderRegistry::new(true),
             
             os: CxOs::default(),
             
