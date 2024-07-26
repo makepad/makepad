@@ -61,14 +61,6 @@ pub type AChoreographer_vsyncCallback = unsafe extern "C" fn(
     data: *mut c_void,
 );
 
-#[repr(C)]
-pub struct AChoreographerFrameTimelineInfo {
-    pub id: i64,
-    pub vsyncId: i64,
-    pub expectedPresentationTime: i64,
-    pub deadline: i64,
-}
-
 extern "C" {
     pub fn AChoreographer_getInstance() -> *mut AChoreographer;
 
@@ -77,13 +69,4 @@ extern "C" {
         callback: Option<AChoreographer_vsyncCallback>,
         data: *mut c_void,
     ) -> i32;
-
-    pub fn AChoreographerFrameCallbackData_getFrameTimelinesCount(
-        data: *const AChoreographerFrameCallbackData,
-    ) -> usize;
-
-    pub fn AChoreographerFrameCallbackData_getFrameTimelineInfo(
-        callbackData: *const AChoreographerFrameCallbackData,
-        index: usize,
-    ) -> AChoreographerFrameTimelineInfo;
 }
