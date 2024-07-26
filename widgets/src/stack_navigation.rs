@@ -254,6 +254,11 @@ impl WidgetNode for StackNavigation {
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        self.view.uid_to_widget(uid)
+    }
+    
 }
 
 impl WidgetMatchEvent for StackNavigation {

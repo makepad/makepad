@@ -89,6 +89,13 @@ impl WidgetNode for Dock{
             }
         }
     }
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for (_, widget) in self.items.values() {
+            let x = widget.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
+    }
 }        
 
 pub struct DockVisibleItemIterator<'a> {
