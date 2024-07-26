@@ -169,16 +169,16 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
     init_choreographer();
 }
 
+pub unsafe fn init_choreographer() {
+    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+    post_vsync_callback();
+}
+
 unsafe extern "C" fn vsync_callback(
     _data: *mut ndk_sys::AChoreographerFrameCallbackData,
     _user_data: *mut std::ffi::c_void,
 ) {
     send_from_java_message(FromJavaMessage::RenderLoop);
-    post_vsync_callback();
-}
-
-pub unsafe fn init_choreographer() {
-    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
     post_vsync_callback();
 }
 
