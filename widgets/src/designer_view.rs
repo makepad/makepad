@@ -237,12 +237,28 @@ impl DesignerView{
 impl Widget for DesignerView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let uid = self.widget_uid();
+        // alright so. our widgets dont have any 'event' flow here
+        // so what can we do.
+        // 
+        
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
-                
+                // lets poll our widget structure with a special event
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
                 //let corner_outer:f64  = 10.0 * self.zoom;
+                // lets send a designer pick into all our widgets
+                for (_id, cd) in self.containers.iter(){
+                    // ok BUT our mouse pick is not dependent on the container
+                    // ok so we are in a pass. meaning 0,0 origin
+                    let abs = (fh.abs - fh.rect.pos) * self.zoom + self.pan;
+                    // ok so what will we return eh
+                    cd.component.handle_event(cx, &Event::DesignerPick(DesignerPickEvent{
+                        abs: abs
+                    }), &mut Scope::empty())
+                    
+                }
+                
                 let mut cursor = None;
                 for cd in self.containers.values(){
                     match cd.get_edge(fh.abs -fh.rect.pos, self.zoom, self.pan){

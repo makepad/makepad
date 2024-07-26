@@ -15,7 +15,7 @@ impl WidgetNode for BareStep{
         
     fn redraw(&mut self, _cx: &mut Cx){}
         
-    fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {
+    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {
     }
 }   
 

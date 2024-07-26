@@ -41,7 +41,9 @@ pub const EGL_DMA_BUF_PLANE0_OFFSET_EXT: u32 = 12915;
 pub const EGL_DMA_BUF_PLANE0_PITCH_EXT: u32 = 12916;
 pub const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: u32 = 13379;
 pub const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: u32 = 13380;
-
+pub const EGL_SWAP_BEHAVIOR: i32 = 0x3093;
+pub const EGL_BUFFER_PRESERVED: i32 = 0x3094;
+pub const EGL_BUFFER_DESTROYED: i32 = 0x3095;
 pub type NativeDisplayType = EGLNativeDisplayType;
 pub type NativePixmapType = EGLNativePixmapType;
 pub type NativeWindowType = EGLNativeWindowType;
@@ -239,9 +241,28 @@ unsafe extern "C" fn(
 ),
 >;
 
+type PFNEGLPRESENTATIONTIMEANDROID = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    surface: EGLSurface,
+    time: i64
+),
+>;
+
+type PFNEGLSURFACEATTRIB = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    surface: EGLSurface,
+    attrib: EGLint,
+    value: EGLint
+)->EGLBoolean,
+>;
+
+
 struct Module(::std::ptr::NonNull<::std::os::raw::c_void>);
 
 pub struct LibEgl {
+    pub eglPresentationTimeANDROID: PFNEGLPRESENTATIONTIMEANDROID,
     pub eglBindAPI: PFNEGLBINDAPIPROC,
     pub eglChooseConfig: PFNEGLCHOOSECONFIGPROC,
     pub eglCopyBuffers: PFNEGLCOPYBUFFERSPROC,
@@ -336,6 +357,7 @@ impl LibEgl {
         }
 
         Some(LibEgl {
+            eglPresentationTimeANDROID: module.get_symbol("eglPresentationTimeANDROID").ok(),
             eglBindAPI: module.get_symbol("eglBindAPI").ok(),
             eglChooseConfig: module.get_symbol("eglChooseConfig").ok(),
             eglCopyBuffers: module.get_symbol("eglCopyBuffers").ok(),
