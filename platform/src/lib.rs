@@ -204,6 +204,7 @@ pub use {
             DragHitEvent,
             DropHitEvent,
             DesignerPickEvent,
+            HitDesigner,
         },
         action::{
             Action,

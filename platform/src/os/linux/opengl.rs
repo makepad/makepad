@@ -177,7 +177,6 @@ impl Cx {
                     GlShader::set_uniform_array(&shgl.draw_uniforms, draw_uniforms);
                     GlShader::set_uniform_array(&shgl.user_uniforms, &draw_call.user_uniforms);
                     GlShader::set_uniform_array(&shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
-                    
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
                         GlShader::set_uniform_array(&shgl.const_table_uniform, ct);
@@ -240,7 +239,7 @@ impl Cx {
                         instances as i32
                     );
                     
-                    gl_sys::BindVertexArray(0);
+                    //gl_sys::BindVertexArray(0);
                 }
                 
             }
