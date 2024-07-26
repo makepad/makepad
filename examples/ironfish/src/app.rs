@@ -515,13 +515,19 @@ impl MatchEvent for App {
             sequencer.grid_up(cx);
         }
         
+      
         if let Some((index,km)) = ui.button_set(ids!(preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7,preset_8)).which_clicked_modifiers(&actions){
             self.preset(cx, index, km.shift);
         }
         
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &ui, Self::data_bind);
+
+        
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+
+        //sequencer.set_step(ironfish.sequencer);
+
         ironfish.settings.apply_over(cx, &db.nodes);
     }
 
@@ -555,6 +561,7 @@ impl App{
         use std::io::prelude::*;
         
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+        
         let file_name = format!("examples/ironfish/preset_{}.txt", index);
         if save {
             let nodes = ironfish.settings.live_read();
