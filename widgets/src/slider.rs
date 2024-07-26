@@ -38,6 +38,7 @@ pub struct DrawSlider {
 }
 
 #[derive(Live, Widget)]
+#[designable]
 pub struct Slider {
     #[redraw] #[live] draw_slider: DrawSlider,
     
@@ -148,6 +149,9 @@ impl Slider {
     }
 }
 
+impl WidgetDesign for Slider{
+    
+}
 
 impl Widget for Slider {
 

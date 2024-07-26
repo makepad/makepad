@@ -37,6 +37,14 @@ impl WidgetNode for SlidesView{
             child.find_widgets(path, cached, results);
         }
     }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for child in self.children.values() {
+            let x = child.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
+    }
 }   
 
     

@@ -58,7 +58,14 @@ impl WidgetNode for MultiWindow{
             window.find_widgets(path, cached, results);
         }
     }
-        
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for window in self.windows.values() {
+            let x = window.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
+    }
 }
 
 impl Widget for MultiWindow {

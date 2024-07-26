@@ -252,11 +252,21 @@ impl Widget for DesignerView {
                     // ok BUT our mouse pick is not dependent on the container
                     // ok so we are in a pass. meaning 0,0 origin
                     let abs = (fh.abs - fh.rect.pos) * self.zoom + self.pan;
-                    // ok so what will we return eh
-                    cd.component.handle_event(cx, &Event::DesignerPick(DesignerPickEvent{
-                        abs: abs
-                    }), &mut Scope::empty())
-                    
+                    // lets capture the actions
+                    let actions = cx.capture_actions(|cx|{
+                        cd.component.handle_event(cx, &Event::DesignerPick(DesignerPickEvent{
+                            abs: abs
+                        }), &mut Scope::empty())
+                    });
+                    for action in actions{
+                        match action.cast(){
+                            WidgetDesignAction::PickedBody=>{
+                                // alright our widget got clicked.
+                                //cx.component.uid_to_widget(action.uid)
+                            }
+                            _=>()
+                        }
+                    }
                 }
                 
                 let mut cursor = None;
