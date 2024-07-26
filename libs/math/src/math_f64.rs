@@ -180,6 +180,22 @@ impl Rect {
 
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct DVec4 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub w: f64,
+}
+
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct DVec3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct DVec2 {
@@ -204,6 +220,11 @@ impl DVec2 {
         DVec2::default()
     }
 
+    pub fn zero(&mut self) {
+        self.x = 0.;
+        self.y = 0.;
+    
+    }
 
     pub fn dpi_snap(&self, f:f64)->DVec2{
         DVec2{

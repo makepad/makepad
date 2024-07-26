@@ -18,6 +18,7 @@ live_design!{
             sdf.fill(
                 mix(
                     mix(
+                    mix(
                         mix(#xFFFFFF18, #xFFFDDD30, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.5)), // 1st value = center, 2nd value = outer edges
                         mix(#xFFFFFF40, #xFFFFFF20, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
                         self.hover
@@ -25,7 +26,8 @@ live_design!{
                     mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
                     // mix(#xFFFFFFFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
                     self.active
-                )
+                ),#ffffff,
+                self.active_step)
             );
             return sdf.result
         }
@@ -62,6 +64,7 @@ live_design!{
     }
     
     Sequencer = {{Sequencer}} {
+        current_step: 0,
         button: <SeqButton> {}
         button_size: vec2(25.0, 25.0),
         grid_x: 16,
@@ -78,6 +81,7 @@ live_design!{
 struct DrawButton {
     #[deref] draw_super: DrawQuad,
     #[live] active: f32,
+    #[live] active_step: f32,
     #[live] hover: f32,
 }
 
@@ -86,7 +90,8 @@ pub struct SeqButton {
     #[live] draw_button: DrawButton,
     #[animator] animator: Animator,
     #[live] x: usize,
-    #[live] y: usize
+    #[live] y: usize,
+   // #[live] activestep: f32
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -97,7 +102,7 @@ pub struct Sequencer {
     #[redraw] #[rust] area: Area,
     #[walk] walk: Walk,
     #[live] button: Option<LivePtr>,
-    
+    #[live] current_step: usize,
     #[live] grid_x: usize,
     #[live] grid_y: usize,
     
@@ -212,7 +217,7 @@ impl Sequencer {
             let x = i % self.grid_x;
             let y = i / self.grid_x;
             let bit = 1 << y;
-            let active = steps[x] & bit == bit;
+            let active = (steps[x] & bit == bit);
             button.set_is_active(cx, active, Animate::Yes);
         }
     }
@@ -259,6 +264,13 @@ impl Widget for Sequencer {
                 });
                 btn.x = x;
                 btn.y = y;
+                if x == self.current_step{
+                    btn.draw_button.active_step = 1.0;
+                }
+                else
+                {
+                    btn.draw_button.active_step = 0.0;
+                }
                 btn.draw_abs(cx, Rect {pos: pos, size: sz});
             }
         }
@@ -298,6 +310,12 @@ impl Widget for Sequencer {
 }
 
 impl SequencerRef {
+
+    pub fn set_step(&self, step: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.current_step = step;
+        }
+    }
     
     pub fn clear_grid(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {

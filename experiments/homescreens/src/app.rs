@@ -335,8 +335,12 @@ live_design!{
                             x: 0.5,
                             y: 0.5
                         },
-                
-                    
+                        show_bg: true,
+                        draw_bg: {
+                            fn pixel(self) -> vec4{
+                                return vec4(0.70,0.72,0.72,1)
+                            }
+                        }   
                         <ParticleSystem> {
                             width: Fill,
                             height: Fill,
