@@ -17,6 +17,10 @@ impl WidgetNode for BareStep{
         
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {
     }
+    
+    fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef{
+        WidgetRef::empty()
+    }
 }   
 
 impl Widget for BareStep {

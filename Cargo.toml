@@ -15,6 +15,7 @@ workspace.members = [
     "examples/fractal_zoom", 
     "examples/ui_zoo", 
     "examples/news_feed", 
+    "examples/bare_text",
 #    "makepad_wonderous",
 #    "complex_layout",
     "examples/web_cam", 

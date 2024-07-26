@@ -111,6 +111,14 @@ impl WidgetNode for PageFlip{
             page.find_widgets(path, cached, results);
         }
     }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for page in self.pages.values() {
+            let x = page.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
+    }
 }        
 
 impl Widget for PageFlip {
