@@ -16,7 +16,7 @@ use {
 pub struct MetalGeneratedShader{
     pub mtlsl: String,
     pub fields_as_uniform_blocks:BTreeMap<Ident, Vec<(usize, Ident) >>   
-}
+} 
 
 pub fn generate_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderConstTable, shader_registry: &ShaderRegistry) -> MetalGeneratedShader {
     let mut string = String::new();
@@ -49,7 +49,7 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         writeln!(self.string, "#include <metal_stdlib>").unwrap();
         writeln!(self.string, "using namespace metal;").unwrap();
-
+        
         let mut all_constructor_fns = BTreeSet::new();
         
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {

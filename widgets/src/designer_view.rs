@@ -259,12 +259,15 @@ impl Widget for DesignerView {
                         }), &mut Scope::empty())
                     });
                     for action in actions{
-                        match action.cast(){
-                            WidgetDesignAction::PickedBody=>{
-                                // alright our widget got clicked.
-                                //cx.component.uid_to_widget(action.uid)
+                        if let Some(action) = action.as_widget_action(){
+                            match action.cast(){
+                                WidgetDesignAction::PickedBody=>{
+                                    // alright so lets draw a quad on top
+                                    // alright our widget got clicked.
+                                    //cx.component.uid_to_widget(action.uid)
+                                }
+                                _=>()
                             }
-                            _=>()
                         }
                     }
                 }
