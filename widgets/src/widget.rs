@@ -1,5 +1,6 @@
 use {
     crate::makepad_draw::*,
+    crate::makepad_derive_widget::*,
     std::fmt::{Formatter, Debug, Error},
     std::collections::BTreeMap,
     std::any::TypeId,
@@ -21,8 +22,15 @@ pub struct WidgetUid(pub u64);
  
 pub trait WidgetDesign:WidgetNode{}
 
+#[derive(Clone, Debug, DefaultNone)]
+pub enum WidgetDesignAction{
+    PickedBody,
+    None
+}
+
 pub trait WidgetNode: LiveApply{
-    fn find_widget_design(&self, _uid:WidgetUid)->Option<&mut dyn WidgetDesign>{None}
+    fn widget_design(&mut self)->Option<&mut dyn WidgetDesign>{return None}
+    fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef;
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
@@ -398,6 +406,13 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.data_to_widget(cx, nodes, path);
         }
+    }
+    
+    pub fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        if self.widget_uid() == uid{
+            return self.clone()
+        }
+        WidgetRef::empty()
     }
     
     pub fn find_widgets(

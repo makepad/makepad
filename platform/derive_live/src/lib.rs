@@ -39,6 +39,7 @@ use crate::derive_live_registry::*;
     walk,
     layout,
     deref,
+    designable,
     live_ignore,
     live_debug
 ))]

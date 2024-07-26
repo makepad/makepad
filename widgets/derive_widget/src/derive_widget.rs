@@ -14,7 +14,9 @@ pub fn derive_widget_impl(input: TokenStream) ->  TokenStream {
 pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
-    let _main_attribs = parser.eat_attributes();
+    let main_attribs = parser.eat_attributes();
+    let designable =  main_attribs.iter().find(|v| v.name == "designable").is_some();
+    
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
         let struct_name = parser.expect_any_ident().unwrap();
@@ -57,10 +59,16 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         }
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
+        if designable{
+            tb.add("    fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign>{return Some(self)}");
+        }
         if let Some(wrap_field) = &wrap_field{
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
             tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
+            tb.add("   fn uid_to_widget(&mut self, uid:WidgetUid)->WidgetRef{");
+            tb.add("       self.").ident(&wrap_field).add(".uid_to_widget(uid)");
+            tb.add("   }");
         }
         else{
             if let Some(walk_field) = &walk_field{
@@ -87,18 +95,30 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             }
             if find_fields.len()>0{
                 tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){");
-                for find_field in find_fields{
+                for find_field in &find_fields{
                     tb.add("    self.").ident(&find_field).add(".find_widgets(path, cached, results);");
                 }
+                tb.add("    }");
+                tb.add("    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
+                for find_field in &find_fields{
+                    tb.add("    let x = self.").ident(&find_field).add(".uid_to_widget(uid);");
+                    tb.add("    if !x.is_empty(){return x;}");
+                }
+                tb.add("        WidgetRef::empty()");
                 tb.add("    }");
             }
             else if let Some(deref_field) = &deref_field{
                 tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&deref_field).add(".find_widgets(path, cached, results)}");
+                tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
+                tb.add("       self.").ident(&deref_field).add(".uid_to_widget(uid)");
+                tb.add("   }");
             }
             else{
                 tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){}");
+                tb.add("    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
+                tb.add("       WidgetRef::empty()");
+                tb.add("   }");            
             }
-            
         }
         tb.add("}");
         return tb.end();
