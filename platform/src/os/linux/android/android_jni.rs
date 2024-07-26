@@ -159,6 +159,39 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
+static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographer(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+) {
+    init_choreographer();
+}
+
+unsafe extern "C" fn vsync_callback(
+    _data: *mut ndk_sys::AChoreographerFrameCallbackData,
+    _user_data: *mut std::ffi::c_void,
+) {
+    send_from_java_message(FromJavaMessage::RenderLoop);
+    post_vsync_callback();
+}
+
+pub unsafe fn init_choreographer() {
+    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+    post_vsync_callback();
+}
+
+pub unsafe fn post_vsync_callback() {
+    if !CHOREOGRAPHER.is_null() {
+        ndk_sys::AChoreographer_postVsyncCallback(
+            CHOREOGRAPHER,
+            Some(vsync_callback),
+            std::ptr::null_mut(),
+        );
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     env: *mut jni_sys::JNIEnv,

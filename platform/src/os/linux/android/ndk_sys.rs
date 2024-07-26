@@ -1,3 +1,7 @@
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+
+use std::ffi::c_void;
 use makepad_jni_sys as jni_sys;
 
 #[repr(C)]
@@ -47,4 +51,39 @@ extern "C" {
          frameRate:f32,
          compatibility:i8
     )->i32;
+}
+
+pub type AChoreographer = c_void;
+pub type AChoreographerFrameCallbackData = c_void;
+
+pub type AChoreographer_vsyncCallback = unsafe extern "C" fn(
+    callbackData: *mut AChoreographerFrameCallbackData,
+    data: *mut c_void,
+);
+
+#[repr(C)]
+pub struct AChoreographerFrameTimelineInfo {
+    pub id: i64,
+    pub vsyncId: i64,
+    pub expectedPresentationTime: i64,
+    pub deadline: i64,
+}
+
+extern "C" {
+    pub fn AChoreographer_getInstance() -> *mut AChoreographer;
+
+    pub fn AChoreographer_postVsyncCallback(
+        choreographer: *mut AChoreographer,
+        callback: Option<AChoreographer_vsyncCallback>,
+        data: *mut c_void,
+    ) -> i32;
+
+    pub fn AChoreographerFrameCallbackData_getFrameTimelinesCount(
+        data: *const AChoreographerFrameCallbackData,
+    ) -> usize;
+
+    pub fn AChoreographerFrameCallbackData_getFrameTimelineInfo(
+        callbackData: *const AChoreographerFrameCallbackData,
+        index: usize,
+    ) -> AChoreographerFrameTimelineInfo;
 }
