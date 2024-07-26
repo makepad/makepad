@@ -226,6 +226,13 @@ impl Vec3 {
         }
     }
     
+    pub fn zero(&mut self)
+    {
+        self.x = 0.0;
+        self.y = 0.0;
+        self.z = 0.0;
+    }
+    
     pub fn all(x: f32) -> Vec3 {
         Vec3 {x, y: x, z: x}
     }
