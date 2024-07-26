@@ -123,7 +123,7 @@ impl Cx {
                     || vao.geom_vb != geometry.os.vb.gl_buffer
                     || vao.geom_ib != geometry.os.ib.gl_buffer
                     || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
-                    
+                        
                     if let Some(vao) = vao.vao.take(){
                         unsafe{gl_sys::DeleteVertexArrays(1, &vao)};
                     }

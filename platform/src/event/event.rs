@@ -14,6 +14,7 @@ use {
             window::*,
             xr::*,
             drag_drop::*,
+            designer::*,
             network::*,
             video_playback::*,
         },
@@ -120,7 +121,7 @@ pub enum Event {
     ///
     /// [`onPause`]: https://developer.android.com/reference/android/app/Activity#onPause()
     Pause,
-
+    
     Draw(DrawEvent),
     LiveEdit,
     /// The application has gained focus and is now the active window receiving user input.
@@ -173,10 +174,12 @@ pub enum Event {
     VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
-
+    
     BackPressed,
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
+    
+    DesignerPick(DesignerPickEvent),
 }
 
 impl Event{
@@ -249,6 +252,8 @@ impl Event{
 
             #[cfg(target_arch = "wasm32")]
             51=>"ToWasmMsg",
+            
+            52=>"DesignerPick",            
             _=>panic!()
         }
     }
@@ -315,9 +320,11 @@ impl Event{
             Self::MouseLeave(_)=>48,
             Self::Actions(_)=>49,
             Self::BackPressed=>50,
-
+            
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_)=>51,
+            
+            Self::DesignerPick(_) =>52,
         }
     }
 }
@@ -340,6 +347,8 @@ pub enum Hit{
     FingerHoverOver(FingerHoverEvent),
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
+    
+    DesignerPick(DesignerPickEvent),
 
     BackPressed,
 
@@ -355,7 +364,7 @@ pub enum DragHit{
 }
 
 impl Event{
-    pub fn requires_visibility(&self)->bool{
+    pub fn requires_visibility(&self) -> bool{
         match self{
             Self::MouseDown(_)|
             Self::MouseMove(_)|
