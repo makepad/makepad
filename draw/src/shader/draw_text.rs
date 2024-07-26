@@ -390,11 +390,11 @@ impl DrawText {
     }
     
     pub fn get_line_spacing(&self) -> f64 {
-        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing
+        self.text_style.font_size * self.text_style.height_factor * self.text_style.line_spacing
     }
     
     pub fn get_font_size(&self) -> f64 {
-        self.text_style.font_size * self.font_scale
+        self.text_style.font_size
     }
     
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {
@@ -452,7 +452,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size * self.font_scale;
+        let font_size = self.text_style.font_size;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -542,7 +542,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size * self.font_scale;
+        let font_size = self.text_style.font_size;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -610,7 +610,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size * self.font_scale;
+        let font_size = self.text_style.font_size;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
         
@@ -630,7 +630,13 @@ impl DrawText {
                     glyph_infos,
                     ..
                 } = event {
-                    self.draw_glyphs(cx, origin + position, &glyph_infos, font_atlas);
+                    self.draw_glyphs(
+                        cx,
+                        origin + position,
+                        font_size,
+                        &glyph_infos, 
+                        font_atlas
+                    );
                 }
                 false
             }
@@ -666,7 +672,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size * self.font_scale;
+        let font_size = self.text_style.font_size;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -734,7 +740,7 @@ impl DrawText {
             height: Size::Fixed(height),
         });
 
-        // cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
+        cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
         
         // Lay out the text again to draw the glyphs in the draw rectangle.
         let mut position = DVec2::new();
@@ -756,6 +762,7 @@ impl DrawText {
                     self.draw_glyphs(
                         cx,
                         rect.pos + position,
+                        font_size,
                         glyph_infos,
                         font_atlas,
                     );
@@ -805,7 +812,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size * self.font_scale;
+        let font_size = self.text_style.font_size;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -849,6 +856,7 @@ impl DrawText {
                         self.draw_glyphs(
                             cx,
                             rect.pos,
+                            font_size,
                             &glyph_infos,
                             font_atlas
                         );
@@ -886,6 +894,7 @@ impl DrawText {
         &mut self,
         cx: &mut Cx2d,
         position: DVec2,
+        font_size: f64,
         glyph_infos: &[font_atlas::GlyphInfo],
         font_atlas: &mut CxFontAtlas,
     ) {
@@ -918,8 +927,6 @@ impl DrawText {
         // Compute the glyph padding.
         let glyph_padding_dpx = 2.0;
         let glyph_padding_lpx = glyph_padding_dpx / device_pixel_ratio;
-        
-        let font_size = self.text_style.font_size;
 
         self.char_depth = self.draw_depth;
         let mut position = position;
@@ -988,9 +995,9 @@ impl DrawText {
 
             // Compute the distance from the current position to the draw rectangle.
             let delta = dvec2(
-                left_side_bearing * self.font_scale,
-                (ascender - glyph_position.y) * self.font_scale,
-            ) * self.font_scale - glyph_padding_lpx;
+                left_side_bearing,
+                ascender - glyph_position.y
+            ) - glyph_padding_lpx;
 
             // Compute the advance width.
             let advance_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, self.text_style.font_size, font_atlas);
@@ -999,16 +1006,16 @@ impl DrawText {
             self.font_t1 = atlas_glyph.t1;
             self.font_t2 = atlas_glyph.t2;
             self.rect_pos = (position + delta).into();
-            self.rect_size = (padded_glyph_size_lpx * self.font_scale).into();
+            self.rect_size = padded_glyph_size_lpx.into();
             self.delta.x = delta.x as f32;
             self.delta.y = delta.y as f32;
-            self.advance = (advance_width * self.font_scale) as f32;
+            self.advance = advance_width as f32;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
             self.char_depth += ZBIAS_STEP;
             
             // Advance to the next position.
-            position.x += advance_width * self.font_scale;
+            position.x += advance_width;
         }
     }
 }
