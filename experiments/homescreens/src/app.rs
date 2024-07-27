@@ -364,13 +364,16 @@ live_design!{
                                 
                                 fn pixel(self) -> vec4{
                                     let col = sample2d_rt(self.image, self.pos);
-                                    let s = sin(self.pos.y * 150.0 ) *0.5 + 0.5;
+                                    //let s = sin(self.pos.y * 150.0 + sin(self.pos.x*100.)*10.0 ) *0.5 + 0.5;
                                     
                                     let q = 10.0;
-                                    let r = 100.0;
+                                    let r = 1000.0;
 
-                                    let s2 = sin(self.pos.x * 100.0/self.pos.y + sin(self.pos.y*r)*q)*0.5 + 0.5;                                    let g = vec3(s,s2,0.2);
-                                    return vec4(g*col.x, col.x);                                 
+                                    let s2 = sin((self.pos.x * 100.0)/self.pos.y +self.time+ sin(self.time*0.3+self.pos.y*r + self.pos.x*0.2/self.pos.y)*q)*0.25 + 0.75;         
+                                     let g = vec3(s2*0.9,s2*0.92,s2*0.95);
+                                     let a = col.x * 0.3;
+
+                                    return vec4(g*a, a);                                 
                                 }
                             }
                         }
