@@ -39,6 +39,7 @@ pub mod window_menu;
 pub mod html;
 pub mod markdown;
 pub mod text_flow;
+pub mod multi_image;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -148,6 +149,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
+    crate::multi_image::live_design(cx);
     crate::image_blend::live_design(cx);
     crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
