@@ -381,6 +381,8 @@ live_design!{
                         <ParticleSystem> {
                             width: Fill,
                             height: Fill,
+                            maxparticles: 3000,
+                            spawnrate: 50,
                         }              
                     }   
                     screen5 = <View>
