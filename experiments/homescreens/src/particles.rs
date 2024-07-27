@@ -175,7 +175,7 @@ impl Widget for ParticleSystem {
                     velocity: vec3(0.0,0.2500+ random_f32(&mut self.seed) * 1.30,0.), acceleration: vec3(0.0,0.0,0.0), life: 1.0});
         }
 
-        if (self.spawncounter > 1.0) {
+        if self.spawncounter > 1.0 {
             self.spawncounter = 1.0
         }
         // self.line_width = 10.5;
@@ -184,7 +184,7 @@ impl Widget for ParticleSystem {
         
             let mut rect = fullrect;
 
-            match(particle.particle_type){
+            match particle.particle_type {
                 
                 ParticleType::Drop => {
                     rect.size = dvec2(2.*particle.scale,60.*particle.scale);

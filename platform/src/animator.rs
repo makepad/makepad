@@ -914,7 +914,7 @@ impl Animator {
                 }
             }
             else {
-                error!("cut_to_live generaiton invalid")
+                error!("cut_to_live generation invalid")
             }
         }
     }
