@@ -102,9 +102,8 @@ impl Cx {
                     self.handle_message(message);
                 },
                 Err(e) => {
-                    // Handle potential errors, like disconnection
-                    println!("Error receiving message: {:?}", e);
-                    break; // or handle appropriately
+                    crate::error!("Error receiving message: {:?}", e);
+                    break;
                 }
             }
         }
