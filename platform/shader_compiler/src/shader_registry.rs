@@ -100,10 +100,8 @@ impl ShaderRegistry {
         
         let size = table.len();
         let align_gap = 4 - (size - ((size >> 2) << 2));
-        if align_gap != 4{
-            for _ in 0..align_gap {
-                table.push(0.0);
-            }
+        for _ in 0..align_gap {
+            table.push(0.0);
         }
         DrawShaderConstTable {
             table,
