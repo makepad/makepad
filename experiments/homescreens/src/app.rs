@@ -361,13 +361,15 @@ live_design!{
                             height: Fill;	
                             source: dep("crate://self/resources/water_mask.png")
                             draw_bg: {
-                                debug:true,
+                                
                                 fn pixel(self) -> vec4{
                                     let col = sample2d_rt(self.image, self.pos);
                                     let s = sin(self.pos.y * 150.0 ) *0.5 + 0.5;
+                                    
                                     let q = 10.0;
-                                    let s2 = sin(self.pos.x * 100.0/self.pos.y + sin(self.pos.y*q)*10.)*0.5 + 0.5;
-                                    let g = vec3(s,s2,0.2);
+                                    let r = 100.0;
+
+                                    let s2 = sin(self.pos.x * 100.0/self.pos.y + sin(self.pos.y*r)*q)*0.5 + 0.5;                                    let g = vec3(s,s2,0.2);
                                     return vec4(g*col.x, col.x);                                 
                                 }
                             }
