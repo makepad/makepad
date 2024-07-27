@@ -62,8 +62,9 @@ impl Particle {
               
             }
             ParticleType::Drop => {
-                if self.position.y> 0.5{
+                if self.position.y> 1.0{
                     self.velocity.zero();
+                    self.life = 0.;
                     self.acceleration.zero();
                     self.particle_type = ParticleType::Splash;
                 }
