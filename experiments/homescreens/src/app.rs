@@ -473,8 +473,39 @@ live_design!{
                             height: Fill,
                             
                             draw: {
+                                fn pixel(self) -> vec4 {
+                                 return vec4(0.0,self.pos.y*0.1,self.pos.y*0.1,1.0);   
+                                }
+                               
+                            }
+                        }
+                        <ContainerStage>{   
+                            draw_bg: {
+                                texture image: texture2d
+                                uniform shadowopacity:  0.2,
+                                uniform shadowx: 4.0,
+                                uniform shadowy: 4.0,
+                                uniform shadowcolor: vec3(0.01,0.01,0.02),
+                                varying o0: vec2,
+                                varying oShadow: vec2,
                                 
-                                // ported from https://www.shadertoy.com/view/ltffzl
+                                fn vertex(self) -> vec4 {                
+                                    let dpi = self.dpi_factor;                               
+                                    let pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size);
+                                    self.o0 = self.pos;
+                                    self.oShadow = self.pos - vec2(self.shadowx * dpi, self.shadowy * dpi )*0.001;
+                                    return pos;
+                                }
+                    
+                                fn old_pixel(self) -> vec4 {
+                    
+                                    let shadow = sample2d_rt(self.image, self.oShadow + vec2(cos(self.time*3.+self.o0.y*10.)*0.0013, cos(self.time+self.o0.x*100.)*0.0013));
+                                    let main = sample2d_rt(self.image, self.o0);
+                                    let col =  (vec4(self.shadowcolor.xyz,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
+                                    return col;
+                                }
+
+                                 // ported from https://www.shadertoy.com/view/ltffzl
                                 // Heartfelt - by Martijn Steinrucken aka BigWings - 2017
 
                                 // Email:countfrolic@gmail.com Twitter:@The_ArtOfCode
@@ -579,7 +610,9 @@ live_design!{
 
                                 fn pixel(self) -> vec4 {
                                 
-                                    let ipos = vec2(1.0) - self.pos;
+                                    let ipos =self.pos;
+                                    ipos.y = (1. - ipos.y)*0.2;
+                                    ipos.x = (1. - ipos.x)*0.2;
                                     let uv = ipos * 2.0 - vec2(1.0);
                                     let UV = ipos;
                                     let col = vec4(StaticDrops(ipos, self.time),DropLayer2(ipos, self.time).x,0.,1.);
@@ -590,7 +623,7 @@ live_design!{
                                     let minBlur = 2.;
                                     let story = 0.;
                                     let heart = 0.;
-                                    let zoom = -cos(T*.2);
+                                    let zoom = -0.8;
                                     uv *= .7+zoom*.3;
                                     UV = (UV-.5)*(.9+zoom*.1)+.5;
                                     let staticDrops = S(-.5, 1., rainAmount)*2.;
@@ -602,15 +635,17 @@ live_design!{
                                     let cy = Drops(uv+e.yx, t, staticDrops, layer1, layer2).x;
                                     let  n = vec2(cx-c.x, cy-c.x);		// expensive normals
                                     let focus = mix(maxBlur-c.y, minBlur, S(.1, .2, c.x));
-                                    let L = UV + n;
-                                    let col = vec4(sin(L.x*100.), cos(L.y*100.), sin(L.x*100.0),1.0);
+                                    let L = self.pos + n*0.52 ;
+
+                                    let col = sample2d_rt(self.image, L) + length(n*0.4)*vec4(0.,0.7,1.,1.);;
+
+                                    //let col = vec4(sin(L.x*100.), cos(L.y*100.), sin(L.x*100.0),1.0);
                                     
                                     let fragColor =col;
                                     return fragColor;
                                 }
+                                
                             }
-                        }
-                        <ContainerStage>{   
                             <IconSet> {}              
                          }
                 
