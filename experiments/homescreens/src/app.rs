@@ -161,7 +161,7 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:5}
+                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:3}
 
                     screen1tab = Tab{
                         name: "FloatTexture"
@@ -349,6 +349,28 @@ live_design!{
                                 return vec4(0.70,0.72,0.72,1)
                             }
                         }   
+                        <Image>{
+                            width: Fill;
+                            height: Fill;	
+                            source: dep("crate://self/resources/background.png")
+                        }
+                        <Image>{
+                            width: Fill;
+                            height: Fill;	
+                            source: dep("crate://self/resources/water_mask.png")
+                            draw_bg: {
+                                fn pixel(self) -> vec4{
+
+                                    let col = sample2d_rt(self.image, self.pos);
+                                    let s = sin(self.pos.y * 150.0 ) *0.5 + 0.5;
+                                    let s2 = sin(self.pos.x * 100.0/self.pos.y + sin(self.pos.y)*100.0)*0.5 + 0.5;
+                                    let g = vec3(s,s2,0.2);
+                                    return vec4(g*col.x, col.x);
+                                 
+                                }
+                            }
+
+                        }
                         <ParticleSystem> {
                             width: Fill,
                             height: Fill,
