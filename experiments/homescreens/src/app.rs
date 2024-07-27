@@ -10,6 +10,7 @@ live_design!{
     
     import makepad_experiments_homescreens::diffuse::DiffuseThing;
     import makepad_experiments_homescreens::particles::ParticleSystem;
+    import makepad_experiments_homescreens::birds::BirdSystem;
     ContainerStage = <ViewBase> {
         optimize: Texture,
         draw_bg: {
@@ -382,8 +383,30 @@ live_design!{
                             width: Fill,
                             height: Fill,
                             maxparticles: 3000,
-                            spawnrate: 50,
-                        }              
+                            spawnrate: 30,
+                            drop_width: 3,
+                            drop_height: 60,
+                            particletexture:{
+                                 source: dep("crate://self/resources/drop.png")
+                            }
+                            
+                        }       
+                        <BirdSystem> {
+                            width: Fill,
+                            height: Fill,
+                            max_birds: 100,
+                            spawnrate: 20,
+                            bird_width: 20,
+                            bird_height: 20,
+                            birdtexture:{
+                                 source: dep("crate://self/resources/bird_combined.png")
+                            }
+                            
+                        }        
+
+                        <ContainerStage>{   
+                            <IconSet> {}              
+                         }  
                     }   
                     screen5 = <View>
                     {
@@ -698,6 +721,7 @@ impl LiveRegister for App {
         crate::iconbutton::live_design(cx);
         crate::diffuse::live_design(cx);
         crate::particles::live_design(cx);
+        crate::birds::live_design(cx);
     }
 }
 
