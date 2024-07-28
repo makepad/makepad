@@ -26,7 +26,7 @@ live_design! {
                 let x = mod(frame ,4.0);
                 let y = floor(frame / 4 );
                 
-                let col = sample2d_rt(self.image, self.pos*0.25 + vec2(x,y)*0.25);
+                let col = sample2d(self.image, self.pos*0.25 + vec2(x,y)*0.25);
                 let alpha = 1 - cos(self.thetime*0.10)*0.5;
                 //return vec4(0.0,0.02,0.02,pow(self.pos.y,5.0)*0.3);
                 return col*alpha*0.2;
