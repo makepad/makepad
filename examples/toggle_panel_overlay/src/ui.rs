@@ -3,12 +3,13 @@ use makepad_widgets::*;
 live_design!(
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
+    import makepad_widgets::toggle_panel::*;
 
     Ui = {{Ui}} {
         align: {x: 0.5, y: 0.5}
         body = <View> {
             flow: Right,
-            <TogglePanelBase> {}
+            <TogglePanel> {}
         }
     }
 );

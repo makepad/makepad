@@ -60,6 +60,7 @@ pub mod nav_control;
 pub mod view;
 pub mod widget;
 pub mod widget_match_event;
+pub mod toggle_panel;
 
 pub mod touch_gesture;
 
