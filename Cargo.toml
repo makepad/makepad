@@ -33,6 +33,7 @@ workspace.members = [
     "examples/slides",
     "examples/graph",
     "examples/image_viewer",
+    "examples/hello_widgets",
     "studio",
     "tools/cargo_makepad",
      "tools/auto_version",
