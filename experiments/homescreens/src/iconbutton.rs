@@ -29,7 +29,7 @@ live_design!{
             }
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return vec4(0.,0.,0.,0.)
+                    return #0000+#0000
                 }
             }
         }       

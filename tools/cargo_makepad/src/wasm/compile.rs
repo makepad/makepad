@@ -79,9 +79,11 @@ fn brotli_compress(dest_path:&PathBuf){
     brotli_file.write_all(&brotli_data).unwrap();
 }
 
-pub fn cp_brotli(source_path: &PathBuf, dest_path: &PathBuf, exec: bool) -> Result<(), String> {
+pub fn cp_brotli(source_path: &PathBuf, dest_path: &PathBuf, exec: bool, compress:bool) -> Result<(), String> {
     cp(source_path, dest_path, exec)?;
-    brotli_compress(dest_path);
+    if compress{
+        brotli_compress(dest_path);
+    }
     Ok(())
 }
     
@@ -130,7 +132,9 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
             let source_file_name = source_path.file_name().ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?.to_string_lossy().to_string();
             let dest_path = dest_dir.join(&source_file_name);
             cp(&source_path, &dest_path, false)?;
-            brotli_compress(&dest_path);
+            if config.brotli{
+                brotli_compress(&dest_path);
+            }
             Ok(())
         }) ?;
         
@@ -140,20 +144,20 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
         // alright we need special handling for makepad-wasm-bridge
         // and makepad-platform
         if name == "makepad-wasm-bridge"{
-            cp_brotli(&dep_dir.join("src/wasm_bridge.js"), &app_dir.join("makepad_wasm_bridge/wasm_bridge.js"), false)?;
+            cp_brotli(&dep_dir.join("src/wasm_bridge.js"), &app_dir.join("makepad_wasm_bridge/wasm_bridge.js"), false, config.brotli)?;
         }
         if name == "makepad-platform"{
-            cp_brotli(&dep_dir.join("src/os/web/audio_worklet.js"), &app_dir.join("makepad_platform/audio_worklet.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/audio_worklet.js"), &app_dir.join("makepad_platform/audio_worklet.js"), false,config.brotli)?;
             
-            cp_brotli(&dep_dir.join("src/os/web/web_gl.js"), &app_dir.join("makepad_platform/web_gl.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/web_gl.js"), &app_dir.join("makepad_platform/web_gl.js"), false, config.brotli)?;
             
-            cp_brotli(&dep_dir.join("src/os/web/web_worker.js"), &app_dir.join("makepad_platform/web_worker.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/web_worker.js"), &app_dir.join("makepad_platform/web_worker.js"), false, config.brotli)?;
             
-            cp_brotli(&dep_dir.join("src/os/web/web.js"), &app_dir.join("makepad_platform/web.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/web.js"), &app_dir.join("makepad_platform/web.js"), false, config.brotli)?;
             
-            cp_brotli(&dep_dir.join("src/os/web/auto_reload.js"), &app_dir.join("makepad_platform/auto_reload.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/auto_reload.js"), &app_dir.join("makepad_platform/auto_reload.js"), false, config.brotli)?;
             
-            cp_brotli(&dep_dir.join("src/os/web/full_canvas.css"), &app_dir.join("makepad_platform/full_canvas.css"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/full_canvas.css"), &app_dir.join("makepad_platform/full_canvas.css"), false, config.brotli)?;
         }
         let name = name.replace("-","_");
         let resources_path = dep_dir.join("resources");
@@ -181,7 +185,9 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
                 };
                 let dest_path = dest_dir.join(&source_file_name);
                 cp(&source_path2, &dest_path, false)?;
-                brotli_compress(&dest_path);
+                if config.brotli{
+                    brotli_compress(&dest_path);
+                }
                 Ok(())
             }) ?;
         }            
@@ -205,12 +211,16 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     else{
         cp(&wasm_source, &wasm_dest, false)?;
     }
-    brotli_compress(&wasm_dest);
+    if config.brotli{
+        brotli_compress(&wasm_dest);
+    }
     // generate html file
     let index_path = app_dir.join("index.html");
     let html = generate_html(build_crate);
     fs::write(&index_path, &html.as_bytes()).map_err( | e | format!("Can't write {:?} {:?} ", index_path, e)) ?;
-    brotli_compress(&index_path);
+    if config.brotli{
+        brotli_compress(&index_path);
+    }
     println!("Created wasm package: {:?}", app_dir);
     println!("Copy this directory to any webserver, and serve with atleast these headers:");
     println!("Cross-Origin-Embedder-Policy: require-corp");
