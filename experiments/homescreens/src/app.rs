@@ -162,15 +162,15 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen1tab, screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:3}
+                    root = Tabs{tabs:[screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:3}
 
-                    screen1tab = Tab{
+                    /*screen1tab = Tab{
                         name: "FloatTexture"
                         kind: screen1
-                    }
+                    }*/
 
                     screen2tab = Tab{
-                        name: "Silly Gradient"
+                        name: "Gradient"
                         kind: screen2
                     }
 
@@ -179,7 +179,7 @@ live_design!{
                         kind: screen3
                     }
                     screen4tab = Tab{
-                        name: "WaterColour"
+                        name: "Water"
                         kind: screen4
                     }
                     screen5tab = Tab{
