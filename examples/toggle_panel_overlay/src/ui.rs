@@ -8,8 +8,27 @@ live_design!(
     Ui = {{Ui}} {
         align: {x: 0.5, y: 0.5}
         body = <View> {
-            flow: Right,
-            <TogglePanel> {}
+            flow: Overlay,
+            <Label> {
+                margin: {top: 80, left: 20}
+                text: "Hi, I'm the content behind!",
+            }
+            <TogglePanel> {
+                open_content = {
+                    <View> {
+                        align: {x: 0.5, y: 0.5},
+                        show_bg: true,
+                        draw_bg: {
+                            fn pixel() -> vec4 {
+                                return #a22;
+                            }
+                        }
+                        <Label> {
+                            text: "There is content behind me...",
+                        }
+                    }
+                }
+            }
         }
     }
 );
