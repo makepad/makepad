@@ -31,7 +31,6 @@ live_design!{
             }
 
             fn pixel(self) -> vec4 {
-
                 let shadow = sample2d_rt(self.image, self.oShadow + vec2(cos(self.time*3.+self.o0.y*10.)*0.0013, cos(self.time+self.o0.x*100.)*0.0013));
                 let main = sample2d_rt(self.image, self.o0);
                 let col =  (vec4(self.shadowcolor.xyz,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
@@ -60,7 +59,6 @@ live_design!{
             }
 
             fn pixel(self) -> vec4 {
-
     
                 let main = sample2d_rt(self.image, self.o0);
                 let uv = self.o0  - vec2(0.03,0.07);
@@ -162,7 +160,7 @@ live_design!{
                     padding: 0,
                     spacing: 0,
 
-                    root = Tabs{tabs:[screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:3}
+                    root = Tabs{tabs:[screen2tab, screen3tab, screen4tab, screen5tab, screen6tab], selected:4}
 
                     /*screen1tab = Tab{
                         name: "FloatTexture"
