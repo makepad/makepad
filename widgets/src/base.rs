@@ -14,7 +14,7 @@ live_design!{
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
     import crate::image::ImageBase;
-    import crate::multi_image::MultiImage;
+    import crate::multi_image::MultiImageBase;
     import crate::image_blend::ImageBlendBase;
     import crate::icon::IconBase;
     import crate::rotated_image::RotatedImageBase;

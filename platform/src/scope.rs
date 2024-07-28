@@ -56,6 +56,15 @@ impl <'a> ScopeDataRef<'a>{
     pub fn get<T: Any>(&self) -> Option<&T> {
         self.0.as_ref().and_then(|r| r.downcast_ref())
     }
+        
+    pub fn with_data<F, R>(&self, f: F) -> R where F: FnOnce(&dyn Any) -> R{
+        if let Some(data) = self.0{
+            f(data)
+        }
+        else{
+            panic!()
+        }
+    }
 }
 
 impl <'a> ScopeDataMut<'a>{
@@ -65,6 +74,24 @@ impl <'a> ScopeDataMut<'a>{
                     
     pub fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.0.as_mut().and_then(|r| r.downcast_mut())
+    }
+    
+    pub fn with_data<F, R>(&self, f: F) -> R where F: FnOnce(&dyn Any) -> R{
+        if let Some(data) = &self.0{
+            f(*data)
+        }
+        else{
+            panic!()
+        }
+    }
+    
+    pub fn with_mut_data<F, R>(&mut self, f: F) -> R where F: FnOnce(&mut dyn Any) -> R{
+        if let Some(data) = &mut self.0{
+            f(*data)
+        }
+        else{
+            panic!()
+        }
     }
 }
 
@@ -78,7 +105,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
         
-    pub fn with_data_props<T: Any>(v: &'a mut T, w: &'b T)->Self{
+    pub fn with_data_props<T: Any + Sized>(v: &'a mut T, w: &'b T)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
@@ -136,6 +163,25 @@ impl<'a,'b> Scope<'a,'b>{
         self.path.push(id);
         let r = f(self);
         self.path.pop();
+        r
+    }
+    
+    pub fn override_props<T:Any, F, R>(&mut self, props:&'b T, f: F) -> R where F: FnOnce(&mut Scope) -> R{
+        let mut props = ScopeDataRef(Some(props));
+        std::mem::swap(&mut self.props, &mut props);
+        let r = f(self);
+        std::mem::swap(&mut self.props, &mut props);
+        r
+    }
+    
+    pub fn override_props_index<T:Any, F, R>(&mut self, props:&'b T, index:usize, f: F) -> R where F: FnOnce(&mut Scope) -> R{
+        let mut props = ScopeDataRef(Some(props));
+        let old_index = self.index;
+        self.index = index;
+        std::mem::swap(&mut self.props, &mut props);
+        let r = f(self);
+        std::mem::swap(&mut self.props, &mut props);
+        self.index = old_index;
         r
     }
 }
