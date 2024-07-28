@@ -364,7 +364,7 @@ live_design!{
                             draw_bg: {
                                 
                                 fn pixel(self) -> vec4{
-                                    let col = sample2d_rt(self.image, self.pos);
+                                    let col = sample2d(self.image, self.pos);
                                     //let s = sin(self.pos.y * 150.0 + sin(self.pos.x*100.)*10.0 ) *0.5 + 0.5;
                                     
                                     let q = 10.0;
