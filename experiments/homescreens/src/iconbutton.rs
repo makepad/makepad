@@ -25,7 +25,7 @@ live_design!{
             text: "yes"
             draw_text: {
                 text_style: {font_size: 15},
-                color: #f00
+                //color: #f00
             }
             draw_bg: {
                 fn pixel(self) -> vec4 {
