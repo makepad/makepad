@@ -6,7 +6,9 @@ use crate::{
      // outline_tree::*,
      makepad_widgets::makepad_derive_widget::*,
      makepad_widgets::widget::*, 
-  };
+     makepad_widgets::*, 
+      makepad_widgets::image_cache::ImageCacheImpl
+    };
   
   
 live_design! {
@@ -16,8 +18,13 @@ live_design! {
         
        spawnrate: 10.,
         draw_rain: {
+            texture image: texture2d
             fn pixel(self) -> vec4{
-                return vec4(0.0,0.02,0.02,pow(self.pos.y,5.0)*0.3)
+                
+                let col = sample2d_rt(self.image, self.pos);
+                col *= 0.12;
+                return col;
+                //return vec4(0.0,0.02,0.02,pow(self.pos.y,5.0)*0.3)
             }
         }   
         draw_splash: {
@@ -96,8 +103,13 @@ pub struct ParticleSystem {
     #[rust] lasttime: f64,
     #[rust] deltatime: f64,
     #[rust] spawncounter: f64,
+    
     #[live(10.0)] spawnrate: f64,
+    #[live(6.0) ] drop_width: f64,
+    #[live(64.0) ] drop_height: f64,
     #[live(100)] maxparticles: i32,
+
+    #[live] particletexture: Image,
     #[rust] seed: u32,
     #[live(0.0)] time: f64
 }
@@ -131,7 +143,7 @@ fn random_f32(seed: &mut u32) -> f32 {
     out as f32 / std::u32::MAX as f32
 }
 
-fn random_f64(seed: &mut u32) -> f64 {
+fn _random_f64(seed: &mut u32) -> f64 {
     let mut out = 0;
     for _ in 0..32 {
         out |= random_bit(seed);
@@ -163,17 +175,21 @@ impl Widget for ParticleSystem {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // lets draw a bunch of quads
         let fullrect = cx.walk_turtle_with_area(&mut self.area, walk);
+        self.draw_rain.set_texture(0,&self.particletexture.get_texture(0).clone().unwrap());
         self.spawncounter+= self.deltatime;
         while self.spawncounter * self.spawnrate > 1.0 && self.particles.len() < self.maxparticles as usize
         {
             self.spawncounter -= 1.0/self.spawnrate.max(0.00001);
+
+            let inp = random_f32(&mut self.seed);
+            let newscale = (1.0-(inp*inp)) *2.0+ 0.1;
             self.particles.push(
                 Particle
                 {
                     particle_type: ParticleType::Drop,  
-                    scale: random_f64(&mut self.seed) *3.0+ 0.2,
+                    scale: newscale as f64,
                     position: vec3(random_f32(&mut self.seed) ,-1.0,random_f32(&mut self.seed)),
-                    velocity: vec3(0.0,0.2500+ random_f32(&mut self.seed) * 1.30,0.), acceleration: vec3(0.0,0.0,0.0), life: 1.0});
+                    velocity: vec3(0.0,0.1500 * newscale,0.), acceleration: vec3(0.0,0.0,0.0), life: 1.0});
         }
 
         if self.spawncounter > 1.0 {
@@ -188,15 +204,19 @@ impl Widget for ParticleSystem {
             match particle.particle_type {
                 
                 ParticleType::Drop => {
-                    rect.size = dvec2(2.*particle.scale,60.*particle.scale);
+                    rect.size = dvec2(self.drop_width*particle.scale,self.drop_height*particle.scale);
                     let perspective_pos = perspective(particle.position);
                     rect.pos = perspective_pos * fullrect.size + fullrect.pos - rect.size/2.0;
+                    self.draw_rain.set_uniform(cx, id!(thetime), &[self.time as f32]);
                     self.draw_rain.draw_abs(cx, rect);
                 }   
                 ParticleType::Splash => {
                     rect.size = dvec2(80.*particle.scale,10.*particle.scale);
                     let perspective_pos = perspective(particle.position);
                     rect.pos = perspective_pos * fullrect.size + fullrect.pos - rect.size/2.0;
+                    //self.draw_splash.set_uniform(cx, "time", self.time);
+                    self.draw_splash.set_uniform(cx, id!(thetime), &[self.time as f32]);
+
                    self.draw_splash.draw_abs(cx, rect);
                 }
             }
