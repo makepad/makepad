@@ -96,7 +96,7 @@ live_design! {
         icon_walk: {width: 14, height: 14}
 
         draw_text: {
-            text_style: <REGULAR_FONT>{font_size: 9},
+            text_style: {font_size: 9},
             fn get_color(self) -> vec4 {
                 return self.color;
             }
