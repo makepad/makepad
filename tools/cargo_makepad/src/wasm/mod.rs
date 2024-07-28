@@ -5,7 +5,7 @@ use compile::WasmConfig;
 pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
     let mut config = WasmConfig{
         strip: false,
-        lan: true,
+        lan: false,
         brotli: false,
         port: None,
         small_fonts: false
