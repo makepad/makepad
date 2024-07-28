@@ -26,11 +26,11 @@ live_design! {
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
     H2_TEXT_BOLD = {
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Bold.ttf")}
     }
     H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
 
     COLOR_DOWN_FULL = #000

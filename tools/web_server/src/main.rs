@@ -18,9 +18,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     
     if args.len()!=2{
-        println!("Pass in makepad path as first arg");
+        println!("Pass in root path as first arg");
     }
-    let makepad_path = args[1].clone();
+    let root_path = args[1].clone();
     
     start_http_server(HttpServer{
         listen_address:addr,
@@ -34,14 +34,14 @@ fn main() {
     //let mut route_connections = HashMap::new();
     
     
-    let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
-    let remaps = [
-        (format!("/makepad/{}/",abs_makepad_path),makepad_path.clone()),
-        (format!("/makepad/{}/",std::env::current_dir().unwrap().display()),"".to_string()),
-        ("/makepad//".to_string(),makepad_path.clone()),
-        ("/makepad/".to_string(),makepad_path.clone()),
-        ("/".to_string(),"".to_string())
-    ];
+    //let abs_makepad_path = std::env::current_dir().unwrap().join(makepad_path.clone()).canonicalize().unwrap().to_str().unwrap().to_string();
+    //let remaps = [
+        //(format!("/makepad/{}/",abs_makepad_path),makepad_path.clone()),
+        //(format!("/makepad/{}/",std::env::current_dir().unwrap().display()),"".to_string()),
+        //("/makepad//".to_string(),makepad_path.clone()),
+        //("/makepad/".to_string(),makepad_path.clone()),
+    //    ("/".to_string(),"".to_string())
+    //];
     while let Ok(message) = rx_request.recv() {
         match message{
             HttpServerRequest::ConnectWebSocket {web_socket_id:_, response_sender:_, headers:_}=>{
@@ -85,31 +85,50 @@ fn main() {
                     continue
                 }
                 
-                let mut strip = None;
-                for remap in &remaps{
-                    if let Some(s) = path.strip_prefix(&remap.0){
-                        strip = Some(format!("{}{}",remap.1, s));
-                        break;
+                //let mut strip = None;
+                //for remap in &remaps{
+                //    if let Some(s) = path.strip_prefix(&remap.0){
+                //        strip = Some(format!("{}{}",remap.1, s));
+                //        break;
+                //    }
+                // }
+                let base = format!("{}{}", root_path, path);
+                // check if we have a .br file
+                let base_br = format!("{}{}.br", root_path, path);
+                if let Ok(mut file_handle) = File::open(base_br) {
+                    let mut body = Vec::<u8>::new();
+                    if file_handle.read_to_end(&mut body).is_ok() {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                            Content-Type: {}\r\n\
+                            Cross-Origin-Embedder-Policy: require-corp\r\n\
+                            Cross-Origin-Opener-Policy: same-origin\r\n\
+                            Content-encoding: br\r\n\
+                            Cache-Control: max-age:0\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            mime_type,
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse{header, body});
                     }
                 }
-                if let Some(base) = strip{
-                    if let Ok(mut file_handle) = File::open(base) {
-                        let mut body = Vec::<u8>::new();
-                        if file_handle.read_to_end(&mut body).is_ok() {
-                            let header = format!(
-                                "HTTP/1.1 200 OK\r\n\
-                                Content-Type: {}\r\n\
-                                Cross-Origin-Embedder-Policy: require-corp\r\n\
-                                Cross-Origin-Opener-Policy: same-origin\r\n\
-                                Content-encoding: none\r\n\
-                                Cache-Control: max-age:0\r\n\
-                                Content-Length: {}\r\n\
-                                Connection: close\r\n\r\n",
-                                mime_type,
-                                body.len()
-                            );
-                            let _ = response_sender.send(HttpServerResponse{header, body});
-                        }
+                else if let Ok(mut file_handle) = File::open(base) {
+                    let mut body = Vec::<u8>::new();
+                    if file_handle.read_to_end(&mut body).is_ok() {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                            Content-Type: {}\r\n\
+                            Cross-Origin-Embedder-Policy: require-corp\r\n\
+                            Cross-Origin-Opener-Policy: same-origin\r\n\
+                            Content-encoding: none\r\n\
+                            Cache-Control: max-age:0\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            mime_type,
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse{header, body});
                     }
                 }
             }

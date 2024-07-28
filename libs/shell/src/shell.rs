@@ -227,6 +227,45 @@ fn cp_all_recursive(source_dir: &Path, dest_dir: &Path, exec: bool) -> Result<()
     Ok(())
 }
 
+
+pub fn walk_all(source_dir: &Path, dest_dir: &Path, cb:&mut dyn Fn(&Path, &Path)-> Result<(), String>) -> Result<(), String> {
+    walk_all_recursive(source_dir, dest_dir, cb)?;
+    Ok(())
+}
+
+fn walk_all_recursive(source_dir: &Path, dest_dir: &Path, cb:&mut dyn Fn(&Path, &Path)-> Result<(), String>) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Err(format!("{:?} is not a directory", source_dir));
+    }
+    
+    mkdir(dest_dir) ?;
+    
+    for entry in fs::read_dir(source_dir).map_err(|_e| format!("Unable to read source directory {:?}", source_dir))? {
+        let entry = entry.map_err(|_e| format!("Unable to process directory entry"))?;
+        let source_path = entry.path();
+        if source_path.is_file() {
+            cb(&source_path, dest_dir)?;
+            /*let source_file_name = source_path.file_name().ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?.to_string_lossy().to_string();
+            let source_path2 = if let Some(tgt) = rename.get(&source_file_name){
+                //println!("RENAMING {} {}", source_file_name, tgt);
+                source_path.parent().unwrap().join(tgt)
+            }
+            else{
+                source_path
+            };
+            let dest_path = dest_dir.join(source_file_name);
+            cp(&source_path2, &dest_path, exec)?;*/
+        } else if source_path.is_dir() {
+            let dest_path = dest_dir.join(source_path.file_name()
+            .ok_or_else(|| format!("Unable to get folder name for {:?}", source_path))?);
+            
+            walk_all_recursive(&source_path, &dest_path, cb)?;
+        }
+    }
+    
+    Ok(())
+}
+
 pub fn ls(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut result = Vec::new();
     ls_recursive(dir, dir, &mut result)?;
