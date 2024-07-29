@@ -277,7 +277,7 @@ pub struct CxDrawList {
     pub draw_list_uniforms: CxDrawListUniforms,
     pub os: CxOsView,
     pub rect_areas: Vec<CxRectArea>,
-    pub find_appendable_draw_shader_id: Vec<Option<u32>>
+    pub find_appendable_draw_shader_id: Vec<u64>
 }
 
 pub struct CxRectArea{
@@ -315,15 +315,15 @@ impl CxDrawList {
         if draw_vars.draw_shader.is_none(){
             return None
         }
-        let draw_shader_id = draw_vars.draw_shader.as_ref().unwrap().draw_shader_id  as  u32;
+        let draw_shader_id = draw_vars.draw_shader.as_ref().unwrap().false_compare_id();
         
         //let mut found = 0;
         for i in (0..self.draw_items.len()).rev() {
-            if self.find_appendable_draw_shader_id[i] == Some(draw_shader_id){
+            if self.find_appendable_draw_shader_id[i] == draw_shader_id{
                 let draw_item = &mut self.draw_items[i];
                 if let Some(draw_call) = &draw_item.draw_call() {
                     // TODO! figure out why this can happen
-                    if draw_call.draw_shader.draw_shader_ptr.0.index != draw_vars.draw_shader.unwrap().draw_shader_ptr.0.index{
+                    if draw_call.draw_shader != draw_vars.draw_shader.unwrap(){
                         continue
                     }
                     // lets compare uniforms and textures..
@@ -373,10 +373,10 @@ impl CxDrawList {
     pub fn append_draw_call(&mut self, redraw_id: u64, sh: &CxDrawShader, draw_vars: &DrawVars) -> &mut CxDrawItem {
         
         if let Some(ds) = &draw_vars.draw_shader{
-            self.find_appendable_draw_shader_id.push(Some(ds.draw_shader_id as u32));
+            self.find_appendable_draw_shader_id.push(ds.false_compare_id());
         }
         else{
-            self.find_appendable_draw_shader_id.push(None);
+            self.find_appendable_draw_shader_id.push(0);
         }
         self.draw_items.push_item(
             redraw_id,
@@ -394,7 +394,7 @@ impl CxDrawList {
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // see if we need to add a new one
         self.draw_items.push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
-        self.find_appendable_draw_shader_id.push(None);
+        self.find_appendable_draw_shader_id.push(0);
     }
     
     pub fn store_sub_list_last(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
