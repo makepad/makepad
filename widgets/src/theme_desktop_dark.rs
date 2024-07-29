@@ -187,7 +187,7 @@ live_design! {
         font_size: (THEME_FONT_SIZE_CODE)
         brightness: 1.1
         top_drop: 1.3
-        line_spacing: 2.0
+        line_spacing: 1.4
     }
 
     Label = <LabelBase> {

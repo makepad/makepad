@@ -17,6 +17,7 @@ workspace.members = [
     "experiments/esp_car",
     "experiments/homescreens",
     "experiments/html_experiment",
+    "examples/bare_text",
     "examples/fractal_zoom", 
     "examples/ui_zoo", 
     "examples/news_feed", 
