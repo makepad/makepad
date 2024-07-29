@@ -229,6 +229,15 @@ impl ButtonRef {
             inner.enabled = enabled;
         }
     }
+
+    /// Resets the hover state of this button. This is useful in certain cases the
+    /// hover state should be reseted in a specific way that is not the default behavior
+    /// which is based on the mouse cursor position and movement.
+    pub fn reset_hover(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animator_cut(cx, id!(hover.off));
+        }
+    }
 }
 
 impl ButtonSet {
@@ -240,6 +249,12 @@ impl ButtonSet {
     }
     pub fn released(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.released(actions))
+    }
+
+    pub fn reset_hover(&self, cx: &mut Cx) {
+        for item in self.iter() {
+            item.reset_hover(cx)
+        }
     }
     
     pub fn which_clicked_modifiers(&self, actions: &Actions) -> Option<(usize,KeyModifiers)> {
