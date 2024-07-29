@@ -66,7 +66,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
             tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
-            tb.add("   fn uid_to_widget(&mut self, uid:WidgetUid)->WidgetRef{");
+            tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
             tb.add("       self.").ident(&wrap_field).add(".uid_to_widget(uid)");
             tb.add("   }");
         }
