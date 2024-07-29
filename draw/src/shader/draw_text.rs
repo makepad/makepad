@@ -398,22 +398,35 @@ impl DrawText {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {
-        let mut fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
-        if self.text_style.font.font_id.is_none() {
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return DVec2::default();
+        };
+        let font_ids = &[font_id];
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas;
+
+        if font_atlas.fonts[font_id].is_none() {
             return DVec2::default();
         }
-        let font_id = self.text_style.font.font_id.unwrap();
-        if fonts_atlas.fonts[font_id].is_none() {
-            return DVec2::default();
-        }
-        let font = fonts_atlas.fonts[font_id].as_mut().unwrap();
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        println!("DIIEEEEEE {:?}", self.text_style.line_spacing);
+
+        let font = font_atlas.fonts[font_id].as_mut().unwrap();
         let slot = font.owned_font_face.with_ref( | face | face.glyph_index('!').map_or(0, | id | id.0 as usize));
         let glyph = font.get_glyph_by_id(slot).unwrap();
         
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
-            y: self.text_style.line_spacing
+            y: line_spacing / font_size,
         }
     }
 }
@@ -452,7 +465,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
+        let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -542,7 +555,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
+        let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -610,7 +623,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
+        let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
         
@@ -672,7 +685,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
+        let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -740,7 +753,7 @@ impl DrawText {
             height: Size::Fixed(height),
         });
 
-        cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
+        // cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
         
         // Lay out the text again to draw the glyphs in the draw rectangle.
         let mut position = DVec2::new();
@@ -812,7 +825,7 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        let font_size = self.text_style.font_size;
+        let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
@@ -924,6 +937,7 @@ impl DrawText {
         // Get the device pixel ratio.
         let device_pixel_ratio = cx.current_dpi_factor();
 
+
         // Compute the glyph padding.
         let glyph_padding_dpx = 2.0;
         let glyph_padding_lpx = glyph_padding_dpx / device_pixel_ratio;
@@ -933,9 +947,7 @@ impl DrawText {
         for glyph_info in glyph_infos {
             let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
             let units_per_em = font.ttf_font.units_per_em;
-
-            // Compute the ascender.
-            let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size);
+            let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size) * self.text_style.line_scale;
             
             // Use the glyph id to get the glyph from the font.
             let glyph = font.owned_font_face.with_ref(|face| {
@@ -983,8 +995,8 @@ impl DrawText {
                 font_atlas
                     .alloc
                     .alloc_atlas_glyph(
-                        padded_glyph_size_dpx.x,
-                        padded_glyph_size_dpx.y,
+                        padded_glyph_size_dpx.x / self.font_scale,
+                        padded_glyph_size_dpx.y / self.font_scale,
                         CxFontsAtlasTodo {
                             font_id: glyph_info.font_id,
                             atlas_page_id,
@@ -995,9 +1007,9 @@ impl DrawText {
 
             // Compute the distance from the current position to the draw rectangle.
             let delta = dvec2(
-                left_side_bearing,
-                ascender - glyph_position.y
-            ) - glyph_padding_lpx;
+                left_side_bearing - glyph_padding_lpx,
+                ascender - glyph_position.y + glyph_padding_lpx
+            );
 
             // Compute the advance width.
             let advance_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, self.text_style.font_size, font_atlas);
@@ -1145,7 +1157,7 @@ fn layout_grapheme(
     line_spacing: f64,
     wrap_width: Option<f64>,
     font_atlas: &mut CxFontAtlas,
-    shape_cache: &mut CxShapeCache,
+    shape_cache: &mut CxShapeCache, 
     mut f: impl FnMut(DVec2, LayoutEvent, &mut CxFontAtlas) -> bool,
 ) -> bool {
     let glyph_infos = shape(grapheme, font_ids, font_atlas, shape_cache);
