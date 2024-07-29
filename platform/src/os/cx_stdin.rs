@@ -142,7 +142,7 @@ pub type SharedSwapchain = Swapchain<SharedPresentableImageOsHandle>;
 // FIXME(eddyb) move these type aliases into `os::{linux,apple,windows}`.
 
 /// [DMA-BUF](crate::os::linux::dma_buf)-backed image from `eglExportDMABUFImageMESA`.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_env="ohos")))]
 pub type SharedPresentableImageOsHandle =
     crate::os::linux::dma_buf::Image<aux_chan::AuxChannedImageFd>;
 
@@ -163,7 +163,7 @@ pub struct SharedPresentableImageOsHandle {
 pub type SharedPresentableImageOsHandle = u64;
 
 // FIXME(eddyb) use `enum Foo {}` here ideally, when the derives are fixed.
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(all(target_os = "linux", not(target_env="ohos")), target_os = "macos", target_os = "windows")))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImageOsHandle {
     // HACK(eddyb) non-`()` field working around deriving limitations.
@@ -171,7 +171,7 @@ pub struct SharedPresentableImageOsHandle {
 }
 
 /// Auxiliary communication channel, besides stdin (only on Linux).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_env="ohos")))]
 pub mod aux_chan {
     use super::*;
     use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
@@ -277,7 +277,7 @@ pub mod aux_chan {
         }
     }
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", not(target_env="ohos"))))]
 pub mod aux_chan {
     use std::io;
 
