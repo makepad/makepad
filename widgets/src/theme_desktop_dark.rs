@@ -187,7 +187,7 @@ live_design! {
     THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
-        brightness: 1.1
+        //brightness: 1.1
         top_drop: 1.3
         line_spacing: 2.0
     }
