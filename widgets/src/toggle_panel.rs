@@ -1,12 +1,35 @@
 use crate::{button::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*};
 
 live_design! {
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
+    import crate::button::ButtonBase;
+    import crate::view::ViewBase;
+    //import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
 
     ICON_CLOSE_PANEL = dep("crate://self/resources/icons/close_left_panel.svg")
     ICON_OPEN_PANEL = dep("crate://self/resources/icons/open_left_panel.svg")
+
+    // copy of cached view from base, as can't be imported directly here.
+    CachedView = <ViewBase> {
+        optimize: Texture,
+        draw_bg: {
+            texture image: texture2d
+            uniform marked: float,
+            varying scale: vec2
+            varying shift: vec2
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
+            }
+        }
+    }
 
     FadeView = <CachedView> {
         draw_bg: {
@@ -15,6 +38,125 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let color = sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
                 return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+            }
+        }
+    }
+
+    Button = <ButtonBase> {
+        // TODO: NEEDS FOCUS STATE
+
+        width: Fit, height: Fit,
+        spacing: 7.5,
+        align: {x: 0.5, y: 0.5},
+        padding: <THEME_MSPACE_2> {}
+        label_walk: { width: Fit, height: Fit },
+
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return THEME_COLOR_TEXT_DEFAULT
+            }
+        }
+
+        icon_walk: {
+            width: (THEME_DATA_ICON_WIDTH), height: Fit,
+        }
+
+        draw_icon: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        mix(self.color, #f, 0.5),
+                        self.hover
+                    ),
+                    self.color * 0.75,
+                    self.pressed
+                )
+            }
+        }
+
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+                let bot_gradient = mix(
+                    mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING
+                )
+
+                return sdf.result
+            }
+        }
+
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+
+                pressed = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
             }
         }
     }
@@ -114,7 +256,7 @@ live_design! {
         }
     }
 
-    TogglePanel = {{TogglePanel}} {
+    TogglePanelBase = {{TogglePanel}} {
         flow: Overlay,
         width: 300,
         height: Fill,
@@ -124,16 +266,16 @@ live_design! {
             height: Fill
         }
 
-        persistent_content = <View> {
+        persistent_content = <ViewBase> {
             height: Fit
             width: Fill
-            default = <View> {
+            default = <ViewBase> {
                 height: Fit,
                 width: Fill,
                 padding: {top: 58, left: 15, right: 15}
                 spacing: 10,
 
-                before = <View> {
+                before = <ViewBase> {
                     height: Fit,
                     width: Fit,
                     spacing: 10,
@@ -152,7 +294,7 @@ live_design! {
                     }
                 }
 
-                after = <View> {
+                after = <ViewBase> {
                     height: Fit,
                     width: Fit,
                     spacing: 10,

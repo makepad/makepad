@@ -63,6 +63,7 @@ live_design!{
     
     import crate::bare_step::BareStep;
     import crate::turtle_step::TurtleStep;
+    import crate::toggle_panel::TogglePanelBase;
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
 
@@ -973,6 +974,7 @@ live_design!{
     BareStep = <BareStep>{}
     TurtleStep = <TurtleStep>{}
     ColorPicker = <ColorPicker>{}
+    TogglePanelBase = <TogglePanelBase>{}
     
     DesignerBase = <DesignerBase>{}
     DesignerOutlineBase = <DesignerOutlineBase>{}
