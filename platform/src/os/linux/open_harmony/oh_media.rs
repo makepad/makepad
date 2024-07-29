@@ -1,16 +1,10 @@
 
 use {
-    std::sync::{Arc, Mutex},
-    self::super::{
-        android_audio::*,
-        /*android_jni::*,*/
-        android_midi::*,
-        android_camera::*,
-    },
+    //std::sync::{Arc, Mutex},
     crate::{
         cx::Cx,
-        event::Event,
-        thread::SignalToUI,
+        //event::Event,
+        //thread::SignalToUI,
         audio::*,
         midi::*,
         video::*,
@@ -49,7 +43,7 @@ impl Cx {
     }
 }
 
-impl CxAndroidMedia {
+impl CxOpenHarmonyMedia {
 }
 
 impl CxMediaApi for Cx {
@@ -76,13 +70,13 @@ impl CxMediaApi for Cx {
     fn use_audio_outputs(&mut self, _devices: &[AudioDeviceId]) {
     }
     
-    fn audio_output_box(&mut self, _index: usize, f: AudioOutputFn) {
+    fn audio_output_box(&mut self, _index: usize, _f: AudioOutputFn) {
     }
     
-    fn audio_input_box(&mut self, _index: usize, f: AudioInputFn) {
+    fn audio_input_box(&mut self, _index: usize, _f: AudioInputFn) {
     }
     
-    fn video_input_box(&mut self, _index: usize, f: VideoInputFn) {
+    fn video_input_box(&mut self, _index: usize, _f: VideoInputFn) {
     }
     
     fn use_video_input(&mut self, _inputs: &[(VideoInputId, VideoFormatId)]) {
