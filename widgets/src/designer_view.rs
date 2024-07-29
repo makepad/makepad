@@ -187,7 +187,7 @@ impl DesignerView{
         cd.container.draw_all(cx, &mut Scope::with_props(cd))
     }
     
-    fn select_component(&mut self, cx:&mut Cx, what_id:Option<LiveId>){
+    fn select_component(&mut self, _cx:&mut Cx, what_id:Option<LiveId>){
         /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
