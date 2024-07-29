@@ -68,7 +68,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
             tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
             tb.add("       self.").ident(&wrap_field).add(".uid_to_widget(uid)");
-            tb.add("   }");
+            tb.add("   }"); 
         }
         else{
             if let Some(walk_field) = &walk_field{
