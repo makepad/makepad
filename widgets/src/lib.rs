@@ -113,6 +113,7 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
+    toggle_panel::*,
     widget::{
         WidgetSet,
         WidgetSetIterator,
@@ -191,6 +192,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::root::live_design(cx);
     crate::bare_step::live_design(cx);
     crate::turtle_step::live_design(cx);
+    crate::toggle_panel::live_design(cx);
     
     crate::designer::live_design(cx);
     crate::designer_view::live_design(cx);
