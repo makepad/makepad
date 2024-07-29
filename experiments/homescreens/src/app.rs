@@ -107,7 +107,7 @@ live_design!{
          
             <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon9.png")}, button={text: "TheTube"}}
             <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon11.png")}, button={text: "With Me"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon12.png")}, button={text: "Fishnes"}}
+            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon12.png")}, button={text: "Passwords"}}
             <View> {}
         }
         // <View> {
