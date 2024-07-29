@@ -79,6 +79,7 @@ impl Widget for Button {
                     self.animator_play(cx, id!(hover.on));
                 }
                 Hit::FingerHoverOut(_) => {
+                    cx.set_cursor(MouseCursor::Default);
                     self.animator_play(cx, id!(hover.off));
                 }
                 Hit::FingerUp(fe) => {
