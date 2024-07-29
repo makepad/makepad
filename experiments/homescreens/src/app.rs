@@ -513,13 +513,15 @@ live_design!{
                                 return vec4(0.70,0.72,0.72,1)
                             }
                         }   
-
-                        <Image>{
-                            width: Fill;
-                            height: Fill;	
-                            source: dep("crate://self/resources/unsplash.jpg")
-                        }
-                
+                            width: Fill,
+                            height: Fill,
+                            <Image>{
+                                width: Fill;
+                                height: Fill;	
+                                fit: Biggest;
+                                source: dep("crate://self/resources/unsplash.jpg")
+                            }
+                            
                         // quad = <MyWidget> {
                         //     align:{x:0.,y:0.0}
                         //     width: Fill,
@@ -669,7 +671,10 @@ live_design!{
 
                                 fn pixel(self) -> vec4 {
                                 
+                                    let aspect = self.rect_size.x/self.rect_size.y;
+                                    
                                     let ipos =self.pos;
+                                    ipos.x = (ipos.x-0.5)*aspect + 0.5;                                    
                                     ipos.y = (1. - ipos.y)*0.2;
                                     ipos.x = (1. - ipos.x)*0.2;
                                     let uv = ipos * 2.0 - vec2(1.0);
