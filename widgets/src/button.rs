@@ -97,6 +97,11 @@ impl Widget for Button {
                 }
                 _ => (),
             }
+        } else {
+            // Make sure to not show hover state if button is disabled or hidden
+            if self.animator_in_state(cx, id!(hover.on)) {
+                self.animator_play(cx, id!(hover.off));
+            }
         }
     }
 
