@@ -181,7 +181,7 @@ live_design! {
 }
 
 /// A toggable side panel that can be expanded and collapsed to a maximum and minimum size.
-#[derive(Live, Widget, LiveHook)]
+#[derive(Live, Widget)]
 pub struct TogglePanel {
     #[deref]
     view: View,
@@ -200,33 +200,25 @@ pub struct TogglePanel {
     #[live(110.0)]
     close_size: f32,
 
-    #[rust]
-    initialized: bool,
-
     #[animator]
     animator: Animator,
 }
 
+impl LiveHook for TogglePanel {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        if self.is_open(cx) {
+            self.animator_panel_progress = 1.0;
+        } else {
+            self.animator_panel_progress = 0.0;
+        };
+    }
+}
+
 impl Widget for TogglePanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.initialized {
-            self.initialized = true;
-            if self.is_open(cx) {
-                self.animator_panel_progress = 1.0;
-                self.apply_over(cx, live! {width: (self.open_size)});
-            } else {
-                self.animator_panel_progress = 0.0;
-                self.apply_over(cx, live! {width: (self.close_size)});
-            };
-            self.redraw(cx);
-        }
-
         if self.animator_handle_event(cx, event).must_redraw() {
-            let size_range = self.open_size - self.close_size;
-            let size = self.close_size + size_range * self.animator_panel_progress;
-            self.apply_over(cx, live! {width: (size)});
-            self.redraw(cx);
-        }
+            self.redraw(cx)
+        };
 
         if let Event::Actions(actions) = event {
             let open = self.button(id!(open));
@@ -249,6 +241,12 @@ impl Widget for TogglePanel {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let mut walk = walk;
+
+        let size_range = self.open_size - self.close_size;
+        let size = self.close_size + size_range * self.animator_panel_progress;
+        walk.width = Size::Fixed(size.into());
+
         self.view.draw_walk(cx, scope, walk)
     }
 }
