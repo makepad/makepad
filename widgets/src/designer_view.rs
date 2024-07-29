@@ -133,6 +133,7 @@ pub struct DesignerView {
     #[rust] finger_move: Option<FingerMove>,
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,
+    #[live] draw_outline: DrawQuad,
     #[rust] view_file: Option<LiveId>,
     #[rust] selected_component: Option<LiveId>,
     #[rust] containers: ComponentMap<LiveId, ContainerData>,
@@ -187,7 +188,7 @@ impl DesignerView{
     }
     
     fn select_component(&mut self, cx:&mut Cx, what_id:Option<LiveId>){
-        for (id, comp) in self.containers.iter_mut(){
+        /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
                     .animator_cut(cx, id!(select.on));
@@ -197,6 +198,7 @@ impl DesignerView{
                     .animator_cut(cx, id!(select.off));
             }
         }
+        */
         self.selected_component = what_id;
     }
     
@@ -470,6 +472,8 @@ impl Widget for DesignerView {
         self.draw_bg.draw_vars.set_texture(0, self.color_texture.as_ref().unwrap());
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_bg.draw_abs(cx, rect);
+        // lets draw all the outlines on top
+        
             
         cx.set_pass_area_with_origin(
             &self.pass,
