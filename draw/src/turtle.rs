@@ -384,13 +384,15 @@ impl<'a> Cx2d<'a> {
                     let align_y = turtle.layout.align.y;
                     let width_left = turtle.width_left();
                     let padded_height_or_used = turtle.padded_height_or_used();
-                    for i in turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = align_x * width_left;
-                        let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                    if align_x != 0.0 || align_y != 0.0{
+                        for i in turtle_walks_start..self.turtle_walks.len() {
+                            let walk = &self.turtle_walks[i];
+                            let shift_x = align_x * width_left;
+                            let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
+                            let align_start = walk.align_start;
+                            let align_end = self.get_turtle_walk_align_end(i);
+                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                        }
                     }
                 }
             },
@@ -418,28 +420,32 @@ impl<'a> Cx2d<'a> {
                     let align_y = turtle.layout.align.y;
                     let padded_width_or_used = turtle.padded_width_or_used();
                     let height_left = turtle.height_left();
-                    for i in turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
-                        let shift_y = align_y * height_left;
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                    if align_x != 0.0 || align_y != 0.0{
+                        for i in turtle_walks_start..self.turtle_walks.len() {
+                            let walk = &self.turtle_walks[i];
+                            let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
+                            let shift_y = align_y * height_left;
+                            let align_start = walk.align_start;
+                            let align_end = self.get_turtle_walk_align_end(i);
+                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                        }
                     }
                 }
             },
             Flow::Overlay => {
                 let align_x = turtle.layout.align.x;
                 let align_y = turtle.layout.align.y;
-                let padded_width_or_used = turtle.padded_width_or_used();
-                let padded_height_or_used = turtle.padded_height_or_used();
-                for i in turtle_walks_start..self.turtle_walks.len() {
-                    let walk = &self.turtle_walks[i];
-                    let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
-                    let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
-                    let align_start = walk.align_start;
-                    let align_end = self.get_turtle_walk_align_end(i);
-                    self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                if align_x != 0.0 || align_y != 0.0{
+                    let padded_width_or_used = turtle.padded_width_or_used();
+                    let padded_height_or_used = turtle.padded_height_or_used();
+                    for i in turtle_walks_start..self.turtle_walks.len() {
+                        let walk = &self.turtle_walks[i];
+                        let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
+                        let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
+                        let align_start = walk.align_start;
+                        let align_end = self.get_turtle_walk_align_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                    }
                 }
             }
         }
