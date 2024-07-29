@@ -235,6 +235,12 @@ impl ButtonRef {
             inner.enabled = enabled;
         }
     }
+
+    pub fn reset_hover(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animator_cut(cx, id!(hover.off));
+        }
+    }
 }
 
 impl ButtonSet {
@@ -246,6 +252,12 @@ impl ButtonSet {
     }
     pub fn released(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.released(actions))
+    }
+
+    pub fn reset_hover(&self, cx: &mut Cx) {
+        for item in self.iter() {
+            item.reset_hover(cx)
+        }
     }
     
     pub fn which_clicked_modifiers(&self, actions: &Actions) -> Option<(usize,KeyModifiers)> {
