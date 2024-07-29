@@ -112,6 +112,12 @@ pub struct DrawShader {
     pub draw_shader_ptr: DrawShaderPtr
 }
 
+impl DrawShader{
+    pub fn false_compare_id(&self)->u64{
+        (self.draw_shader_id as u64)<<32 + self.draw_shader_ptr.0.index as u64
+    }
+}
+
 pub struct CxDrawShader {
     pub class_prop: LiveId,
     pub type_name: LiveId,
