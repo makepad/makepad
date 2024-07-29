@@ -126,6 +126,10 @@ live_design! {
         draw_text: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
+            fn get_brightness(self)->float{
+                return 1.1    
+            }
+            
             fn blend_color(self, incol: vec4) -> vec4 {
                 if self.outline < 0.5 {
                     return incol

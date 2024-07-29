@@ -19,10 +19,10 @@ live_design!{
         //debug: true;
         color: #fff
         
-        uniform brightness: float
-        uniform curve: float
-        uniform sdf_radius: float
-        uniform sdf_cutoff: float
+       // uniform brightness: float
+       // uniform curve: float
+        //uniform sdf_radius: float
+        //uniform sdf_cutoff: float
         
         texture tex: texture2d
         
@@ -65,17 +65,25 @@ live_design!{
             return incol
         }
         
+        fn get_brightness(self)->float{
+            return 1.0;
+        }
+        
         fn sample_color(self, scale:float, pos:vec2)->vec4{
+            let brightness = self.get_brightness();
+            let sdf_radius = 8.0;
+            let sdf_cutoff = 0.25;
             let s = sample2d(self.tex, pos).x;
-            if (self.sdf_radius != 0.0) {
+            let curve = 0.5; 
+            //if (self.sdf_radius != 0.0) {
                 // HACK(eddyb) harcoded atlas size (see asserts below).
                 let texel_coords = pos.xy * 4096.0;
-                s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
-            } else {
-                s = pow(s, self.curve);
-            }
+                s = clamp((s - (1.0 - sdf_cutoff)) * sdf_radius / scale + 0.5, 0.0, 1.0);
+            //} else {
+            //    s = pow(s, curve);
+            //}
             let col = self.get_color(); 
-            return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
+            return self.blend_color(vec4(s * col.rgb * brightness * col.a, s * col.a));
         }
         
         fn pixel(self) -> vec4 {
@@ -146,8 +154,8 @@ const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(9.0)] pub font_size: f64,
-    #[live(1.0)] pub brightness: f32,
-    #[live(0.5)] pub curve: f32,
+    //#[live(1.0)] pub brightness: f32,
+    //#[live(0.5)] pub curve: f32,
     #[live(0.88)] pub line_scale: f64,
     #[live(1.4)] pub line_spacing: f64,
     #[live(1.1)] pub top_drop: f64,
@@ -248,12 +256,13 @@ impl DrawText {
     
     pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontAtlas) {
         self.draw_vars.texture_slots[0] = Some(font_atlas.texture_sdf.clone());
-        self.draw_vars.user_uniforms[0] = self.text_style.brightness;
-        self.draw_vars.user_uniforms[1] = self.text_style.curve;
-        let (sdf_radius, sdf_cutoff) = font_atlas.alloc.sdf.as_ref()
-            .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
-        self.draw_vars.user_uniforms[2] = sdf_radius;
-        self.draw_vars.user_uniforms[3] = sdf_cutoff;
+        // self.draw_vars.user_uniforms[0] = self.text_style.brightness;
+        // self.draw_vars.user_uniforms[1] = self.text_style.curve;
+        //let (sdf_radius, sdf_cutoff) = font_atlas.alloc.sdf.as_ref()
+        //    .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
+        //self.draw_vars.user_uniforms[0] = sdf_radius;
+        //self.draw_vars.user_uniforms[1] = sdf_cutoff;
+        //println!("{}, {}", sdf_radius, sdf_cutoff);
     }
     
     fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, font_atlas: &mut CxFontAtlas) {

@@ -277,6 +277,7 @@ pub struct CxDrawList {
     pub draw_list_uniforms: CxDrawListUniforms,
     pub os: CxOsView,
     pub rect_areas: Vec<CxRectArea>,
+    pub find_appendable_draw_shader_id: Vec<Option<u32>>
 }
 
 pub struct CxRectArea{
@@ -311,48 +312,57 @@ impl CxDrawList {
     
     pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_vars: &DrawVars) -> Option<usize> {
         // find our drawcall to append to the current layer
-        if self.draw_items.len() > 0 {
-            for i in (0..self.draw_items.len()).rev() {
+        if draw_vars.draw_shader.is_none(){
+            return None
+        }
+        let draw_shader_id = draw_vars.draw_shader.as_ref().unwrap().draw_shader_id  as  u32;
+        
+        //let mut found = 0;
+        for i in (0..self.draw_items.len()).rev() {
+            if self.find_appendable_draw_shader_id[i] == Some(draw_shader_id){
                 let draw_item = &mut self.draw_items[i];
                 if let Some(draw_call) = &draw_item.draw_call() {
-                    if draw_call.draw_shader == draw_vars.draw_shader.unwrap() {
-                        // lets compare uniforms and textures..
-                        if !sh.mapping.flags.draw_call_nocompare {
-                            if draw_call.geometry_id != draw_vars.geometry_id {
-                                continue
-                            }
-                            let mut diff = false;
-                            for i in 0..sh.mapping.user_uniforms.total_slots {
-                                if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
-                                    diff = true;
-                                    break;
-                                }
-                            }
-                            if diff {continue}
-                            for i in 0..sh.mapping.textures.len() {
-                                fn neq(a:&Option<Texture>, b:&Option<Texture>)->bool{
-                                    if let Some(a) = a{
-                                        if let Some(b) = b{
-                                            return a.texture_id() != b.texture_id()
-                                        }
-                                        return true
-                                    }
-                                    return false
-                                }
-                                if neq(&draw_call.texture_slots[i], &draw_vars.texture_slots[i]) {
-                                    diff = true;
-                                    break;
-                                }
-                            }
-                            if diff {continue}
-                        }
-                        if !draw_call.options._appendable_drawcall(&draw_vars.options) {
+                    // TODO! figure out why this can happen
+                    if draw_call.draw_shader.draw_shader_ptr.0.index != draw_vars.draw_shader.unwrap().draw_shader_ptr.0.index{
+                        continue
+                    }
+                    // lets compare uniforms and textures..
+                    if !sh.mapping.flags.draw_call_nocompare {
+                        if draw_call.geometry_id != draw_vars.geometry_id {
                             continue
                         }
-                        return Some(i)
+                        let mut diff = false;
+                        for i in 0..sh.mapping.user_uniforms.total_slots {
+                            if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
+                                diff = true;
+                                break;
+                            }
+                        }
+                        if diff {continue}
+                                
+                        for i in 0..sh.mapping.textures.len() {
+                            fn neq(a:&Option<Texture>, b:&Option<Texture>)->bool{
+                                if let Some(a) = a{
+                                    if let Some(b) = b{
+                                        return a.texture_id() != b.texture_id()
+                                    }
+                                    return true
+                                }
+                                return false
+                            }
+                            if neq(&draw_call.texture_slots[i], &draw_vars.texture_slots[i]) {
+                                diff = true;
+                                break;
+                            }
+                        }
+                        if diff {continue}
                     }
+                    if !draw_call.options._appendable_drawcall(&draw_vars.options) {
+                        continue
+                    }
+                    return Some(i)
                 }
-                else if draw_item.kind.sub_list().is_some(){
+                else{
                     break;
                 }
             }
@@ -361,6 +371,13 @@ impl CxDrawList {
     }
     
     pub fn append_draw_call(&mut self, redraw_id: u64, sh: &CxDrawShader, draw_vars: &DrawVars) -> &mut CxDrawItem {
+        
+        if let Some(ds) = &draw_vars.draw_shader{
+            self.find_appendable_draw_shader_id.push(Some(ds.draw_shader_id as u32));
+        }
+        else{
+            self.find_appendable_draw_shader_id.push(None);
+        }
         self.draw_items.push_item(
             redraw_id,
             CxDrawKind::DrawCall(CxDrawCall::new(&sh.mapping, draw_vars))
@@ -371,11 +388,13 @@ impl CxDrawList {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
         self.rect_areas.clear();
+        self.find_appendable_draw_shader_id.clear();
     }
     
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // see if we need to add a new one
         self.draw_items.push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
+        self.find_appendable_draw_shader_id.push(None);
     }
     
     pub fn store_sub_list_last(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
