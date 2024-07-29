@@ -15,10 +15,10 @@ live_design!{
         optimize: Texture,
         draw_bg: {
             texture image: texture2d
-            uniform shadowopacity:  0.2,
-            uniform shadowx: 4.0,
-            uniform shadowy: 4.0,
-            uniform shadowcolor: vec3(0.01,0.01,0.02),
+            uniform shadowopacity: 0.5,
+            uniform shadowx: 0.5,
+            uniform shadowy: 0.5,
+            uniform shadowcolor: #000,
             varying o0: vec2,
             varying oShadow: vec2,
             
@@ -71,55 +71,54 @@ live_design!{
         }
     }
 
-    IconSet = <View>
-    {
-            width: Fill,
-            height: Fill,
-            flow: Down
+    IconSet = <View> {
+        width: Fill,
+        height: Fill,
+        flow: Down
+        margin: {top: 25.} 
+        spacing: 50
+        padding: 5
+        <View> {
             spacing: 5
-            padding: 5
-        <View>{
-            spacing: 5
             width: Fill,
-            height: Fill,
+            height: 200,
             align: {x:0., y:0.5}
             flow: Right,
-            <IconButton>{button={text:"Amaze-on"},width: Fill,image={source: dep("crate://self/resources/Icon1.png")}}
-            <IconButton>{button={text:"Pearstore"},width: Fill,image={source: dep("crate://self/resources/Icon2.png")}}
-            <IconButton>{button={text:"Tao's Tacos"},width: Fill,image={source: dep("crate://self/resources/Icon3.png")}}
-            <IconButton>{button={text:"Floof"},width: Fill,image={source: dep("crate://self/resources/Icon4.png")}}
-            
+            <IconButton>{button={text:"I am all"},width: Fill,image={source: dep("crate://self/resources/Icon1.png")}}
+            <IconButton>{button={text:"Notificiations"},width: Fill,image={source: dep("crate://self/resources/Icon2.png")}}
+            <IconButton>{button={text:"External Data"},width: Fill,image={source: dep("crate://self/resources/Icon3.png")}}
+            <IconButton>{button={text:"Files"},width: Fill,image={source: dep("crate://self/resources/Icon4.png")}}
         }
-        <View>{
+        <View> {
             width: Fill,
-            height: Fill,
+            height: 200,
             flow: Right,
             
-            <IconButton>{button={text:"JackyYes"},width: Fill,image={source: dep("crate://self/resources/Icon5.png")}}
-            <IconButton>{button={text:"MangoTime"},width: Fill,image={source: dep("crate://self/resources/Icon6.png")}}
-            <IconButton>{button={text:"Browser"},width: Fill,image={source: dep("crate://self/resources/Icon7.png")}}
-            <IconButton>{button={text:"Game-Royale"},width: Fill,image={source: dep("crate://self/resources/Icon8.png")}}
+            <IconButton>{button={text:"Recycle Bin"},width: Fill,image={source: dep("crate://self/resources/Icon5.png")}}
+            <IconButton>{button={text:"Utilities"},width: Fill,image={source: dep("crate://self/resources/Icon6.png")}}
+            <IconButton>{button={text:"Food"},width: Fill,image={source: dep("crate://self/resources/Icon7.png")}}
+            <IconButton>{button={text:"Zoo"},width: Fill,image={source: dep("crate://self/resources/Icon8.png")}}
                                 
         }
-        <View>{
+        <View> { 
             width: Fill,
-            height: Fill,
+            height: 200,
             flow: Right,
          
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon9.png")}, button={text: "P-Express"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon10.png")}, button={text: "The Stare"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon11.png")}, button={text: "ZenTea"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon12.png")}, button={text: "Fishness"}}
+            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon9.png")}, button={text: "TheTube"}}
+            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon11.png")}, button={text: "With Me"}}
+            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon12.png")}, button={text: "Fishnes"}}
+            <View> {}
         }
-        <View>{
-            width: Fill,
-            height: Fill,
-            flow: Right,
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon13.png")}, button={ text: "Diwe"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon14.png")}, button={ text: "Wubi"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon15.png")}, button={text: "RideHyper"}}
-            <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon16.png")}, button={text: "TrustyBank"}}
-        }
+        // <View> {
+        //     width: Fill,
+        //     height: Fill,
+        //     flow: Right,
+        //     <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon13.png")}, button={ text: "Diwe"}}
+        //     <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon14.png")}, button={ text: "Wubi"}}
+        //     <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon15.png")}, button={text: "RideHyper"}}
+        //     <IconButton>{width: Fill,image={source: dep("crate://self/resources/Icon16.png")}, button={text: "TrustyBank"}}
+        // }
     
     }
 
@@ -238,8 +237,7 @@ live_design!{
                 
                         
                     }   
-                    screen3 = <View>
-                    {
+                    screen3 = <View> {
                         flow: Overlay,                
                         width: Fill,
                         height: Fill
@@ -255,14 +253,9 @@ live_design!{
                             width: Fill,
                             height: Fill,
                             draw: {
-                              
                                 fn pixel(self) -> vec4 {
-                              
-
-                               
                                 
-                                let fragColor = mix( vec4(.8,0.8,.8, 1.),vec4(0.0,0.1,0.3, 1.0), self.pos.y);
-
+                                let fragColor = mix(#272001, #764423, self.pos.y);
 
                                     return fragColor;
                                 }
@@ -331,8 +324,7 @@ live_design!{
                     }   
 
                 
-                    screen4 = <View>
-                    {
+                    screen4 = <View> {
                         flow: Overlay,                
                         width: Fill,
                         height: Fill
@@ -352,7 +344,7 @@ live_design!{
                         <Image>{
                             width: Fill;
                             height: Fill;	
-                            source: dep("crate://self/resources/background.png")
+                            source: dep("crate://self/resources/background.jpg")
                         }
 
                         <Image>{
@@ -515,19 +507,37 @@ live_design!{
                             x: 0.5,
                             y: 0.5
                         },
-                
-                        quad = <MyWidget> {
-                            align:{x:0.,y:0.0}
-                            width: Fill,
-                            height: Fill,
-                            
-                            draw: {
-                                fn pixel(self) -> vec4 {
-                                 return vec4(0.0,self.pos.y*0.1,self.pos.y*0.1,1.0);   
-                                }
-                               
+                        show_bg: true,
+                        draw_bg: {
+                            fn pixel(self) -> vec4{
+                                return vec4(0.70,0.72,0.72,1)
                             }
+                        }   
+
+                        <Image>{
+                            width: Fill;
+                            height: Fill;	
+                            source: dep("crate://self/resources/unsplash.jpg")
                         }
+                
+                        // quad = <MyWidget> {
+                        //     align:{x:0.,y:0.0}
+                        //     width: Fill,
+                        //     height: Fill,
+                            
+                        //     // draw: {
+                        //     //     fn pixel(self) -> vec4 {
+                        //     //      return vec4(0.0,self.pos.y*0.1,self.pos.y*0.1,1.0);   
+                        //     //     } 
+                        //     // }
+                        //     draw: {
+                        //         fn pixel(self) -> vec4 {
+                                
+                        //         let fragColor = mix(#A7A17C, #764423, self.pos.y);
+                        //             return fragColor;
+                        //         }
+                        //     }
+                        // }
                         <ContainerStage>{   
                             draw_bg: {
                                 texture image: texture2d
