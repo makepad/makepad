@@ -3,20 +3,21 @@ use crate::{button::*, makepad_derive_widget::*, makepad_draw::*, view::*, widge
 live_design! {
     import crate::button::ButtonBase;
     import crate::view::ViewBase;
-    //import makepad_widgets::theme_desktop_dark::*;
     import makepad_draw::shader::std::*;
 
     ICON_CLOSE_PANEL = dep("crate://self/resources/icons/close_left_panel.svg")
     ICON_OPEN_PANEL = dep("crate://self/resources/icons/open_left_panel.svg")
 
-    // Copy of cached view from base, as can't be imported directly here to avoid infinite recursion.
-    CachedView = <ViewBase> {
+    FadeView = <ViewBase> {
         optimize: Texture,
         draw_bg: {
+            instance opacity: 1.0
+
             texture image: texture2d
             uniform marked: float,
             varying scale: vec2
             varying shift: vec2
+
             fn vertex(self) -> vec4 {
                 let dpi = self.dpi_factor;
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
@@ -25,15 +26,6 @@ live_design! {
                 self.shift = (self.rect_pos - floor_pos) / ceil_size;
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
-            /*fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
-            }*/
-        }
-    }
-
-    FadeView = <CachedView> {
-        draw_bg: {
-            instance opacity: 1.0
 
             fn pixel(self) -> vec4 {
                 let color = sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
@@ -42,98 +34,18 @@ live_design! {
         }
     }
 
-    CustomButton = <ButtonBase> {
-        draw_bg: {
-            instance hover: 0.0
-            instance color: #0000
-            instance color_hover: #fff
-            instance border_width: 1.0
-            instance border_color: #0000
-            instance border_color_hover: #fff
-            instance radius: 2.5
-
-            fn get_color(self) -> vec4 {
-                return mix(self.color, mix(self.color, self.color_hover, 0.2), self.hover)
-            }
-
-            fn get_border_color(self) -> vec4 {
-                return mix(self.border_color, mix(self.border_color, self.border_color_hover, 0.2), self.hover)
-            }
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.box(
-                    self.border_width,
-                    self.border_width,
-                    self.rect_size.x - (self.border_width * 2.0),
-                    self.rect_size.y - (self.border_width * 2.0),
-                    max(1.0, self.radius)
-                )
-                sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
-                }
-                return sdf.result;
-            }
-        }
-
-        draw_icon: {
-            instance color: #fff
-            instance color_hover: #000
-            uniform rotation_angle: 0.0,
-
-            fn get_color(self) -> vec4 {
-                return mix(self.color, mix(self.color, self.color_hover, 0.2), self.hover)
-            }
-
-            // Support rotation of the icon
-            fn clip_and_transform_vertex(self, rect_pos: vec2, rect_size: vec2) -> vec4 {
-                let clipped: vec2 = clamp(
-                    self.geom_pos * rect_size + rect_pos,
-                    self.draw_clip.xy,
-                    self.draw_clip.zw
-                )
-                self.pos = (clipped - rect_pos) / rect_size
-
-                // Calculate the texture coordinates based on the rotation angle
-                let angle_rad = self.rotation_angle * 3.14159265359 / 180.0;
-                let cos_angle = cos(angle_rad);
-                let sin_angle = sin(angle_rad);
-                let rot_matrix = mat2(
-                    cos_angle, -sin_angle,
-                    sin_angle, cos_angle
-                );
-                self.tex_coord1 = mix(
-                    self.icon_t1.xy,
-                    self.icon_t2.xy,
-                    (rot_matrix * (self.pos.xy - vec2(0.5))) + vec2(0.5)
-                );
-
-                return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
-                    clipped.x,
-                    clipped.y,
-                    self.draw_depth + self.draw_zbias,
-                    1.
-                )))
-            }
-        }
-        icon_walk: {width: 14, height: 14}
-
-        draw_text: {
-            text_style: {font_size: 9},
-            fn get_color(self) -> vec4 {
-                return self.color;
-            }
-        }
-    }
-
-    ToggleButton = <CustomButton> {
+    ToggleButton = <ButtonBase> {
         width: Fit,
         height: Fit,
         icon_walk: {width: 20, height: 20},
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return #0000;
+            }
+        }
         draw_icon: {
             fn get_color(self) -> vec4 {
-                return #475467;
+                return #fff;
             }
         }
     }
