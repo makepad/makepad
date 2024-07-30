@@ -39,10 +39,12 @@ live_design! {
         height: Fit,
         icon_walk: {width: 20, height: 20},
         draw_bg: {
+            instance color: #0000
             fn pixel(self) -> vec4 {
-                return #0000;
+                return self.color;
             }
         }
+        icon_walk: {width: 20, height: 20},
         draw_icon: {
             fn get_color(self) -> vec4 {
                 return #fff;
