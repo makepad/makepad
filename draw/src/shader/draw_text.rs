@@ -442,7 +442,7 @@ impl DrawText {
     pub fn pick_walk(
         &mut self,
         cx: &mut Cx,
-        walk: Walk,
+        _walk: Walk,
         _align: Align,
         text: &str,
         target_position: DVec2,
@@ -534,7 +534,7 @@ impl DrawText {
     pub fn reverse_pick_walk(
         &mut self,
         cx: &mut Cx2d,
-        walk: Walk,
+        _walk: Walk,
         _align: Align,
         text: &str,
         target_index: usize,
@@ -776,8 +776,9 @@ impl DrawText {
             |position, event, font_atlas| {
                 if let LayoutEvent::Chunk {
                     glyph_infos,
-                    string,
                     ..
+                    //string,
+                    //..
                 } = event {
                     self.draw_glyphs(
                         cx,
