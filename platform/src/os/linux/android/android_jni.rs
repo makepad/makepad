@@ -38,6 +38,7 @@ pub enum FromJavaMessage {
         window: *mut ndk_sys::ANativeWindow,
     },
     SurfaceDestroyed,
+    RenderLoop,
     Touch(Vec<TouchPoint>),
     Character {
         character: u32,
@@ -156,6 +157,39 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
     let env = attach_jni_env();
 
     ndk_sys::ANativeWindow_fromSurface(env, surface)
+}
+
+static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographer(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+) {
+    init_choreographer();
+}
+
+pub unsafe fn init_choreographer() {
+    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+    post_vsync_callback();
+}
+
+unsafe extern "C" fn vsync_callback(
+    _data: *mut ndk_sys::AChoreographerFrameCallbackData,
+    _user_data: *mut std::ffi::c_void,
+) {
+    send_from_java_message(FromJavaMessage::RenderLoop);
+    post_vsync_callback();
+}
+
+pub unsafe fn post_vsync_callback() {
+    if !CHOREOGRAPHER.is_null() {
+        ndk_sys::AChoreographer_postVsyncCallback(
+            CHOREOGRAPHER,
+            Some(vsync_callback),
+            std::ptr::null_mut(),
+        );
+    }
 }
 
 #[no_mangle]
@@ -365,6 +399,14 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
         keyboard_height: keyboard_height as u32,
         is_open: is_open != 0
     });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_onRenderLoop(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+) {
+    send_from_java_message(FromJavaMessage::RenderLoop);
 }
 
 #[no_mangle]

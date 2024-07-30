@@ -98,8 +98,8 @@ impl WidgetNode for PageFlip{
         self.area.redraw(cx)
     }
         
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some(page) = self.pages.get_mut(&path[0]) {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if let Some(page) = self.pages.get(&path[0]) {
             if path.len() == 1{
                 results.push(page.clone());
             }
@@ -107,9 +107,17 @@ impl WidgetNode for PageFlip{
                 page.find_widgets(&path[1..], cached, results);
             }
         }
-        for page in self.pages.values_mut(){
+        for page in self.pages.values() {
             page.find_widgets(path, cached, results);
         }
+    }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for page in self.pages.values() {
+            let x = page.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
     }
 }        
 

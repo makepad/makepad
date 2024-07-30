@@ -1,5 +1,5 @@
 use {
-    crate::makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*}, makepad_widgets::Button
+    crate::makepad_widgets::{ makepad_draw::*}
 };
 
 // the "IconButton" on the *left* hand side of the below is the name we will refer to the
@@ -25,11 +25,11 @@ live_design!{
             text: "yes"
             draw_text: {
                 text_style: {font_size: 15},
-                color: #f00
+                //color: #f00
             }
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return vec4(0.,0.,0.,0.)
+                    return #0000+#0000
                 }
             }
         }       

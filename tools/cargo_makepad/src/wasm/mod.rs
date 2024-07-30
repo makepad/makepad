@@ -1,23 +1,33 @@
 mod compile;
 mod sdk;
+use compile::WasmConfig;
 
 pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
+    let mut config = WasmConfig{
+        strip: false,
+        lan: false,
+        brotli: false,
+        port: None,
+        small_fonts: false
+    };
     
-    let mut port = None;
-    let mut lan = false;
-    
-    let mut strip = false;
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
         if let Some(opt) = v.strip_prefix("--port=") {
-            port = Some(opt.parse::<u16>().unwrap_or(8010));
+            config.port = Some(opt.parse::<u16>().unwrap_or(8010));
         }
         else if let Some(_) = v.strip_prefix("--strip") {
-            strip = true;
+            config.strip = true;
+        }
+        else if let Some(_) = v.strip_prefix("--small-fonts") {
+            config.small_fonts = true;
+        }
+        else if let Some(_) = v.strip_prefix("--brotli") {
+            config.brotli = true;
         }
         else if let Some(_) = v.strip_prefix("--lan") {
-            lan = true;
+            config.lan = true;
         }
         else {
             args = &args[i..];
@@ -33,11 +43,11 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install()
         }
         "build" =>{
-            compile::build(strip, &args[1..])?;
+            compile::build(config, &args[1..])?;
             Ok(())
         }
         "run" =>{
-            compile::run(lan, port.unwrap_or(8010), strip, &args[1..])?;
+            compile::run(config, &args[1..])?;
             Ok(())
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))

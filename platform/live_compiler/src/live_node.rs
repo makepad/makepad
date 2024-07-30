@@ -96,7 +96,7 @@ pub enum LiveValue {
     // tree items
     Root{id_resolve:Box<HashMap<LiveId,LiveScopeTarget>>},
     Array,
-    Expr {expand_index: Option<u32>},
+    Expr,// {expand_index: Option<u32>},
     TupleEnum (LiveId),
     NamedEnum (LiveId),
     Object,
@@ -559,7 +559,7 @@ impl LiveValue {
             }
         }
     }
-    
+    /*
     pub fn set_expr_expand_index_if_none(&mut self, index: usize) {
         if let Self::Expr {expand_index, ..} = self {
             if expand_index.is_none() {
@@ -573,7 +573,7 @@ impl LiveValue {
             Self::Expr {expand_index, ..} => *expand_index,
             _ => None
         }
-    }
+    }*/
     
     pub fn is_id(&self) -> bool {
         matches!(self, Self::Id(_))

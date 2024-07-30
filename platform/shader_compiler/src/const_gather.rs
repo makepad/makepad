@@ -12,15 +12,19 @@ use{
 #[derive(Clone)]
 pub struct ConstGatherer<'a> {
     pub fn_def: &'a FnDef,
+    pub const_gather_active: bool
 }
 
 impl<'a> ConstGatherer<'a> {
     pub fn const_gather_expr(&self, expr: &Expr) {
-        //let gather_span = if self.gather_all{Some(expr.span)}else{None};
         
+        //let gather_span = if self.gather_all{Some(expr.span)}else{None};
+        if !self.const_gather_active{
+            return
+        }
         match expr.const_val.borrow().as_ref().unwrap() {
             Some(Val::Vec4(val)) => {
-                expr.const_index.set(Some(
+               expr.const_index.set(Some(
                     self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
                 self.write_span(&expr.span, 4);

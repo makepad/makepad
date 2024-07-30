@@ -6,9 +6,11 @@ pub mod xr;
 pub mod drag_drop;
 pub mod network;
 pub mod video_playback;
+pub mod designer;
 
 pub use event::*;
 pub use finger::*;
+pub use designer::*;
 pub use keyboard::*;
 pub use window::*;
 pub use xr::*;
