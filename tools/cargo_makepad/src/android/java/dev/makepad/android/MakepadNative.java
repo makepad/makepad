@@ -16,6 +16,8 @@ public class MakepadNative {
     public native static void activityOnWindowFocusChanged(boolean has_focus);
     public static native void onAndroidParams(String cache_path, float dentify, boolean isEmulator);
 
+    public native static void initChoreographer();
+
     public native static void onBackPressed();
 
     // belongs to QuadSurface class

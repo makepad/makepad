@@ -133,6 +133,7 @@ pub struct DesignerView {
     #[rust] finger_move: Option<FingerMove>,
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,
+    #[live] draw_outline: DrawQuad,
     #[rust] view_file: Option<LiveId>,
     #[rust] selected_component: Option<LiveId>,
     #[rust] containers: ComponentMap<LiveId, ContainerData>,
@@ -186,8 +187,8 @@ impl DesignerView{
         cd.container.draw_all(cx, &mut Scope::with_props(cd))
     }
     
-    fn select_component(&mut self, cx:&mut Cx, what_id:Option<LiveId>){
-        for (id, comp) in self.containers.iter_mut(){
+    fn select_component(&mut self, _cx:&mut Cx, what_id:Option<LiveId>){
+        /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
                     .animator_cut(cx, id!(select.on));
@@ -197,6 +198,7 @@ impl DesignerView{
                     .animator_cut(cx, id!(select.off));
             }
         }
+        */
         self.selected_component = what_id;
     }
     
@@ -237,12 +239,41 @@ impl DesignerView{
 impl Widget for DesignerView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let uid = self.widget_uid();
+        // alright so. our widgets dont have any 'event' flow here
+        // so what can we do.
+        // 
+        
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
-                
+                // lets poll our widget structure with a special event
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
                 //let corner_outer:f64  = 10.0 * self.zoom;
+                // lets send a designer pick into all our widgets
+                for (_id, cd) in self.containers.iter(){
+                    // ok BUT our mouse pick is not dependent on the container
+                    // ok so we are in a pass. meaning 0,0 origin
+                    let abs = (fh.abs - fh.rect.pos) * self.zoom + self.pan;
+                    // lets capture the actions
+                    let actions = cx.capture_actions(|cx|{
+                        cd.component.handle_event(cx, &Event::DesignerPick(DesignerPickEvent{
+                            abs: abs
+                        }), &mut Scope::empty())
+                    });
+                    for action in actions{
+                        if let Some(action) = action.as_widget_action(){
+                            match action.cast(){
+                                WidgetDesignAction::PickedBody=>{
+                                    // alright so lets draw a quad on top
+                                    // alright our widget got clicked.
+                                    //cx.component.uid_to_widget(action.uid)
+                                }
+                                _=>()
+                            }
+                        }
+                    }
+                }
+                
                 let mut cursor = None;
                 for cd in self.containers.values(){
                     match cd.get_edge(fh.abs -fh.rect.pos, self.zoom, self.pan){
@@ -441,6 +472,8 @@ impl Widget for DesignerView {
         self.draw_bg.draw_vars.set_texture(0, self.color_texture.as_ref().unwrap());
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_bg.draw_abs(cx, rect);
+        // lets draw all the outlines on top
+        
             
         cx.set_pass_area_with_origin(
             &self.pass,

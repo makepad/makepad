@@ -36,6 +36,7 @@ live_design! {
     THEME_TEXTSELECTION_CORNER_RADIUS = (THEME_CORNER_RADIUS * .5)
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
+    THEME_SPLITTER_SIZE = 10.0,
     THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
     THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
     THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
@@ -78,6 +79,7 @@ live_design! {
         mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT),
         pow(0.36, THEME_COLOR_CONTRAST))
     )
+    THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_FG_APP)
     THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
@@ -185,7 +187,7 @@ live_design! {
     THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
-        brightness: 1.1
+        //brightness: 1.1
         top_drop: 1.3
         line_spacing: 1.4
     }
@@ -4265,7 +4267,7 @@ live_design! {
                 }
             }
         }
-        
+        /*
         <RoundedShadowView>{
             width: 250., height: 350.,
             abs_pos: vec2(25., 325.)
@@ -4373,7 +4375,7 @@ live_design! {
                     }
                 }
             }
-        }
+        }*/
     }
 
     DesignerContainer = <DesignerContainerBase>{

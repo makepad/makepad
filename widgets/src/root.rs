@@ -53,10 +53,18 @@ impl WidgetNode for Root{
     }
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
         
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
-        for window in self.windows.values_mut() {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
+        for window in self.windows.values() {
             window.find_widgets(path, cached, results);
         }
+    }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for window in self.windows.values() {
+            let x = window.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
     }
         
 }
