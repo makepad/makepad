@@ -993,7 +993,7 @@ impl DrawText {
             let left_side_bearing = units_to_lpxs(glyph.horizontal_metrics.left_side_bearing, units_per_em, font_size);
 
             // Use the font size in device pixels to get the atlas page id from the font.
-            let atlas_page_id = font.get_atlas_page_id(units_to_lpxs(1.0, units_per_em, font_size) * device_pixel_ratio);
+            let atlas_page_id = font.get_atlas_page_id(units_to_lpxs(1.0, units_per_em, font_size / self.font_scale) * device_pixel_ratio);
 
             // Use the atlas page id to get the atlas page from the font.
             let atlas_page = &mut font.atlas_pages[atlas_page_id];
