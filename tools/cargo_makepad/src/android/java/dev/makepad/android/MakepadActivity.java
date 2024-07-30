@@ -5,8 +5,12 @@ import javax.microedition.khronos.opengles.GL10;
 
 import android.app.Activity;
 import android.view.View;
+import android.view.Choreographer;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
+import android.view.Display;
+import android.view.WindowManager;
+import android.view.Window;
 import android.content.Context;
 
 import android.content.ClipData;
@@ -110,6 +114,7 @@ class MakepadSurface
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i("SAPP", "surfaceCreated");
         Surface surface = holder.getSurface();
+        //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceCreated(surface);
     }
 
@@ -127,6 +132,7 @@ class MakepadSurface
                                int height) {
         Log.i("SAPP", "surfaceChanged");
         Surface surface = holder.getSurface();
+        //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
@@ -263,7 +269,7 @@ MidiManager.OnDeviceOpenedListener{
         ResizingLayout layout = new ResizingLayout(this);
         layout.addView(view);
         setContentView(layout);
-
+  
         MakepadNative.activityOnCreate(this);
 
         HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
@@ -284,12 +290,29 @@ MidiManager.OnDeviceOpenedListener{
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+        MakepadNative.initChoreographer();        
         //% MAIN_ACTIVITY_ON_CREATE
     }
 
     @Override
     protected void onStart() {
         super.onStart();
+
+       // this forces a high framerate default 
+           /*
+        Window w = getWindow();
+        WindowManager.LayoutParams p = w.getAttributes();
+        Display.Mode[] modes = getDisplay().getSupportedModes();
+
+        for(Display.Mode mode: modes){    
+            if(mode.getRefreshRate() > 100.0){
+                p.preferredDisplayModeId = mode.getModeId();
+                w.setAttributes(p);
+                Log.w("Makepad", "width"+mode.getRefreshRate()+" id "+mode.getModeId());
+                break;
+            }
+        }
+*/      
         MakepadNative.activityOnStart();
     }
 
@@ -428,6 +451,7 @@ MidiManager.OnDeviceOpenedListener{
     }
 
     public void sendWebSocketMessage(long id, byte[] message) {
+
         MakepadWebSocket webSocket = mActiveWebsockets.get(id);
         if (webSocket != null) {
             webSocket.sendMessage(message);

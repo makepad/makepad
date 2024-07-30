@@ -71,7 +71,20 @@ impl<T> IdPool<T> where T: Default {
         }
     }
 
-    pub fn alloc_with_reuse_filter<F>(&mut self, mut filter: F, item: T) -> PoolId 
+    /// Allocates an item in the pool, potentially reusing an existing slot.
+    ///
+    /// This method attempts to find a reusable slot in the pool that satisfies the given filter.
+    /// If a suitable slot is found, it's reused; otherwise, a new slot is allocated.
+    ///
+    /// # Arguments
+    /// * `filter` - A closure that determines if an existing item can be reused.
+    /// * `item` - The new item to be stored in the pool.
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// - `PoolId`: The ID of the allocated or reused slot.
+    /// - `Option<T>`: The previous item if a slot was reused, or None if a new slot was allocated.
+    pub fn alloc_with_reuse_filter<F>(&mut self, mut filter: F, item: T) -> (PoolId, Option<T>)
     where F: FnMut(&IdPoolItem<T>) -> bool {
         let maybe_free_id = self.free.0.borrow_mut()
             .iter()
@@ -87,16 +100,16 @@ impl<T> IdPool<T> where T: Default {
         if let Some((index, id)) = maybe_free_id {
             self.free.0.borrow_mut().remove(index);
             self.pool[id].generation += 1;
-            self.pool[id].item = item;
-    
+            let old_item = std::mem::replace(&mut self.pool[id].item, item);
+
             let pool_id = PoolId {
                 id,
                 generation: self.pool[id].generation,
                 free: self.free.clone()
             };
-            pool_id
+            (pool_id, Some(old_item))
         } else {
-            self.alloc_new(Some(item))
+            (self.alloc_new(Some(item)), None)
         }
     }
 }

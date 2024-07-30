@@ -21,19 +21,12 @@ live_design!{
                 body = <ScrollXYView>{
                     flow: Down,
                     spacing:10,
-                    padding: 100
-                    <RectView>{
-                        clip_y: false, 
-                        draw_bg:{color:#f00}
-                        width: Fit,
-                        height: Fit
                         padding: 0
                         margin: 0
-                        label1 = <Label> {
                             draw_text: {
                                 color: #f
                             },
-                            text: r#"Kestinyg kexy 1234"#,
+                            text: r#"Testing text 1234"#,
                             width: 200.0,
                         }
                     }
