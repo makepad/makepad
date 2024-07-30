@@ -417,8 +417,6 @@ impl DrawText {
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
-        println!("DIIEEEEEE {:?}", self.text_style.line_spacing);
-
         let font = font_atlas.fonts[font_id].as_mut().unwrap();
         let slot = font.owned_font_face.with_ref( | face | face.glyph_index('!').map_or(0, | id | id.0 as usize));
         let glyph = font.get_glyph_by_id(slot).unwrap();
