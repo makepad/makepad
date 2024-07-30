@@ -133,6 +133,10 @@ pub struct AndroidParams {
 }
 
 #[derive(Clone, Debug)]
+pub struct OpenHarmonyParams {
+}
+
+#[derive(Clone, Debug)]
 pub struct WebParams {
     pub protocol: String,
     pub host: String,
@@ -154,6 +158,7 @@ pub enum OsType {
     Macos,
     Ios,
     Android(AndroidParams),
+    OpenHarmony(OpenHarmonyParams),
     LinuxWindow (LinuxWindowParams),
     LinuxDirect,
     Web(WebParams)
@@ -252,7 +257,7 @@ impl Cx {
             live_file_change_receiver: recv,
             live_file_change_sender: send,
             
-            shader_registry: ShaderRegistry::new(),
+            shader_registry: ShaderRegistry::new(true),
             
             os: CxOs::default(),
             

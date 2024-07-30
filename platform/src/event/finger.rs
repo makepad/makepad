@@ -1070,6 +1070,16 @@ impl Event {
                     return Hit::FingerHoverOut(fhe);
                 }
             },
+            Event::DesignerPick(e) => {
+               
+                let rect = area.clipped_rect(&cx);
+                if !hit_test(e.abs, &rect, &options.margin) {
+                    return Hit::Nothing
+                }
+                // lets add our area to a handled vec?
+                // but how will we communicate the widget?
+                return Hit::DesignerPick(e.clone())
+            },
             _ => ()
         };
         Hit::Nothing

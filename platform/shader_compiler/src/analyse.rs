@@ -27,7 +27,8 @@ use{
 
 #[derive(Clone, Copy)]
 pub struct ShaderAnalyseOptions {
-    pub no_const_collapse: bool
+    pub no_const_collapse: bool,
+    pub const_gather_active: bool
 }
 
 pub struct StructAnalyser<'a> {
@@ -565,7 +566,8 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
-            fn_def: self.fn_def
+            fn_def: self.fn_def,
+            const_gather_active: self.options.const_gather_active
         }
     }
     
