@@ -12,7 +12,7 @@ live_design!(
                 margin: {top: 80, left: 20}
                 text: "Hi, I'm the content behind!",
             }
-            <TogglePanelBase> {
+            <TogglePanel> {
                 open_content = {
                     <View> {
                         align: {x: 0.5, y: 0.5},
