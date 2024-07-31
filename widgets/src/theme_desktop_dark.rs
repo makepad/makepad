@@ -3796,7 +3796,27 @@ live_design! {
         root_view = <View> {}
     }
 
-    TogglePanel = <TogglePanelBase> {}
+    // Re-export the icons in case you want to override the built-in buttons with
+    // an instance of your custom button while preserving the default icons.
+    TOGGLE_PANEL_OPEN_ICON = (TOGGLE_PANEL_OPEN_ICON)
+    TOGGLE_PANEL_CLOSE_ICON = (TOGGLE_PANEL_CLOSE_ICON)
+    TogglePanel = <TogglePanelBase> {
+        persistent_content = {
+            default = {
+                open = <Button> {
+                    visible: false,
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_OPEN_ICON)
+                    }
+                }
+                close = <Button> {
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_CLOSE_ICON)
+                    }
+                }
+            }
+        }
+    }
 
     DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
         align: { y: 0.5 }
