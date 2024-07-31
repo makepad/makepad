@@ -5,8 +5,8 @@ live_design! {
     import crate::view::ViewBase;
     import makepad_draw::shader::std::*;
 
-    ICON_CLOSE_PANEL = dep("crate://self/resources/icons/close_left_panel.svg")
-    ICON_OPEN_PANEL = dep("crate://self/resources/icons/open_left_panel.svg")
+    TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
+    TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
 
     FadeView = <ViewBase> {
         optimize: Texture,
@@ -79,14 +79,14 @@ live_design! {
 
                 close = <ToggleButton> {
                     draw_icon: {
-                        svg_file: (ICON_CLOSE_PANEL),
+                        svg_file: (TOGGLE_PANEL_CLOSE_ICON),
                     }
                 }
 
                 open = <ToggleButton> {
                     visible: false,
                     draw_icon: {
-                        svg_file: (ICON_OPEN_PANEL),
+                        svg_file: (TOGGLE_PANEL_OPEN_ICON),
                     }
                 }
 
