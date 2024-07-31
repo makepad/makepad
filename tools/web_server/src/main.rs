@@ -87,9 +87,9 @@ fn main() {
                     continue
                 }
                 let coep = if path == "/" || path == "/index.html"{
-                    "Cross-Origin-Embedder-Policy: require-corp\r\nCross-Origin-Opener-Policy: same-origin\r\n"
+                    ""
                 }
-                else{""};
+                else{"Cross-Origin-Embedder-Policy: require-corp\r\nCross-Origin-Opener-Policy: same-origin\r\n"};
                 
                 //let mut strip = None;
                 //for remap in &remaps{
