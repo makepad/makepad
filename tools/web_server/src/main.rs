@@ -84,6 +84,10 @@ fn main() {
                 if path.contains("..") || path.contains('\\'){
                     continue
                 }
+                let coep = if path == "/" || path == "/index.html"{
+                    "Cross-Origin-Embedder-Policy: require-corp\r\nCross-Origin-Opener-Policy: same-origin\r\n"
+                }
+                else{""};
                 
                 //let mut strip = None;
                 //for remap in &remaps{
@@ -101,12 +105,11 @@ fn main() {
                         let header = format!(
                             "HTTP/1.1 200 OK\r\n\
                             Content-Type: {}\r\n\
-                            Cross-Origin-Embedder-Policy: require-corp\r\n\
-                            Cross-Origin-Opener-Policy: same-origin\r\n\
-                            Content-encoding: br\r\n\
+                            {coep}Content-encoding: br\r\n\
                             Cache-Control: max-age:0\r\n\
                             Content-Length: {}\r\n\
                             Connection: close\r\n\r\n",
+                            
                             mime_type,
                             body.len()
                         );
@@ -119,9 +122,7 @@ fn main() {
                         let header = format!(
                             "HTTP/1.1 200 OK\r\n\
                             Content-Type: {}\r\n\
-                            Cross-Origin-Embedder-Policy: require-corp\r\n\
-                            Cross-Origin-Opener-Policy: same-origin\r\n\
-                            Content-encoding: none\r\n\
+                            {coep}Content-encoding: none\r\n\
                             Cache-Control: max-age:0\r\n\
                             Content-Length: {}\r\n\
                             Connection: close\r\n\r\n",
