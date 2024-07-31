@@ -63,7 +63,7 @@ live_design!{
     
     import crate::bare_step::BareStep;
     import crate::turtle_step::TurtleStep;
-    import crate::toggle_panel::TogglePanelBase;
+    import crate::toggle_panel::*;
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
 
@@ -974,6 +974,11 @@ live_design!{
     BareStep = <BareStep>{}
     TurtleStep = <TurtleStep>{}
     ColorPicker = <ColorPicker>{}
+
+    // Re-export the icons in case you want to override the built-in buttons with
+    // an instance of your custom button while preserving the default icons.
+    TOGGLE_PANEL_OPEN_ICON = (TOGGLE_PANEL_OPEN_ICON)
+    TOGGLE_PANEL_CLOSE_ICON = (TOGGLE_PANEL_CLOSE_ICON)
     TogglePanelBase = <TogglePanelBase>{}
     
     DesignerBase = <DesignerBase>{}
