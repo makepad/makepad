@@ -77,6 +77,8 @@ fn main() {
                 else if path.ends_with(".js") {"text/javascript"}
                 else if path.ends_with(".ttf") {"application/ttf"}
                 else if path.ends_with(".png") {"image/png"}
+                else if path.ends_with(".woff"){"font/woff"}
+		              else if path.ends_with(".woff2"){"font/woff2"}
                 else if path.ends_with(".jpg") {"image/jpg"}
                 else if path.ends_with(".svg") {"image/svg+xml"}
                 else {continue};
