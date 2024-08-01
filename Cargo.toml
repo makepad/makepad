@@ -19,6 +19,7 @@ workspace.members = [
     "examples/bare_text",
 #    "makepad_wonderous",
 #    "complex_layout",
+#    "comp_demo",
     "examples/web_cam", 
     "examples/ironfish",
     "examples/simple",
