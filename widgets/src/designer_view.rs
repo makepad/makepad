@@ -136,6 +136,7 @@ pub struct DesignerView {
     #[live] draw_outline: DrawQuad,
     #[rust] view_file: Option<LiveId>,
     #[rust] selected_component: Option<LiveId>,
+    #[rust] selected_subcomponent: Option<WidgetRef>,
     #[rust] containers: ComponentMap<LiveId, ContainerData>,
     #[redraw] #[rust(DrawList2d::new(cx))] draw_list: DrawList2d,
     #[rust(Pass::new(cx))] pass: Pass,
@@ -157,7 +158,7 @@ impl DesignerView{
             rect(info.dx, info.dy, info.dw, info.dh)
         }
         else{
-            rect(50.0,50.0,400.0,300.0)
+            rect(50.0,50.0,200.0,300.0)
         };
                                     
         let container_ptr = self.container.unwrap();
@@ -187,7 +188,7 @@ impl DesignerView{
         cd.container.draw_all(cx, &mut Scope::with_props(cd))
     }
     
-    fn select_component(&mut self, _cx:&mut Cx, what_id:Option<LiveId>){
+    fn select_component(&mut self, cx:&mut Cx, what_id:Option<LiveId>){
         /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
@@ -199,6 +200,7 @@ impl DesignerView{
             }
         }
         */
+        self.redraw(cx);
         self.selected_component = what_id;
     }
     
@@ -266,7 +268,11 @@ impl Widget for DesignerView {
                                 WidgetDesignAction::PickedBody=>{
                                     // alright so lets draw a quad on top
                                     // alright our widget got clicked.
-                                    //cx.component.uid_to_widget(action.uid)
+                                    let comp = cd.component.uid_to_widget(action.widget_uid);
+                                    self.selected_subcomponent = Some(
+                                        comp
+                                    );
+                                    self.draw_list.redraw(cx);
                                 }
                                 _=>()
                             }
@@ -473,8 +479,25 @@ impl Widget for DesignerView {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_bg.draw_abs(cx, rect);
         // lets draw all the outlines on top
-        
-            
+        if let Some(component) = self.selected_component{
+           if let Some(container) = self.containers.get(&component){
+               let mut rect = rect;
+               rect.pos += (container.rect.pos - self.pan)/self.zoom;
+               rect.size = container.rect.size;
+               rect.size /= self.zoom;
+               self.draw_outline.draw_abs(cx, rect);
+           } 
+        }
+        // alright and now we need to highlight a component
+        if let Some(component) = &self.selected_subcomponent{
+            let area = component.area();
+            let mut rect = rect;
+            let component_rect = area.rect(cx);
+            rect.pos += (component_rect.pos - self.pan)/self.zoom;
+            rect.size = component_rect.size;
+            rect.size /= self.zoom;
+            self.draw_outline.draw_abs(cx, rect);
+        } 
         cx.set_pass_area_with_origin(
             &self.pass,
             self.area,
