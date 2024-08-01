@@ -33,6 +33,7 @@ pub trait WidgetNode: LiveApply{
     fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef;
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
+    fn area(&self)->Area{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
 }
 
@@ -430,6 +431,13 @@ impl WidgetRef {
         WidgetUid(0)
     }
     
+    pub fn area(&self) -> Area {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.area()
+        }
+        Area::Empty
+    }
+    
     pub fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.widget_to_data(cx, actions, nodes, path);
@@ -446,6 +454,9 @@ impl WidgetRef {
     pub fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
         if self.widget_uid() == uid{
             return self.clone()
+        }
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.uid_to_widget(uid)
         }
         WidgetRef::empty()
     }
