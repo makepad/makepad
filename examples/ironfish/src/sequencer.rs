@@ -217,7 +217,7 @@ impl Sequencer {
             let x = i % self.grid_x;
             let y = i / self.grid_x;
             let bit = 1 << y;
-            let active = (steps[x] & bit == bit);
+            let active = steps[x] & bit == bit;
             button.set_is_active(cx, active, Animate::Yes);
         }
     }
