@@ -323,6 +323,10 @@ impl CodeEditor {
         self.scroll_bars.redraw(cx);
     }
     
+    pub fn area(&self)->Area{
+        self.scroll_bars.area()
+    }
+    
     pub fn walk(&self, _cx:&mut Cx)->Walk{
         self.walk
     }
