@@ -4483,6 +4483,16 @@ live_design! {
 
     DesignerView = <DesignerViewBase>{
         clear_color: #333333
+        draw_outline:{
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                sdf.stroke(#fff, 1.0);
+                return sdf.result;
+                //return vec4(self.color.xyz * self.color.w, self.color.w)
+            }
+        }
+        
         draw_bg: {
             texture image: texture2d
             varying scale: vec2
