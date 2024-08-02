@@ -36,6 +36,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
                 
         // alright now. we have a field
         let mut walk_field = None;
+        let mut area_field = None;
         let mut deref_field = None;
         let mut wrap_field = None;
         let mut find_fields = Vec::new();
@@ -56,6 +57,9 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             if field.attrs.iter().find(|v| v.name == "wrap").is_some(){
                 wrap_field = Some(field.name.clone());
             }
+            if field.attrs.iter().find(|v| v.name == "area").is_some(){
+                area_field = Some(field.name.clone());
+            }
         }
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
@@ -65,12 +69,20 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         if let Some(wrap_field) = &wrap_field{
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(&wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(&wrap_field).add(".redraw(cx)}");
+            tb.add("    fn area(&self)->Area{ self.").ident(&wrap_field).add(".area()}");
             tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(&wrap_field).add(".find_widgets(path, cached, results)}");
-            tb.add("   fn uid_to_widget(&mut self, uid:WidgetUid)->WidgetRef{");
+            tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
             tb.add("       self.").ident(&wrap_field).add(".uid_to_widget(uid)");
-            tb.add("   }");
+            tb.add("   }"); 
         }
         else{
+            if let Some(area_field) = &area_field{
+                tb.add("    fn area(&self)->Area{ self.").ident(&area_field).add(".area()}");
+            }
+            else if let Some(deref_field) = &deref_field{
+                tb.add("    fn area(&self)->Area{ self.").ident(&deref_field).add(".area()}");
+            }
+            
             if let Some(walk_field) = &walk_field{
                 tb.add("    fn walk(&mut self, _cx:&mut Cx) -> Walk { self.").ident(&walk_field).add("}");
             }
