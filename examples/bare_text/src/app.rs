@@ -21,14 +21,8 @@ live_design!{
                 body = <ScrollXYView>{
                     flow: Down,
                     spacing:10,
-                    padding: 10
-                    <RectView>{
-                        draw_bg:{color:#f00}
-                        width: Fit,
-                        height: Fit
                         padding: 0
                         margin: 0
-                        label1 = <Label> {
                             draw_text: {
                                 color: #f
                             },

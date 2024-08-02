@@ -126,6 +126,10 @@ live_design! {
         draw_text: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
+            fn get_brightness(self)->float{
+                return 1.1    
+            }
+            
             fn blend_color(self, incol: vec4) -> vec4 {
                 if self.outline < 0.5 {
                     return incol
@@ -319,8 +323,16 @@ impl CodeEditor {
         self.scroll_bars.redraw(cx);
     }
     
+    pub fn area(&self)->Area{
+        self.scroll_bars.area()
+    }
+    
     pub fn walk(&self, _cx:&mut Cx)->Walk{
         self.walk
+    }
+    
+    pub fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef{
+        WidgetRef::empty()    
     }
     
     pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet){
