@@ -35,7 +35,6 @@ workspace.members = [
     "examples/slides",
     "examples/graph",
     "examples/image_viewer",
-    "examples/toggle_panel_overlay",
     "studio",
     "tools/cargo_makepad",
      "tools/auto_version",
