@@ -40,7 +40,7 @@ pub struct DrawSlider {
 #[derive(Live, Widget)]
 #[designable]
 pub struct Slider {
-    #[redraw] #[live] draw_slider: DrawSlider,
+    #[area] #[redraw] #[live] draw_slider: DrawSlider,
     
     #[walk] walk: Walk,
     
@@ -125,7 +125,8 @@ impl Slider {
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             let walk = self.text_input.walk(cx);
-            self.text_input.draw_walk_text_input(cx, walk);
+            let mut scope = Scope::default();
+            let _ = self.text_input.draw_walk(cx, &mut scope, walk);
 
             let label_walk = dw.resolve(cx);
             cx.begin_turtle(label_walk, Layout::default());

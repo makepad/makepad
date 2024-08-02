@@ -67,6 +67,9 @@ impl Into<Area> for InstanceArea {
 }
 
 impl Area {
+    pub fn area(&self)->Self{
+        self.clone()
+    }
     
     pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_area(*self);

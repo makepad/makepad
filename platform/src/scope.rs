@@ -56,15 +56,6 @@ impl <'a> ScopeDataRef<'a>{
     pub fn get<T: Any>(&self) -> Option<&T> {
         self.0.as_ref().and_then(|r| r.downcast_ref())
     }
-        
-    pub fn with_data<F, R>(&self, f: F) -> R where F: FnOnce(&dyn Any) -> R{
-        if let Some(data) = self.0{
-            f(data)
-        }
-        else{
-            panic!()
-        }
-    }
 }
 
 impl <'a> ScopeDataMut<'a>{
@@ -74,24 +65,6 @@ impl <'a> ScopeDataMut<'a>{
                     
     pub fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.0.as_mut().and_then(|r| r.downcast_mut())
-    }
-    
-    pub fn with_data<F, R>(&self, f: F) -> R where F: FnOnce(&dyn Any) -> R{
-        if let Some(data) = &self.0{
-            f(*data)
-        }
-        else{
-            panic!()
-        }
-    }
-    
-    pub fn with_mut_data<F, R>(&mut self, f: F) -> R where F: FnOnce(&mut dyn Any) -> R{
-        if let Some(data) = &mut self.0{
-            f(*data)
-        }
-        else{
-            panic!()
-        }
     }
 }
 
