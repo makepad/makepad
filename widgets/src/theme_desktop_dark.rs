@@ -187,9 +187,9 @@ live_design! {
     THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
-        brightness: 1.1
-        top_drop: 1.3
-        line_spacing: 2.0
+        //brightness: 1.1
+        line_scale: 1.2,
+        line_spacing: 1.16
     }
 
     Label = <LabelBase> {
@@ -3256,7 +3256,7 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 )
-                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, 1.0 /* self.focus */));
                 return sdf.result
             }
         }
@@ -3796,6 +3796,81 @@ live_design! {
         root_view = <View> {}
     }
 
+    TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
+    TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
+    TogglePanel = <TogglePanelBase> {
+        flow: Overlay,
+        width: 300,
+        height: Fill,
+
+        open_content = <CachedView> {
+            width: Fill
+            height: Fill
+
+            draw_bg: {
+                instance opacity: 1.0
+    
+                fn pixel(self) -> vec4 {
+                    let color = sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
+                    return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+                }
+            }
+        }
+
+        persistent_content = <View> {
+            height: Fit
+            width: Fill
+            default = <View> {
+                height: Fit,
+                width: Fill,
+                padding: {top: 58, left: 15, right: 15}
+                spacing: 10,
+
+                before = <View> {
+                    height: Fit,
+                    width: Fit,
+                    spacing: 10,
+                }
+
+                close = <Button> {
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_CLOSE_ICON),
+                    }
+                }
+
+                open = <Button> {
+                    visible: false,
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_OPEN_ICON),
+                    }
+                }
+
+                after = <View> {
+                    height: Fit,
+                    width: Fit,
+                    spacing: 10,
+                }
+            }
+        }
+
+        animator: {
+            panel = {
+                default: open,
+                open = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.3}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    apply: {animator_panel_progress: 1.0, open_content = { draw_bg: {opacity: 1.0} }}
+                }
+                close = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.3}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    apply: {animator_panel_progress: 0.0, open_content = { draw_bg: {opacity: 0.0} }}
+                }
+            }
+        }
+    }
 
     DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
         align: { y: 0.5 }
@@ -4483,6 +4558,16 @@ live_design! {
 
     DesignerView = <DesignerViewBase>{
         clear_color: #333333
+        draw_outline:{
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                sdf.stroke(#fff, 1.0);
+                return sdf.result;
+                //return vec4(self.color.xyz * self.color.w, self.color.w)
+            }
+        }
+        
         draw_bg: {
             texture image: texture2d
             varying scale: vec2

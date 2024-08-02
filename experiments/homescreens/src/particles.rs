@@ -21,7 +21,7 @@ live_design! {
             texture image: texture2d
             fn pixel(self) -> vec4{
                 
-                let col = sample2d_rt(self.image, self.pos);
+                let col = sample2d(self.image, self.pos);
                 col *= 0.12;
                 return col;
                 //return vec4(0.0,0.02,0.02,pow(self.pos.y,5.0)*0.3)

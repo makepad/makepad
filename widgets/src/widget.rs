@@ -33,10 +33,14 @@ pub trait WidgetNode: LiveApply{
     fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef;
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
+    fn area(&self)->Area{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
 }
 
 pub trait Widget: WidgetNode {
+    fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, _sweep_area: Area) {
+        self.handle_event(cx, event, scope)
+    }
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
@@ -376,7 +380,39 @@ impl WidgetRef {
             widget,
         }))))
     }
-    
+    /// ## handle event with a sweep area
+    /// 
+    /// this is used for the sweep event, this fn can help to pass the event into popup,
+    /// the widget should implement the `handle_event_with` fn in `impl Widget for $Widget`
+    /// 
+    /// ### Example
+    /// ```rust
+    /// impl Widget for Button {
+    /// fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, sweep_area: Area) {
+    ///     let uid = self.widget_uid();
+    ///
+    ///     if self.animator_handle_event(cx, event).must_redraw() {
+    ///         self.draw_button.redraw(cx);
+    ///     }
+    ///     match event.hits_with_options(cx, self.draw_button.area(), HitOptions::new().with_sweep_area(sweep_area) ) {
+    ///         Hit::FingerDown(f_down) => {
+    ///             if self.grab_key_focus {
+    ///                  cx.set_key_focus(self.sweep_area);
+    ///             }
+    ///             cx.widget_action(uid, &scope.path, GButtonEvent::Pressed(f_down.modifiers));
+    ///             self.animator_play(cx, id!(hover.pressed));
+    ///         }
+    ///         _ =>()
+    ///     }
+    /// }
+    /// ```
+    /// ### Details
+    /// See [Flexible Popup](https://palpus-rs.github.io/Gen-UI.github.io/makepad/code/widgets/flexible_popup.html)
+    pub fn handle_event_with(&self, cx: &mut Cx, event: &Event, scope: &mut Scope, sweep_area: Area) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.handle_event_with(cx, event, scope, sweep_area)
+        }
+    }
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
@@ -395,6 +431,13 @@ impl WidgetRef {
         WidgetUid(0)
     }
     
+    pub fn area(&self) -> Area {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.area()
+        }
+        Area::Empty
+    }
+    
     pub fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.widget_to_data(cx, actions, nodes, path);
@@ -411,6 +454,9 @@ impl WidgetRef {
     pub fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
         if self.widget_uid() == uid{
             return self.clone()
+        }
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.uid_to_widget(uid)
         }
         WidgetRef::empty()
     }
