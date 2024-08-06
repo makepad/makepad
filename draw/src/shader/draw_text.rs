@@ -399,7 +399,7 @@ impl DrawText {
     }
     
     pub fn get_line_spacing(&self) -> f64 {
-        self.text_style.font_size * self.text_style.height_factor * self.text_style.line_spacing
+        self.text_style.font_size * self.font_scale * self.text_style.line_spacing
     }
     
     pub fn get_font_size(&self) -> f64 {
@@ -439,26 +439,43 @@ impl DrawText {
 }
 
 impl DrawText {
-    pub fn pick_walk(
-        &mut self,
-        cx: &mut Cx,
-        _walk: Walk,
-        _align: Align,
-        text: &str,
-        target_position: DVec2,
-    ) -> usize {
-        // Obtain a 2d context from the context.
-        let draw_event = DrawEvent::default();
-        let cx = &mut Cx2d::new(cx, &draw_event);
+    pub fn compute_line_spacing(&self, cx: &Cx2d) -> f64 {
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return 0.0;
+        };
+        let font_ids = &[font_id];
 
-        // If the text is empty, there is nothing to pick.
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        line_spacing
+    }
+
+    pub fn compute_selected_rects(
+        &self,
+        cx: &mut Cx2d, 
+        walk: Walk,
+        _align: Align,
+        width: f64,
+        text: &str,
+        start: IndexAffinity,
+        end: IndexAffinity,
+    ) -> Vec<Rect> {
+        // If the text is empty, there is nothing to draw.
         if text.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
-        // If the font did not load, there is nothing to pick.
+        // If the font did not load, there is nothing to draw.
         let Some(font_id) = self.text_style.font.font_id else {
-            return 0;
+            return Vec::new();
         };
         let font_ids = &[font_id];
 
@@ -476,11 +493,99 @@ impl DrawText {
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
-        let wrap_width = None;
+        let fixed_width = if !walk.width.is_fit() {
+            Some(width)
+        } else {
+            None
+        };
 
-        let mut closest_index = text.len();
-        let height = compute_line_height(font_ids, font_size, font_atlas);
-        let mut prev_end = None;
+        let wrap_width = if self.wrap == TextWrap::Word {
+            fixed_width
+        } else {
+            None
+        };
+
+        let mut rects = Vec::new();
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            |position, event, _font_atlas| {
+                match event {
+                    LayoutEvent::Newline { .. } => {
+                        rects.push(Rect {
+                            pos: dvec2(0.0, position.y),
+                            size: dvec2(position.x, line_height),
+                        })
+                    }
+                    _ => {}
+                }
+                false
+            }
+        );
+        rects.push(Rect {
+            pos: dvec2(0.0, position.y),
+            size: dvec2(position.x, line_height),
+        });
+
+        rects
+    }
+
+    pub fn pick(
+        &self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        _align: Align,
+        width: f64,
+        text: &str,
+        target_position: DVec2,
+    ) -> IndexAffinity {
+        // If the text is empty, there is nothing to draw.
+        if text.is_empty() {
+            return IndexAffinity::new(text.len(), Affinity::After);
+        }
+
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return IndexAffinity::new(text.len(), Affinity::After);
+        };
+        let font_ids = &[font_id];
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas;
+
+        // Borrow the shape cache from the context.
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache = shape_cache_rc.0.borrow_mut();
+        let shape_cache = &mut *shape_cache;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        let fixed_width = if !walk.width.is_fit() {
+            Some(width)
+        } else {
+            None
+        };
+
+        let wrap_width = if self.wrap == TextWrap::Word {
+            fixed_width
+        } else {
+            None
+        };
+
+        let mut closest = IndexAffinity::new(text.len(), Affinity::After);
+        let line_height = compute_line_height(font_ids, font_size, font_atlas);
+        let mut prev_glyph_end = None;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -498,28 +603,40 @@ impl DrawText {
                         glyph_infos,
                         ..
                     } => {
+                        let chunk_start = string.as_ptr() as usize - text.as_ptr() as usize;
+                        let mut position = position;
                         let mut iter = glyph_infos.iter().peekable();
                         while let Some(glyph_info) = iter.next() {
-                            let base_index = string.as_ptr() as usize - text.as_ptr() as usize;
-                            let start_index = base_index + glyph_info.cluster;
-                            let end_index = base_index + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
-                            
-                            let width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
-                            let grapheme_count = string.graphemes(true).count();
-                            let width_per_grapheme = width / (grapheme_count + 1) as f64;
-
+                            let glyph_start = chunk_start + glyph_info.cluster;
+                            let glyph_end = chunk_start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let glyph_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
+                            let grapheme_count = text[glyph_start..glyph_end].graphemes(true).count();
+                            let width_per_grapheme = glyph_width / (grapheme_count + 1) as f64;
                             for index in 0..grapheme_count {
-                                if target_position.x < position.x + index as f64 * width_per_grapheme && target_position.y < position.y + height {
-                                    closest_index = start_index + string.grapheme_indices(true).nth(index).unwrap().0;
+                                let next_position_x = position.x + width_per_grapheme;
+                                if target_position.x < next_position_x && target_position.y < position.y + line_spacing {
+                                    closest = IndexAffinity::new(
+                                        glyph_start + text[glyph_start..glyph_end].grapheme_indices(true).nth(index).unwrap().0,
+                                        Affinity::After,
+                                    );
                                     return true;
                                 }
+                                position.x = next_position_x;
                             }
-                            prev_end = Some(end_index);
+                            position.x += width_per_grapheme;
+                            prev_glyph_end = Some(glyph_end);
                         }
                     }
-                    LayoutEvent::Newline => {
-                        if target_position.y < position.y + height {
-                            closest_index = prev_end.unwrap();
+                    LayoutEvent::Newline { is_soft } => {
+                        if target_position.y < position.y + line_height {
+                            closest = IndexAffinity::new(
+                                prev_glyph_end.unwrap(),
+                                if is_soft {
+                                    Affinity::Before
+                                } else {
+                                    Affinity::After
+                                }
+                            );
                             return true;
                         }
                     }
@@ -528,25 +645,24 @@ impl DrawText {
             }
         );
 
-        closest_index
+        closest
     }
 
-    pub fn reverse_pick_walk(
-        &mut self,
+    pub fn reverse_pick(
+        &self,
         cx: &mut Cx2d,
-        _walk: Walk,
+        walk: Walk,
         _align: Align,
+        width: f64,
         text: &str,
-        target_index: usize,
+        target: IndexAffinity,
     ) -> DVec2 {
-        println!("REVERSE PICKING {:?}", target_index);
-
-        // If the text is empty, there is nothing to pick.
+        // If the text is empty, there is nothing to draw.
         if text.is_empty() {
             return DVec2::new();
         }
 
-        // If the font did not load, there is nothing to pick.
+        // If the font did not load, there is nothing to draw.
         let Some(font_id) = self.text_style.font.font_id else {
             return DVec2::new();
         };
@@ -566,9 +682,20 @@ impl DrawText {
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
-        let wrap_width = None;
+        let fixed_width = if !walk.width.is_fit() {
+            Some(width)
+        } else {
+            None
+        };
+
+        let wrap_width = if self.wrap == TextWrap::Word {
+            fixed_width
+        } else {
+            None
+        };
 
         let mut closest_position = None;
+        let mut prev_glyph_end = None;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -586,25 +713,31 @@ impl DrawText {
                         glyph_infos,
                         ..
                     } => {
-                        let start = string.as_ptr() as usize - text.as_ptr() as usize;
+                        let chunk_start = string.as_ptr() as usize - text.as_ptr() as usize;
                         let mut position = position;
                         let mut iter = glyph_infos.iter().peekable();
                         while let Some(glyph_info) = iter.next() {
-                            let glyph_start = start + glyph_info.cluster;
-                            let glyph_end = start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let glyph_start = chunk_start + glyph_info.cluster;
+                            let glyph_end = chunk_start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
                             let glyph_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
-                            let grapheme_count = string[glyph_start..glyph_end].graphemes(true).count();
+                            let grapheme_count = text[glyph_start..glyph_end].graphemes(true).count();
                             let glyph_width_per_grapheme = glyph_width / grapheme_count as f64;
-                            for (grapheme_start, grapheme) in string[glyph_start..glyph_end].grapheme_indices(true) {
-                                if target_index < glyph_start + grapheme_start + grapheme.len() {
+                            for (grapheme_start, grapheme) in text[glyph_start..glyph_end].grapheme_indices(true) {
+                                if target.index < glyph_start + grapheme_start + grapheme.len() {
                                     closest_position = Some(position);
                                     return true;
                                 }
                                 position.x += glyph_width_per_grapheme;
                             }
+                            prev_glyph_end = Some(glyph_end);
                         }
                     }
-                    _ => {}
+                    LayoutEvent::Newline { is_soft } => {
+                        if target.index == prev_glyph_end.unwrap() && (!is_soft || target.affinity == Affinity::Before) {
+                            closest_position = Some(position);
+                            return true;
+                        }
+                    }
                 }
                 false
             }
@@ -711,7 +844,7 @@ impl DrawText {
         };
 
         // If word wrapping is enabled, set the wrap width to the fixed width of the bounding box.
-        let wrap_width = if !walk.width.is_fit() && self.wrap == TextWrap::Word {
+        let wrap_width = if self.wrap == TextWrap::Word {
             fixed_width
         } else {
             None
@@ -893,7 +1026,7 @@ impl DrawText {
                             prev_rect_slot = Some(rect);
                         }
                     }
-                    LayoutEvent::Newline => {
+                    LayoutEvent::Newline { .. }  => {
                         cx.turtle_new_line();
                     }
                 }
@@ -1040,6 +1173,30 @@ impl DrawText {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct IndexAffinity {
+    pub index: usize,
+    pub affinity: Affinity,
+}
+
+impl IndexAffinity {
+    pub fn new(index: usize, affinity: Affinity) -> Self {
+        IndexAffinity { index, affinity }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Affinity {
+    Before,
+    After,
+}
+
+impl Default for Affinity {
+    fn default() -> Self {
+        Affinity::Before
+    }
+}
+
 fn layout_text(
     position: &mut DVec2,
     text: &str,
@@ -1053,6 +1210,9 @@ fn layout_text(
 ) -> bool {
     for (index, line) in lines(text).enumerate() {
         if index > 0 {
+            if f(*position, LayoutEvent::Newline { is_soft: false }, font_atlas) {
+                return true;
+            }
             position.x = 0.0;
             position.y += line_spacing;
         }
@@ -1120,7 +1280,7 @@ fn layout_word(
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
     }).sum();
     if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) && !is_first {
-        if f(*position, LayoutEvent::Newline, font_atlas) {
+        if f(*position, LayoutEvent::Newline { is_soft: true }, font_atlas) {
             return true;
         }
         position.x = 0.0;
@@ -1173,7 +1333,7 @@ fn layout_grapheme(
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
     }).sum();
     if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) && !is_first {
-        if f(*position, LayoutEvent::Newline, font_atlas) {
+        if f(*position, LayoutEvent::Newline { is_soft: true }, font_atlas) {
             return true;
         }
         position.x = 0.0;
@@ -1196,7 +1356,9 @@ enum LayoutEvent<'a> {
         string: &'a str,
         glyph_infos: &'a [font_atlas::GlyphInfo],
     },
-    Newline,
+    Newline {
+        is_soft: bool
+    }
 }
 
 fn lines(text: &str) -> impl Iterator<Item = &str> {
