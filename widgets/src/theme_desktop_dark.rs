@@ -3216,13 +3216,13 @@ live_design! {
         cursor_margin_bottom: (THEME_SPACE_1),
         cursor_margin_top: (THEME_SPACE_1),
         select_pad_edges: 3.0
-        cursor_size: 2.0,
+        cursor_width: 2.0,
         numeric_only: false,
         on_focus_select_all: false,
         empty_message: "0",
         clip_x: false, clip_y: false,
 
-        draw_text: {
+        draw_label: {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
@@ -3261,7 +3261,7 @@ live_design! {
             }
         }
 
-        draw_select: {
+        draw_selection: {
             instance hover: 0.0
             instance focus: 0.0
             uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
@@ -3341,14 +3341,14 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_select: {hover: 0.0}
+                        draw_selection: {hover: 0.0}
                         draw_text: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_select: {hover: 1.0}
+                        draw_selection: {hover: 1.0}
                         draw_text: {hover: 1.0}
                     }
                 }
@@ -3360,7 +3360,7 @@ live_design! {
                     apply: {
                         draw_cursor: {focus: 0.0},
                         draw_bg: {focus: 0.0},
-                        draw_select: {focus: 0.0}
+                        draw_selection: {focus: 0.0}
                         draw_text: {focus: 0.0}
                     }
                 }
@@ -3369,7 +3369,7 @@ live_design! {
                     apply: {
                         draw_cursor: {focus: 1.0},
                         draw_bg: {focus: 1.0},
-                        draw_select: {focus: 1.0}
+                        draw_selection: {focus: 1.0}
                         draw_text: {focus: 1.0}
                     }
                 }
