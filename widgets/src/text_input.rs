@@ -3,6 +3,252 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
+    },
+    unicode_segmentation::GraphemeCursor,
+};
+
+live_design!{
+    DrawLabel = {{DrawLabel}} {}
+    TextInputBase = {{TextInput}} {}
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+pub struct DrawLabel {
+    #[deref] draw_super: DrawText,
+    #[live] is_empty: f32,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct TextInput {
+    #[animator] animator: Animator,
+    
+    #[redraw] #[live] draw_bg: DrawColor,
+    #[live] draw_label: DrawLabel,
+    #[live] draw_selection: DrawQuad,
+    #[live] draw_cursor: DrawQuad,
+    
+    #[layout] layout: Layout,
+    #[walk] walk: Walk,
+    #[live] label_align: Align,
+
+    #[live] cursor_width: f64,
+
+    #[live] pub is_read_only: bool,
+    #[live] pub text: String,
+
+    #[rust] cursor_head: IndexAffinity,
+    #[rust] cursor_tail: IndexAffinity,
+    #[rust] rect: Rect,
+}
+
+impl TextInput {
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
+    }
+
+    pub fn select_all(&mut self) {
+        // TODO
+    }
+
+    pub fn create_external_undo(&mut self) {
+        // TODO
+    }
+
+    fn pick(&self, cx: &mut Cx2d, position: DVec2) -> IndexAffinity {
+        self.draw_label.pick(
+            cx,
+            Walk::size(self.walk.width,self.walk.height),
+            self.label_align,
+            self.rect.size.x,
+            &self.text,
+            position,
+        )
+    }
+
+    fn cursor_position(&self, cx: &mut Cx2d) -> DVec2 {
+        self.draw_label.reverse_pick(
+            cx,
+            Walk::size(self.walk.width,self.walk.height),
+            self.label_align,
+            self.rect.size.x,
+            &self.text,
+            self.cursor_head,
+        )
+    }
+
+    fn move_cursor_left(&mut self, cx: &mut Cx) {
+        let mut grapheme_cursor = GraphemeCursor::new(self.cursor_head.index, self.text.len(), true);
+        let Some(grapheme_index) = grapheme_cursor.prev_boundary(&self.text, 0).unwrap() else {
+            return;
+        };
+        self.cursor_head.index = grapheme_index;
+        self.cursor_head.affinity = Affinity::After;
+        self.cursor_tail = self.cursor_head;
+        self.draw_bg.redraw(cx);
+    }
+
+    fn move_cursor_right(&mut self, cx: &mut Cx) {
+        let mut grapheme_cursor = GraphemeCursor::new(self.cursor_head.index, self.text.len(), true);
+        let Some(grapheme_index) = grapheme_cursor.next_boundary(&self.text, 0).unwrap() else {
+            return;
+        };
+        self.cursor_head.index = grapheme_index;
+        self.cursor_head.affinity = Affinity::Before;
+        self.cursor_tail = self.cursor_head;
+        self.draw_bg.redraw(cx);
+    }
+
+    fn move_cursor_up(&mut self, cx: &mut Cx2d) {
+        let position = self.cursor_position(cx);
+        let line_spacing = self.draw_label.compute_line_spacing(cx);
+        self.move_cursor_to(cx, DVec2 {
+            x: position.x,
+            y: position.y - 0.5 * line_spacing,
+        })
+    }
+
+    fn move_cursor_down(&mut self, cx: &mut Cx2d) {
+        let position = self.cursor_position(cx);
+        let line_spacing = self.draw_label.compute_line_spacing(cx);
+        self.move_cursor_to(cx, DVec2 {
+            x: position.x,
+            y: position.y + 1.5 * line_spacing,
+        });
+    }
+
+    fn move_cursor_to(&mut self, cx: &mut Cx2d, position: DVec2) {
+        self.cursor_head = self.pick(cx, position);
+        self.cursor_tail = self.cursor_head;
+        self.draw_bg.redraw(&mut *cx);
+    }
+}
+
+impl Widget for TextInput {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
+
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                ..
+            }) => {
+                self.move_cursor_left(cx);
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                ..
+            }) => {
+                self.move_cursor_right(cx);
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                ..
+            }) => {
+                let event = DrawEvent::default();
+                let mut cx = Cx2d::new(cx, &event);
+                self.move_cursor_up(&mut cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                ..
+            }) => {
+                let event = DrawEvent::default();
+                let mut cx = Cx2d::new(cx, &event);
+                self.move_cursor_down(&mut cx);
+            }
+            Hit::FingerDown(FingerDownEvent { abs, .. }) => {
+                let event = DrawEvent::default();
+                let mut cx = Cx2d::new(cx, &event);
+                self.move_cursor_to(&mut cx, abs - self.rect.pos);
+                self.set_key_focus(&mut *cx);
+            }
+            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+                let event = DrawEvent::default();
+                let mut cx = Cx2d::new(cx, &event);
+                self.move_cursor_to(&mut cx, abs - self.rect.pos);
+            }
+            _ => {}
+        }
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.draw_bg.begin(cx, walk, self.layout);
+
+        self.draw_selection.append_to_draw_call(cx);
+
+        // Draw text
+        self.draw_label.is_empty = 0.0;
+        self.draw_label.draw_walk(
+            cx,
+            Walk::size(self.walk.width,self.walk.height),
+            self.label_align,
+            &self.text
+        );
+
+        self.rect = cx.turtle().padded_rect_used();
+     
+        // Draw selection
+        let rects = self.draw_label.compute_selected_rects(
+            cx,
+            Walk::size(self.walk.width,self.walk.height),
+            self.label_align,
+            self.rect.size.x,
+            &self.text,
+            self.cursor_head,
+            self.cursor_tail
+        );
+        for rect in rects {
+            println!("{:?} {:?}", self.rect, rect);
+            self.draw_selection.draw_abs(cx, Rect {
+                pos: self.rect.pos + rect.pos,
+                size: rect.size,
+            });
+        }
+     
+        // Draw cursor
+        let cursor_position = self.cursor_position(cx);
+        let line_spacing = self.draw_label.compute_line_spacing(cx);
+        self.draw_cursor.draw_abs(cx, Rect {
+            pos: self.rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
+            size: dvec2(self.cursor_width, line_spacing)
+        });
+
+        self.draw_bg.end(cx);
+
+        DrawStep::done()
+    }
+    
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+    
+    fn set_text(&mut self, text: &str) {
+        self.text = text.to_string();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, DefaultNone)]
+pub enum TextInputAction {
+    Change(String),
+    Return(String),
+    Escape,
+    KeyFocus,
+    KeyFocusLost,
+    None
+}
+
+/*
+use {
+    crate::{
+        makepad_derive_widget::*,
+        makepad_draw::*,
+        widget::*,
     }
 };
 
@@ -667,3 +913,4 @@ impl TextInputRef {
         }
     }
 }
+*/

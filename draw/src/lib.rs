@@ -51,7 +51,7 @@ pub use crate::{
         draw_icon::DrawIcon,
         draw_quad::DrawQuad,
         draw_line::DrawLine,
-        draw_text::DrawText,
+        draw_text::{Affinity, DrawText, IndexAffinity},
         draw_color::DrawColor,
     },
     geometry::{

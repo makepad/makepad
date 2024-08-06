@@ -210,7 +210,7 @@ impl Widget for Slider {
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
-                self.text_input.read_only = true;
+                self.text_input.is_read_only = true;
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
@@ -220,7 +220,7 @@ impl Widget for Slider {
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
-                self.text_input.read_only = false;
+                self.text_input.is_read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
                 self.animator_play(cx, id!(drag.off));
