@@ -4,6 +4,8 @@ use {
             RefCell,
             Cell,
         },
+        sync::Arc,
+        sync::Mutex,
         rc::Rc,
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
@@ -683,10 +685,10 @@ impl Win32Window {
                                         alt: false,  // TODO
                                         logo: false,  // Windows doesn't have a logo button
                                     },
-                                    handled: Cell::new(false),
+                                    handled: Arc::new(Mutex::new(false)),
                                     abs: DVec2 { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
-                                    items: Rc::new(vec![drag_item]),
-                                    response: Rc::new(Cell::new(response)),
+                                    items: Arc::new(vec![drag_item]),
+                                    response: Arc::new(Mutex::new(response)),
                                 }
                             )
                         );        
@@ -710,9 +712,9 @@ impl Win32Window {
                                         alt: false,  // TODO
                                         logo: false,  // Windows doesn't have a logo button
                                     },
-                                    handled: Cell::new(false),
+                                    handled: Arc::new(Mutex::new(false)),
                                     abs: DVec2 { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
-                                    items: Rc::new(vec![drag_item]),
+                                    items: Arc::new(vec![drag_item]),
                                 }
                             )
                         );

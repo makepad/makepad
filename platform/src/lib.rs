@@ -233,7 +233,7 @@ pub use {
         },
         live_prims::{
             LiveDependency,
-            RcStringMut,
+            ArcStringMut,
         },
         live_traits::{
             LiveHookDeref,

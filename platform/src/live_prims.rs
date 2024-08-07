@@ -1,5 +1,5 @@
 use {
-    std::rc::Rc,
+    std::sync::Arc,
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
@@ -683,24 +683,34 @@ live_primitive!(
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::String(Rc::new(self.clone()))
+            LiveValue::String(Arc::new(self.clone()))
         }
     }
 );
 
-pub enum RcStringMut{
-    Rc(Rc<String>),
+pub enum ArcStringMut{
+    Arc(Arc<String>),
     String(String)
 }
 
-impl Default for RcStringMut{
+impl Default for ArcStringMut{
     fn default()->Self{Self::String(String::new())}
 }
 
-impl RcStringMut{
+impl ArcStringMut{
+    pub fn as_arc(&self)->Arc<String>{
+        match self{
+            Self::Arc(rc)=>{
+                return rc.clone();
+            }
+            Self::String(s)=>{
+                return Arc::new(s.clone())
+            }
+        }
+    }
     pub fn as_mut(&mut self)->&mut String{
         match self{
-            Self::Rc(rc)=>{
+            Self::Arc(rc)=>{
                 *self = Self::String(rc.to_string());
                 return self.as_mut();
             }
@@ -711,7 +721,7 @@ impl RcStringMut{
     }
     pub fn as_mut_empty(&mut self)->&mut String{
         match self{
-            Self::Rc(_)=>{
+            Self::Arc(_)=>{
                 *self = Self::String(String::new());
                 return self.as_mut();
             }
@@ -721,9 +731,22 @@ impl RcStringMut{
             }
         }
     }
+
+    pub fn set(&mut self, v:&str){
+        match self{
+            Self::Arc(_rc)=>{
+                *self = Self::String(v.to_string());
+            }
+            Self::String(s)=>{
+                s.clear();
+                s.push_str(v);
+            }
+        }
+    }
+
     pub fn as_ref(&self)->&str{
         match self{
-            Self::Rc(rc)=>{
+            Self::Arc(rc)=>{
                 &*rc
             }
             Self::String(s)=>{
@@ -735,20 +758,20 @@ impl RcStringMut{
 
 
 live_primitive!(
-    RcStringMut,
+    ArcStringMut,
     Default::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Str(v) => {
-                *self = RcStringMut::String(v.to_string());
+                *self = ArcStringMut::String(v.to_string());
                 index + 1
             }
             LiveValue::String(v) => {
-                *self = RcStringMut::Rc(v.clone());
+                *self = ArcStringMut::Arc(v.clone());
                 index + 1
             }
             LiveValue::InlineString(v) => {
-                *self = RcStringMut::String(v.as_str().to_string());
+                *self = ArcStringMut::String(v.as_str().to_string());
                 index + 1
             }
             LiveValue::Expr {..} => {
@@ -774,20 +797,20 @@ live_primitive!(
         }
         else {
             match self{
-                RcStringMut::Rc(rc)=>LiveValue::String(rc.clone()),
-                RcStringMut::String(v)=>LiveValue::String(Rc::new(v.clone()))
+                ArcStringMut::Arc(rc)=>LiveValue::String(rc.clone()),
+                ArcStringMut::String(v)=>LiveValue::String(Arc::new(v.clone()))
             }
         }
     }
 );
-
+/*
 live_primitive!(
-    Rc<String>,
+    Arc<String>,
     Default::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Str(v) => {
-                *self = Rc::new(v.to_string());
+                *self = Arc::new(v.to_string());
                 index + 1
             }
             LiveValue::String(v) => {
@@ -795,7 +818,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::InlineString(v) => {
-                *self = Rc::new(v.as_str().to_string());
+                *self = Arc::new(v.as_str().to_string());
                 index + 1
             }
             LiveValue::Expr {..} => {
@@ -823,7 +846,7 @@ live_primitive!(
             LiveValue::String(self.clone())
         }
     }
-);
+);*/
 
 impl ToLiveValue for &str{
     fn to_live_value(&self) -> LiveValue {
@@ -833,7 +856,7 @@ impl ToLiveValue for &str{
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::String(Rc::new(self.to_string()))
+            LiveValue::String(Arc::new(self.to_string()))
         }
     }
 }
@@ -850,11 +873,11 @@ impl LiveIdToEnum for &[LiveId;1]{
 }*/
 
 #[derive(Debug, Default, Clone)]
-pub struct LiveDependency(Rc<String>);
+pub struct LiveDependency(Arc<String>);
 
 impl LiveDependency{
     pub fn as_str(&self)->&str{&self.0}
-    pub fn as_ref(&self)->&Rc<String>{&self.0}
+    pub fn as_ref(&self)->&Arc<String>{&self.0}
 }
 
 
