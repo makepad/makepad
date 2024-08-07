@@ -1,6 +1,6 @@
 use {
     std::{
-        rc::Rc,
+        sync::Arc,
         fmt,
         ops::Deref,
         ops::DerefMut,
@@ -46,7 +46,7 @@ pub enum LiveToken {
     Open(Delim),
     Close(Delim),
     
-    String (Rc<String>),
+    String (Arc<String>),
     Bool(bool),
     Int(i64),
     Float(f64),

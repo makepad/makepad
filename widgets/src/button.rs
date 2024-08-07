@@ -56,7 +56,7 @@ pub struct Button {
     visible: bool,
 
     #[live]
-    pub text: RcStringMut,
+    pub text: ArcStringMut,
 }
 
 impl Widget for Button {
