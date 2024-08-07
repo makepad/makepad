@@ -55,6 +55,12 @@ pub struct Button {
     #[live(true)]
     visible: bool,
 
+    /// It indicates if the hover state will be reset when the button is clicked.
+    /// This could be useful for buttons that disappear when clicked, where the hover state
+    /// should not be preserved.
+    #[live]
+    reset_hover_on_click: bool,
+
     #[live]
     pub text: ArcStringMut,
 }
@@ -65,6 +71,7 @@ impl Widget for Button {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
+
         if self.enabled && self.visible {
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) => {
@@ -84,7 +91,10 @@ impl Widget for Button {
                 Hit::FingerUp(fe) => {
                     if fe.is_over {
                         cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
-                        if fe.device.has_hovers() {
+                        if self.reset_hover_on_click {
+                            self.animator_cut(cx, id!(hover.off));
+                        } else if fe.device.has_hovers() {
+                            self.animator_play(cx, id!(hover.on));
                             self.animator_play(cx, id!(hover.on));
                         } else {
                             self.animator_play(cx, id!(hover.off));
@@ -229,6 +239,15 @@ impl ButtonRef {
             inner.enabled = enabled;
         }
     }
+
+    /// Resets the hover state of this button. This is useful in certain cases the
+    /// hover state should be reseted in a specific way that is not the default behavior
+    /// which is based on the mouse cursor position and movement.
+    pub fn reset_hover(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animator_cut(cx, id!(hover.off));
+        }
+    }
 }
 
 impl ButtonSet {
@@ -240,6 +259,12 @@ impl ButtonSet {
     }
     pub fn released(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.released(actions))
+    }
+
+    pub fn reset_hover(&self, cx: &mut Cx) {
+        for item in self.iter() {
+            item.reset_hover(cx)
+        }
     }
     
     pub fn which_clicked_modifiers(&self, actions: &Actions) -> Option<(usize,KeyModifiers)> {
