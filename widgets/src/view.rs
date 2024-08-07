@@ -150,6 +150,8 @@ pub struct View {
     block_signal_event: bool,
     #[live]
     cursor: Option<MouseCursor>,
+    #[live(false)]
+    capture_overload: bool,
     #[live]
     scroll_bars: Option<LivePtr>,
     #[live(false)]
@@ -625,7 +627,7 @@ impl Widget for View {
         }
 
         if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
-            match event.hits(cx, self.area()) {
+            match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());

@@ -1,0 +1,11 @@
+[package]
+name = "vulkan"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+vk-sys = "0.7.0"
+winit = "0.30.4"
+
+[workspace]
