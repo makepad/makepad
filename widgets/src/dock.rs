@@ -1127,7 +1127,7 @@ impl DockRef {
     pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr: DragResponse) {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
-                dh.response.set(dr);
+                *dh.response.lock().unwrap() = dr;
                 dock.drop_state = Some(pos);
             }
             else {

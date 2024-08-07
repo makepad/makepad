@@ -26,7 +26,7 @@ pub struct Label {
     #[live] padding: Padding,
     #[rust] area: Area,
     //margin: Margin,
-    #[live] text: RcStringMut,
+    #[live] text: ArcStringMut,
 } 
 
 impl Widget for Label {

@@ -6,7 +6,6 @@ use {
         widget::*,
         text_flow::TextFlow,
     },
-    std::rc::Rc,
 };
 
 live_design!{
@@ -19,7 +18,7 @@ live_design!{
 #[derive(Live, Widget)]
 pub struct Markdown{
     #[deref] text_flow: TextFlow,
-    #[live] body: Rc<String>,
+    #[live] body: ArcStringMut,
     #[live] paragraph_spacing: f64,
     #[rust] doc: MarkdownDoc
 }
@@ -160,14 +159,14 @@ impl Widget for Markdown {
     } 
     
     fn set_text(&mut self, v:&str){
-        self.body = Rc::new(v.to_string());
+        self.body.set(v);
         self.parse_text();
     }
 }
 
 impl Markdown {
     fn parse_text(&mut self) {
-        let new_doc = parse_markdown(&*self.body);
+        let new_doc = parse_markdown(self.body.as_ref());
         if new_doc != self.doc{
             self.doc = new_doc;
             self.text_flow.clear_items();
