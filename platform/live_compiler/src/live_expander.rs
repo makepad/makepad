@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use {
-    std::rc::Rc,
+    std::sync::Arc,
     crate::{
         makepad_live_id::*,
         makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
@@ -260,7 +260,7 @@ impl<'a> LiveExpander<'a> {
                         let mut final_path = self.live_registry.file_id_to_cargo_manifest_path(file_id);
                         final_path.push('/');
                         final_path.push_str(path);
-                        out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                        out_doc.nodes[out_index].value = LiveValue::Dependency(Arc::new(final_path));
                     } else if let Some(path) = path.strip_prefix("crate://") {
                         let mut split = path.split('/');
                         if let Some(crate_name) = split.next() {
@@ -269,7 +269,7 @@ impl<'a> LiveExpander<'a> {
                                     final_path.push('/');
                                     final_path.push_str(next);
                                 }
-                                out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                                out_doc.nodes[out_index].value = LiveValue::Dependency(Arc::new(final_path));
                             }
                         }
                     }

@@ -664,13 +664,13 @@ impl LiveNew for WidgetRef {
     }
 }
 
-pub trait WidgetActionTrait: 'static {
+pub trait WidgetActionTrait: 'static + Send {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-impl<T: 'static + ? Sized + Clone + Debug> WidgetActionTrait for T {
+impl<T: 'static + ? Sized + Clone + Debug+ Send> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -718,13 +718,13 @@ pub trait WidgetActionCxExt {
 }
 
 pub trait WidgetActionsApi {
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
 }
 
 pub trait WidgetActionOptionApi{
     fn widget_uid_eq(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
-    fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone;
+    fn cast<T: WidgetActionTrait + 'static + Send >(&self) -> T where T: Default + Clone;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction>{
@@ -738,7 +738,7 @@ impl WidgetActionOptionApi for Option<&WidgetAction>{
         None
     }
     
-    fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone{
+    fn cast<T: WidgetActionTrait + 'static  + Send>(&self) -> T where T: Default + Clone{
         if let Some(item) = self{
             if let Some(item) = item.action.downcast_ref::<T>(){
                 return item.clone()
@@ -770,7 +770,7 @@ impl WidgetActionsApi for Actions{
         None
     }
     
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
         if let Some(item) = self.find_widget_action(widget_uid) {
             if let Some(item) = item.action.downcast_ref::<T>(){
                 return item.clone()
@@ -810,7 +810,7 @@ impl WidgetActionCxExt for Cx {
 }
 
 impl WidgetAction {
-    pub fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone {
+    pub fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T where T: Default + Clone {
         if let Some(item) = self.action.downcast_ref::<T>(){
             return item.clone()
         }
