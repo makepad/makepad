@@ -439,7 +439,7 @@ impl DrawText {
 }
 
 impl DrawText {
-    pub fn line_spacing(&self, cx: &Cx2d) -> f64 {
+    pub fn line_height(&self, cx: &Cx2d) -> f64 {
         // If the font did not load, there is nothing to draw.
         let Some(font_id) = self.text_style.font.font_id else {
             return 0.0;
@@ -453,9 +453,12 @@ impl DrawText {
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
-        let line_spacing = line_height * self.text_style.line_spacing;
 
-        line_spacing
+        line_height
+    }
+
+    pub fn line_spacing(&self, cx: &Cx2d) -> f64 {
+        self.line_height(cx) * self.text_style.line_spacing
     }
 
     pub fn selected_rects(
