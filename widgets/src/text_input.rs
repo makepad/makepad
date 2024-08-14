@@ -4,7 +4,7 @@ use {
         makepad_draw::*,
         widget::*,
     },
-    unicode_segmentation::GraphemeCursor,
+    unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
 };
 
 live_design!{
@@ -35,10 +35,12 @@ pub struct TextInput {
     #[live] cursor_width: f64,
 
     #[live] pub is_read_only: bool,
+    #[live] pub is_numeric_only: bool,
+    #[live] pub empty_text: String,
     #[live] pub text: String,
 
-    #[rust] cursor_head: IndexAffinity,
-    #[rust] cursor_tail: IndexAffinity,
+    #[rust] cursor: Cursor,
+    #[rust] history: History,
     #[rust] rect: Rect,
 }
 
@@ -47,16 +49,43 @@ impl TextInput {
         cx.set_key_focus(self.draw_bg.area());
     }
 
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        self.cursor = cursor;
+    }
+
     pub fn select_all(&mut self) {
-        // TODO
+        self.set_cursor(Cursor {
+            head: IndexAffinity {
+                index: self.text.len(),
+                affinity: Affinity::After,
+            },
+            tail: IndexAffinity {
+                index: 0,
+                affinity: Affinity::Before,
+            },
+        });
     }
 
-    pub fn create_external_undo(&mut self) {
-        // TODO
+    pub fn filter_input(&mut self, input: String) -> String {
+        if self.is_numeric_only {
+            input.chars().filter_map(|char| {
+                match char {
+                    '.' | ',' => Some('.'),
+                    char if char.is_ascii_digit() => Some(char),
+                    _ => None,
+                }
+            }).collect()
+        } else {
+            input
+        }
     }
 
-    fn pick(&self, cx: &mut Cx2d, position: DVec2) -> IndexAffinity {
-        self.draw_label.pick(
+    pub fn force_new_edit_group(&mut self) {
+        self.history.force_new_edit_group();
+    }
+
+    fn position_to_index_affinity(&self, cx: &mut Cx2d, position: DVec2) -> IndexAffinity {
+        self.draw_label.position_to_index_affinity(
             cx,
             Walk::size(self.walk.width,self.walk.height),
             self.label_align,
@@ -67,65 +96,138 @@ impl TextInput {
     }
 
     fn cursor_position(&self, cx: &mut Cx2d) -> DVec2 {
-        self.draw_label.reverse_pick(
+        self.draw_label.index_affinity_to_position(
             cx,
             Walk::size(self.walk.width,self.walk.height),
             self.label_align,
             self.rect.size.x,
             &self.text,
-            self.cursor_head,
+            self.cursor.head,
         )
     }
 
-    fn move_cursor_left(&mut self, cx: &mut Cx) {
-        let mut grapheme_cursor = GraphemeCursor::new(self.cursor_head.index, self.text.len(), true);
-        let Some(grapheme_index) = grapheme_cursor.prev_boundary(&self.text, 0).unwrap() else {
+    fn move_cursor_left(&mut self, is_select: bool) {
+        let Some(index) = prev_grapheme_boundary(&self.text, self.cursor.head.index) else {
             return;
         };
-        self.cursor_head.index = grapheme_index;
-        self.cursor_head.affinity = Affinity::After;
-        self.cursor_tail = self.cursor_head;
-        self.draw_bg.redraw(cx);
+        self.move_cursor_to(
+            IndexAffinity {
+                index,
+                affinity: Affinity::After,
+            },
+            is_select
+        );
     }
 
-    fn move_cursor_right(&mut self, cx: &mut Cx) {
-        let mut grapheme_cursor = GraphemeCursor::new(self.cursor_head.index, self.text.len(), true);
-        let Some(grapheme_index) = grapheme_cursor.next_boundary(&self.text, 0).unwrap() else {
+    fn move_cursor_right(&mut self, is_select: bool) {
+        let Some(index) = next_grapheme_boundary(&self.text, self.cursor.head.index) else {
             return;
         };
-        self.cursor_head.index = grapheme_index;
-        self.cursor_head.affinity = Affinity::Before;
-        self.cursor_tail = self.cursor_head;
-        self.draw_bg.redraw(cx);
+        self.move_cursor_to(
+            IndexAffinity {
+                index,
+                affinity: Affinity::Before,
+            },
+            is_select
+        );
     }
 
-    fn move_cursor_up(&mut self, cx: &mut Cx2d) {
+    fn move_cursor_up(&mut self, cx: &mut Cx2d, is_select: bool) {
         let position = self.cursor_position(cx);
-        let line_spacing = self.draw_label.compute_line_spacing(cx);
-        self.move_cursor_to(cx, DVec2 {
+        let line_spacing = self.draw_label.line_spacing(cx);
+        let index_affinity = self.position_to_index_affinity(cx, DVec2 {
             x: position.x,
             y: position.y - 0.5 * line_spacing,
-        })
+        });
+        self.move_cursor_to(index_affinity, is_select)
     }
 
-    fn move_cursor_down(&mut self, cx: &mut Cx2d) {
+    fn move_cursor_down(&mut self, cx: &mut Cx2d, is_select: bool) {
         let position = self.cursor_position(cx);
-        let line_spacing = self.draw_label.compute_line_spacing(cx);
-        self.move_cursor_to(cx, DVec2 {
+        let line_spacing = self.draw_label.line_spacing(cx);
+        let index_affinity = self.position_to_index_affinity(cx, DVec2 {
             x: position.x,
             y: position.y + 1.5 * line_spacing,
         });
+        self.move_cursor_to(index_affinity, is_select);
     }
 
-    fn move_cursor_to(&mut self, cx: &mut Cx2d, position: DVec2) {
-        self.cursor_head = self.pick(cx, position);
-        self.cursor_tail = self.cursor_head;
-        self.draw_bg.redraw(&mut *cx);
+    fn move_cursor_to(&mut self, index_affinity: IndexAffinity, is_select: bool) {
+        self.cursor.head = index_affinity;
+        if !is_select {
+            self.cursor.tail = self.cursor.head;
+        }
+        self.history.force_new_edit_group();
+    }
+
+    fn select_word(&mut self) {
+        if self.cursor.head.index < self.cursor.tail.index { 
+            self.cursor.head = IndexAffinity {
+                index: self.ceil_word_boundary(self.cursor.head.index),
+                affinity: Affinity::After,
+            };
+        } else if self.cursor.head.index > self.cursor.tail.index {
+            self.cursor.head = IndexAffinity {
+                index: self.floor_word_boundary(self.cursor.head.index),
+                affinity: Affinity::Before,
+            };
+        } else {
+            self.cursor.tail = IndexAffinity {
+                index: self.ceil_word_boundary(self.cursor.head.index),
+                affinity: Affinity::After,
+            };
+            self.cursor.head = IndexAffinity {
+                index: self.floor_word_boundary(self.cursor.head.index),
+                affinity: Affinity::Before,
+            };
+        }
+    }
+
+    fn ceil_word_boundary(&self, index: usize) -> usize {
+        let mut prev_word_boundary_index = 0;
+        for (word_boundary_index, _) in self.text.split_word_bound_indices() {
+            if word_boundary_index > index {
+                return prev_word_boundary_index;
+            }
+            prev_word_boundary_index = word_boundary_index;
+        }
+        prev_word_boundary_index
+    }
+
+    fn floor_word_boundary(&self, index: usize) -> usize {
+        let mut prev_word_boundary_index = self.text.len();
+        for (word_boundary_index, _) in self.text.split_word_bound_indices().rev() {
+            if word_boundary_index < index {
+                return prev_word_boundary_index;
+            }
+            prev_word_boundary_index = word_boundary_index;
+        }
+        prev_word_boundary_index
+    }
+
+    fn apply_edit(&mut self, edit: Edit) {
+        self.cursor.head.index = edit.start + edit.replace_with.len();
+        self.cursor.tail = self.cursor.head;
+        self.history.apply_edit(edit, &mut self.text);
+    }
+
+    fn undo(&mut self) {
+        if let Some(cursor) = self.history.undo(self.cursor, &mut self.text) {
+            self.cursor = cursor;
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(cursor) = self.history.redo(self.cursor, &mut self.text) {
+            self.cursor = cursor;
+        }
     }
 }
 
 impl Widget for TextInput {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
@@ -133,45 +235,285 @@ impl Widget for TextInput {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, id!(focus.on));
+                self.force_new_edit_group();
+                // TODO: Select all if necessary
+                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                cx.hide_text_ime();
+                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
+                modifiers: KeyModifiers {
+                    shift: is_select,
+                    ..
+                },
                 ..
             }) => {
-                self.move_cursor_left(cx);
+                self.move_cursor_left(is_select);
+                self.draw_bg.redraw(cx);
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
+                modifiers: KeyModifiers {
+                    shift: is_select,
+                    ..
+                },
                 ..
             }) => {
-                self.move_cursor_right(cx);
+                self.move_cursor_right( is_select);
+                self.draw_bg.redraw(cx);
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers {
+                    shift: is_select,
+                    ..
+                },
                 ..
             }) => {
                 let event = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                self.move_cursor_up(&mut cx);
+                self.move_cursor_up(&mut cx, is_select);
+                self.draw_bg.redraw(&mut cx);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers {
+                    shift: is_select,
+                    ..
+                },
                 ..
             }) => {
                 let event = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                self.move_cursor_down(&mut cx);
+                self.move_cursor_down(&mut cx, is_select);
+                self.draw_bg.redraw(&mut cx);
             }
-            Hit::FingerDown(FingerDownEvent { abs, .. }) => {
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Home,
+                ..
+            }) => {
+                self.move_cursor_to(
+                    IndexAffinity {
+                        index: 0,
+                        affinity: Affinity::Before,
+                    },
+                    false
+                );
+                self.history.force_new_edit_group();
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::End,
+                ..
+            }) => {
+                self.move_cursor_to(
+                    IndexAffinity {
+                        index: self.text.len(),
+                        affinity: Affinity::After,
+                    },
+                    false
+                );
+                self.history.force_new_edit_group();
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                modifiers: KeyModifiers {
+                    shift: false,
+                    ..
+                },
+                ..
+            }) => {
+                cx.hide_text_ime();
+                cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                modifiers: KeyModifiers {
+                    shift: true,
+                    ..
+                },
+                ..
+            }) if !self.is_read_only => {
+                self.history.create_or_extend_edit_group(
+                    EditKind::Other,
+                    self.cursor,
+                );
+                self.apply_edit(Edit {
+                    start: self.cursor.start().index,
+                    end: self.cursor.end().index,
+                    replace_with: "\n".to_string(),
+                });
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..
+            }) => {
+                cx.widget_action(uid, &scope.path, TextInputAction::Escape);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) if !self.is_read_only => {
+                let mut start = self.cursor.start().index;
+                let end = self.cursor.end().index;
+                if start == end {
+                    start = prev_grapheme_boundary(&self.text, start).unwrap_or(0);
+                }
+                self.history.create_or_extend_edit_group(EditKind::Backspace, self.cursor);
+                self.apply_edit(Edit {
+                    start,
+                    end,
+                    replace_with: String::new(),
+                });
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) if !self.is_read_only => {
+                let start = self.cursor.start().index;
+                let mut end = self.cursor.end().index;
+                if start == end {
+                    end = next_grapheme_boundary(&self.text, end).unwrap_or(self.text.len());
+                }
+                self.history.create_or_extend_edit_group(EditKind::Delete, self.cursor);
+                self.apply_edit(Edit {
+                    start,
+                    end,
+                    replace_with: String::new(),
+                });
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyA,
+                modifiers: KeyModifiers {
+                    control: true,
+                    ..
+                },
+                ..
+            }) | Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyA,
+                modifiers: KeyModifiers {
+                    logo: true,
+                    ..
+                },
+                ..
+            }) => {
+                self.select_all();
+                self.draw_bg.redraw(cx);
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers: KeyModifiers {
+                    logo: true,
+                    shift: false,
+                    ..
+                },
+                ..
+            }) if !self.is_read_only => {
+                self.undo();
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers: KeyModifiers {
+                    logo: true,
+                    shift: true,
+                    ..
+                },
+                ..
+            }) if !self.is_read_only => {
+                self.redo();
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+            }
+            Hit::TextInput(TextInputEvent {
+                input,
+                was_paste,
+                ..
+            }) if !self.is_read_only => {
+                let input = self.filter_input(input);
+                if !input.is_empty() {
+                    self.history.create_or_extend_edit_group(
+                        if was_paste {
+                            EditKind::Other
+                        } else {
+                            EditKind::Insert
+                        },
+                        self.cursor,
+                    );
+                    self.apply_edit(Edit {
+                        start: self.cursor.start().index,
+                        end: self.cursor.end().index,
+                        replace_with: input,
+                    });
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+                }
+            }
+            Hit::TextCopy(event) => {
+                let selection = &self.text[self.cursor.start().index..self.cursor.end().index];
+                *event.response.borrow_mut() = Some(selection.to_string());
+            }
+            Hit::TextCut(event) => {
+                let selection = &self.text[self.cursor.start().index..self.cursor.end().index];
+                *event.response.borrow_mut() = Some(selection.to_string());
+                if !selection.is_empty() {
+                    self.history.create_or_extend_edit_group(EditKind::Other, self.cursor);
+                    self.apply_edit(Edit {
+                        start: self.cursor.start().index,
+                        end: self.cursor.end().index,
+                        replace_with: String::new(),
+                    });
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
+                }
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Text);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                tap_count,
+                ..
+            }) => {
                 let event = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                self.move_cursor_to(&mut cx, abs - self.rect.pos);
+                let index_affinity = self.position_to_index_affinity(&mut cx, abs - self.rect.pos);
+                self.move_cursor_to(index_affinity, false);
+                if tap_count == 2 {
+                    self.select_word();
+                }
                 self.set_key_focus(&mut *cx);
+                self.draw_bg.redraw(&mut *cx);
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
-                let event = DrawEvent::default();
+            Hit::FingerMove(FingerMoveEvent {
+                abs,
+                tap_count,
+                ..
+            }) => {
+                let event: DrawEvent = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                self.move_cursor_to(&mut cx, abs - self.rect.pos);
+                let index_affinity = self.position_to_index_affinity(&mut cx, abs - self.rect.pos);
+                self.move_cursor_to(index_affinity, true);
+                if tap_count == 2 {
+                    self.select_word();
+                }
+                self.draw_bg.redraw(&mut *cx);
             }
             _ => {}
         }
@@ -183,28 +525,37 @@ impl Widget for TextInput {
         self.draw_selection.append_to_draw_call(cx);
 
         // Draw text
-        self.draw_label.is_empty = 0.0;
-        self.draw_label.draw_walk(
-            cx,
-            Walk::size(self.walk.width,self.walk.height),
-            self.label_align,
-            &self.text
-        );
+        if self.text.is_empty() {
+            self.draw_label.is_empty = 1.0;
+            self.draw_label.draw_walk(
+                cx,
+                Walk::size(self.walk.width,self.walk.height),
+                self.label_align,
+                &self.empty_text,
+            );
+        } else {
+            self.draw_label.is_empty = 0.0;
+            self.draw_label.draw_walk(
+                cx,
+                Walk::size(self.walk.width,self.walk.height),
+                self.label_align,
+                &self.text,
+            );
+        }
 
         self.rect = cx.turtle().padded_rect_used();
      
         // Draw selection
-        let rects = self.draw_label.compute_selected_rects(
+        let rects = self.draw_label.selected_rects(
             cx,
             Walk::size(self.walk.width,self.walk.height),
             self.label_align,
             self.rect.size.x,
             &self.text,
-            self.cursor_head,
-            self.cursor_tail
+            self.cursor.head.min(self.cursor.tail),
+            self.cursor.head.max(self.cursor.tail)
         );
         for rect in rects {
-            println!("{:?} {:?}", self.rect, rect);
             self.draw_selection.draw_abs(cx, Rect {
                 pos: self.rect.pos + rect.pos,
                 size: rect.size,
@@ -213,23 +564,36 @@ impl Widget for TextInput {
      
         // Draw cursor
         let cursor_position = self.cursor_position(cx);
-        let line_spacing = self.draw_label.compute_line_spacing(cx);
+        let line_spacing = self.draw_label.line_spacing(cx);
         self.draw_cursor.draw_abs(cx, Rect {
+            
             pos: self.rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
             size: dvec2(self.cursor_width, line_spacing)
         });
 
         self.draw_bg.end(cx);
 
+        if cx.has_key_focus(self.draw_bg.area()) {
+            let padding = dvec2(self.layout.padding.left, self.layout.padding.top);
+            cx.show_text_ime(
+                self.draw_bg.area(), 
+                padding + cursor_position - self.cursor_width * 0.5
+            );
+        }
+
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
+
         DrawStep::done()
     }
     
     fn text(&self) -> String {
-        self.text.clone()
+        self.text.to_string()
     }
     
     fn set_text(&mut self, text: &str) {
-        self.text = text.to_string();
+        self.text = self.filter_input(text.to_string());
+        self.set_cursor(Cursor::default());
+        self.history.clear();
     }
 }
 
@@ -241,6 +605,222 @@ pub enum TextInputAction {
     KeyFocus,
     KeyFocusLost,
     None
+}
+
+impl TextInputRef {
+    pub fn changed(&self, actions: &Actions) -> Option<String> {
+        if let TextInputAction::Change(val) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(val);
+        }
+        None
+    }
+
+    pub fn returned(&self, actions: &Actions) -> Option<String> {
+        if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
+            return Some(val);
+        }
+        None
+    }
+    
+    pub fn set_cursor(&self, head: usize, tail: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_cursor(Cursor {
+                head: IndexAffinity {
+                    index: head,
+                    affinity: Affinity::After,
+                },
+                tail: IndexAffinity {
+                    index: tail,
+                    affinity: Affinity::Before,
+                },
+            });
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Cursor {
+    pub head: IndexAffinity,
+    pub tail: IndexAffinity,
+}
+
+impl Cursor {
+    pub fn start(&self) -> IndexAffinity {
+        self.head.min(self.tail)
+    }
+
+    pub fn end(&self) -> IndexAffinity {
+        self.head.max(self.tail)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct History {
+    current_edit_kind: Option<EditKind>,
+    undo_stack: EditStack,
+    redo_stack: EditStack,
+}
+
+impl History {
+    pub fn force_new_edit_group(&mut self) {
+        self.current_edit_kind = None;
+    }
+
+    pub fn create_or_extend_edit_group(
+        &mut self,
+        edit_kind: EditKind,
+        cursor: Cursor,
+    ) {
+        if !self
+            .current_edit_kind
+            .map_or(false, |current_edit_kind| current_edit_kind.can_merge_with(edit_kind))
+        {
+            self.undo_stack.push_edit_group(cursor);
+            self.current_edit_kind = Some(edit_kind);
+        }
+    }
+
+    fn apply_edit(&mut self, edit: Edit, text: &mut String) {
+        let inverted_edit = edit.invert(&text);
+        edit.apply(text);
+        self.undo_stack.push_edit(inverted_edit);
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(
+        &mut self,
+        cursor: Cursor,
+        text: &mut String,
+    ) -> Option<Cursor> {
+        let mut edits = Vec::new();
+        if let Some(new_cursor) = self.undo_stack.pop_edit_group(&mut edits) {
+            self.redo_stack.push_edit_group(cursor);
+            for edit in edits {
+                let inverted_edit = edit.clone().invert(text);
+                edit.apply(text);
+                self.redo_stack.push_edit(inverted_edit);
+            }
+            self.current_edit_kind = None;
+            Some(new_cursor)
+        } else {
+            None
+        }
+    }
+
+    pub fn redo(
+        &mut self,
+        cursor: Cursor,
+        text: &mut String,
+    ) -> Option<Cursor> {
+        let mut edits = Vec::new();
+        if let Some(new_cursor) = self.redo_stack.pop_edit_group(&mut edits) {
+            self.undo_stack.push_edit_group(cursor);
+            for edit in edits {
+                let inverted_edit = edit.clone().invert(text);
+                edit.apply(text);
+                self.undo_stack.push_edit(inverted_edit);
+            }
+            self.current_edit_kind = None;
+            Some(new_cursor)
+        } else {
+            None
+        }
+    }
+
+    fn clear(&mut self) {
+        self.current_edit_kind = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct EditStack {
+    edit_groups: Vec<EditGroup>,
+    edits: Vec<Edit>,
+}
+
+impl EditStack {
+    fn push_edit_group(&mut self, cursor: Cursor) {
+        self.edit_groups.push(EditGroup {
+            cursor,
+            edit_start: self.edits.len(),
+        });
+    }
+
+    fn push_edit(&mut self, edit: Edit) {
+        self.edits.push(edit);
+    }
+
+    fn pop_edit_group(&mut self, edits: &mut Vec<Edit>) -> Option<Cursor> {
+        match self.edit_groups.pop() {
+            Some(edit_group) => {
+                edits.extend(self.edits.drain(edit_group.edit_start..).rev());
+                Some(edit_group.cursor)
+            }
+            None => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.edit_groups.clear();
+        self.edits.clear();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditKind {
+    Insert,
+    Backspace,
+    Delete,
+    Other,
+}
+
+impl EditKind {
+    fn can_merge_with(self, other: EditKind) -> bool {
+        if self == Self::Other {
+            false
+        } else {
+            self == other
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EditGroup {
+    cursor: Cursor,
+    edit_start: usize
+}
+
+#[derive(Clone, Debug)]
+struct Edit {
+    start: usize,
+    end: usize,
+    replace_with: String,
+}
+
+impl Edit {
+    fn apply(&self, text: &mut String) {
+        text.replace_range(self.start..self.end, &self.replace_with);
+    }
+
+    fn invert(&self, text: &str) -> Self {
+        Self {
+            start: self.start,
+            end: self.start + self.replace_with.len(),
+            replace_with: text[self.start..self.end].to_string(),
+        }
+    }
+}
+
+fn next_grapheme_boundary(string: &str, index: usize) -> Option<usize> {
+    let mut cursor = GraphemeCursor::new(index, string.len(), true);
+    cursor.next_boundary(string, 0).unwrap()
+}
+
+fn prev_grapheme_boundary(string: &str, index: usize) -> Option<usize> {
+    let mut cursor = GraphemeCursor::new(index, string.len(), true);
+    cursor.prev_boundary(string, 0).unwrap()
 }
 
 /*
@@ -889,28 +1469,6 @@ impl TextInput {
         }
         
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default())
-    }
-}
-
-impl TextInputRef {
-    pub fn changed(&self, actions: &Actions) -> Option<String> {
-        if let TextInputAction::Change(val) = actions.find_widget_action_cast(self.widget_uid()) {
-            return Some(val);
-        }
-        None
-    }
-
-    pub fn returned(&self, actions: &Actions) -> Option<String> {
-        if let TextInputAction::Return(val) = actions.find_widget_action_cast(self.widget_uid()) {
-            return Some(val);
-        }
-        None
-    }
-    
-    pub fn set_cursor(&self, head:usize, tail: usize){
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.set_cursor(head, tail);
-        }
     }
 }
 */

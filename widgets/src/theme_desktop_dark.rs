@@ -3213,14 +3213,106 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
 
         label_align: {y: 0.}
-        cursor_margin_bottom: (THEME_SPACE_1),
-        cursor_margin_top: (THEME_SPACE_1),
-        select_pad_edges: 3.0
-        cursor_width: 2.0,
-        numeric_only: false,
         on_focus_select_all: false,
-        empty_message: "0",
         clip_x: false, clip_y: false,
+
+        cursor_width: 2.0,
+
+        is_read_only: false,
+        is_numeric_only: false,
+        empty_text: "0",
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_label: {hover: 0.0},
+                        draw_selection: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_label: {hover: 1.0},
+                        draw_selection: {hover: 1.0}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: .25}}
+                    apply: {
+                        draw_bg: {focus: 0.0},
+                        draw_label: {focus: 0.0},
+                        draw_cursor: {focus: 0.0},
+                        draw_selection: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_cursor: {focus: 1.0},
+                        draw_bg: {focus: 1.0},
+                        draw_selection: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                    }
+                }
+            }
+        }
+
+        draw_bg: {
+            instance radius: (THEME_CORNER_RADIUS)
+            instance hover: 0.0
+            instance focus: 0.0
+            instance bodytop: (THEME_COLOR_INSET_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 1.5;
+
+                let body = mix(
+                    self.bodytop,
+                    self.bodybottom,
+                    self.focus
+                );
+
+                let body_transp = (THEME_COLOR_D_HIDDEN)
+
+                let top_gradient = mix(
+                    body_transp,
+                    THEME_COLOR_BEVEL_SHADOW,
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+
+                let bot_gradient = mix(
+                    (THEME_COLOR_BEVEL_LIGHT),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.radius
+                )
+
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING * 0.9
+                )
+
+                return sdf.result
+            }
+        }
 
         draw_label: {
             instance hover: 0.0
@@ -3281,98 +3373,6 @@ live_design! {
                     self.focus)
                 ); // Pad color
                 return sdf.result
-            }
-        }
-
-        draw_bg: {
-            instance radius: (THEME_CORNER_RADIUS)
-            instance hover: 0.0
-            instance focus: 0.0
-            instance bodytop: (THEME_COLOR_INSET_DEFAULT)
-            instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 1.5;
-
-                let body = mix(
-                    self.bodytop,
-                    self.bodybottom,
-                    self.focus
-                );
-
-                let body_transp = (THEME_COLOR_D_HIDDEN)
-
-                let top_gradient = mix(
-                    body_transp,
-                    THEME_COLOR_BEVEL_SHADOW,
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-
-                let bot_gradient = mix(
-                    (THEME_COLOR_BEVEL_LIGHT),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.radius
-                )
-
-                sdf.fill_keep(body)
-
-                sdf.stroke(
-                    bot_gradient,
-                    THEME_BEVELING * 0.9
-                )
-
-                return sdf.result
-            }
-        }
-
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_selection: {hover: 0.0}
-                        draw_text: {hover: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_selection: {hover: 1.0}
-                        draw_text: {hover: 1.0}
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: .25}}
-                    apply: {
-                        draw_cursor: {focus: 0.0},
-                        draw_bg: {focus: 0.0},
-                        draw_selection: {focus: 0.0}
-                        draw_text: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_cursor: {focus: 1.0},
-                        draw_bg: {focus: 1.0},
-                        draw_selection: {focus: 1.0}
-                        draw_text: {focus: 1.0}
-                    }
-                }
             }
         }
     }
