@@ -222,7 +222,7 @@ impl Widget for Slider {
             Hit::FingerUp(fe) => {
                 self.text_input.is_read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
-                self.text_input.create_external_undo();
+                self.text_input.force_new_edit_group();
                 self.animator_play(cx, id!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));
