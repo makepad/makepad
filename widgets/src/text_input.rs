@@ -439,13 +439,19 @@ impl Widget for TextInput {
             }
             Hit::TextInput(TextInputEvent {
                 input,
+                replace_last,
                 was_paste,
                 ..
             }) if !self.is_read_only => {
                 let input = self.filter_input(input);
                 if !input.is_empty() {
+                    let mut start = self.cursor.start().index;
+                    let end = self.cursor.end().index;
+                    if replace_last {
+                        start -= self.history.last_inserted_text(&self.text).map_or(0, |text| text.len());
+                    }
                     self.history.create_or_extend_edit_group(
-                        if was_paste {
+                        if replace_last || was_paste {
                             EditKind::Other
                         } else {
                             EditKind::Insert
@@ -453,8 +459,8 @@ impl Widget for TextInput {
                         self.cursor,
                     );
                     self.apply_edit(Edit {
-                        start: self.cursor.start().index,
-                        end: self.cursor.end().index,
+                        start,
+                        end,
                         replace_with: input,
                     });
                     self.draw_bg.redraw(cx);
@@ -662,6 +668,10 @@ struct History {
 }
 
 impl History {
+    pub fn last_inserted_text<'a>(&self, text: &'a str) -> Option<&'a str> {
+        self.undo_stack.edits.last().map(|edit| &text[edit.start..edit.end])
+    }
+
     pub fn force_new_edit_group(&mut self) {
         self.current_edit_kind = None;
     }
