@@ -1,6 +1,6 @@
 use {
-    std::cell::Cell,
-    std::rc::Rc,
+    std::sync::Arc,
+    std::sync::Mutex,
     crate::{
         makepad_live_id::*,
         makepad_math::*,
@@ -18,39 +18,39 @@ use {
 #[derive(Clone, Debug)]
 pub struct DragEvent {
     pub modifiers: KeyModifiers,
-    pub handled: Cell<bool>,
+    pub handled: Arc<Mutex<bool>>,
     pub abs: DVec2,
-    pub items: Rc<Vec<DragItem >>,
-    pub response: Rc<Cell<DragResponse >>,
+    pub items: Arc<Vec<DragItem >>,
+    pub response: Arc<Mutex<DragResponse >>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DropEvent {
     pub modifiers: KeyModifiers,
-    pub handled: Cell<bool>,
+    pub handled: Arc<Mutex<bool>>,
     pub abs: DVec2,
-    pub items: Rc<Vec<DragItem >>,
+    pub items: Arc<Vec<DragItem >>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DragHitEvent {
     pub modifiers: KeyModifiers,
     pub abs: DVec2,
     pub rect: Rect,
     pub state: DragState,
-    pub items: Rc<Vec<DragItem >>,
-    pub response: Rc<Cell<DragResponse >>,
+    pub items: Arc<Vec<DragItem >>,
+    pub response: Arc<Mutex<DragResponse >>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DropHitEvent {
     pub modifiers: KeyModifiers,
     pub abs: DVec2,
     pub rect: Rect,
-    pub items: Rc<Vec<DragItem >>,
+    pub items: Arc<Vec<DragItem >>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DragState {
     In,
     Over,
@@ -112,10 +112,10 @@ impl Event {
             Event::Drag(event) => {
                 let rect = area.clipped_rect(cx);
                 if area == cx.drag_drop.drag_area {
-                    if !event.handled.get() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
+                    if !*event.handled.lock().unwrap() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
                         //log!("drag_hist_with_options: Drag, in drag area, event handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
-                        event.handled.set(true);
+                        *event.handled.lock().unwrap() = true;
                         DragHit::Drag(DragHitEvent {
                             rect,
                             modifiers: event.modifiers,
@@ -136,10 +136,10 @@ impl Event {
                         })
                     }
                 } else {
-                    if !event.handled.get() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
+                    if !*event.handled.lock().unwrap() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
                         //log!("drag_hits_with_options: Drag, not in drag_area, event not handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
-                        event.handled.set(true);
+                        *event.handled.lock().unwrap() = true;
                         DragHit::Drag(DragHitEvent {
                             modifiers: event.modifiers,
                             rect,
@@ -156,10 +156,10 @@ impl Event {
             }
             Event::Drop(event) => {
                 let rect = area.clipped_rect(cx);
-                if !event.handled.get() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
+                if !*event.handled.lock().unwrap() && Margin::rect_contains_with_margin(event.abs, &rect, &options.margin) {
                     //log!("drag_hits_with_options: Drop, event not handled and rect {:?} contains ({},{}) in margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                     cx.drag_drop.next_drag_area = Area::default();
-                    event.handled.set(true);
+                    *event.handled.lock().unwrap() = true;
                     DragHit::Drop(DropHitEvent {
                         modifiers: event.modifiers,
                         rect,

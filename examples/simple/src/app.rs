@@ -12,9 +12,16 @@ live_design!{
                 height: Fill
                 
                 draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        // test
-                        return mix(#7, #3, self.pos.y);
+                    fn pixel(self) -> vec4 {    // < --- Apply error: examples/simple/src/app.rs:21:20 - property: pixel target class not found
+                        // 获取几何位置
+                        let st = vec2(
+                            self.geom_pos.x,
+                            self.geom_pos.y
+                        );
+                        
+                        // 计算颜色，基于 x 和 y 位置及时间
+                        let color = vec3(st.x, st.y, abs(sin(self.time)));
+                        return vec4(color, 1.0);
                     }
                 }
                 

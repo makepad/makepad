@@ -66,7 +66,7 @@ pub struct RadioButton {
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] text: RcStringMut,
+    #[live] text: ArcStringMut,
     
     #[live] bind: String,
 }
