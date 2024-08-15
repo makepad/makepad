@@ -7,7 +7,6 @@ use {
         text_flow::{TextFlow},
         link_label::LinkLabel,
     },
-    std::rc::Rc,
 };
 
 const BULLET: &str = "•";
@@ -50,7 +49,7 @@ pub enum TrimWhitespaceInText {
 #[derive(Live, Widget)]
 pub struct Html {
     #[deref] pub text_flow: TextFlow,
-    #[live] pub body: Rc<String>,
+    #[live] pub body: ArcStringMut,
     #[rust] pub doc: HtmlDoc,
 
     /// Markers used for unordered lists, indexed by the list's nesting level.
@@ -69,7 +68,7 @@ pub struct Html {
 impl LiveHook for Html {
     fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
         let mut errors = Some(Vec::new());
-        let new_doc = parse_html(&*self.body, &mut errors, InternLiveId::No);
+        let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
         if new_doc != self.doc{
             self.doc = new_doc;
             self.text_flow.clear_items();
@@ -369,9 +368,9 @@ impl Widget for Html {
     }
     
     fn set_text(&mut self, v:&str){
-        self.body = Rc::new(v.to_string());
+        self.body.set(v);
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(&*self.body, &mut errors, InternLiveId::No);
+        self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
