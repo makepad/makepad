@@ -46,7 +46,7 @@ pub struct CheckBox {
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     
-    #[live] text: RcStringMut,
+    #[live] text: ArcStringMut,
     
     #[live] bind: String,
 }

@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if)]
 use {
     std::{
-        rc::Rc,
+        sync::Arc,
         fmt::Write,
         iter
     },
@@ -958,7 +958,7 @@ impl LiveNodeVecApi for LiveNodeVec {
             self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::InlineString(inline_str)});
         }
         else {
-            self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::String(Rc::new(v.to_string()))});
+            self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::String(Arc::new(v.to_string()))});
         }
     }
     
