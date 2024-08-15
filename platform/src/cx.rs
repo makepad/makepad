@@ -11,6 +11,7 @@ use {
         cell::RefCell,
     },
     crate::{
+        action::{Action,ACTION_SENDER_GLOBAL},
         makepad_live_compiler::{
             LiveRegistry,
             LiveFileChange
@@ -96,7 +97,9 @@ pub struct Cx {
 
     pub (crate) live_file_change_receiver: std::sync::mpsc::Receiver<Vec<LiveFileChange>>,
     pub (crate) live_file_change_sender: std::sync::mpsc::Sender<Vec<LiveFileChange >>,
-
+    
+    pub (crate) action_receiver: std::sync::mpsc::Receiver<Action>,
+    
     pub shader_registry: ShaderRegistry,
     
     pub os: CxOs,
@@ -211,7 +214,12 @@ impl Cx {
         });
         
         let (executor, spawner) = executor::new_executor_and_spawner();
-        let (send, recv) = std::sync::mpsc::channel();
+        let (live_file_change_sender, live_file_change_receiver) = std::sync::mpsc::channel();
+        let (action_sender, action_receiver) = std::sync::mpsc::channel();
+        if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock(){
+            *sender = Some(action_sender);
+        }
+        
         Self {
             null_texture,
             cpu_cores: 8,
@@ -254,8 +262,9 @@ impl Cx {
             
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             
-            live_file_change_receiver: recv,
-            live_file_change_sender: send,
+            live_file_change_receiver,
+            live_file_change_sender,
+            action_receiver,
             
             shader_registry: ShaderRegistry::new(true),
             

@@ -13,7 +13,7 @@
 //! before it finds the end of the token.
 
 use {
-    std::rc::Rc,
+    std::sync::Arc,
     crate::{
         char_ext::CharExt,
         live_id::{LiveId,LIVE_ID_SEED},
@@ -519,12 +519,12 @@ impl DoubleQuotedStringTailState {
                 ('"', _) => {
                     cursor.skip(1);
                     cursor.skip_suffix();
-                    break (State::Initial(InitialState), FullToken::String(Rc::new(s)));
+                    break (State::Initial(InitialState), FullToken::String(Arc::new(s)));
                 }
                 ('\0', _) => {
                     break (
                         State::DoubleQuotedStringTail(DoubleQuotedStringTailState),
-                        FullToken::String(Rc::new(s)),
+                        FullToken::String(Arc::new(s)),
                     );
                 }
                 ('\\', '\\') => {
@@ -635,11 +635,11 @@ impl RawDoubleQuotedStringTailState {
                     }
                     if end_hash_count == self.start_hash_count {
                         cursor.skip_suffix();
-                        break (State::Initial(InitialState), FullToken::String(Rc::new(s)));
+                        break (State::Initial(InitialState), FullToken::String(Arc::new(s)));
                     }
                 }
                 '\0' => {
-                    break (State::RawDoubleQuotedStringTail(self), FullToken::String(Rc::new(s)));
+                    break (State::RawDoubleQuotedStringTail(self), FullToken::String(Arc::new(s)));
                 }
                 x => {
                     s.push(x);
