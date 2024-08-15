@@ -572,7 +572,6 @@ impl Widget for TextInput {
         let cursor_position = self.cursor_position(cx);
         let cursor_height = self.draw_label.line_height(cx);
         self.draw_cursor.draw_abs(cx, Rect {
-            
             pos: self.rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
             size: dvec2(self.cursor_width, cursor_height)
         });
