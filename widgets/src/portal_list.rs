@@ -300,8 +300,12 @@ impl PortalList {
 
         cx.end_turtle_with_area(&mut self.area);
     }
-    
+
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
+        self.next_visible_item_with_scroll(cx).map(|(index, _)| index)
+    }
+
+    pub fn next_visible_item_with_scroll(&mut self, cx: &mut Cx2d) -> Option<(usize, f64)> {
         let vi = self.vec_index;
         let layout = if vi == Vec2Index::Y { Layout::flow_down() } else { Layout::flow_right() };
         if let Some(draw_state) = self.draw_state.get() {
@@ -331,7 +335,7 @@ impl PortalList {
                             }, layout);
                         }
                     }
-                    return Some(self.first_id)
+                    return Some((self.first_id, self.first_scroll));
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
                     let is_down_again = draw_state.is_down_again();
@@ -372,7 +376,7 @@ impl PortalList {
                                     }, layout);
                                 }
                             }
-                            return Some(self.first_id - 1);
+                            return Some((self.first_id - 1, pos));
                         }
                         else {
                             self.draw_state.set(ListDrawState::End {viewport});
@@ -411,7 +415,7 @@ impl PortalList {
                             }, layout);
                         }
                     }
-                    return Some(index + 1)
+                    return Some((index + 1, pos));
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {
                     let did_draw = cx.turtle_has_align_items();
@@ -443,7 +447,7 @@ impl PortalList {
                                     width: Size::Fill,
                                     height: Size::Fit
                                 }, Layout::flow_down());
-                                return Some(last_index + 1);
+                                return Some((last_index + 1, pos));
                             }
                         }
                         self.draw_state.set(ListDrawState::End {viewport});
@@ -469,7 +473,7 @@ impl PortalList {
                         height: Size::Fit
                     }, Layout::flow_down());
                     
-                    return Some(index - 1);
+                    return Some((index - 1, pos));
                 }
                 _ => ()
             }
