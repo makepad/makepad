@@ -301,10 +301,15 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
     }
 
+    /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         self.next_visible_item_with_scroll(cx).map(|(index, _)| index)
     }
 
+    /// Similar to [`PortalList::next_visible_item()`], but also returns the item's "scroll offset".
+    ///
+    /// The item's "scroll offset" (or scroll position) is the distance from
+    /// the beginning of the PortalList's viewport to the beginning of that item.
     pub fn next_visible_item_with_scroll(&mut self, cx: &mut Cx2d) -> Option<(usize, f64)> {
         let vi = self.vec_index;
         let layout = if vi == Vec2Index::Y { Layout::flow_down() } else { Layout::flow_right() };
