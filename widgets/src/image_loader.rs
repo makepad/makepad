@@ -65,10 +65,7 @@ impl WidgetMatchEvent for ImageLoader {
                         let is_expected_response = response.metadata_id == LiveId::from_str(&uri);
                         if response.status_code == 200 && is_expected_response {
                             if let Some(body) = response.get_body() {
-                                // TODO: Caching
-                                // cx.get_global::<NetworkImageCache>()
-                                //     .insert(response.metadata_id, body);
-
+                                // TODO: Add caching and decode in background threads
                                 let image_ref =
                                     self.content_loader.content_view().image(id!(image));
 
