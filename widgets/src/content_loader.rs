@@ -28,11 +28,11 @@ pub struct ContentLoader {
 
     /// The actual content to be displayed once loaded.
     #[live]
-    pub content: View,
+    content: View,
 
     /// An error view to show if the content fails to load.
     #[live]
-    pub error: View,
+    error: View,
 
     /// Wether to display the image as soon as it's loaded.
     #[rust(true)]
@@ -98,6 +98,18 @@ impl ContentLoader {
 
     pub fn set_show_content_on_load(&mut self, show: bool) {
         self.show_content_on_load = show;
+    }
+
+    pub fn content_view(&mut self) -> &mut View {
+        &mut self.content
+    }
+    
+    pub fn error_view(&mut self) -> &mut View {
+        &mut self.error
+    }
+
+    pub fn placeholder_view(&mut self) -> &mut LoaderPlaceholder {
+        &mut self.placeholder
     }
 }
 

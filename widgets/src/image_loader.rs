@@ -69,8 +69,8 @@ impl WidgetMatchEvent for ImageLoader {
                                 // cx.get_global::<NetworkImageCache>()
                                 //     .insert(response.metadata_id, body);
 
-                                // TODO: instead of content being pub, use a callback with imageref access like in text_or_image
-                                let image_ref = self.content_loader.content.image(id!(image));
+                                let image_ref =
+                                    self.content_loader.content_view().image(id!(image));
 
                                 let image_format = get_image_format(&body);
                                 match image_format {
@@ -126,7 +126,7 @@ impl ImageLoader {
         self.content_loader
             .set_content_loading_status(ContentLoadingStatus::Failed);
         self.content_loader
-            .error
+            .error_view()
             .label(id!(error_message))
             .set_text(&error);
         cx.widget_action(
@@ -141,7 +141,7 @@ impl ImageLoader {
         self.image_loading_status = ImageLoadingStatus::Loading;
         self.content_loader
             .set_content_loading_status(ContentLoadingStatus::Loading);
-        self.content.redraw(cx);
+        self.content_view().redraw(cx);
 
         let mut request = HttpRequest::new(uri.to_string(), HttpMethod::GET);
         request.metadata_id = LiveId::from_str(&uri);
