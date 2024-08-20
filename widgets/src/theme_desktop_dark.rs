@@ -3466,7 +3466,7 @@ live_design! {
             cursor_margin_bottom: (THEME_SPACE_1),
             cursor_margin_top: (THEME_SPACE_1),
             select_pad_edges: 3.0
-            cursor_size: 2.0,
+            cursor_width: 2.0,
             empty_text: "0",
             is_numeric_only: true,
 
@@ -3565,7 +3565,7 @@ live_design! {
             cursor_margin_bottom: (THEME_SPACE_1),
             cursor_margin_top: (THEME_SPACE_1),
             select_pad_edges: (THEME_SPACE_1),
-            cursor_size: (THEME_SPACE_1),
+            cursor_width: (THEME_SPACE_1),
             empty_text: "0",
             is_numeric_only: true,
             draw_bg: {
