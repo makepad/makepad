@@ -333,12 +333,12 @@ impl Cx {
             FromJavaMessage::WebSocketClosed {sender} => {
                 self.os.websocket_parsers.remove(&sender.0);
                 let message = WebSocketMessage::Closed;
-                sender.1.send(message).unwrap();
+                sender.1.send(message).ok();
             }
             FromJavaMessage::WebSocketError {error, sender} => {
                 self.os.websocket_parsers.remove(&sender.0);
                 let message = WebSocketMessage::Error(error);
-                sender.1.send(message).unwrap();
+                sender.1.send(message).ok();
             }
             FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                 self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
