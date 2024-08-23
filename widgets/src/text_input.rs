@@ -86,7 +86,7 @@ impl TextInput {
     fn position_to_index_affinity(&self, cx: &mut Cx2d, width: f64, position: DVec2) -> IndexAffinity {
         self.draw_label.position_to_index_affinity(
             cx,
-            Walk::size(self.walk.width,self.walk.height),
+            Walk::fit(),
             self.label_align,
             width,
             &self.text,
@@ -97,7 +97,7 @@ impl TextInput {
     fn cursor_position(&self, cx: &mut Cx2d, width: f64) -> DVec2 {
         self.draw_label.index_affinity_to_position(
             cx,
-            Walk::size(self.walk.width,self.walk.height),
+            Walk::fit(),
             self.label_align,
             width,
             &self.text,
@@ -228,7 +228,7 @@ impl Widget for TextInput {
         let rect = self.draw_bg.area().rect(cx);
         let padded_rect = Rect {
             pos: rect.pos + self.layout.padding.left_top(),
-            size: rect.size - self.layout.padding.left_top(),
+            size: rect.size - self.layout.padding.size(),
         };
 
         let uid = self.widget_uid();
@@ -548,7 +548,7 @@ impl Widget for TextInput {
             self.draw_label.is_empty = 1.0;
             self.draw_label.draw_walk(
                 cx,
-                Walk::size(self.walk.width,self.walk.height),
+                Walk::fit(),
                 self.label_align,
                 &self.empty_text,
             );
@@ -556,18 +556,18 @@ impl Widget for TextInput {
             self.draw_label.is_empty = 0.0;
             self.draw_label.draw_walk(
                 cx,
-                Walk::size(self.walk.width,self.walk.height),
+                Walk::fit(),
                 self.label_align,
                 &self.text,
             );
         }
 
-        let padded_rect = cx.turtle().padded_rect_used();
-     
+        let padded_rect = cx.turtle().padded_rect();
+
         // Draw selection
         let rects = self.draw_label.selected_rects(
             cx,
-            Walk::size(self.walk.width,self.walk.height),
+            Walk::fit(),
             self.label_align,
             padded_rect.size.x,
             &self.text,

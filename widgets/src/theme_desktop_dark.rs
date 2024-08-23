@@ -3213,7 +3213,8 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
 
         label_align: {y: 0.}
-        clip_x: false, clip_y: false,
+        clip_x: false,
+        clip_y: false,
 
         cursor_width: 2.0,
 
