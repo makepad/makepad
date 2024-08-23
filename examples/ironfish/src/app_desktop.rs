@@ -1572,7 +1572,7 @@ live_design! {
         }
     }
 
-    ChorusFXPanel = <FishPanelContainer dx:824.1 dy:2220.0 dw:329.5 dh:238.6> {
+    ChorusFXPanel = <FishPanelContainer dx:824.1 dy:2219.5 dw:329.5 dh:238.6> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -2000,7 +2000,7 @@ live_design! {
         }
     }
 
-    FishPanelSoundSources = <FishPanelContainer dx:-56.3 dy:1375.7 dw:400.0 dh:1144.1> {
+    FishPanelSoundSources = <FishPanelContainer dx:-59.4 dy:1375.0 dw:400.0 dh:1144.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2209,7 +2209,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer dx:820.2 dy:1375.1 dw:338.4 dh:644.1> {
+    FishPanelEffects = <FishPanelContainer dx:821.3 dy:1353.5 dw:338.4 dh:644.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-30.4 dy:-238.7 dw:1613.1 dh:1522.3>{
+    AppDesktop = <View dx:-36.0 dy:-224.4 dw:1613.1 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill
