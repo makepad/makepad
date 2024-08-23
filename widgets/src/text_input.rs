@@ -36,7 +36,7 @@ pub struct TextInput {
 
     #[live] pub is_read_only: bool,
     #[live] pub is_numeric_only: bool,
-    #[live] pub empty_text: String,
+    #[live] pub empty_message: String,
     #[live] pub text: String,
 
     #[rust] cursor: Cursor,
@@ -550,7 +550,7 @@ impl Widget for TextInput {
                 cx,
                 Walk::fit(),
                 self.label_align,
-                &self.empty_text,
+                &self.empty_message,
             );
         } else {
             self.draw_label.is_empty = 0.0;
