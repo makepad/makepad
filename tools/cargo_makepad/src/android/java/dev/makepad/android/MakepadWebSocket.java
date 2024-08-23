@@ -56,7 +56,7 @@ public class MakepadWebSocket {
             doHandshake();
         } catch (Exception e) {
             MakepadNative.onWebSocketError(e.toString(), mCallback);
-            throw new RuntimeException(e);
+            // throw new RuntimeException(e);
         }
     }
 

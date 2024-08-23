@@ -1,6 +1,7 @@
 use makepad_jni_sys as jni_sys;
 use {
-    std::{cell::{Cell, RefCell}, ffi::CString, sync::mpsc::{self, Sender}},
+    std::sync::Mutex,
+    std::{cell::{Cell}, ffi::CString, sync::mpsc::{self, Sender}},
     self::super::{
         ndk_sys,
         ndk_utils,
@@ -110,15 +111,12 @@ pub enum FromJavaMessage {
 }
 unsafe impl Send for FromJavaMessage {}
 
-thread_local! {
-    static MESSAGES_TX: RefCell<Option<mpsc::Sender<FromJavaMessage>>> = RefCell::new(None);
-}
+static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(None);
 
 fn send_from_java_message(message: FromJavaMessage) {
-    MESSAGES_TX.with(|tx| {
-        let mut tx = tx.borrow_mut();
+    if let Ok(mut tx) = MESSAGES_TX.lock(){
         tx.as_mut().unwrap().send(message).unwrap();
-    })
+    }
 }
 
 // Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
@@ -139,7 +137,7 @@ pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: m
     let env = attach_jni_env();
     let activity = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
     SET_ACTIVITY_FN(activity);
-    MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(from_java_tx));
+    *MESSAGES_TX.lock().unwrap() = Some(from_java_tx);
 }
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
@@ -479,16 +477,16 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
-    env: *mut jni_sys::JNIEnv,
+    _env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    error: jni_sys::jstring,
+    _error: jni_sys::jstring,
     callback: jni_sys::jlong,
 ) {
-    let error = unsafe { jstring_to_string(env, error) };
+    //let error = unsafe { jstring_to_string(env, error) };
     let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
     send_from_java_message(FromJavaMessage::WebSocketError {
-        error,
+        error:"".to_string(),
         sender: sender.clone(),
     });
 }
