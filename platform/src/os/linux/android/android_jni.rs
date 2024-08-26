@@ -1,3 +1,5 @@
+use std::thread;
+
 use makepad_jni_sys as jni_sys;
 use {
     std::sync::Mutex,
@@ -5,6 +7,7 @@ use {
     self::super::{
         ndk_sys,
         ndk_utils,
+        super::libc_sys,
     },
     crate::{
         area::Area,
@@ -168,9 +171,49 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
 }
 
 pub unsafe fn init_choreographer() {
-    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
-    post_vsync_callback();
+    if is_choreographer_available() {
+        crate::log!("🚧🚧🚧🚧 Choreogrpaher IS AVAILABLE");
+        CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+        post_vsync_callback();
+    } else {
+        crate::log!("🛑 Choreographer NOT AVAILABLE");
+        std::thread::spawn(|| {
+            loop {
+                send_from_java_message(FromJavaMessage::RenderLoop);
+                thread::sleep(std::time::Duration::from_millis(8));
+            }
+        });
+    }
 }
+
+// Function to check if the Choreographer API is available
+fn is_choreographer_available() -> bool {
+    unsafe {
+        // Open the libandroid.so library
+        let filename = c"libandroid.so";
+        let lib = libc_sys::dlopen(filename.as_ptr(), libc_sys::RTLD_LAZY);
+        if lib.is_null() {
+            return false;
+        }
+
+        // Attempt to load the necessary symbols
+        let get_instance_symbol = c"AChoreographer_getInstance";
+        let get_instance: *mut std::ffi::c_void = libc_sys::dlsym(lib, get_instance_symbol.as_ptr());
+        let post_callback_symbol = c"AChoreographer_postFrameCallback";
+        let post_callback: *mut std::ffi::c_void = libc_sys::dlsym(lib, post_callback_symbol.as_ptr());
+
+        // Close the library
+        libc_sys::dlclose(lib);
+
+        // Check if both symbols were found
+        if !get_instance.is_null() && !post_callback.is_null() {
+            return true;
+        }
+
+        false
+    }
+}
+
 
 unsafe extern "C" fn vsync_callback(
     _data: *mut ndk_sys::AChoreographerFrameCallbackData,
