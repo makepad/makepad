@@ -1,5 +1,3 @@
-use std::thread;
-
 use makepad_jni_sys as jni_sys;
 use {
     std::sync::Mutex,
@@ -7,7 +5,6 @@ use {
     self::super::{
         ndk_sys,
         ndk_utils,
-        super::libc_sys,
     },
     crate::{
         area::Area,
@@ -170,27 +167,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
     init_choreographer();
 }
 
+#[allow(unused)]
 pub unsafe fn init_choreographer() {
-    if is_choreographer_available() {
-        crate::log!("🚧🚧🚧🚧 Choreogrpaher IS AVAILABLE");
-        CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
-        post_vsync_callback();
-    } else {
+    // If the Choreographer is not available (e.g. OHOS), use a manual render loop
+    #[cfg(no_android_choreographer)]
+    {
         crate::log!("🛑 Choreographer NOT AVAILABLE");
         std::thread::spawn(|| {
             loop {
                 send_from_java_message(FromJavaMessage::RenderLoop);
-                thread::sleep(std::time::Duration::from_millis(8));
+                std::thread::sleep(std::time::Duration::from_millis(8));
             }
         });
+        return;
     }
-}
-
-fn is_choreographer_available() -> bool {
-    #[cfg(no_android_choreographer)]
-    return false;
-
-    true
+    
+    crate::log!("🚧🚧🚧🚧 Choreogrpaher AVAILABLE");
+    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+    post_vsync_callback();
 }
 
 unsafe extern "C" fn vsync_callback(
