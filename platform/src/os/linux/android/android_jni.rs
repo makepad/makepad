@@ -159,15 +159,46 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
 
 static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
 
+/// Initializes the render loop which used the Android Choreographer when available to ensure proper vsync.
+/// If `no_android_choreographer` is present (e.g. OHOS with non-compatiblity), we fallback to a simple loop with frame pacing.
+/// This will be replaced by proper a vsync mechanism once we firgure it out for that OHOS.
+#[allow(unused)]
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographer(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
+    device_refresh_rate: jni_sys::jfloat,
 ) {
-    init_choreographer();
-}
-
-pub unsafe fn init_choreographer() {
+    // If the Choreographer is not available (e.g. OHOS), use a manual render loop
+    #[cfg(no_android_choreographer)]
+    {
+        std::thread::spawn(move || {
+            let mut last_frame_time = std::time::Instant::now();
+            let target_frame_time = std::time::Duration::from_secs_f32(1.0 / device_refresh_rate);
+            loop {
+                let now = std::time::Instant::now();
+                let elapsed = now - last_frame_time;
+                
+                if elapsed >= target_frame_time {
+                    let frame_start = std::time::Instant::now();
+                    send_from_java_message(FromJavaMessage::RenderLoop);
+                    let frame_duration = frame_start.elapsed();
+                    
+                    // Adaptive sleep: sleep less if the last frame took longer to process
+                    if frame_duration < target_frame_time {
+                        std::thread::sleep(target_frame_time - frame_duration);
+                    }
+                    
+                    last_frame_time = now;
+                } else {
+                    std::thread::sleep(target_frame_time - elapsed);
+                }
+            }
+        });
+        return;
+    }
+    
+    // Otherwise use the actual Choreographer
     CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
     post_vsync_callback();
 }
