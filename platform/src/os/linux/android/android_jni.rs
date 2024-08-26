@@ -172,7 +172,6 @@ pub unsafe fn init_choreographer() {
     // If the Choreographer is not available (e.g. OHOS), use a manual render loop
     #[cfg(no_android_choreographer)]
     {
-        crate::log!("🛑 Choreographer NOT AVAILABLE");
         std::thread::spawn(|| {
             loop {
                 send_from_java_message(FromJavaMessage::RenderLoop);
@@ -182,7 +181,6 @@ pub unsafe fn init_choreographer() {
         return;
     }
     
-    crate::log!("🚧🚧🚧🚧 Choreogrpaher AVAILABLE");
     CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
     post_vsync_callback();
 }
