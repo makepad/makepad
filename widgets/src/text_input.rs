@@ -512,6 +512,8 @@ impl Widget for TextInput {
                 self.move_cursor_to(index_affinity, false);
                 if tap_count == 2 {
                     self.select_word();
+                } else if tap_count == 3 {
+                    self.select_all();
                 }
                 self.set_key_focus(&mut *cx);
                 self.draw_bg.redraw(&mut *cx);
@@ -531,6 +533,8 @@ impl Widget for TextInput {
                 self.move_cursor_to(index_affinity, true);
                 if tap_count == 2 {
                     self.select_word();
+                } else if tap_count == 3 {
+                    self.select_all();
                 }
                 self.draw_bg.redraw(&mut *cx);
             }
