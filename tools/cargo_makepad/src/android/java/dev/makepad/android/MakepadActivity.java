@@ -296,7 +296,8 @@ MidiManager.OnDeviceOpenedListener{
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
-        MakepadNative.initChoreographer();        
+        float refreshRate = getDeviceRefreshRate();
+        MakepadNative.initChoreographer(refreshRate);
         //% MAIN_ACTIVITY_ON_CREATE
     }
 
@@ -647,5 +648,27 @@ MidiManager.OnDeviceOpenedListener{
         } catch (IOException e) {
             return "Unknown";
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    public float getDeviceRefreshRate() {
+        float refreshRate = 60.0f;  // Default to a common refresh rate
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Use getDisplay() API on Android 11 and above
+            Display display = getDisplay();
+            if (display != null) {
+                refreshRate = display.getRefreshRate();
+            }
+        } else {
+            // Use the old method for Android 10 and below
+            WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (windowManager != null) {
+                Display display = windowManager.getDefaultDisplay();
+                refreshRate = display.getRefreshRate();
+            }
+        }
+
+        return refreshRate;
     }
 }
