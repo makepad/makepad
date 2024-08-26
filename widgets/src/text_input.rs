@@ -613,8 +613,12 @@ impl Widget for TextInput {
     }
     
     fn set_text(&mut self, text: &str) {
+        if self.text == text {
+            return;
+        }
         self.text = self.filter_input(text.to_string());
-        self.set_cursor(Cursor::default());
+        self.cursor.head.index = self.cursor.head.index.min(text.len());
+        self.cursor.tail.index = self.cursor.tail.index.min(text.len());
         self.history.clear();
     }
 }
