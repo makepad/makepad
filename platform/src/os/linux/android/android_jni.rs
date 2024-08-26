@@ -186,34 +186,12 @@ pub unsafe fn init_choreographer() {
     }
 }
 
-// Function to check if the Choreographer API is available
 fn is_choreographer_available() -> bool {
-    unsafe {
-        // Open the libandroid.so library
-        let filename = c"libandroid.so";
-        let lib = libc_sys::dlopen(filename.as_ptr(), libc_sys::RTLD_LAZY);
-        if lib.is_null() {
-            return false;
-        }
+    #[cfg(no_android_choreographer)]
+    return false;
 
-        // Attempt to load the necessary symbols
-        let get_instance_symbol = c"AChoreographer_getInstance";
-        let get_instance: *mut std::ffi::c_void = libc_sys::dlsym(lib, get_instance_symbol.as_ptr());
-        let post_callback_symbol = c"AChoreographer_postFrameCallback";
-        let post_callback: *mut std::ffi::c_void = libc_sys::dlsym(lib, post_callback_symbol.as_ptr());
-
-        // Close the library
-        libc_sys::dlclose(lib);
-
-        // Check if both symbols were found
-        if !get_instance.is_null() && !post_callback.is_null() {
-            return true;
-        }
-
-        false
-    }
+    true
 }
-
 
 unsafe extern "C" fn vsync_callback(
     _data: *mut ndk_sys::AChoreographerFrameCallbackData,
