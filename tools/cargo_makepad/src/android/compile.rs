@@ -137,6 +137,7 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
         let target_arch_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
          
+        let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
         shell_env(
             &[
                 // Set the linker env var to the path of the target-specific `clang` binary.
@@ -162,7 +163,7 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
                 (&format!("RANLIB_{toolchain}"), full_llvm_ranlib_path.to_str().unwrap()),
 
                 ("RUSTFLAGS", &cfg_flag),
-                ("MAKEPAD", "lines"),
+                ("MAKEPAD", &makepad_env),
             ],
             &cwd,
             "rustup",
