@@ -194,7 +194,6 @@ impl BuildConnection {
                 "--release".into(),
                 "--message-format=json".into(),
             ],
-
             BuildTarget::Harmony => {
                 env.push(("MAKEPAD", "no_android_choreographer"));
                 vec![
