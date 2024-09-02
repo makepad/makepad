@@ -13,14 +13,14 @@ workspace.members = [
     "experiments/homescreens",
     "experiments/html_experiment",
     "examples/bare_text",
-    "examples/fractal_zoom", 
-    "examples/ui_zoo", 
-    "examples/news_feed", 
+    "examples/fractal_zoom",
+    "examples/ui_zoo",
+    "examples/news_feed",
     "examples/bare_text",
 #    "makepad_wonderous",
 #    "complex_layout",
 #    "comp_demo",
-    "examples/web_cam", 
+    "examples/web_cam",
     "examples/ironfish",
     "examples/simple",
     "examples/text_flow",
@@ -29,6 +29,7 @@ workspace.members = [
     "experiments/huedmx",
     "experiments/sdxl_remote",
     "examples/simple",
+    "examples/simple-fonts",
     "examples/simple_shader",
     "examples/chatgpt",
     "examples/sdxl",
@@ -37,7 +38,7 @@ workspace.members = [
     "examples/image_viewer",
     "studio",
     "tools/cargo_makepad",
-     "tools/auto_version",
+     "tools/auto_version", "examples/simple-fonts",
 ]
 
 workspace.exclude = [
@@ -50,22 +51,22 @@ workspace.exclude = [
     "experiments/svgloader",
     "experiments/empty","tools/windows_strip",
     "tools/video_mixer",
-    "tools/web_server", 
-    "tools/file_router", 
+    "tools/web_server",
+    "tools/file_router",
     "tools/wasm_strip"
 ]
 
 workspace.resolver = "2"
 #debug = true
- 
+
 [profile.small]
-inherits = "release"  
+inherits = "release"
 #debug = true
 opt-level = 'z'     # Optimize for size
 lto = true          # Enable link-time optimization
 codegen-units = 1   # Reduce number of codegen units to increase optimizations
 panic = 'abort'     # Abort on panic
-strip = true   
+strip = true
 
 
 #[profile.dev.package.makepad-live-tokenizer]
