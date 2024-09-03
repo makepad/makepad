@@ -3213,14 +3213,14 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
 
         label_align: {y: 0.}
-        on_focus_select_all: false,
-        clip_x: false, clip_y: false,
+        clip_x: false,
+        clip_y: false,
 
         cursor_width: 2.0,
 
         is_read_only: false,
         is_numeric_only: false,
-        empty_text: "0",
+        empty_message: "0",
 
         animator: {
             hover = {

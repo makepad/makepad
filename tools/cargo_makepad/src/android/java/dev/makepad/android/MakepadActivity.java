@@ -79,7 +79,10 @@ import android.media.MediaFormat;
 
 import java.nio.ByteBuffer;
 import android.media.MediaDataSource;
+
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 
 import dev.makepad.android.MakepadNative;
 
@@ -284,13 +287,17 @@ MidiManager.OnDeviceOpenedListener{
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
         boolean isEmulator = this.isEmulator();
+        String androidVersion = Build.VERSION.RELEASE;
+        String buildNumber = Build.DISPLAY;
+        String kernelVersion = this.getKernelVersion();
 
-        MakepadNative.onAndroidParams(cache_path, density, isEmulator);
+        MakepadNative.onAndroidParams(cache_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
-        MakepadNative.initChoreographer();        
+        float refreshRate = getDeviceRefreshRate();
+        MakepadNative.initChoreographer(refreshRate);
         //% MAIN_ACTIVITY_ON_CREATE
     }
 
@@ -626,5 +633,42 @@ MidiManager.OnDeviceOpenedListener{
             || Build.PRODUCT == "sdk"
             || Build.PRODUCT == "google_sdk"
             || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
+    }
+
+    private String getKernelVersion() {
+        try {
+            Process process = Runtime.getRuntime().exec("uname -r");
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder stringBuilder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                stringBuilder.append(line);
+            }
+            return stringBuilder.toString();
+        } catch (IOException e) {
+            return "Unknown";
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    public float getDeviceRefreshRate() {
+        float refreshRate = 60.0f;  // Default to a common refresh rate
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Use getDisplay() API on Android 11 and above
+            Display display = getDisplay();
+            if (display != null) {
+                refreshRate = display.getRefreshRate();
+            }
+        } else {
+            // Use the old method for Android 10 and below
+            WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (windowManager != null) {
+                Display display = windowManager.getDefaultDisplay();
+                refreshRate = display.getRefreshRate();
+            }
+        }
+
+        return refreshRate;
     }
 }

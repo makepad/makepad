@@ -300,13 +300,25 @@ impl PortalList {
 
         cx.end_turtle_with_area(&mut self.area);
     }
-    
+
+    /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
         let layout = if vi == Vec2Index::Y { Layout::flow_down() } else { Layout::flow_right() };
         if let Some(draw_state) = self.draw_state.get() {
             match draw_state {
                 ListDrawState::Begin => {
+                    // Sanity check: warn on the first item ID being outside of the previously-set item range.
+                    // This check is done here rather than in `begin()`, as most PortalList usage doesn't set
+                    // the item range properly until right before looping over `next_visible_items()`.
+                    #[cfg(debug_assertions)]
+                    if self.fails_sanity_check_first_id_within_item_range() {
+                        warning!("PortalList: first_id {} is greater than range_end {}.\n\
+                            --> Check that you have set the correct item range and first item ID!",
+                            self.first_id, self.range_end,
+                        );
+                    }
+
                     let viewport = cx.turtle().padded_rect();
                     self.draw_state.set(ListDrawState::Down {
                         index: self.first_id,
@@ -331,7 +343,7 @@ impl PortalList {
                             }, layout);
                         }
                     }
-                    return Some(self.first_id)
+                    return Some(self.first_id);
                 }
                 ListDrawState::Down {index, pos, viewport} | ListDrawState::DownAgain {index, pos, viewport} => {
                     let is_down_again = draw_state.is_down_again();
@@ -411,7 +423,7 @@ impl PortalList {
                             }, layout);
                         }
                     }
-                    return Some(index + 1)
+                    return Some(index + 1);
                 }
                 ListDrawState::Up {index, pos, hit_bottom, viewport} => {
                     let did_draw = cx.turtle_has_align_items();
@@ -546,6 +558,20 @@ impl PortalList {
             self.first_scroll = 0.0;
         }
         self.update_scroll_bar(cx);
+    }
+
+    /// Returns `true` if currently at the end of the list, meaning that the lasat item
+    /// is visible in the viewport.
+    pub fn is_at_end(&self) -> bool {
+        self.at_end
+    }
+
+    /// Returns `true` if this sanity check fails: the first item ID is within the item range.
+    ///
+    /// Returns `false` if the sanity check passes as expected.
+    pub fn fails_sanity_check_first_id_within_item_range(&self) -> bool {
+        !self.tail_range
+            && (self.first_id > self.range_end)
     }
 }
 
@@ -791,6 +817,12 @@ impl Widget for PortalList {
 }
 
 impl PortalListRef {
+    /// Sets the first item to be shown and its scroll offset.
+    ///
+    /// On the next draw pass, this PortalList will draw the item with the given `id`
+    /// as the first item in the list, and will set the *scroll offset*
+    /// (from the top of the viewport to the beginning of the first item)
+    /// to the given value `s`.
     pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
@@ -798,12 +830,14 @@ impl PortalListRef {
         }
     }
     
+    /// Sets the first item to be shown by this PortalList to the item with the given `id`.
     pub fn set_first_id(&self, id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
         }
     }
     
+    /// Returns the ID of the item currently shown as the first item in this PortalList.
     pub fn first_id(&self) -> usize {
         if let Some(inner) = self.borrow() {
             inner.first_id
@@ -813,12 +847,24 @@ impl PortalListRef {
         }
     }
     
+    /// Enables whether the PortalList auto-tracks the last item in the list.
+    ///
+    /// If `true`, the PortalList will continually scroll to the last item in the list
+    /// automatically, as new items are added.
+    /// If `false`, the PortalList will not auto-scroll to the last item.
     pub fn set_tail_range(&self, tail_range: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.tail_range = tail_range
         }
     }
 
+    /// See [`PortalList::is_at_end()`].
+    pub fn is_at_end(&self) -> bool {
+        let Some(inner) = self.borrow() else { return false };
+        inner.is_at_end()
+    }
+
+    /// Returns whether the given `actions` contain an action indicating that this PortalList was scrolled.
     pub fn scrolled(&self, actions: &Actions) -> bool {
         if let PortalListAction::Scroll = actions.find_widget_action(self.widget_uid()).cast() {
             return true;
@@ -826,24 +872,27 @@ impl PortalListRef {
         false
     }
 
+    /// Returns the current scroll offset of this PortalList.
+    ///
+    /// See [`PortalListRef::set_first_id_and_scroll()`] for more information.
     pub fn scroll_position(&self) -> f64 {
         let Some(inner) = self.borrow_mut() else { return 0.0 };
         inner.first_scroll
     }
     
-    /// A convenience wrapper around [`PortalList::item()`].
+    /// See [`PortalList::item()`].
     pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
         let mut inner = self.borrow_mut()?;
         inner.item(cx, entry_id, template)
     }
 
-    /// A convenience wrapper around [`PortalList::item_with_existed()`].
+    /// See [`PortalList::item_with_existed()`].
     pub fn item_with_existed(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
         let mut inner = self.borrow_mut()?;
         inner.item_with_existed(cx, entry_id, template)
     }
 
-    /// A convenience wrapper around [`PortalList::contains_item()`].
+    /// See [`PortalList::contains_item()`].
     pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
         let Some(inner) = self.borrow() else { return false };
         inner.contains_item(entry_id, template)

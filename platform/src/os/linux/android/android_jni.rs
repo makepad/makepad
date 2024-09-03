@@ -1,6 +1,7 @@
 use makepad_jni_sys as jni_sys;
 use {
-    std::{cell::{Cell, RefCell}, ffi::CString, sync::mpsc::{self, Sender}},
+    std::sync::Mutex,
+    std::{cell::{Cell}, ffi::CString, sync::mpsc::{self, Sender}},
     self::super::{
         ndk_sys,
         ndk_utils,
@@ -110,15 +111,12 @@ pub enum FromJavaMessage {
 }
 unsafe impl Send for FromJavaMessage {}
 
-thread_local! {
-    static MESSAGES_TX: RefCell<Option<mpsc::Sender<FromJavaMessage>>> = RefCell::new(None);
-}
+static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(None);
 
 fn send_from_java_message(message: FromJavaMessage) {
-    MESSAGES_TX.with(|tx| {
-        let mut tx = tx.borrow_mut();
+    if let Ok(mut tx) = MESSAGES_TX.lock(){
         tx.as_mut().unwrap().send(message).unwrap();
-    })
+    }
 }
 
 // Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
@@ -139,7 +137,7 @@ pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: m
     let env = attach_jni_env();
     let activity = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
     SET_ACTIVITY_FN(activity);
-    MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(from_java_tx));
+    *MESSAGES_TX.lock().unwrap() = Some(from_java_tx);
 }
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
@@ -161,15 +159,46 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
 
 static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
 
+/// Initializes the render loop which used the Android Choreographer when available to ensure proper vsync.
+/// If `no_android_choreographer` is present (e.g. OHOS with non-compatiblity), we fallback to a simple loop with frame pacing.
+/// This will be replaced by proper a vsync mechanism once we firgure it out for that OHOS.
+#[allow(unused)]
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographer(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
+    device_refresh_rate: jni_sys::jfloat,
 ) {
-    init_choreographer();
-}
-
-pub unsafe fn init_choreographer() {
+    // If the Choreographer is not available (e.g. OHOS), use a manual render loop
+    #[cfg(no_android_choreographer)]
+    {
+        std::thread::spawn(move || {
+            let mut last_frame_time = std::time::Instant::now();
+            let target_frame_time = std::time::Duration::from_secs_f32(1.0 / device_refresh_rate);
+            loop {
+                let now = std::time::Instant::now();
+                let elapsed = now - last_frame_time;
+                
+                if elapsed >= target_frame_time {
+                    let frame_start = std::time::Instant::now();
+                    send_from_java_message(FromJavaMessage::RenderLoop);
+                    let frame_duration = frame_start.elapsed();
+                    
+                    // Adaptive sleep: sleep less if the last frame took longer to process
+                    if frame_duration < target_frame_time {
+                        std::thread::sleep(target_frame_time - frame_duration);
+                    }
+                    
+                    last_frame_time = now;
+                } else {
+                    std::thread::sleep(target_frame_time - elapsed);
+                }
+            }
+        });
+        return;
+    }
+    
+    // Otherwise use the actual Choreographer
     CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
     post_vsync_callback();
 }
@@ -199,11 +228,17 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     cache_path: jni_sys::jstring,
     density: jni_sys::jfloat,
     is_emulator: jni_sys::jboolean,
+    android_version: jni_sys::jstring,
+    build_number: jni_sys::jstring,
+    kernel_version: jni_sys::jstring,
 ) {
     send_from_java_message(FromJavaMessage::Init(AndroidParams {
         cache_path: jstring_to_string(env, cache_path),
         density: density as f64,
         is_emulator: is_emulator != 0,
+        android_version: jstring_to_string(env, android_version),
+        build_number: jstring_to_string(env, build_number),
+        kernel_version: jstring_to_string(env, kernel_version),
     }));
 }
 
@@ -479,16 +514,16 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
-    env: *mut jni_sys::JNIEnv,
+    _env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
-    error: jni_sys::jstring,
+    _error: jni_sys::jstring,
     callback: jni_sys::jlong,
 ) {
-    let error = unsafe { jstring_to_string(env, error) };
+    //let error = unsafe { jstring_to_string(env, error) };
     let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
     send_from_java_message(FromJavaMessage::WebSocketError {
-        error,
+        error:"".to_string(),
         sender: sender.clone(),
     });
 }
