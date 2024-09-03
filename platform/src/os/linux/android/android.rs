@@ -333,12 +333,12 @@ impl Cx {
             FromJavaMessage::WebSocketClosed {sender} => {
                 self.os.websocket_parsers.remove(&sender.0);
                 let message = WebSocketMessage::Closed;
-                sender.1.send(message).unwrap();
+                sender.1.send(message).ok();
             }
             FromJavaMessage::WebSocketError {error, sender} => {
                 self.os.websocket_parsers.remove(&sender.0);
                 let message = WebSocketMessage::Error(error);
-                sender.1.send(message).unwrap();
+                sender.1.send(message).ok();
             }
             FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                 self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
@@ -511,17 +511,20 @@ impl Cx {
             crate::log!("Custom panic hook: {}", info);
         }));
 
+        // SAFETY: This function initializes JNI globals and is expected to be called only once.
         unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
 
         // lets start a thread
         std::thread::spawn(move || {
+            // SAFETY: This attaches the current thread to the JVM. It's safe as long as we're in the correct thread.
             unsafe {attach_jni_env()};
             let mut cx = startup();
             cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
             let window = loop {
-                match from_java_rx.try_recv() {
+                // Here use blocking method `recv` to reduce CPU usage during cold start.
+                match from_java_rx.recv() {
                     Ok(FromJavaMessage::Init(params)) => {
                         cx.os.dpi_factor = params.density;
                         cx.os_type = OsType::Android(params);
@@ -537,23 +540,30 @@ impl Cx {
                     _ => {}
                 }
             };
+
+            // SAFETY:
+            // The LibEgl instance (libegl) has been properly loaded and initialized earlier.
+            // We're not requesting a robust context (false), which is usually fine for most applications.
             let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context(
                 &mut libegl,
                 std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
                 false,
             ).expect("Cant create EGL context")};
+
+            // SAFETY: This is loading OpenGL function pointers. It's safe as long as we have a valid EGL context.
             unsafe {gl_sys::load_with( | s | {
                 let s = CString::new(s).unwrap();
                 libegl.eglGetProcAddress.unwrap()(s.as_ptr())
             })};
 
+            // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,
                 egl_config,
                 window as _,
                 std::ptr::null_mut(),
             )};
-            
+
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
@@ -572,6 +582,7 @@ impl Cx {
 
             let display = cx.os.display.take().unwrap();
 
+            // SAFETY: These calls clean up EGL resources. They're safe as long as we have valid EGL objects.
             unsafe {
                 (display.libegl.eglMakeCurrent.unwrap())(
                     display.egl_display,
@@ -585,6 +596,7 @@ impl Cx {
             }
         });
     }
+
 
     pub fn start_network_live_file_watcher(&mut self) {
 
