@@ -525,7 +525,18 @@ impl PortalList {
             None
         }
     }
-
+    
+    pub fn position_of_item(&self, cx:&Cx, entry_id: usize) -> Option<f64>{
+        for ((id, _),item) in &*self.items {
+            if *id == entry_id{
+                let item_rect = item.area().rect(cx);
+                let self_rect = self.area.rect(cx);
+                return Some(item_rect.pos.y - self_rect.pos.y)
+            }
+        }
+        None
+    }
+    
     /// Returns `true` if a widget already exists for the given `entry_id` and `template`.
     pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
         self.items.contains_key(&(entry_id, template))
@@ -896,6 +907,11 @@ impl PortalListRef {
     pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
         let Some(inner) = self.borrow() else { return false };
         inner.contains_item(entry_id, template)
+    }
+    
+    pub fn position_of_item(&self, cx:&Cx, entry_id: usize) -> Option<f64>{
+        let Some(inner) = self.borrow() else { return None };
+        inner.position_of_item(cx, entry_id)
     }
     
     pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
