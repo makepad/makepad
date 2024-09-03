@@ -82,6 +82,9 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             else if let Some(deref_field) = &deref_field{
                 tb.add("    fn area(&self)->Area{ self.").ident(&deref_field).add(".area()}");
             }
+            else if redraw_fields.len()>0{
+                tb.add("    fn area(&self)->Area{ self.").ident(&redraw_fields[0]).add(".area()}");
+            }
             
             if let Some(walk_field) = &walk_field{
                 tb.add("    fn walk(&mut self, _cx:&mut Cx) -> Walk { self.").ident(&walk_field).add("}");
