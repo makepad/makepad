@@ -36,12 +36,11 @@ pub struct TextInput {
 
     #[live] pub is_read_only: bool,
     #[live] pub is_numeric_only: bool,
-    #[live] pub empty_text: String,
+    #[live] pub empty_message: String,
     #[live] pub text: String,
 
     #[rust] cursor: Cursor,
     #[rust] history: History,
-    #[rust] rect: Rect,
 }
 
 impl TextInput {
@@ -84,23 +83,23 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
-    fn position_to_index_affinity(&self, cx: &mut Cx2d, position: DVec2) -> IndexAffinity {
+    fn position_to_index_affinity(&self, cx: &mut Cx2d, width: f64, position: DVec2) -> IndexAffinity {
         self.draw_label.position_to_index_affinity(
             cx,
-            Walk::size(self.walk.width,self.walk.height),
+            Walk::fit(),
             self.label_align,
-            self.rect.size.x,
+            width,
             &self.text,
             position,
         )
     }
 
-    fn cursor_position(&self, cx: &mut Cx2d) -> DVec2 {
+    fn cursor_position(&self, cx: &mut Cx2d, width: f64) -> DVec2 {
         self.draw_label.index_affinity_to_position(
             cx,
-            Walk::size(self.walk.width,self.walk.height),
+            Walk::fit(),
             self.label_align,
-            self.rect.size.x,
+            width,
             &self.text,
             self.cursor.head,
         )
@@ -132,20 +131,20 @@ impl TextInput {
         );
     }
 
-    fn move_cursor_up(&mut self, cx: &mut Cx2d, is_select: bool) {
-        let position = self.cursor_position(cx);
+    fn move_cursor_up(&mut self, cx: &mut Cx2d, width: f64, is_select: bool) {
+        let position = self.cursor_position(cx, width);
         let line_spacing = self.draw_label.line_spacing(cx);
-        let index_affinity = self.position_to_index_affinity(cx, DVec2 {
+        let index_affinity = self.position_to_index_affinity(cx, width, DVec2 {
             x: position.x,
             y: position.y - 0.5 * line_spacing,
         });
         self.move_cursor_to(index_affinity, is_select)
     }
 
-    fn move_cursor_down(&mut self, cx: &mut Cx2d, is_select: bool) {
-        let position = self.cursor_position(cx);
+    fn move_cursor_down(&mut self, cx: &mut Cx2d, width: f64, is_select: bool) {
+        let position = self.cursor_position(cx, width);
         let line_spacing = self.draw_label.line_spacing(cx);
-        let index_affinity = self.position_to_index_affinity(cx, DVec2 {
+        let index_affinity = self.position_to_index_affinity(cx, width, DVec2 {
             x: position.x,
             y: position.y + 1.5 * line_spacing,
         });
@@ -226,6 +225,12 @@ impl TextInput {
 
 impl Widget for TextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let rect = self.draw_bg.area().rect(cx);
+        let padded_rect = Rect {
+            pos: rect.pos + self.layout.padding.left_top(),
+            size: rect.size - self.layout.padding.size(),
+        };
+
         let uid = self.widget_uid();
 
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -276,7 +281,7 @@ impl Widget for TextInput {
             }) => {
                 let event = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                self.move_cursor_up(&mut cx, is_select);
+                self.move_cursor_up(&mut cx, padded_rect.size.x, is_select);
                 self.draw_bg.redraw(&mut cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -289,7 +294,7 @@ impl Widget for TextInput {
             }) => {
                 let event = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                self.move_cursor_down(&mut cx, is_select);
+                self.move_cursor_down(&mut cx, padded_rect.size.x, is_select);
                 self.draw_bg.redraw(&mut cx);
             }
             Hit::KeyDown(KeyEvent {
@@ -499,10 +504,16 @@ impl Widget for TextInput {
             }) => {
                 let event = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                let index_affinity = self.position_to_index_affinity(&mut cx, abs - self.rect.pos);
+                let index_affinity = self.position_to_index_affinity(
+                    &mut cx,
+                    padded_rect.size.x,
+                    abs - padded_rect.pos
+                );
                 self.move_cursor_to(index_affinity, false);
                 if tap_count == 2 {
                     self.select_word();
+                } else if tap_count == 3 {
+                    self.select_all();
                 }
                 self.set_key_focus(&mut *cx);
                 self.draw_bg.redraw(&mut *cx);
@@ -514,10 +525,16 @@ impl Widget for TextInput {
             }) => {
                 let event: DrawEvent = DrawEvent::default();
                 let mut cx = Cx2d::new(cx, &event);
-                let index_affinity = self.position_to_index_affinity(&mut cx, abs - self.rect.pos);
+                let index_affinity = self.position_to_index_affinity(
+                    &mut cx,
+                    padded_rect.size.x,
+                    abs - padded_rect.pos
+                );
                 self.move_cursor_to(index_affinity, true);
                 if tap_count == 2 {
                     self.select_word();
+                } else if tap_count == 3 {
+                    self.select_all();
                 }
                 self.draw_bg.redraw(&mut *cx);
             }
@@ -535,44 +552,44 @@ impl Widget for TextInput {
             self.draw_label.is_empty = 1.0;
             self.draw_label.draw_walk(
                 cx,
-                Walk::size(self.walk.width,self.walk.height),
+                Walk::fit(),
                 self.label_align,
-                &self.empty_text,
+                &self.empty_message,
             );
         } else {
             self.draw_label.is_empty = 0.0;
             self.draw_label.draw_walk(
                 cx,
-                Walk::size(self.walk.width,self.walk.height),
+                Walk::fit(),
                 self.label_align,
                 &self.text,
             );
         }
 
-        self.rect = cx.turtle().padded_rect_used();
-     
+        let padded_rect = cx.turtle().padded_rect();
+
         // Draw selection
         let rects = self.draw_label.selected_rects(
             cx,
-            Walk::size(self.walk.width,self.walk.height),
+            Walk::fit(),
             self.label_align,
-            self.rect.size.x,
+            padded_rect.size.x,
             &self.text,
             self.cursor.head.min(self.cursor.tail),
             self.cursor.head.max(self.cursor.tail)
         );
         for rect in rects {
             self.draw_selection.draw_abs(cx, Rect {
-                pos: self.rect.pos + rect.pos,
+                pos: padded_rect.pos + rect.pos,
                 size: rect.size,
             });
         }
      
         // Draw cursor
-        let cursor_position = self.cursor_position(cx);
+        let cursor_position = self.cursor_position(cx, padded_rect.size.x);
         let cursor_height = self.draw_label.line_height(cx);
         self.draw_cursor.draw_abs(cx, Rect {
-            pos: self.rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
+            pos: padded_rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
             size: dvec2(self.cursor_width, cursor_height)
         });
 
@@ -596,8 +613,12 @@ impl Widget for TextInput {
     }
     
     fn set_text(&mut self, text: &str) {
+        if self.text == text {
+            return;
+        }
         self.text = self.filter_input(text.to_string());
-        self.set_cursor(Cursor::default());
+        self.cursor.head.index = self.cursor.head.index.min(text.len());
+        self.cursor.tail.index = self.cursor.tail.index.min(text.len());
         self.history.clear();
     }
 }
@@ -641,6 +662,13 @@ impl TextInputRef {
             });
         }
     }
+
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        if let Some(inner) = self.borrow() {
+            inner.set_key_focus(cx);
+        }
+    }
+
 }
 
 #[derive(Clone, Copy, Debug, Default)]
