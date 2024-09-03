@@ -1013,10 +1013,10 @@ impl DrawText {
             // Compute the padded size of the bounding box of the glyph in device pixels.
             let mut padded_glyph_size_dpx = glyph_size_dpx;
             if padded_glyph_size_dpx.x != 0.0 {
-                padded_glyph_size_dpx.x += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.x = padded_glyph_size_dpx.x.ceil() + glyph_padding_dpx * 2.0;
             }
             if padded_glyph_size_dpx.y != 0.0 {
-                padded_glyph_size_dpx.y += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.y = padded_glyph_size_dpx.y.ceil() + glyph_padding_dpx * 2.0;
             }
 
             // Compute the padded size of the bounding box of the glyph in logical pixels.
