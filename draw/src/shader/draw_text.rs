@@ -483,7 +483,7 @@ impl DrawText {
 
         let mut closest = IndexAffinity::new(text.len(), Affinity::After);
         let line_height = compute_line_height(font_ids, font_size, font_atlas);
-        let mut prev_glyph_end = None;
+        let mut prev_glyph_end = 0;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -521,13 +521,13 @@ impl DrawText {
                                 position.x = next_position_x;
                             }
                             position.x += width_per_grapheme;
-                            prev_glyph_end = Some(glyph_end);
+                            prev_glyph_end = glyph_end;
                         }
                     }
                     LayoutEvent::Newline { is_soft } => {
                         if target_position.y < position.y + line_height {
                             closest = IndexAffinity::new(
-                                prev_glyph_end.unwrap(),
+                                prev_glyph_end,
                                 if is_soft {
                                     Affinity::Before
                                 } else {
@@ -536,6 +536,7 @@ impl DrawText {
                             );
                             return true;
                         }
+                        prev_glyph_end += 1;
                     }
                 }
                 false
@@ -592,7 +593,7 @@ impl DrawText {
         };
 
         let mut closest_position = None;
-        let mut prev_glyph_end = None;
+        let mut prev_glyph_end = 0;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -625,14 +626,15 @@ impl DrawText {
                                 }
                                 position.x += glyph_width_per_grapheme;
                             }
-                            prev_glyph_end = Some(glyph_end);
+                            prev_glyph_end = glyph_end;
                         }
                     }
                     LayoutEvent::Newline { is_soft } => {
-                        if target.index == prev_glyph_end.unwrap() && (!is_soft || target.affinity == Affinity::Before) {
+                        if target.index == prev_glyph_end && (!is_soft || target.affinity == Affinity::Before) {
                             closest_position = Some(position);
                             return true;
                         }
+                        prev_glyph_end += 1;
                     }
                 }
                 false
