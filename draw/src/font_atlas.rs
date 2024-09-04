@@ -1,41 +1,38 @@
-use {
-    makepad_rustybuzz::UnicodeBuffer,
-    sdfer::NDCursor as _
-};
+use {makepad_rustybuzz::UnicodeBuffer, sdfer::NDCursor as _};
 
 pub use {
-    std::{
-        borrow::Borrow,
-        collections::VecDeque,
-        hash::{Hash, Hasher},
-        rc::Rc,
-        cell::RefCell,
-        io::prelude::*,
-        fs::File,
-        collections::HashMap,
-    },
     crate::{
-        makepad_platform::*,
         cx_2d::Cx2d,
-        turtle::{Walk, Layout},
-        draw_list_2d::{ManyInstances, DrawList2d, RedrawingApi},
+        draw_list_2d::{DrawList2d, ManyInstances, RedrawingApi},
         geometry::GeometryQuad2D,
+        makepad_platform::*,
         makepad_vector::font::Glyph,
-        makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
         makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
+        makepad_vector::trapezoidator::Trapezoidator,
+        turtle::{Layout, Walk},
     },
     fxhash::FxHashMap,
     makepad_rustybuzz::{Direction, GlyphBuffer},
     makepad_vector::ttf_parser::GlyphId,
+    std::{
+        borrow::Borrow,
+        cell::RefCell,
+        collections::HashMap,
+        collections::VecDeque,
+        fs::File,
+        hash::{Hash, Hasher},
+        io::prelude::*,
+        rc::Rc,
+    },
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
 pub(crate) const ATLAS_HEIGHT: usize = 4096;
 
 pub struct CxFontAtlas {
-    pub fonts: Vec<Option<CxFont >>,
+    pub fonts: Vec<Option<CxFont>>,
     pub path_to_font_id: HashMap<String, usize>,
     pub texture_sdf: Texture,
     pub texture_svg: Texture,
@@ -63,15 +60,13 @@ impl CxShapeCache {
         font_ids: &[usize],
         font_atlas: &CxFontAtlas,
     ) -> &[GlyphInfo] {
-        if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
+        if !self
+            .shapes
+            .contains_key(&(direction, text, font_ids) as &(dyn ShapeKey))
+        {
             let shape_key = (direction, text.into(), font_ids.into());
             let mut glyph_infos = Vec::new();
-            let _ = self.shape_internal(
-                text,
-                font_ids,
-                font_atlas,
-                &mut glyph_infos,
-            );
+            let _ = self.shape_internal(text, font_ids, font_atlas, &mut glyph_infos);
             if self.shape_keys.len() == 4096 {
                 let shape_key = self.shape_keys.pop_front().unwrap();
                 self.shapes.remove(&shape_key as &(dyn ShapeKey));
@@ -98,9 +93,9 @@ impl CxShapeCache {
 
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
-        let buffer = font.owned_font_face.with_ref(|face| {
-            makepad_rustybuzz::shape(face, &[], buffer)
-        });
+        let buffer = font
+            .owned_font_face
+            .with_ref(|face| makepad_rustybuzz::shape(face, &[], buffer));
 
         let infos = buffer.glyph_infos();
         let mut info_iter = infos.iter();
@@ -115,22 +110,53 @@ impl CxShapeCache {
                 });
             } else {
                 let start = info.cluster as usize;
-                let end = loop {
+                let mut end = start;
+
+                loop {
                     info_slot = info_iter.next();
                     if let Some(info) = info_slot {
                         if info.glyph_id != 0 {
-                            break info.cluster as usize;
+                            end = info.cluster as usize;
+                            if end > start {
+                                break;
+                            }
                         }
                     } else {
-                        break text.len()
+                        end = text.len();
+                        break;
                     }
-                };
-                if self.shape_internal(
-                    &text[start..end],
-                    font_ids,
-                    font_atlas,
-                    glyph_infos,
-                ).is_err() {
+                }
+
+                // Ensure that end is always greater than start.
+                if end <= start {
+                    end = text.len();
+                }
+
+                // Check if the text slice is valid
+                if start >= text.len() || end > text.len() || start >= end {
+                    println!(
+                        "Invalid text slice: start={}, end={}, text.len()={}",
+                        start,
+                        end,
+                        text.len()
+                    );
+                    return Err(());
+                }
+
+                //  ensure that it does not go out of bounds.
+                let safe_text = &text[start..end.min(text.len())];
+
+                if safe_text.is_empty() {
+                    println!(
+                        "Empty text slice: start={}, end={}, text.len()={}",
+                        start,
+                        end,
+                        text.len()
+                    );
+                    return Err(());
+                }
+
+                if let Err(_) = self.shape_internal(safe_text, font_ids, font_atlas, glyph_infos) {
                     glyph_infos.push(GlyphInfo {
                         font_id,
                         glyph_id: info.glyph_id as usize,
@@ -244,7 +270,7 @@ impl CxFontAtlas {
                 full: false,
                 texture_size: DVec2 {
                     x: ATLAS_WIDTH as f64,
-                    y: ATLAS_HEIGHT as f64
+                    y: ATLAS_HEIGHT as f64,
                 },
                 xpos: 0,
                 ypos: 0,
@@ -258,13 +284,18 @@ impl CxFontAtlas {
                         cutoff: 0.25,
                         ..Default::default()
                     },
-                })
+                }),
             },
         }
     }
 }
 impl CxFontsAtlasAlloc {
-    pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64, todo: CxFontsAtlasTodo) -> CxFontAtlasGlyph {
+    pub fn alloc_atlas_glyph(
+        &mut self,
+        w: f64,
+        h: f64,
+        todo: CxFontsAtlasTodo,
+    ) -> CxFontAtlasGlyph {
         // In SDF mode, leave enough room around each glyph (i.e. padding).
         let pad = self.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
 
@@ -294,7 +325,11 @@ impl CxFontsAtlasAlloc {
         if h + self.ypos >= self.texture_size.y as usize {
             // ok so the fontatlas is full..
             self.full = true;
-            println!("FONT ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
+            println!(
+                "FONT ATLAS FULL, TODO FIX THIS {} > {},",
+                h + self.ypos,
+                self.texture_size.y
+            );
         }
         if h > self.hmax {
             self.hmax = h;
@@ -308,10 +343,9 @@ impl CxFontsAtlasAlloc {
         self.todo.push(todo);
 
         CxFontAtlasGlyph {
-            t1: (dvec2(
-                (x_range.start + pad) as f64,
-                (y_range.start + pad) as f64,
-            ) / self.texture_size).into(),
+            t1: (dvec2((x_range.start + pad) as f64, (y_range.start + pad) as f64)
+                / self.texture_size)
+                .into(),
 
             // NOTE(eddyb) `- 1` is because the texture coordinate rectangle
             // formed by `t1` and `t2` is *inclusive*, while the integer ranges
@@ -319,15 +353,18 @@ impl CxFontsAtlasAlloc {
             t2: (dvec2(
                 (x_range.end - pad - 1) as f64,
                 (y_range.end - pad - 1) as f64,
-            ) / self.texture_size).into(),
+            ) / self.texture_size)
+                .into(),
         }
     }
 }
 
 #[derive(Debug, Clone, Live, LiveRegister)]
 pub struct Font {
-    #[rust] pub font_id: Option<usize>,
-    #[live] pub path: LiveDependency
+    #[rust]
+    pub font_id: Option<usize>,
+    #[live]
+    pub path: LiveDependency,
 }
 
 #[derive(Clone)]
@@ -340,14 +377,19 @@ impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         Cx2d::lazy_construct_font_atlas(cx);
         let atlas = cx.get_global::<CxFontsAtlasRc>().clone();
-        self.font_id = Some(atlas.0.borrow_mut().get_font_by_path(cx, self.path.as_str()));
+        self.font_id = Some(
+            atlas
+                .0
+                .borrow_mut()
+                .get_font_by_path(cx, self.path.as_str()),
+        );
     }
 }
 
 impl CxFontAtlas {
     pub fn get_font_by_path(&mut self, cx: &mut Cx, path: &str) -> usize {
-        if path.len() == 0{
-            return 0
+        if path.len() == 0 {
+            return 0;
         }
         if let Some(item) = self.path_to_font_id.get(path) {
             return *item;
@@ -355,7 +397,7 @@ impl CxFontAtlas {
         let font_id = self.fonts.len();
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
-        
+
         match cx.take_dependency(path) {
             // FIXME(eddyb) this clones the `data` `Vec<u8>`, in order to own it
             // inside a `owned_font_face::OwnedFace`.
@@ -366,14 +408,14 @@ impl CxFontAtlas {
                 Ok(cxfont) => {
                     self.fonts[font_id] = Some(cxfont);
                 }
-            }
+            },
             Err(err) => {
                 error!("get_font_by_path - {} {}", path, err)
             }
         }
         font_id
     }
-    
+
     pub fn reset_fonts_atlas(&mut self) {
         for cxfont in &mut self.fonts {
             if let Some(cxfont) = cxfont {
@@ -387,30 +429,35 @@ impl CxFontAtlas {
         self.alloc.hmax = 0;
         self.clear_buffer = true;
     }
-    
+
     pub fn get_internal_font_atlas_texture_id(&self) -> Texture {
         self.texture_sdf.clone()
     }
 }
 
 impl<'a> Cx2d<'a> {
-    pub fn lazy_construct_font_atlas(cx: &mut Cx){
+    pub fn lazy_construct_font_atlas(cx: &mut Cx) {
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
-            
-            let texture_sdf = Texture::new_with_format(cx, TextureFormat::VecRu8 {
-                width: ATLAS_WIDTH,
-                height: ATLAS_HEIGHT,
-                data: vec![],
-                unpack_row_length: None
-            });
+            let texture_sdf = Texture::new_with_format(
+                cx,
+                TextureFormat::VecRu8 {
+                    width: ATLAS_WIDTH,
+                    height: ATLAS_HEIGHT,
+                    data: vec![],
+                    unpack_row_length: None,
+                },
+            );
 
-            let texture_svg = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
-                width: ATLAS_WIDTH,
-                height: ATLAS_HEIGHT,
-                data: vec![],
-            });
-            
+            let texture_svg = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: ATLAS_WIDTH,
+                    height: ATLAS_HEIGHT,
+                    data: vec![],
+                },
+            );
+
             let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
@@ -421,18 +468,18 @@ impl<'a> Cx2d<'a> {
             cx.set_global(ShapeCacheRc(Rc::new(RefCell::new(CxShapeCache::new()))));
         }
     }
-    
-    pub fn reset_fonts_atlas(cx:&mut Cx){
+
+    pub fn reset_fonts_atlas(cx: &mut Cx) {
         if cx.has_global::<CxFontsAtlasRc>() {
             let mut fonts_atlas = cx.get_global::<CxFontsAtlasRc>().0.borrow_mut();
             fonts_atlas.reset_fonts_atlas();
         }
     }
-        
+
     pub fn draw_font_atlas(&mut self) {
         let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
-        let fonts_atlas = &mut*fonts_atlas;
+        let fonts_atlas = &mut *fonts_atlas;
 
         if fonts_atlas.alloc.full {
             fonts_atlas.reset_fonts_atlas();
@@ -454,7 +501,12 @@ impl<'a> Cx2d<'a> {
     ) {
         let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
         let _atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
-        let _glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
+        let _glyph = cxfont.owned_font_face.with_ref(|face| {
+            cxfont
+                .ttf_font
+                .get_glyph_by_id(face, todo.glyph_id)
+                .unwrap()
+        });
 
         self.swrast_atlas_todo_sdf(fonts_atlas, todo, reuse_sdfer_bufs);
     }
@@ -467,13 +519,21 @@ impl<'a> Cx2d<'a> {
     ) {
         let cxfont = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
         let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
-        let glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
+        let glyph = cxfont.owned_font_face.with_ref(|face| {
+            cxfont
+                .ttf_font
+                .get_glyph_by_id(face, todo.glyph_id)
+                .unwrap()
+        });
 
         let is_one_of_tab_lf_cr = ['\t', '\n', '\r'].iter().any(|&c| {
-            Some(todo.glyph_id) == cxfont.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
+            Some(todo.glyph_id)
+                == cxfont
+                    .owned_font_face
+                    .with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
         });
         if is_one_of_tab_lf_cr {
-            return
+            return;
         }
 
         let glyphtc = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
@@ -484,8 +544,10 @@ impl<'a> Cx2d<'a> {
         // would be kept in each `CxFontsAtlasTodo`, to avoid recomputation here.
         let render_pad_dpx = 2.0;
         let render_wh = dvec2(
-            ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels).ceil() + render_pad_dpx * 2.0,
-            ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels).ceil() + render_pad_dpx * 2.0,
+            ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels).ceil()
+                + render_pad_dpx * 2.0,
+            ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels).ceil()
+                + render_pad_dpx * 2.0,
         );
 
         // NOTE(eddyb) `+ 1.0` is because the texture coordinate rectangle
@@ -520,42 +582,43 @@ impl<'a> Cx2d<'a> {
         );
 
         let mut cur = ab_glyph_rasterizer::point(0.0, 0.0);
-        let to_ab = |p: makepad_vector::geometry::Point| ab_glyph_rasterizer::point(p.x as f32, p.y as f32);
+        let to_ab =
+            |p: makepad_vector::geometry::Point| ab_glyph_rasterizer::point(p.x as f32, p.y as f32);
         commands
-        .fold(ab_glyph_rasterizer::Rasterizer::new(
-            glyph_rast.width(),
-            glyph_rast.height()
-        ), |mut rasterizer, cmd| match cmd {
-            makepad_vector::path::PathCommand::MoveTo(p) => {
-                cur = to_ab(p);
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::LineTo(p1) => {
-                let (p0, p1) = (cur, to_ab(p1));
-                rasterizer.draw_line(p0, p1);
-                cur = p1;
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::ArcTo(..) => {
-                unreachable!("font glyphs should not use arcs");
-            }
-            makepad_vector::path::PathCommand::QuadraticTo(p1, p2) => {
-                let (p0, p1, p2) = (cur, to_ab(p1), to_ab(p2));
-                rasterizer.draw_quad(p0, p1, p2);
-                cur = p2;
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::CubicTo(p1, p2, p3) => {
-                let (p0, p1, p2, p3) = (cur, to_ab(p1), to_ab(p2), to_ab(p3));
-                rasterizer.draw_cubic(p0, p1, p2, p3);
-                cur = p3;
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::Close => rasterizer
-        })
-        .for_each_pixel_2d(|x, y, a| {
-            glyph_rast[(x as usize, y as usize)] = sdfer::Unorm8::encode(a);
-        });
+            .fold(
+                ab_glyph_rasterizer::Rasterizer::new(glyph_rast.width(), glyph_rast.height()),
+                |mut rasterizer, cmd| match cmd {
+                    makepad_vector::path::PathCommand::MoveTo(p) => {
+                        cur = to_ab(p);
+                        rasterizer
+                    }
+                    makepad_vector::path::PathCommand::LineTo(p1) => {
+                        let (p0, p1) = (cur, to_ab(p1));
+                        rasterizer.draw_line(p0, p1);
+                        cur = p1;
+                        rasterizer
+                    }
+                    makepad_vector::path::PathCommand::ArcTo(..) => {
+                        unreachable!("font glyphs should not use arcs");
+                    }
+                    makepad_vector::path::PathCommand::QuadraticTo(p1, p2) => {
+                        let (p0, p1, p2) = (cur, to_ab(p1), to_ab(p2));
+                        rasterizer.draw_quad(p0, p1, p2);
+                        cur = p2;
+                        rasterizer
+                    }
+                    makepad_vector::path::PathCommand::CubicTo(p1, p2, p3) => {
+                        let (p0, p1, p2, p3) = (cur, to_ab(p1), to_ab(p2), to_ab(p3));
+                        rasterizer.draw_cubic(p0, p1, p2, p3);
+                        cur = p3;
+                        rasterizer
+                    }
+                    makepad_vector::path::PathCommand::Close => rasterizer,
+                },
+            )
+            .for_each_pixel_2d(|x, y, a| {
+                glyph_rast[(x as usize, y as usize)] = sdfer::Unorm8::encode(a);
+            });
 
         let mut glyph_out = if let Some(sdf_config) = &fonts_atlas.alloc.sdf {
             let (glyph_sdf, new_reuse_bufs) = sdfer::esdt::glyph_to_sdf(
@@ -570,27 +633,40 @@ impl<'a> Cx2d<'a> {
         };
 
         let mut atlas_data = vec![];
-        fonts_atlas.texture_sdf.swap_vec_u8(self.cx, &mut atlas_data);
-        let (atlas_w, atlas_h) = fonts_atlas.texture_sdf.get_format(self.cx).vec_width_height().unwrap();
+        fonts_atlas
+            .texture_sdf
+            .swap_vec_u8(self.cx, &mut atlas_data);
+        let (atlas_w, atlas_h) = fonts_atlas
+            .texture_sdf
+            .get_format(self.cx)
+            .vec_width_height()
+            .unwrap();
         if atlas_data.is_empty() {
-            atlas_data = vec![0; atlas_w*atlas_h];
+            atlas_data = vec![0; atlas_w * atlas_h];
         } else {
-            assert_eq!(atlas_data.len(), atlas_w*atlas_h);
+            assert_eq!(atlas_data.len(), atlas_w * atlas_h);
         }
 
-        let sdf_pad = fonts_atlas.alloc.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
+        let sdf_pad = fonts_atlas
+            .alloc
+            .sdf
+            .as_ref()
+            .map_or(0, |sdf| sdf.params.pad);
         let atlas_x0 = (glyphtc.t1.x as f64 * fonts_atlas.alloc.texture_size.x) as usize - sdf_pad;
         let atlas_y0 = (glyphtc.t1.y as f64 * fonts_atlas.alloc.texture_size.y) as usize - sdf_pad;
 
         for y in 0..glyph_out.height() {
-            let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..glyph_out.width()];
+            let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w]
+                [atlas_x0..][..glyph_out.width()];
             let mut src = glyph_out.cursor_at(0, y);
             for dst in dst {
                 *dst = src.get_mut().to_bits();
                 src.advance((1, 0));
             }
         }
-        fonts_atlas.texture_sdf.swap_vec_u8(self.cx, &mut atlas_data);
+        fonts_atlas
+            .texture_sdf
+            .swap_vec_u8(self.cx, &mut atlas_data);
     }
 }
 
@@ -608,9 +684,9 @@ impl CxFont {
             let mut buffer = UnicodeBuffer::new();
             buffer.set_direction(direction);
             buffer.push_str(string);
-            let buffer = self.owned_font_face.with_ref(|face| {
-                makepad_rustybuzz::shape(face, &[], buffer)
-            });
+            let buffer = self
+                .owned_font_face
+                .with_ref(|face| makepad_rustybuzz::shape(face, &[], buffer));
             self.shape_cache.insert(direction, Rc::from(string), buffer);
         }
         self.shape_cache.get(direction, string).unwrap()
@@ -633,7 +709,8 @@ impl OldShapeCache {
     }
 
     pub fn contains(&self, direction: Direction, string: &str) -> bool {
-        self.buffers.contains_key(&(direction, string) as &(dyn OldShapeKey))
+        self.buffers
+            .contains_key(&(direction, string) as &(dyn OldShapeKey))
     }
 
     pub fn get(&mut self, direction: Direction, string: &str) -> Option<&GlyphBuffer> {
@@ -705,7 +782,7 @@ impl OldShapeKey for (Direction, Rc<str>) {
 #[derive(Clone)]
 pub struct CxFontAtlasPage {
     pub font_size_in_device_pixels: f64,
-    pub atlas_glyphs: HashMap<usize, CxFontAtlasGlyph>
+    pub atlas_glyphs: HashMap<usize, CxFontAtlasGlyph>,
 }
 
 #[derive(Clone, Copy)]
@@ -722,9 +799,12 @@ pub struct CxFontsAtlasTodo {
 }
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(bytes: Rc<Vec<u8>>) -> Result<Self, crate::owned_font_face::FaceParsingError> {
+    pub fn load_from_ttf_bytes(
+        bytes: Rc<Vec<u8>>,
+    ) -> Result<Self, crate::owned_font_face::FaceParsingError> {
         let owned_font_face = crate::owned_font_face::OwnedFace::parse(bytes, 0)?;
-        let ttf_font = owned_font_face.with_ref(|face| makepad_vector::ttf_parser::from_ttf_parser_face(face));
+        let ttf_font =
+            owned_font_face.with_ref(|face| makepad_vector::ttf_parser::from_ttf_parser_face(face));
         Ok(Self {
             ttf_font,
             owned_font_face,
@@ -733,11 +813,11 @@ impl CxFont {
             shape_cache: OldShapeCache::new(),
         })
     }
-    
+
     pub fn get_atlas_page_id(&mut self, font_size_in_device_pixels: f64) -> usize {
         for (index, sg) in self.atlas_pages.iter().enumerate() {
             if sg.font_size_in_device_pixels == font_size_in_device_pixels {
-                return index
+                return index;
             }
         }
         self.atlas_pages.push(CxFontAtlasPage {
@@ -751,15 +831,15 @@ impl CxFont {
         if let Some(id) = self.glyph_ids[c as usize] {
             id
         } else {
-            let id = self.owned_font_face.with_ref(|face| {
-                face.glyph_index(c).unwrap_or(GlyphId(0))
-            });
+            let id = self
+                .owned_font_face
+                .with_ref(|face| face.glyph_index(c).unwrap_or(GlyphId(0)));
             self.glyph_ids[c as usize] = Some(id);
             id
         }
     }
 
-    pub fn get_glyph(&mut self, c:char)->Option<&Glyph>{
+    pub fn get_glyph(&mut self, c: char) -> Option<&Glyph> {
         if c < '\u{10000}' {
             let id = self.glyph_id(c);
             Some(self.get_glyph_by_id(id.0 as usize).unwrap())
@@ -769,7 +849,8 @@ impl CxFont {
     }
 
     pub fn get_glyph_by_id(&mut self, id: usize) -> makepad_vector::ttf_parser::Result<&Glyph> {
-        self.owned_font_face.with_ref(|face| self.ttf_font.get_glyph_by_id(face, id))
+        self.owned_font_face
+            .with_ref(|face| self.ttf_font.get_glyph_by_id(face, id))
     }
 
     pub fn get_advance_width_for_char(&mut self, c: char) -> Option<f64> {
@@ -778,6 +859,9 @@ impl CxFont {
     }
 
     pub fn get_advance_width_for_glyph(&mut self, id: GlyphId) -> Option<f64> {
-        self.owned_font_face.with_ref(|face| face.glyph_hor_advance(id).map(|advance_width| advance_width as f64))
+        self.owned_font_face.with_ref(|face| {
+            face.glyph_hor_advance(id)
+                .map(|advance_width| advance_width as f64)
+        })
     }
 }
