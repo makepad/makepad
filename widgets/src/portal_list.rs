@@ -507,7 +507,9 @@ impl PortalList {
     /// Creates a new widget from the given `template` or returns an existing widget,
     /// if one already exists with the same `entry_id` and `template`.
     ///
-    /// If you don't care whether the widget already existed or not, use [`PortalList::item()`] instead.
+    /// * If you only want to check whether the item already existed without creating one,
+    ///   use [`PortalList::get_item()`] instead.
+    /// * If you don't care whether the widget already existed or not, use [`PortalList::item()`] instead.
     ///
     /// ## Return
     /// * If a widget of the same `template` already existed for the given `entry_id`,
