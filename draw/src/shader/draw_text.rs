@@ -483,7 +483,7 @@ impl DrawText {
 
         let mut closest = IndexAffinity::new(text.len(), Affinity::After);
         let line_height = compute_line_height(font_ids, font_size, font_atlas);
-        let mut prev_glyph_end = None;
+        let mut prev_glyph_end = 0;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -521,13 +521,13 @@ impl DrawText {
                                 position.x = next_position_x;
                             }
                             position.x += width_per_grapheme;
-                            prev_glyph_end = Some(glyph_end);
+                            prev_glyph_end = glyph_end;
                         }
                     }
                     LayoutEvent::Newline { is_soft } => {
                         if target_position.y < position.y + line_height {
                             closest = IndexAffinity::new(
-                                prev_glyph_end.unwrap(),
+                                prev_glyph_end,
                                 if is_soft {
                                     Affinity::Before
                                 } else {
@@ -536,6 +536,7 @@ impl DrawText {
                             );
                             return true;
                         }
+                        prev_glyph_end += 1;
                     }
                 }
                 false
@@ -592,7 +593,7 @@ impl DrawText {
         };
 
         let mut closest_position = None;
-        let mut prev_glyph_end = None;
+        let mut prev_glyph_end = 0;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -625,14 +626,15 @@ impl DrawText {
                                 }
                                 position.x += glyph_width_per_grapheme;
                             }
-                            prev_glyph_end = Some(glyph_end);
+                            prev_glyph_end = glyph_end;
                         }
                     }
                     LayoutEvent::Newline { is_soft } => {
-                        if target.index == prev_glyph_end.unwrap() && (!is_soft || target.affinity == Affinity::Before) {
+                        if target.index == prev_glyph_end && (!is_soft || target.affinity == Affinity::Before) {
                             closest_position = Some(position);
                             return true;
                         }
+                        prev_glyph_end += 1;
                     }
                 }
                 false
@@ -1011,10 +1013,10 @@ impl DrawText {
             // Compute the padded size of the bounding box of the glyph in device pixels.
             let mut padded_glyph_size_dpx = glyph_size_dpx;
             if padded_glyph_size_dpx.x != 0.0 {
-                padded_glyph_size_dpx.x += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.x = padded_glyph_size_dpx.x.ceil() + glyph_padding_dpx * 2.0;
             }
             if padded_glyph_size_dpx.y != 0.0 {
-                padded_glyph_size_dpx.y += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.y = padded_glyph_size_dpx.y.ceil() + glyph_padding_dpx * 2.0;
             }
 
             // Compute the padded size of the bounding box of the glyph in logical pixels.
