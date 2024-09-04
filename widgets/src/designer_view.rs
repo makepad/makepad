@@ -124,7 +124,7 @@ enum FingerMove{
 #[derive(Live, Widget)]
 pub struct DesignerView {
     #[walk] walk:Walk,
-    #[rust] area:Area,
+    #[rust] #[area] area:Area,
     #[rust] reapply: bool,
     #[rust(1.5)] zoom: f64,
     #[rust] undo_group: u64,
