@@ -54,6 +54,7 @@ pub struct PortalList {
     #[rust] range_start: usize,
     #[rust(usize::MAX)] range_end: usize,
     #[rust(0usize)] view_window: usize,
+    #[rust(0usize)] visible_items: usize,
     #[live(0.2)] flick_scroll_minimum: f64,
     #[live(80.0)] flick_scroll_maximum: f64,
     #[live(0.005)] flick_scroll_scaling: f64,
@@ -299,6 +300,7 @@ impl PortalList {
         }
 
         cx.end_turtle_with_area(&mut self.area);
+        self.visible_items = visible_items;
     }
 
     /// Returns the index of the next visible item that will be drawn by this PortalList.
@@ -604,6 +606,12 @@ impl PortalList {
         self.at_end
     }
 
+    /// Returns the number of items that are currently visible in the viewport,
+    /// including partially visible items.
+    pub fn visible_items(&self) -> usize {
+        self.visible_items
+    }
+
     /// Returns `true` if this sanity check fails: the first item ID is within the item range.
     ///
     /// Returns `false` if the sanity check passes as expected.
@@ -900,6 +908,12 @@ impl PortalListRef {
     pub fn is_at_end(&self) -> bool {
         let Some(inner) = self.borrow() else { return false };
         inner.is_at_end()
+    }
+
+    /// See [`PortalList::visible_items()`].
+    pub fn visible_items(&self) -> usize {
+        let Some(inner) = self.borrow() else { return 0 };
+        inner.visible_items()
     }
 
     /// Returns whether the given `actions` contain an action indicating that this PortalList was scrolled.
