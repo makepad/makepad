@@ -77,7 +77,7 @@ pub struct PortalList {
     #[rust(true)] not_filling_viewport: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<(usize, LiveId), WidgetRef>,
+    #[rust] items: ComponentMap<usize, (LiveId, WidgetRef)>,
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
@@ -103,7 +103,7 @@ impl LiveHook for PortalList {
                 let id = nodes[index].id;
                 self.templates.insert(id, live_ptr);
                 // lets apply this thing over all our childnodes with that template
-                for ((_, templ_id), node) in self.items.iter_mut() {
+                for (_, (templ_id, node)) in self.items.iter_mut() {
                     if *templ_id == id {
                         node.apply(cx, apply, index, nodes);
                     }
@@ -490,14 +490,15 @@ impl PortalList {
     }
     
     /// Creates a new widget from the given `template` or returns an existing widget,
-    /// if one already exists with the same `entry_id` and `template`.
+    /// if one already exists with the same `entry_id`.
     ///
     /// If you care whether the widget already existed or not, use [`PortalList::item_with_existed()`] instead.
     ///
     /// ## Return
-    /// * If a widget already existed for the given `entry_id`, this returns a reference to that widget.
+    /// * If a widget already existed for the given `entry_id` and `template`,
+    ///   this returns a reference to that widget.
     /// * If a new widget was created successfully, this returns a reference to that new widget.
-    /// * If a widget didn't exist for the given `entry_id` but the `template` could not be found, this returns `None`.
+    /// * If the given `template` could not be found, this returns `None`.
     pub fn item(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
         self.item_with_existed(cx, entry_id, template)
             .map(|(item, _)| item)
@@ -506,40 +507,66 @@ impl PortalList {
     /// Creates a new widget from the given `template` or returns an existing widget,
     /// if one already exists with the same `entry_id` and `template`.
     ///
-    /// If you don't care whether the widget already existed or not, use [`PortalList::item()`] instead.
+    /// * If you only want to check whether the item already existed without creating one,
+    ///   use [`PortalList::get_item()`] instead.
+    /// * If you don't care whether the widget already existed or not, use [`PortalList::item()`] instead.
     ///
     /// ## Return
-    /// * If a widget already existed for the given `entry_id`, this returns a tuple of that widget and `true`.
-    /// * If a new widget was created successfully, this returns a tuple of that widget and `false`.
-    /// * If the given `template` wasn't found, this returns `None`.
+    /// * If a widget of the same `template` already existed for the given `entry_id`,
+    ///   this returns a tuple of that widget and `true`.
+    /// * If a new widget was created successfully, either because an item with the given `entry_id`
+    ///   did not exist or because the existing item with the given `entry_id` did not use the given `template`,
+    ///   this returns a tuple of that widget and `false`.
+    /// * If the given `template` could not be found, this returns `None`.
     pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
+        use std::collections::hash_map::Entry;
         if let Some(ptr) = self.templates.get(&template) {
-            let mut already_existed = true;
-            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
-                already_existed = false;
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
-            });
-            Some((entry.clone(), already_existed))
+            match self.items.entry(entry_id) {
+                Entry::Occupied(mut occ) => {
+                    if occ.get().0 == template {
+                        Some((occ.get().1.clone(), true))
+                    } else {
+                        let widget_ref = WidgetRef::new_from_ptr(cx, Some(*ptr));
+                        occ.insert((template, widget_ref.clone()));
+                        Some((widget_ref, false))
+                    }
+                }
+                Entry::Vacant(vac) => {
+                    let widget_ref = WidgetRef::new_from_ptr(cx, Some(*ptr));
+                    vac.insert((template, widget_ref.clone()));
+                    Some((widget_ref, false))
+                }
+            }
         } else {
             warning!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
             None
         }
     }
-    
-    pub fn position_of_item(&self, cx:&Cx, entry_id: usize) -> Option<f64>{
-        for ((id, _),item) in &*self.items {
-            if *id == entry_id{
-                let item_rect = item.area().rect(cx);
-                let self_rect = self.area.rect(cx);
-                return Some(item_rect.pos.y - self_rect.pos.y)
-            }
+
+    /// Returns the "start" position of the item with the given `entry_id`
+    /// relative to the "start" position of the PortalList.
+    ///
+    /// * For vertical lists, the start position is the top of the item
+    ///   relative to the top of the PortalList.
+    /// * For horizontal lists, the start position is the left side of the item
+    ///   relative to the left side of the PortalList.
+    ///
+    /// TODO: FIXME: this may not properly handle bottom-up lists
+    ///              or lists that go from right to left.
+    pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
+        if let Some((_, item)) = self.items.get(&entry_id) {
+            let item_rect = item.area().rect(cx);
+            let self_rect = self.area.rect(cx);
+            let vi = self.vec_index;
+            Some(item_rect.pos.index(vi) - self_rect.pos.index(vi))
+        } else {
+            None
         }
-        None
     }
     
-    /// Returns `true` if a widget already exists for the given `entry_id` and `template`.
-    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
-        self.items.contains_key(&(entry_id, template))
+    /// Returns a reference to the template and widget for the given `entry_id`.
+    pub fn get_item(&self, entry_id: usize) -> Option<&(LiveId, WidgetRef)> {
+        self.items.get(&entry_id)
     }
     
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
@@ -615,7 +642,7 @@ impl Widget for PortalList {
             self.area.redraw(cx);
         }
         
-        for item in self.items.values_mut() {
+        for (_, item) in self.items.values_mut() {
             let item_uid = item.widget_uid();
             cx.group_widget_actions(uid, item_uid, |cx|{
                 item.handle_event(cx, event, scope)
@@ -903,10 +930,10 @@ impl PortalListRef {
         inner.item_with_existed(cx, entry_id, template)
     }
 
-    /// See [`PortalList::contains_item()`].
-    pub fn contains_item(&self, entry_id: usize, template: LiveId) -> bool {
-        let Some(inner) = self.borrow() else { return false };
-        inner.contains_item(entry_id, template)
+    /// See [`PortalList::get_item()`].
+    pub fn get_item(&self, entry_id: usize) -> Option<(LiveId, WidgetRef)> {
+        let Some(inner) = self.borrow() else { return None };
+        inner.get_item(entry_id).cloned()
     }
     
     pub fn position_of_item(&self, cx:&Cx, entry_id: usize) -> Option<f64>{
@@ -922,12 +949,12 @@ impl PortalListRef {
     
     fn items_with_actions_vec(&self, actions: &Actions, set: &mut ItemsWithActions) {
         let uid = self.widget_uid();
-        for action in actions {
-            if let Some(action) = action.as_widget_action(){
-                if let Some(group) = &action.group{
-                    if group.group_uid == uid{
-                        if let Some(inner) = self.borrow() {
-                            for ((item_id, _), item) in inner.items.iter() {
+        if let Some(inner) = self.borrow() {
+            for action in actions {
+                if let Some(action) = action.as_widget_action(){
+                    if let Some(group) = &action.group{
+                        if group.group_uid == uid{
+                            for (item_id, (_, item)) in inner.items.iter() {
                                 if group.item_uid == item.widget_uid(){
                                     set.push((*item_id, item.clone()))
                                 }
