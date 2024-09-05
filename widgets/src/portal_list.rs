@@ -553,12 +553,23 @@ impl PortalList {
     /// * For horizontal lists, the start position is the left side of the item
     ///   relative to the left side of the PortalList.
     ///
+    /// Returns `None` if the item with the given `entry_id` does not exist
+    /// or if the item's area rectangle is zero.
+    ///
     /// TODO: FIXME: this may not properly handle bottom-up lists
     ///              or lists that go from right to left.
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
+        const ZEROED: Rect = Rect { pos: DVec2 { x: 0.0, y: 0.0 }, size: DVec2 { x: 0.0, y: 0.0 } };
+
         if let Some((_, item)) = self.items.get(&entry_id) {
             let item_rect = item.area().rect(cx);
+            if item_rect == ZEROED {
+                return None;
+            }
             let self_rect = self.area.rect(cx);
+            if self_rect == ZEROED {
+                return None;
+            }
             let vi = self.vec_index;
             Some(item_rect.pos.index(vi) - self_rect.pos.index(vi))
         } else {
