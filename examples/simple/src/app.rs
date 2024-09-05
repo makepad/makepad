@@ -37,7 +37,7 @@ live_design!{
                         draw_text:{color:#f00}
                     }
                     input1 = <TextInput> {
-                        width: 100, height: 30
+                        width: 100
                         text: "Click to count "
                     }
                     label1 = <Label> {
@@ -73,6 +73,12 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        if let Some(q) = self.ui.layout(id!(layout)).query(&actions){
+            if q.width < 855.0 && q.heigh > 10{
+                q.set_layout(id!(desktop))
+            }
+        }
+        
         if self.ui.button(id!(button1)).clicked(&actions) {
             log!("Press button {}", self.counter); 
             self.counter += 1;
@@ -88,8 +94,7 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
-} 
-
+}
 /*
 
 // This is our custom allocator!
