@@ -51,6 +51,9 @@ impl WidgetNode for Root{
             window.redraw(cx);
         }
     }
+    
+    fn area(&self)->Area{Area::Empty}
+    
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
         
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){

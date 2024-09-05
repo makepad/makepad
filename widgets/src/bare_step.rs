@@ -12,7 +12,9 @@ impl WidgetNode for BareStep{
     fn walk(&mut self, _cx:&mut Cx) -> Walk{
         Walk::default()
     }
-        
+    
+    fn area(&self)->Area{Area::Empty}
+    
     fn redraw(&mut self, _cx: &mut Cx){}
         
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet) {
