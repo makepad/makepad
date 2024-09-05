@@ -33,7 +33,7 @@ pub trait WidgetNode: LiveApply{
     fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef;
     fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
-    fn area(&self)->Area{return Area::Empty;}
+    fn area(&self)->Area;//{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
 }
 
