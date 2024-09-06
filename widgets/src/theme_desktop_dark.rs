@@ -4763,5 +4763,27 @@ live_design! {
         }
     }
 
+    PopupNotification = <PopupNotificationBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 1.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            cursor: Default
+            capture_overload: true
+        }
+    }
+
     Root = <RootBase> { design_window = <Designer> {} }
 }
