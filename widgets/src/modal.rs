@@ -9,7 +9,6 @@ live_design! {
     ModalBase = {{Modal}} {}
 }
 
-
 #[derive(Clone, Debug, DefaultNone)]
 pub enum ModalAction {
     None,
