@@ -164,7 +164,7 @@ pub struct View {
     scroll_bars_obj: Option<Box<ScrollBars>>,
     #[rust]
     view_size: Option<DVec2>,
-
+    
     #[rust]
     area: Area,
     #[rust]
@@ -518,7 +518,11 @@ impl WidgetNode for View {
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
-
+    
+    fn area(&self)->Area{
+        self.area
+    }
+    
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
         for (_,child) in &mut self.children {

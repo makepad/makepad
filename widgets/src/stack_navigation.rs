@@ -244,7 +244,8 @@ impl WidgetNode for StackNavigation {
     fn walk(&mut self, cx:&mut Cx) -> Walk{
         self.view.walk(cx)
     }
-
+    fn area(&self)->Area{self.view.area()}
+    
     fn redraw(&mut self, cx: &mut Cx) {
         for widget_ref in self.get_active_views(cx).iter() {
             widget_ref.redraw(cx);

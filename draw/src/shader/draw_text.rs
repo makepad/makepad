@@ -148,6 +148,7 @@ const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 #[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
+    #[live()] pub font2: Font,
     #[live(9.0)] pub font_size: f64,
     //#[live(1.0)] pub brightness: f32,
     //#[live(0.5)] pub curve: f32,
@@ -270,7 +271,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return DVec2::default();
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -303,8 +311,15 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return 0.0;
         };
-        let font_ids = &[font_id];
-
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
+        
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
@@ -339,7 +354,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return Vec::new();
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -453,7 +475,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return IndexAffinity::new(text.len(), Affinity::After);
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -483,7 +512,7 @@ impl DrawText {
 
         let mut closest = IndexAffinity::new(text.len(), Affinity::After);
         let line_height = compute_line_height(font_ids, font_size, font_atlas);
-        let mut prev_glyph_end = None;
+        let mut prev_glyph_end = 0;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -521,13 +550,13 @@ impl DrawText {
                                 position.x = next_position_x;
                             }
                             position.x += width_per_grapheme;
-                            prev_glyph_end = Some(glyph_end);
+                            prev_glyph_end = glyph_end;
                         }
                     }
                     LayoutEvent::Newline { is_soft } => {
                         if target_position.y < position.y + line_height {
                             closest = IndexAffinity::new(
-                                prev_glyph_end.unwrap(),
+                                prev_glyph_end,
                                 if is_soft {
                                     Affinity::Before
                                 } else {
@@ -536,6 +565,7 @@ impl DrawText {
                             );
                             return true;
                         }
+                        prev_glyph_end += 1;
                     }
                 }
                 false
@@ -563,7 +593,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return DVec2::new();
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -592,7 +629,7 @@ impl DrawText {
         };
 
         let mut closest_position = None;
-        let mut prev_glyph_end = None;
+        let mut prev_glyph_end = 0;
         let mut position = DVec2::new();
         layout_text(
             &mut position,
@@ -625,14 +662,15 @@ impl DrawText {
                                 }
                                 position.x += glyph_width_per_grapheme;
                             }
-                            prev_glyph_end = Some(glyph_end);
+                            prev_glyph_end = glyph_end;
                         }
                     }
                     LayoutEvent::Newline { is_soft } => {
-                        if target.index == prev_glyph_end.unwrap() && (!is_soft || target.affinity == Affinity::Before) {
+                        if target.index == prev_glyph_end && (!is_soft || target.affinity == Affinity::Before) {
                             closest_position = Some(position);
                             return true;
                         }
+                        prev_glyph_end += 1;
                     }
                 }
                 false
@@ -652,7 +690,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return;
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the shape cache from the context.
         let shape_cache_rc = cx.shape_cache_rc.clone();
@@ -711,7 +756,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return;
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -852,7 +904,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -976,7 +1035,6 @@ impl DrawText {
         // Get the device pixel ratio.
         let device_pixel_ratio = cx.current_dpi_factor();
 
-
         // Compute the glyph padding.
         let glyph_padding_dpx = 2.0;
         let glyph_padding_lpx = glyph_padding_dpx / device_pixel_ratio;
@@ -1011,10 +1069,10 @@ impl DrawText {
             // Compute the padded size of the bounding box of the glyph in device pixels.
             let mut padded_glyph_size_dpx = glyph_size_dpx;
             if padded_glyph_size_dpx.x != 0.0 {
-                padded_glyph_size_dpx.x += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.x = padded_glyph_size_dpx.x.ceil() + glyph_padding_dpx * 2.0;
             }
             if padded_glyph_size_dpx.y != 0.0 {
-                padded_glyph_size_dpx.y += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.y = padded_glyph_size_dpx.y.ceil() + glyph_padding_dpx * 2.0;
             }
 
             // Compute the padded size of the bounding box of the glyph in logical pixels.
