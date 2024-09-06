@@ -148,6 +148,7 @@ const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 #[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
+    #[live()] pub font2: Font,
     #[live(9.0)] pub font_size: f64,
     //#[live(1.0)] pub brightness: f32,
     //#[live(0.5)] pub curve: f32,
