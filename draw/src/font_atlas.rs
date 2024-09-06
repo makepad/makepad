@@ -106,7 +106,7 @@ impl CxShapeCache {
         let mut info_iter = infos.iter();
         let mut info_slot = info_iter.next();
         while let Some(info) = info_slot {
-            if info.glyph_id == 0 {
+            if info.glyph_id != 0 {
                 info_slot = info_iter.next();
                 glyph_infos.push(GlyphInfo {
                     font_id,
