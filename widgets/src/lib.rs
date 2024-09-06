@@ -40,6 +40,7 @@ pub mod html;
 pub mod markdown;
 pub mod text_flow;
 pub mod multi_image;
+pub mod modal;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -94,6 +95,7 @@ pub use crate::{
     html::*,
     check_box::*,
     drop_down::*,
+    modal::*,
     video::*,
     radio_button::*,
     text_input::*,
@@ -155,6 +157,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::image_blend::live_design(cx);
     crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
+    crate::modal::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
     crate::fold_button::live_design(cx);
