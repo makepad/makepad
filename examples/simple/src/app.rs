@@ -38,7 +38,7 @@ live_design!{
                     }
                     input1 = <TextInput> {
                         width: 100
-                        text: "Click to count "
+                        text: "Click to count 获取几何位置"
                     }
                     label1 = <Label> {
                         draw_text: {
