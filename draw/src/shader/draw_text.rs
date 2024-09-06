@@ -271,7 +271,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return DVec2::default();
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -304,8 +311,15 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return 0.0;
         };
-        let font_ids = &[font_id];
-
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
+        
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
@@ -340,7 +354,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return Vec::new();
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -454,7 +475,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return IndexAffinity::new(text.len(), Affinity::After);
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -565,7 +593,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return DVec2::new();
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -655,7 +690,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return;
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the shape cache from the context.
         let shape_cache_rc = cx.shape_cache_rc.clone();
@@ -714,7 +756,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return;
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -855,7 +904,14 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return
         };
-        let font_ids = &[font_id];
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -978,7 +1034,6 @@ impl DrawText {
         
         // Get the device pixel ratio.
         let device_pixel_ratio = cx.current_dpi_factor();
-
 
         // Compute the glyph padding.
         let glyph_padding_dpx = 2.0;
