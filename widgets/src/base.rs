@@ -19,6 +19,7 @@ live_design!{
     import crate::icon::IconBase;
     import crate::rotated_image::RotatedImageBase;
     import crate::modal::ModalBase;
+    import crate::tooltip::TooltipBase;
     import crate::video::VideoBase;
     import crate::popup_menu::PopupMenuBase;
     import crate::label::LabelBase;
@@ -886,36 +887,6 @@ live_design!{
         }
     }
 
-    Modal = <ModalBase> {
-        width: Fill
-        height: Fill
-        flow: Overlay
-        align: {x: 0.5, y: 0.5}
-
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                return vec4(0., 0., 0., 0.0)
-            }
-        }
-
-        bg_view: <View> {
-            width: Fill
-            height: Fill
-            show_bg: true
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    return vec4(0., 0., 0., 0.7)
-                }
-            }
-        }
-
-        content: <View> {
-            flow: Overlay
-            width: Fit
-            height: Fit
-        }
-    }
-
     ExpandablePanel = <ExpandablePanelBase> {
         flow: Overlay,
         width: Fill,
@@ -979,6 +950,7 @@ live_design!{
     IconBase = <IconBase> {}
     RotatedImageBase = <RotatedImageBase> {}
     ModalBase = <ModalBase> {}
+    TooltipBase = <TooltipBase> {}
     VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}
