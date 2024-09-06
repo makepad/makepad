@@ -299,9 +299,10 @@ live_design!{
             BottomSpace = <View> {height: 100}
         }
     }
-            
+    
     App = {{App}} {
         ui: <Window> {
+            
             window: {inner_size: vec2(428, 926)},
             show_bg: true
             draw_bg: {
@@ -340,6 +341,7 @@ struct NewsFeed{
 
 impl Widget for NewsFeed{
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+        
         while let Some(item) =  self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 1000);
