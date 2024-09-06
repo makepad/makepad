@@ -42,6 +42,7 @@ pub mod text_flow;
 pub mod multi_image;
 pub mod modal;
 pub mod tooltip;
+pub mod popup_notification;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -98,6 +99,7 @@ pub use crate::{
     drop_down::*,
     modal::*,
     tooltip::*,
+    popup_notification::*,
     video::*,
     radio_button::*,
     text_input::*,
@@ -161,6 +163,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::rotated_image::live_design(cx);
     crate::modal::live_design(cx);
     crate::tooltip::live_design(cx);
+    crate::popup_notification::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
     crate::fold_button::live_design(cx);

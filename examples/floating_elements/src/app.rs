@@ -31,9 +31,56 @@ live_design!(
                         
                         hover_actions_enabled: true
                     }
-                    button = <Button> {
+
+                    button_modal = <Button> {
                         text: "Open modal"
                         draw_text: {color: #f00}
+                    }
+
+                    button_notification = <Button> {
+                        text: "Open popup notification"
+                        draw_text: {color: #f00}
+                    }
+                }
+
+                tooltip = <Tooltip> {}
+
+                notification = <PopupNotification> {
+                    content: {
+                        height: Fit,
+                        width: Fit,
+
+                        padding: 10,
+
+                        <RoundedView> {
+                            height: Fit,
+                            width: 240,
+
+                            padding: 30,
+                            show_bg: true,
+                            draw_bg: {
+                                color: #3c3c3c
+                                radius: 3.0
+                            }
+                            <Label> {
+                                width: 170
+                                text: "This is a popup notification\nwith some content"
+                            }
+                            close_popup_button = <Button> {
+                                width: Fit,
+                                height: Fit,
+
+                                margin: {top: -20 },
+
+                                draw_icon: {
+                                    svg_file: dep("crate://self/resources/close.svg"),
+                                    fn get_color(self) -> vec4 {
+                                        return #000;
+                                    }
+                                }
+                                icon_walk: {width: 10, height: 10}
+                            }
+                        }
                     }
                 }
 
@@ -54,8 +101,6 @@ live_design!(
                         }
                     }
                 }
-
-                tooltip = <Tooltip> {}
             }
         }
     }
@@ -76,14 +121,22 @@ impl AppMain for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button)).clicked(&actions) {
+        if self.ui.button(id!(button_modal)).clicked(&actions) {
             self.ui.modal(id!(modal)).open(cx);
+        }
+
+        if self.ui.button(id!(button_notification)).clicked(&actions) {
+            self.ui.popup_notification(id!(notification)).open(cx);
+        }
+
+        if self.ui.button(id!(close_popup_button)).clicked(&actions) {
+            self.ui.popup_notification(id!(notification)).close(cx);
         }
 
         let label = self.ui.label(id!(title));
         let mut tooltip = self.ui.tooltip(id!(tooltip));
         if let Some(rect) = label.hover_in(&actions) {
-            tooltip.show_with_options(cx, rect.pos, "Click in the button to open a modal");
+            tooltip.show_with_options(cx, rect.pos, "Here is a tooltip");
         }
         if label.hover_out(&actions) {
             tooltip.hide(cx);
