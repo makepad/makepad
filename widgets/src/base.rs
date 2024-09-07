@@ -16,6 +16,8 @@ live_design!{
     import crate::image::ImageBase;
     import crate::multi_image::MultiImageBase;
     import crate::image_blend::ImageBlendBase;
+    import crate::content_loader::*;
+    import crate::image_loader::*;
     import crate::icon::IconBase;
     import crate::rotated_image::RotatedImageBase;
     import crate::video::VideoBase;
@@ -947,6 +949,9 @@ live_design!{
     ImageBase = <ImageBase> {}
     IconBase = <IconBase> {}
     RotatedImageBase = <RotatedImageBase> {}
+    ContentLoaderBase = <ContentLoaderBase> {}
+    LoaderPlaceholderBase = <LoaderPlaceholderBase> {}
+    ImageLoaderBase = <ImageLoaderBase> {}
     VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}

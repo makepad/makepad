@@ -10,6 +10,8 @@ pub mod button;
 pub mod label;
 pub mod image;
 pub mod image_blend;
+pub mod content_loader;
+pub mod image_loader;
 pub mod icon;
 pub mod link_label;
 pub mod drop_down;
@@ -85,6 +87,8 @@ pub use crate::{
     button::*,
     view::*,
     image::*,
+    content_loader::*,
+    image_loader::*,
     image_blend::*,
     icon::*,
     label::*,
@@ -155,6 +159,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::image_blend::live_design(cx);
     crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
+    crate::content_loader::live_design(cx);
+    crate::image_loader::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
     crate::fold_button::live_design(cx);

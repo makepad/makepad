@@ -207,6 +207,8 @@ live_design! {
         line_spacing: 1.16
     }
 
+    PI = 3.14159
+
     Label = <LabelBase> {
         width: Fit, height: Fit,
         draw_text: {
@@ -3865,24 +3867,151 @@ live_design! {
                     width: Fit,
                     spacing: 10,
                 }
+
+                animator: {
+                    panel = {
+                        default: open,
+                        open = {
+                            redraw: true,
+                            from: {all: Forward {duration: 0.3}}
+                            ease: ExpDecay {d1: 0.80, d2: 0.97}
+                            apply: {animator_panel_progress: 1.0, open_content = { draw_bg: {opacity: 1.0} }}
+                        }
+                        close = {
+                            redraw: true,
+                            from: {all: Forward {duration: 0.3}}
+                            ease: ExpDecay {d1: 0.80, d2: 0.97}
+                            apply: {animator_panel_progress: 0.0, open_content = { draw_bg: {opacity: 0.0} }}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    LoaderPlaceholder = <LoaderPlaceholderBase> {
+        width: Fill, height: Fill
+        show_bg: true
+        draw_bg: {
+            instance spinner_thiccness: 0.01
+            instance spinner_radius: 0.1
+            instance spinner_speed: 3.8
+            instance custom_time: 0.0
+
+            // Spinner shader adapted from https://www.shadertoy.com/view/Xd3cR8
+            fn pixel(self) -> vec4 {
+                // Center the UV coordinates
+                let uv = (self.pos - 0.5);
+                let aspect = self.rect_size.x / self.rect_size.y;
+                uv.x *= aspect;
+
+                let geo = ring(uv, vec2(0.0), (self.spinner_radius) - (self.spinner_thiccness), (self.spinner_radius));
+
+                // let rot = self.spinner_speed * self.custom_time;//self.custom_time * (self.spinner_speed);
+                let rot = fract(self.custom_time) * PI * self.spinner_speed;
+
+                let rot_mat = mat2(cos(rot), sin(rot), -sin(rot), cos(rot));
+                let uv_rot = uv * rot_mat;
+
+                let a = 1.0 - (atan(uv_rot.x, uv_rot.y) / (2.0 * PI) + 0.5);
+                
+                let circle_val = 1.0 - smoothstep((self.spinner_thiccness) / 2.0, (self.spinner_thiccness) / 2.0 + 0.005,
+                    length(uv_rot - vec2(0.0, -(self.spinner_radius) + (self.spinner_thiccness) / 2.0)));
+                a = max(a, circle_val);
+
+                let color = vec4(a * geo);
+
+                return mix(#0f0e0c, #333535, color.x)
+            }
+
+            fn ring(uv: vec2, pos: vec2, inner_rad: float, outer_rad: float) -> float {
+                let dist = length(uv - pos);
+                return (1.0 - smoothstep(outer_rad, outer_rad + 0.005, dist)) *
+                       smoothstep(inner_rad - 0.005, inner_rad, dist)
             }
         }
 
         animator: {
-            panel = {
-                default: open,
-                open = {
-                    redraw: true,
-                    from: {all: Forward {duration: 0.3}}
-                    ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    apply: {animator_panel_progress: 1.0, open_content = { draw_bg: {opacity: 1.0} }}
+            spinner = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 2.0}}
+                    apply: {
+                        draw_bg: {custom_time: 0.5}
+                    }
                 }
-                close = {
+                spin = {
                     redraw: true,
-                    from: {all: Forward {duration: 0.3}}
-                    ease: ExpDecay {d1: 0.80, d2: 0.97}
-                    apply: {animator_panel_progress: 0.0, open_content = { draw_bg: {opacity: 0.0} }}
+                    from: {all: Loop {duration: 1.0, end: 1.0}}
+                    apply: {
+                        draw_bg: {custom_time: 1.0}
+                    }
                 }
+            }
+        }
+    }
+
+    LoaderErrorView = <View> {
+        width: Fill, height: Fill
+        align: {x: 0.5, y: 0.5}
+        flow: Down
+        show_bg: true
+        draw_bg: {
+            color: #0f0e0c
+        }
+        icon = <View> {
+            width: Fill, height: 100
+            show_bg: true
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.aa *= 3.0;
+                    let sz = 20.0;
+                    let c = self.rect_size * vec2(0.5, 0.5);
+                    sdf.move_to(c.x - sz, c.y - sz);
+                    sdf.line_to(c.x + sz, c.y + sz);
+                    sdf.move_to(c.x - sz, c.y + sz);
+                    sdf.line_to(c.x + sz, c.y - sz);
+                    sdf.stroke((THEME_COLOR_TEXT_DEFAULT), 1.5 + 1.5 * self.dpi_dilate);
+                    return sdf.result;
+                }
+            }
+        }
+        error_message = <H4> {
+            width: Fit, height: Fit
+            text: "Error laoding content",
+            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT)}
+        }
+    }
+
+    ContentLoader = <ContentLoaderBase> {
+        align: {x: 0.5, y: 0.5}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.result
+            }
+        }
+        placeholder: <LoaderPlaceholder> {}
+        content: <View> {}
+        error: <LoaderErrorView> {}
+    }
+
+    ImageLoader = <ImageLoaderBase> {
+        align: {x: 0.5, y: 0.5}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.result
+            }
+        }
+        placeholder: <LoaderPlaceholder> {}
+        content: <View> {
+            image = <Image> {}
+        }
+        error: <LoaderErrorView> {
+            error_message = {
+                text: "Error laoding image",
             }
         }
     }
