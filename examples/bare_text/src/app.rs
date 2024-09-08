@@ -21,14 +21,14 @@ live_design!{
                 body = <ScrollXYView>{
                     flow: Down,
                     spacing:10,
-                        padding: 0
+                    <Label>{
+                        padding: 10
                         margin: 0
-                            draw_text: {
-                                color: #f
-                            },
-                            text: r#"Testing text 1234"#,
-                            width: 200.0,
-                        }
+                        draw_text: {
+                            color: #f
+                        },
+                        text: r#"Testing text 1234"#,
+                        width: 200.0,
                     }
                 }
             }
