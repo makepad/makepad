@@ -277,6 +277,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
@@ -317,6 +318,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
         
@@ -360,6 +362,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
@@ -481,6 +484,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
@@ -599,6 +603,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
@@ -696,6 +701,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
@@ -762,6 +768,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
@@ -910,6 +917,7 @@ impl DrawText {
             font_ids[1] = font2_id;
             &font_ids[..2]
         } else {
+            font_ids[0] = font_id;
             &font_ids[..1]
         };
 
