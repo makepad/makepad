@@ -1,6 +1,4 @@
 use makepad_widgets::*;
-
-use makepad_widgets::modal::ModalWidgetRefExt;
         
 live_design!{
     import makepad_widgets::base::*;
@@ -38,14 +36,7 @@ live_design!{
                         text: "Hello world "
                         draw_text:{color:#f00}
                     }
-                    button2 = <Button> {
-                        text: "Open modal"
-                        draw_text:{color:#f00}
-                    }
                     input1 = <TextInput> {
-                        draw_label: {
-                            wrap: Word,
-                        }
                         width: 100
                         text: "Click to count 获取几何位置"
                     }
@@ -59,14 +50,6 @@ live_design!{
                         
                         Vivamus ac porttitor sem. In auctor posuere velit ac molestie. Suspendisse ornare ex quis eros porttitor tincidunt. Praesent tincidunt purus tellus, vel malesuada dui condimentum at. Morbi pellentesque, velit euismod tristique rhoncus, metus mi tincidunt lacus, at faucibus tortor nunc ut nibh. Etiam efficitur est diam, ut commodo enim bibendum at. Suspendisse accumsan gravida nisi, sit amet sodales lectus maximus eu."#,
                         width: 200.0,
-                    }
-
-                    modal = <Modal> {
-                        content: {
-                            <Label> {
-                                text: "Hello world"
-                            }
-                        }
                     }
                 }
             }
@@ -97,10 +80,6 @@ impl MatchEvent for App{
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
-        }
-
-        if self.ui.button(id!(button2)).clicked(&actions) {
-            self.ui.modal(id!(modal)).open(cx);
         }
     }
 }
