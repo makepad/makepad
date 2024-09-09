@@ -78,9 +78,16 @@ live_design!{
                     <blockquote>block<b>quote</b><br/><blockquote>blockquote</blockquote><br/>
                     Next line <br/>
                     <sep/>
-                    </blockquote><b><i>Bold italic</i><br/>
+                    </blockquote><b><i>Bold italic</i></b><br/>
                     <sep/></br>
                     <pre>this is a preformatted code block</pre>
+
+                    <sep/>
+                    (Kevin): Testing html wrapping 
+                    <br />
+                    <b>Emma [it/its]</b>: publishing to the room directory on matrix.org is disabled
+                    <br />
+                    <b>Yue Chen</b>: reply to reply to the test font reply
                     "
                 }
                 <Markdown>{
