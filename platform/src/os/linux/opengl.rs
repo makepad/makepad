@@ -968,7 +968,7 @@ impl CxTexture {
             }
         }
     
-        if !self.check_updated() {
+        if self.get_and_clear_updated().is_empty() {
             return;
         }
         
