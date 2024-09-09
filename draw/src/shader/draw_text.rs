@@ -969,7 +969,7 @@ impl DrawText {
                             abs_pos: None,
                             margin: Margin::default(),
                             width: Size::Fixed(width),
-                            height: Size::Fixed(line_height * self.text_style.top_drop)
+                            height: Size::Fixed(line_height)
                         });
 
                         self.draw_glyphs(
