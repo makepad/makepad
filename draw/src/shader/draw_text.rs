@@ -984,15 +984,17 @@ impl DrawText {
                             if prev_rect.pos.y == rect.pos.y {
                                 prev_rect.size.x += rect.size.x;
                             } else {
-                                f(cx, rect);
+                                f(cx, *prev_rect);
                                 prev_rect_slot = Some(rect);
                             }
                         } else {
                             prev_rect_slot = Some(rect);
                         }
                     }
-                    LayoutEvent::Newline { .. }  => {
-                        cx.turtle_new_line();
+                    LayoutEvent::Newline { is_soft, .. }  => {
+                        if is_soft {
+                            cx.turtle_new_line();
+                        }
                     }
                 }
                 false
