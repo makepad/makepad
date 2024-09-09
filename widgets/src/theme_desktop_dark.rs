@@ -578,7 +578,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         a = <HtmlLink> {}
@@ -680,7 +680,10 @@ live_design! {
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         paragraph_spacing: 16,
-
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -738,7 +741,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         draw_block: {
