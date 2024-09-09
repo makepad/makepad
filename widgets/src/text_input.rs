@@ -83,10 +83,19 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
+    fn inner_walk(&self) -> Walk {
+        if self.walk.width.is_fit() {
+            Walk::fit()
+        } else {
+            Walk::fill_fit()
+        }
+    }
+
     fn position_to_index_affinity(&self, cx: &mut Cx2d, width: f64, position: DVec2) -> IndexAffinity {
+        let inner_walk = self.inner_walk();
         self.draw_label.position_to_index_affinity(
             cx,
-            Walk::fill_fit(),
+            inner_walk,
             self.label_align,
             width,
             &self.text,
@@ -95,9 +104,10 @@ impl TextInput {
     }
 
     fn cursor_position(&self, cx: &mut Cx2d, width: f64) -> DVec2 {
+        let inner_walk = self.inner_walk();
         self.draw_label.index_affinity_to_position(
             cx,
-            Walk::fill_fit(),
+            inner_walk,
             self.label_align,
             width,
             &self.text,
@@ -547,12 +557,14 @@ impl Widget for TextInput {
 
         self.draw_selection.append_to_draw_call(cx);
 
+        let inner_walk = self.inner_walk();
+
         // Draw text
         if self.text.is_empty() {
             self.draw_label.is_empty = 1.0;
             self.draw_label.draw_walk(
                 cx,
-                Walk::fill_fit(),
+                inner_walk,
                 self.label_align,
                 &self.empty_message,
             );
@@ -560,7 +572,7 @@ impl Widget for TextInput {
             self.draw_label.is_empty = 0.0;
             self.draw_label.draw_walk(
                 cx,
-                Walk::fill_fit(),
+                inner_walk,
                 self.label_align,
                 &self.text,
             );
@@ -571,7 +583,7 @@ impl Widget for TextInput {
         // Draw selection
         let rects = self.draw_label.selected_rects(
             cx,
-            Walk::fill_fit(),
+            inner_walk,
             self.label_align,
             padded_rect.size.x,
             &self.text,
