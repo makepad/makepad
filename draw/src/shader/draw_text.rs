@@ -992,7 +992,7 @@ impl DrawText {
                         }
                     }
                     LayoutEvent::Newline { is_soft, .. }  => {
-                        if is_soft {
+                        if !is_soft {
                             cx.turtle_new_line();
                         }
                     }
