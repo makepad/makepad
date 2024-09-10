@@ -2,6 +2,7 @@ use {
     crate::{
         id_pool::*,
         cx::Cx,
+        makepad_math::Rect,
         os::CxOsTexture,
     },
     std::rc::Rc,
@@ -125,7 +126,7 @@ pub(crate) struct TextureAlloc{
 #[allow(unused)]    
 #[derive(Clone, Debug)]
 pub enum TextureCategory{
-    Vec{updated:bool},
+    Vec{updated:Updated},
     Render{initial:bool},
     DepthBuffer{initial:bool},
     Shared{initial:bool},
@@ -140,6 +141,22 @@ impl PartialEq for TextureCategory{
             Self::Shared{..} => if let Self::Shared{..} = other{true} else {false},
             Self::DepthBuffer{..} => if let Self::DepthBuffer{..} = other{true} else {false},           
             Self::Video{..} => if let Self::Video{..} = other{true} else {false},           
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Updated {
+    Empty,
+    Partial(Rect),
+    Full,
+}
+
+impl Updated {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Updated::Empty => true,
+            _ => false,
         }
     }
 }
@@ -159,34 +176,45 @@ pub(crate) enum TexturePixel{
 }
 
 impl CxTexture{
-    pub(crate) fn set_updated(&mut self, up:bool){
-        if let Some(alloc) = &mut self.alloc{
-            if let TextureCategory::Vec{updated} = &mut alloc.category{
-                *updated = up
-            }
-        }
+    pub(crate) fn set_updated(&mut self, updated: Updated) {
+        let Some (alloc) = &mut self.alloc else {
+            return;
+        };
+        let TextureCategory::Vec {
+            updated: updated_slot 
+        } = &mut alloc.category else {
+            return;
+        };
+        *updated_slot = updated;
     }
     
-    pub(crate) fn check_updated(&mut self)->bool{
-        if let Some(alloc) = &mut self.alloc{
-            if let TextureCategory::Vec{updated} = &mut alloc.category{
-                let u = *updated;
-                *updated = false;
-                if u{ // check our buffer sizes
-                    match &self.format{
-                        TextureFormat::VecBGRAu8_32{width, height, data}=>{
-                            if width * height != data.len(){
-                                error!("Texture buffer size incorrect {}*{} != {}", width, height, data.len());
-                                return false
-                            }
-                        }
-                        _=>()
+    pub(crate) fn get_and_clear_updated(&mut self) -> Updated {
+        let Some(alloc) = &mut self.alloc else {
+            return Updated::Empty;
+        };
+        let TextureCategory::Vec {
+            updated: updated_slot
+        } = &mut alloc.category else {
+            return Updated::Empty;
+        };
+        let updated = *updated_slot;
+        *updated_slot = Updated::Empty;
+        if !updated.is_empty() {
+            match &self.format {
+                TextureFormat::VecBGRAu8_32 {
+                    width,
+                    height,
+                    data
+                } => {
+                    if width * height != data.len() {
+                        error!("Texture buffer size incorrect: {} * {} != {}", width, height, data.len());
+                        return Updated::Empty;
                     }
                 }
-                return u
+                _ => {}
             }
         }
-        false
+        updated
     }
     
     pub fn set_initial(&mut self, init:bool){
@@ -335,37 +363,37 @@ impl TextureFormat{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::BGRAu8,
-                category: TextureCategory::Vec{updated:true}
+                category: TextureCategory::Vec{updated:Updated::Full}
             }),
             Self::VecMipBGRAu8_32{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::BGRAu8,
-                category: TextureCategory::Vec{updated:true}
+                category: TextureCategory::Vec{updated:Updated::Full}
             }),
             Self::VecRGBAf32{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::RGBAf32,
-                category: TextureCategory::Vec{updated:true}
+                category: TextureCategory::Vec{updated:Updated::Full}
             }),
             Self::VecRu8{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::Ru8,
-                category: TextureCategory::Vec{updated:true}
+                category: TextureCategory::Vec{updated:Updated::Full}
             }),
             Self::VecRGu8{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::RGu8,
-                category: TextureCategory::Vec{updated:true}
+                category: TextureCategory::Vec{updated:Updated::Full}
             }),
             Self::VecRf32{width,height,..}=>Some(TextureAlloc{
                 width:*width,
                 height:*height,
                 pixel:TexturePixel::Rf32,
-                category: TextureCategory::Vec{updated:true}
+                category: TextureCategory::Vec{updated:Updated::Full}
             }),
             _=>None
         }
@@ -485,7 +513,7 @@ impl Texture {
         match &mut cxtexture.format{
             TextureFormat::VecBGRAu8_32{data,..} => {
                 std::mem::swap(data, image);
-                cxtexture.set_updated(true);
+                cxtexture.set_updated(Updated::Full);
             }
             _=>{
                 panic!("Not the correct texture desc for u32 image buffer")
@@ -498,7 +526,7 @@ impl Texture {
         match &mut cxtexture.format{
             TextureFormat::VecRu8{data,..} | TextureFormat::VecRGu8 { data, ..} => {
                 std::mem::swap(data, image);
-                cxtexture.set_updated(true);
+                cxtexture.set_updated(Updated::Full);
             },
             _=>{
                 panic!("Not the correct texture desc for u8 image buffer")
@@ -511,11 +539,11 @@ impl Texture {
         match &mut cxtexture.format{
             TextureFormat::VecRf32{data,..} => {
                 std::mem::swap(data, image);
-                cxtexture.set_updated(true);
+                cxtexture.set_updated(Updated::Full);
             }
             TextureFormat::VecRGBAf32{data,..} => {
                 std::mem::swap(data, image);
-                cxtexture.set_updated(true);
+                cxtexture.set_updated(Updated::Full);
             }
             _=>{
                 panic!("Not the correct texture desc for f32 image buffer")

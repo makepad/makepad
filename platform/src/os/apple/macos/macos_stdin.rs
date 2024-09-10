@@ -271,7 +271,8 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    for event in self.os.stdin_timers.get_dispatch() {
+                    let events = self.os.stdin_timers.get_dispatch();
+                    for event in  events{
                         self.call_event_handler(&event);
                     }                    
                     if self.handle_live_edit() {

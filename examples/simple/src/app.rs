@@ -1,5 +1,5 @@
 use makepad_widgets::*;
-       
+        
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
@@ -12,9 +12,16 @@ live_design!{
                 height: Fill
                 
                 draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        // test
-                        return mix(#7, #3, self.pos.y);
+                    fn pixel(self) -> vec4 {    // < --- Apply error: examples/simple/src/app.rs:21:20 - property: pixel target class not found
+                        // 获取几何位置
+                        let st = vec2(
+                            self.geom_pos.x,
+                            self.geom_pos.y
+                        );
+                        
+                        // 计算颜色，基于 x 和 y 位置及时间
+                        let color = vec3(st.x, st.y, abs(sin(self.time)));
+                        return vec4(color, 1.0);
                     }
                 }
                 
@@ -30,8 +37,8 @@ live_design!{
                         draw_text:{color:#f00}
                     }
                     input1 = <TextInput> {
-                        width: 100, height: 30
-                        text: "Click to count "
+                        width: 100
+                        text: "Click to count 获取几何位置"
                     }
                     label1 = <Label> {
                         draw_text: {
@@ -60,30 +67,19 @@ pub struct App {
  
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
-        //println!("{}", std::mem::size_of::<LiveNode2>());
-        /*makepad_draw::live_design(cx);
-        makepad_widgets::base::live_design(cx);
-        makepad_widgets::theme_desktop_dark::live_design(cx);
-        makepad_widgets::label::live_design(cx);
-        makepad_widgets::view::live_design(cx);
-        makepad_widgets::button::live_design(cx);
-        makepad_widgets::window::live_design(cx);
-        makepad_widgets::scroll_bar::live_design(cx);
-        makepad_widgets::scroll_bars::live_design(cx);
-        makepad_widgets::root::live_design(cx);*/
         crate::makepad_widgets::live_design(cx);
     }
 }
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        
         if self.ui.button(id!(button1)).clicked(&actions) {
             log!("Press button {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
-            
         }
     }
 }
@@ -93,8 +89,7 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
-} 
-
+}
 /*
 
 // This is our custom allocator!

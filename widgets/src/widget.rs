@@ -1,5 +1,6 @@
 use {
     crate::makepad_draw::*,
+    crate::makepad_derive_widget::*,
     std::fmt::{Formatter, Debug, Error},
     std::collections::BTreeMap,
     std::any::TypeId,
@@ -18,27 +19,38 @@ pub enum WidgetCache {
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub struct WidgetUid(pub u64);
+ 
+pub trait WidgetDesign:WidgetNode{}
 
-pub trait WidgetDesign {
+#[derive(Clone, Debug, DefaultNone)]
+pub enum WidgetDesignAction{
+    PickedBody,
+    None
 }
 
 pub trait WidgetNode: LiveApply{
-    fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
+    fn widget_design(&mut self)->Option<&mut dyn WidgetDesign>{return None}
+    fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef;
+    fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet);
     fn walk(&mut self, _cx:&mut Cx) -> Walk;
+    fn area(&self)->Area;//{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
 }
 
 pub trait Widget: WidgetNode {
+    fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, _sweep_area: Area) {
+        self.handle_event(cx, event, scope)
+    }
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
     }
 
-    fn widget(&mut self, path: &[LiveId]) -> WidgetRef {
+    fn widget(&self, path: &[LiveId]) -> WidgetRef {
         let mut results = WidgetSet::default();
         self.find_widgets(path, WidgetCache::Yes, &mut results);
         return results.into_first()
     }
     
-    fn widgets(&mut self, paths: &[&[LiveId]]) -> WidgetSet {
+    fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         for path in paths {
             self.find_widgets(path, WidgetCache::Yes, &mut results);
@@ -259,7 +271,7 @@ impl WidgetSet {
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
         for widget in self.iter() {
-            if let Some(inner) = widget.0.borrow_mut().as_mut() {
+            if let Some(inner) = widget.0.borrow().as_ref() {
                 for path in paths {
                     inner.widget.find_widgets(path, WidgetCache::Yes, &mut results);
                 }
@@ -368,7 +380,39 @@ impl WidgetRef {
             widget,
         }))))
     }
-    
+    /// ## handle event with a sweep area
+    /// 
+    /// this is used for the sweep event, this fn can help to pass the event into popup,
+    /// the widget should implement the `handle_event_with` fn in `impl Widget for $Widget`
+    /// 
+    /// ### Example
+    /// ```rust
+    /// impl Widget for Button {
+    /// fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, sweep_area: Area) {
+    ///     let uid = self.widget_uid();
+    ///
+    ///     if self.animator_handle_event(cx, event).must_redraw() {
+    ///         self.draw_button.redraw(cx);
+    ///     }
+    ///     match event.hits_with_options(cx, self.draw_button.area(), HitOptions::new().with_sweep_area(sweep_area) ) {
+    ///         Hit::FingerDown(f_down) => {
+    ///             if self.grab_key_focus {
+    ///                  cx.set_key_focus(self.sweep_area);
+    ///             }
+    ///             cx.widget_action(uid, &scope.path, GButtonEvent::Pressed(f_down.modifiers));
+    ///             self.animator_play(cx, id!(hover.pressed));
+    ///         }
+    ///         _ =>()
+    ///     }
+    /// }
+    /// ```
+    /// ### Details
+    /// See [Flexible Popup](https://palpus-rs.github.io/Gen-UI.github.io/makepad/code/widgets/flexible_popup.html)
+    pub fn handle_event_with(&self, cx: &mut Cx, event: &Event, scope: &mut Scope, sweep_area: Area) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.handle_event_with(cx, event, scope, sweep_area)
+        }
+    }
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
@@ -387,6 +431,13 @@ impl WidgetRef {
         WidgetUid(0)
     }
     
+    pub fn area(&self) -> Area {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.area()
+        }
+        Area::Empty
+    }
+    
     pub fn widget_to_data(&self, cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.widget_to_data(cx, actions, nodes, path);
@@ -400,13 +451,23 @@ impl WidgetRef {
         }
     }
     
+    pub fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        if self.widget_uid() == uid{
+            return self.clone()
+        }
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.uid_to_widget(uid)
+        }
+        WidgetRef::empty()
+    }
+    
     pub fn find_widgets(
-        &mut self,
+        &self,
         path: &[LiveId],
         cached: WidgetCache,
         results: &mut WidgetSet
     ) {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
+        if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.find_widgets(path, cached, results)
         }
     }
@@ -603,13 +664,13 @@ impl LiveNew for WidgetRef {
     }
 }
 
-pub trait WidgetActionTrait: 'static {
+pub trait WidgetActionTrait: 'static + Send {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-impl<T: 'static + ? Sized + Clone + Debug> WidgetActionTrait for T {
+impl<T: 'static + ? Sized + Clone + Debug+ Send> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -657,13 +718,13 @@ pub trait WidgetActionCxExt {
 }
 
 pub trait WidgetActionsApi {
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
 }
 
 pub trait WidgetActionOptionApi{
     fn widget_uid_eq(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
-    fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone;
+    fn cast<T: WidgetActionTrait + 'static + Send >(&self) -> T where T: Default + Clone;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction>{
@@ -677,7 +738,7 @@ impl WidgetActionOptionApi for Option<&WidgetAction>{
         None
     }
     
-    fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone{
+    fn cast<T: WidgetActionTrait + 'static  + Send>(&self) -> T where T: Default + Clone{
         if let Some(item) = self{
             if let Some(item) = item.action.downcast_ref::<T>(){
                 return item.clone()
@@ -709,7 +770,7 @@ impl WidgetActionsApi for Actions{
         None
     }
     
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
         if let Some(item) = self.find_widget_action(widget_uid) {
             if let Some(item) = item.action.downcast_ref::<T>(){
                 return item.clone()
@@ -749,7 +810,7 @@ impl WidgetActionCxExt for Cx {
 }
 
 impl WidgetAction {
-    pub fn cast<T: WidgetActionTrait + 'static >(&self) -> T where T: Default + Clone {
+    pub fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T where T: Default + Clone {
         if let Some(item) = self.action.downcast_ref::<T>(){
             return item.clone()
         }

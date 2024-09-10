@@ -34,8 +34,12 @@ pub use crate::os::linux::*;
 #[cfg(target_os = "android")]
 pub use crate::os::linux::android::android_media::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_env="ohos")))]
 pub use crate::os::linux::linux_media::*;
+
+#[cfg(target_env="ohos")]
+pub use crate::os::linux::open_harmony::oh_media::*;
+
 
 //#[cfg(target_os = "linux")]
 //pub use crate::os::linux::*;

@@ -805,7 +805,7 @@ impl CxTexture {
     ) {
         // TODO maybe we can update the data instead of making a new texture?
         if self.alloc_vec(){}
-        if self.check_updated(){
+        if !self.get_and_clear_updated().is_empty() {
             fn get_descs(format: DXGI_FORMAT, width: usize, height: usize, bpp: usize, data: *const std::ffi::c_void)->(D3D11_SUBRESOURCE_DATA,D3D11_TEXTURE2D_DESC) {
                 let sub_data = D3D11_SUBRESOURCE_DATA {
                     pSysMem: data,

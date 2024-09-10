@@ -69,13 +69,14 @@ impl WidgetNode for Dock{
     fn walk(&mut self, _cx:&mut Cx) -> Walk{
         self.walk
     }
+    fn area(&self)->Area{self.area}
     
     fn redraw(&mut self, cx: &mut Cx){
         self.area.redraw(cx)
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        if let Some((_, widget)) = self.items.get_mut(&path[0]) {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        if let Some((_, widget)) = self.items.get(&path[0]) {
             if path.len()>1 {
                 widget.find_widgets(&path[1..], cached, results);
             }
@@ -84,10 +85,17 @@ impl WidgetNode for Dock{
             }
         }
         else {
-            for (_, widget) in self.items.values_mut() {
+            for (_, widget) in self.items.values() {
                 widget.find_widgets(path, cached, results);
             }
         }
+    }
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for (_, widget) in self.items.values() {
+            let x = widget.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
     }
 }        
 
@@ -1120,7 +1128,7 @@ impl DockRef {
     pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr: DragResponse) {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
-                dh.response.set(dr);
+                *dh.response.lock().unwrap() = dr;
                 dock.drop_state = Some(pos);
             }
             else {

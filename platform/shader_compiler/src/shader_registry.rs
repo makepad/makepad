@@ -21,6 +21,7 @@ pub struct ShaderRegistry {
     pub structs: HashMap<StructPtr, StructDef>,
     pub builtins: HashMap<Ident, Builtin>,
     pub enums: HashMap<LiveType, ShaderEnum>,
+    pub const_gather_active: bool
 }
 
 pub struct ShaderEnum {
@@ -29,8 +30,9 @@ pub struct ShaderEnum {
 }
 
 impl ShaderRegistry {
-    pub fn new() -> Self {
+    pub fn new(const_gather_active: bool) -> Self {
         Self {
+            const_gather_active,
             structs: HashMap::new(),
             enums: HashMap::new(),
             draw_shader_defs: HashMap::new(),
@@ -341,7 +343,8 @@ impl ShaderRegistry {
                     shader_registry: self,
                     is_inside_loop: false,
                     options: ShaderAnalyseOptions {
-                        no_const_collapse: true
+                        no_const_collapse: true,
+                        const_gather_active: self.const_gather_active
                     }
                 };
                 fa.analyse_fn_decl() ?;
@@ -470,7 +473,8 @@ impl ShaderRegistry {
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
-                        no_const_collapse: true
+                        no_const_collapse: true,
+                        const_gather_active: self.const_gather_active
                     }
                 };
                 sa.analyse_struct() ?;
@@ -786,7 +790,8 @@ impl ShaderRegistry {
                     draw_shader_def: draw_shader_def,
                     scopes: &mut Scopes::new(),
                     options: ShaderAnalyseOptions {
-                        no_const_collapse: true
+                        no_const_collapse: true,
+                        const_gather_active: self.const_gather_active
                     }
                 };
                 sa.analyse_shader() ?;
