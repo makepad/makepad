@@ -1,7 +1,7 @@
 use {
     std::{
         collections::HashMap,
-        rc::Rc,
+        sync::Arc,
         fmt,
         ops::{Deref, DerefMut},
     },
@@ -71,9 +71,9 @@ pub enum LiveValue {
     None,
     // string types
     Str(&'static str),
-    String(Rc<String>),
+    String(Arc<String>),
     InlineString(InlineString),
-    Dependency(Rc<String>),
+    Dependency(Arc<String>),
     Bool(bool),
     Int64(i64),
     Uint64(u64),
@@ -85,7 +85,7 @@ pub enum LiveValue {
     Vec4(Vec4),
 
     Id(LiveId),
-    IdPath(Rc<Vec<LiveId>>),
+    IdPath(Arc<Vec<LiveId>>),
 
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),

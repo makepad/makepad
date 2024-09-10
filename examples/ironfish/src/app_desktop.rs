@@ -26,11 +26,11 @@ live_design! {
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
     H2_TEXT_BOLD = {
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Bold.ttf")}
     }
     H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
 
     COLOR_DOWN_FULL = #000
@@ -401,7 +401,7 @@ live_design! {
 
     }
 
-    FishSlider = <Slider dx:390.6 dy:3421.7 dw:398.1 dh:92.6> {
+    FishSlider = <Slider dx:387.0 dy:3462.0 dw:398.1 dh:92.6> {
         margin: 0
         height: 36
         text: "CutOff1"
@@ -472,7 +472,7 @@ live_design! {
         }
     }
 
-    InstrumentSlider = <ElementBox dx:390.8 dy:3339.5 dw:390.4 dh:79.1> {
+    InstrumentSlider = <ElementBox dx:393.6 dy:3333.7 dw:390.4 dh:79.1> {
         slider = <FishSlider> {
             draw_slider: {bipolar: 0.0}
         }
@@ -1093,7 +1093,7 @@ live_design! {
         }
     }
 
-    Arp = <GradientYView dx:-44.7 dy:3934.2 dw:157.2 dh:107.1> {
+    Arp = <GradientYView dx:-37.0 dy:3928.2 dw:157.2 dh:107.1> {
         flow: Down,
         padding: <SPACING_0> {}
         spacing: (SSPACING_2)
@@ -1366,7 +1366,7 @@ live_design! {
     }
 
 
-    ShadowFXPanel = <View dx:-51.6 dy:3462.1 dw:400.5 dh:231.9> {
+    ShadowFXPanel = <View dx:-35.3 dy:3462.1 dw:400.5 dh:231.9> {
         width: Fill,
         height: Fit
         flow: Down
@@ -1486,7 +1486,7 @@ live_design! {
         }
     }
 
-    DelayFXPanel = <FishPanelContainer dx:834.7 dy:2712.9 dw:323.8 dh:182.6> {
+    DelayFXPanel = <FishPanelContainer dx:834.7 dy:2708.5 dw:323.8 dh:187.0> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1572,7 +1572,7 @@ live_design! {
         }
     }
 
-    ChorusFXPanel = <FishPanelContainer dx:829.1 dy:2235.7 dw:329.5 dh:238.6> {
+    ChorusFXPanel = <FishPanelContainer dx:824.1 dy:2219.5 dw:329.5 dh:238.6> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -1658,7 +1658,7 @@ live_design! {
         }
     }
 
-    DelayToyFXPanel = <FishPanelContainer dx:837.9 dy:2531.5 dw:320.5 dh:123.9> {
+    DelayToyFXPanel = <FishPanelContainer dx:831.2 dy:2530.3 dw:320.5 dh:123.9> {
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
@@ -2000,7 +2000,7 @@ live_design! {
         }
     }
 
-    FishPanelSoundSources = <FishPanelContainer dx:-56.3 dy:1375.7 dw:400.0 dh:1144.1> {
+    FishPanelSoundSources = <FishPanelContainer dx:-59.4 dy:1375.0 dw:400.0 dh:1144.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2147,7 +2147,7 @@ live_design! {
 
     }
 
-    Play = <FishPanel dx:-55.3 dy:3731.9 dw:1216.0 dh:143.2> {
+    Play = <FishPanel dx:-45.1 dy:3723.3 dw:1216.0 dh:143.2> {
         flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
@@ -2209,7 +2209,7 @@ live_design! {
         }
     }
 
-    FishPanelEffects = <FishPanelContainer dx:820.2 dy:1375.1 dw:338.4 dh:644.1> {
+    FishPanelEffects = <FishPanelContainer dx:821.3 dy:1353.5 dw:338.4 dh:644.1> {
         width: Fill,
         height: Fill
         padding: <SPACING_0> {}
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View dx:-377.4 dy:-1227.1 dw:1613.1 dh:1522.3>{
+    AppDesktop = <View dx:-36.0 dy:-224.4 dw:1613.1 dh:1522.3>{
         flow: Right
         width: Fill,
         height: Fill

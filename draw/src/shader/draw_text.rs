@@ -1,14 +1,9 @@
 use {
     crate::{
-        makepad_platform::*,
-        turtle::{Walk, Size, Align},
-        font_atlas::{CxFontsAtlasTodo, CxFontAtlas, Font, GlyphInfo, ShapeCache},
-        draw_list_2d::ManyInstances,
-        geometry::GeometryQuad2D,
-        cx_2d::Cx2d
+        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{self, CxFontAtlas, CxFontsAtlasTodo, CxShapeCache, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk}
     },
     makepad_rustybuzz::Direction,
-    std::mem,
+    unicode_segmentation::UnicodeSegmentation,
 };
 
 const ZBIAS_STEP: f32 = 0.00001;
@@ -19,10 +14,10 @@ live_design!{
         //debug: true;
         color: #fff
         
-        uniform brightness: float
-        uniform curve: float
-        uniform sdf_radius: float
-        uniform sdf_cutoff: float
+       // uniform brightness: float
+       // uniform curve: float
+        //uniform sdf_radius: float
+        //uniform sdf_cutoff: float
         
         texture tex: texture2d
         
@@ -65,17 +60,25 @@ live_design!{
             return incol
         }
         
+        fn get_brightness(self)->float{
+            return 1.0;
+        }
+        
         fn sample_color(self, scale:float, pos:vec2)->vec4{
+            let brightness = self.get_brightness();
+            let sdf_radius = 8.0;
+            let sdf_cutoff = 0.25;
             let s = sample2d(self.tex, pos).x;
-            if (self.sdf_radius != 0.0) {
+            let curve = 0.5; 
+            //if (self.sdf_radius != 0.0) {
                 // HACK(eddyb) harcoded atlas size (see asserts below).
                 let texel_coords = pos.xy * 4096.0;
-                s = clamp((s - (1.0 - self.sdf_cutoff)) * self.sdf_radius / scale + 0.5, 0.0, 1.0);
-            } else {
-                s = pow(s, self.curve);
-            }
+                s = clamp((s - (1.0 - sdf_cutoff)) * sdf_radius / scale + 0.5, 0.0, 1.0);
+            //} else {
+            //    s = pow(s, curve);
+            //}
             let col = self.get_color(); 
-            return self.blend_color(vec4(s * col.rgb * self.brightness * col.a, s * col.a));
+            return self.blend_color(vec4(s * col.rgb * brightness * col.a, s * col.a));
         }
         
         fn pixel(self) -> vec4 {
@@ -145,9 +148,10 @@ const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 #[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
+    #[live()] pub font2: Font,
     #[live(9.0)] pub font_size: f64,
-    #[live(1.0)] pub brightness: f32,
-    #[live(0.5)] pub curve: f32,
+    //#[live(1.0)] pub brightness: f32,
+    //#[live(0.5)] pub curve: f32,
     #[live(0.88)] pub line_scale: f64,
     #[live(1.4)] pub line_spacing: f64,
     #[live(1.1)] pub top_drop: f64,
@@ -186,9 +190,6 @@ pub struct DrawText {
     #[calc] pub rect_size: Vec2,
     #[calc] pub draw_clip: Vec4,
     #[calc] pub char_depth: f32,
-    #[calc] pub delta: Vec2,
-    #[calc] pub shader_font_size: f32,
-    #[calc] pub advance: f32,
 }
 
 impl LiveHook for DrawText {
@@ -248,194 +249,502 @@ impl DrawText {
     
     pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontAtlas) {
         self.draw_vars.texture_slots[0] = Some(font_atlas.texture_sdf.clone());
-        self.draw_vars.user_uniforms[0] = self.text_style.brightness;
-        self.draw_vars.user_uniforms[1] = self.text_style.curve;
-        let (sdf_radius, sdf_cutoff) = font_atlas.alloc.sdf.as_ref()
-            .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
-        self.draw_vars.user_uniforms[2] = sdf_radius;
-        self.draw_vars.user_uniforms[3] = sdf_cutoff;
-    }
-    
-    fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, chunk: &str, font_atlas: &mut CxFontAtlas) {
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache = shape_cache_rc.0.borrow_mut();
-        let glyph_infos = shape_cache.shape(
-            Direction::LeftToRight,
-            chunk,
-            &[self.text_style.font.font_id.unwrap()],
-            font_atlas
-        );
-        self.draw_glyphs(cx, position, &glyph_infos, font_atlas);
-    }
-
-    pub fn closest_offset(&self, cx: &Cx, newline_indexes: Vec<usize>, pos: DVec2) -> Option<usize> {
-        let area = &self.draw_vars.area;
-        
-        if !area.is_valid(cx) {
-            return None
-        }
-
-        let line_spacing = self.get_line_spacing();
-        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
-        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
-
-        let mut last_y = None;
-        let mut newlines = 0;
-        for i in 0..rect_pos.repeat {
-            if newline_indexes.contains(&(i + newlines)) {
-                newlines += 1;
-            }
-
-            let index = rect_pos.stride * i;
-            let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
-
-            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            if last_y.is_none() {last_y = Some(y)}
-            let advance = advance.buffer[index + 0] as f64;
-            if i > 0 && (y - last_y.unwrap()) > 0.001 && pos.y < last_y.unwrap() as f64 + line_spacing as f64 {
-                return Some(i - 1 + newlines)
-            }
-            if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64 {
-                return Some(i + newlines)
-            }
-            last_y = Some(y)
-        }
-        return Some(rect_pos.repeat + newlines);
-        
-    }
-    
-    pub fn get_selection_rects(&self, cx: &Cx, newline_indexes: Vec<usize>, start: usize, end: usize, shift: DVec2, pad: DVec2) -> Vec<Rect> {
-        let area = &self.draw_vars.area;
-        
-        if !area.is_valid(cx) {
-            return Vec::new();
-        }
-
-        // Adjustments because of newlines characters (they are not in the buffers)
-        let start_offset = newline_indexes.iter().filter(|&&i| i < start).count();
-        let start = start - start_offset;
-        let end_offset = newline_indexes.iter().filter(|&&i| i < end).count();
-        let end = end - end_offset;
-        
-        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
-        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
-        
-        if rect_pos.repeat == 0 || start >= rect_pos.repeat{
-            return Vec::new();
-        }
-        // alright now we go and walk from start to end and collect our selection rects
-        
-        let index = start * rect_pos.stride;
-        let start_x = rect_pos.buffer[index + 0] - delta.buffer[index + 0]; // + advance.buffer[index + 0] * pos;
-        let start_y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-        let line_spacing = self.get_line_spacing();
-        let mut last_y = start_y;
-        let mut min_x = start_x;
-        let mut last_x = start_x;
-        let mut last_advance = advance.buffer[index + 0];
-        let mut out = Vec::new();
-        for index in start..end {
-            if index >= rect_pos.repeat{
-                break;
-            }
-            let index = index * rect_pos.stride;
-            let end_x = rect_pos.buffer[index + 0] - delta.buffer[index + 0];
-            let end_y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            last_advance = advance.buffer[index + 0];
-            if end_y > last_y { // emit rect
-                out.push(Rect {
-                    pos: dvec2(min_x as f64, last_y as f64) + shift,
-                    size: dvec2((last_x - min_x + last_advance) as f64, line_spacing) + pad
-                });
-                min_x = end_x;
-                last_y = end_y;
-            }
-            last_x = end_x;
-        }
-        out.push(Rect {
-            pos: dvec2(min_x as f64, last_y as f64) + shift,
-            size: dvec2((last_x - min_x + last_advance) as f64, line_spacing) + pad
-        });
-        out
-    }
-    
-    pub fn get_char_count(&self, cx: &Cx) -> usize {
-        let area = &self.draw_vars.area;
-        if !area.is_valid(cx) {
-            return 0
-        }
-        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
-        rect_pos.repeat
-    }
-    
-    pub fn get_cursor_pos(&self, cx: &Cx, newline_indexes: Vec<usize>, pos: f32, index: usize) -> Option<DVec2> {
-        let area = &self.draw_vars.area;
-        
-        if !area.is_valid(cx) {
-            return None
-        }
-        // Adjustment because of newlines characters (they are not in the buffers)
-        let index_offset = newline_indexes.iter().filter(|&&i| i < index).count();
-        let (index, pos) = if newline_indexes.contains(&(index)){
-            (index - index_offset - 1, pos + 1.0)
-        } else {
-            (index - index_offset, pos)
-        };
-        
-        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
-        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
-        
-        if rect_pos.repeat == 0 {
-            return None
-        }
-        if index >= rect_pos.repeat {
-            // lets get the last one and advance
-            let index = (rect_pos.repeat - 1) * rect_pos.stride;
-            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0];
-            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            Some(dvec2(x as f64, y as f64))
-        }
-        else {
-            let index = index * rect_pos.stride;
-            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0] * pos;
-            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
-            Some(dvec2(x as f64, y as f64))
-        }
+        // self.draw_vars.user_uniforms[0] = self.text_style.brightness;
+        // self.draw_vars.user_uniforms[1] = self.text_style.curve;
+        //let (sdf_radius, sdf_cutoff) = font_atlas.alloc.sdf.as_ref()
+        //    .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
+        //self.draw_vars.user_uniforms[0] = sdf_radius;
+        //self.draw_vars.user_uniforms[1] = sdf_cutoff;
+        //println!("{}, {}", sdf_radius, sdf_cutoff);
     }
     
     pub fn get_line_spacing(&self) -> f64 {
-        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing
+        self.text_style.font_size * self.font_scale * self.text_style.line_spacing
     }
     
     pub fn get_font_size(&self) -> f64 {
-        self.text_style.font_size * self.font_scale
+        self.text_style.font_size
     }
     
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {
-        let mut fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
-        if self.text_style.font.font_id.is_none() {
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return DVec2::default();
+        };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas;
+
+        if font_atlas.fonts[font_id].is_none() {
             return DVec2::default();
         }
-        let font_id = self.text_style.font.font_id.unwrap();
-        if fonts_atlas.fonts[font_id].is_none() {
-            return DVec2::default();
-        }
-        let font = fonts_atlas.fonts[font_id].as_mut().unwrap();
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        let font = font_atlas.fonts[font_id].as_mut().unwrap();
         let slot = font.owned_font_face.with_ref( | face | face.glyph_index('!').map_or(0, | id | id.0 as usize));
         let glyph = font.get_glyph_by_id(slot).unwrap();
         
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
-            y: self.text_style.line_spacing
+            y: line_spacing / font_size,
         }
     }
 }
 
 impl DrawText {
+    pub fn line_height(&self, cx: &Cx2d) -> f64 {
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return 0.0;
+        };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
+        
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas_ref;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+
+        line_height
+    }
+
+    pub fn line_spacing(&self, cx: &Cx2d) -> f64 {
+        self.line_height(cx) * self.text_style.line_spacing
+    }
+
+    pub fn selected_rects(
+        &self,
+        cx: &mut Cx2d, 
+        walk: Walk,
+        _align: Align,
+        width: f64,
+        text: &str,
+        start: IndexAffinity,
+        end: IndexAffinity,
+    ) -> Vec<Rect> {
+        // If the text is empty, there is nothing to draw.
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return Vec::new();
+        };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas_ref;
+
+        // Borrow the shape cache from the context.
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
+        let shape_cache = &mut *shape_cache_ref;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        let fixed_width = if !walk.width.is_fit() {
+            Some(width)
+        } else {
+            None
+        };
+
+        let wrap_width = if self.wrap == TextWrap::Word {
+            fixed_width
+        } else {
+            None
+        };
+
+        let mut rects = Vec::new();
+        let mut prev_newline_index = 0;
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            |position, index, event, _font_atlas| {
+                match event {
+                    LayoutEvent::Newline { .. } => {
+                        if start.index < index && end.index >= prev_newline_index {
+                            rects.push(Rect {
+                                pos: dvec2(0.0, position.y),
+                                size: dvec2(position.x, line_height),
+                            })
+                        }
+                        prev_newline_index = index;
+                    }
+                    _ => {}
+                }
+                false
+            }
+        );
+        if end.index >= prev_newline_index {
+            rects.push(Rect {
+                pos: dvec2(0.0, position.y),
+                size: dvec2(position.x, line_height),
+            });
+        }
+        
+        drop(shape_cache_ref);
+        drop(font_atlas_ref);
+        
+        if let Some(rect) = rects.last_mut() {
+            let end_position = self.index_affinity_to_position(
+                cx,
+                walk,
+                _align,
+                width,
+                text,
+                end,
+            );
+
+            rect.size.x = end_position.x;
+        }
+
+        if let Some(rect) = rects.first_mut() {
+            let start_position = self.index_affinity_to_position(
+                cx,
+                walk,
+                _align,
+                width,
+                text,
+                start,
+            );
+
+            rect.pos.x = start_position.x;
+            rect.size.x -= start_position.x;
+        }
+
+        rects
+    }
+
+    pub fn position_to_index_affinity(
+        &self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        _align: Align,
+        width: f64,
+        text: &str,
+        target_position: DVec2,
+    ) -> IndexAffinity {
+        // If the text is empty, there is nothing to draw.
+        if text.is_empty() {
+            return IndexAffinity::new(text.len(), Affinity::After);
+        }
+
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return IndexAffinity::new(text.len(), Affinity::After);
+        };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas_ref;
+
+        // Borrow the shape cache from the context.
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
+        let shape_cache = &mut *shape_cache_ref;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        let fixed_width = if !walk.width.is_fit() {
+            Some(width)
+        } else {
+            None
+        };
+
+        let wrap_width = if self.wrap == TextWrap::Word {
+            fixed_width
+        } else {
+            None
+        };
+
+        let mut closest = IndexAffinity::new(text.len(), Affinity::After);
+        let line_height = compute_line_height(font_ids, font_size, font_atlas);
+        let mut prev_glyph_end = 0;
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            |position, start, event, font_atlas| {
+                match event {
+                    LayoutEvent::Chunk {
+                        string,
+                        glyph_infos,
+                        ..
+                    } => {
+                        let mut position = position;
+                        let mut iter = glyph_infos.iter().peekable();
+                        while let Some(glyph_info) = iter.next() {
+                            let glyph_start = start + glyph_info.cluster;
+                            let glyph_end = start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let glyph_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
+                            let grapheme_count = text[glyph_start..glyph_end].graphemes(true).count();
+                            let width_per_grapheme = glyph_width / (grapheme_count + 1) as f64;
+                            for index in 0..grapheme_count {
+                                let next_position_x = position.x + width_per_grapheme;
+                                if target_position.x < next_position_x && target_position.y < position.y + line_spacing {
+                                    closest = IndexAffinity::new(
+                                        glyph_start + text[glyph_start..glyph_end].grapheme_indices(true).nth(index).unwrap().0,
+                                        Affinity::After,
+                                    );
+                                    return true;
+                                }
+                                position.x = next_position_x;
+                            }
+                            position.x += width_per_grapheme;
+                            prev_glyph_end = glyph_end;
+                        }
+                    }
+                    LayoutEvent::Newline { is_soft } => {
+                        if target_position.y < position.y + line_height {
+                            closest = IndexAffinity::new(
+                                prev_glyph_end,
+                                if is_soft {
+                                    Affinity::Before
+                                } else {
+                                    Affinity::After
+                                }
+                            );
+                            return true;
+                        }
+                        prev_glyph_end += 1;
+                    }
+                }
+                false
+            }
+        );
+
+        closest
+    }
+
+    pub fn index_affinity_to_position(
+        &self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        _align: Align,
+        width: f64,
+        text: &str,
+        target: IndexAffinity,
+    ) -> DVec2 {
+        // If the text is empty, there is nothing to draw.
+        if text.is_empty() {
+            return DVec2::new();
+        }
+
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return DVec2::new();
+        };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
+
+        // Borrow the font atlas from the context.
+        let font_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
+        let font_atlas = &mut *font_atlas_ref;
+
+        // Borrow the shape cache from the context.
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
+        let shape_cache = &mut *shape_cache_ref;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+
+        let fixed_width = if !walk.width.is_fit() {
+            Some(width)
+        } else {
+            None
+        };
+
+        let wrap_width = if self.wrap == TextWrap::Word {
+            fixed_width
+        } else {
+            None
+        };
+
+        let mut closest_position = None;
+        let mut prev_glyph_end = 0;
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            |position, start, event, font_atlas| {
+                match event {
+                    LayoutEvent::Chunk {
+                        string,
+                        glyph_infos,
+                        ..
+                    } => {
+                        let mut position = position;
+                        let mut iter = glyph_infos.iter().peekable();
+                        while let Some(glyph_info) = iter.next() {
+                            let glyph_start = start + glyph_info.cluster;
+                            let glyph_end = start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
+                            let glyph_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
+                            let grapheme_count = text[glyph_start..glyph_end].graphemes(true).count();
+                            let glyph_width_per_grapheme = glyph_width / grapheme_count as f64;
+                            for (grapheme_start, grapheme) in text[glyph_start..glyph_end].grapheme_indices(true) {
+                                if target.index < glyph_start + grapheme_start + grapheme.len() {
+                                    closest_position = Some(position);
+                                    return true;
+                                }
+                                position.x += glyph_width_per_grapheme;
+                            }
+                            prev_glyph_end = glyph_end;
+                        }
+                    }
+                    LayoutEvent::Newline { is_soft } => {
+                        if target.index == prev_glyph_end && (!is_soft || target.affinity == Affinity::Before) {
+                            closest_position = Some(position);
+                            return true;
+                        }
+                        prev_glyph_end += 1;
+                    }
+                }
+                false
+            }
+        );
+
+        closest_position.unwrap_or(position)
+    }
+
+    fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, line: &str, font_atlas: &mut CxFontAtlas) {
+        // If the line is empty, there is nothing to draw.
+        if line.is_empty() {
+            return;
+        }
+
+        // If the font did not load, there is nothing to draw.
+        let Some(font_id) = self.text_style.font.font_id else {
+            return;
+        };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
+
+        // Borrow the shape cache from the context.
+        let shape_cache_rc = cx.shape_cache_rc.clone();
+        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
+        let shape_cache = &mut *shape_cache_ref;
+
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
+        
+        let origin = position;
+        let mut position = DVec2::new();
+        layout_line(
+            &mut position,
+            line,
+            0,
+            line.len(),
+            font_ids,
+            font_size,
+            line_spacing,
+            None,
+            font_atlas,
+            shape_cache,
+            |position, _, event, font_atlas| {
+                if let LayoutEvent::Chunk {
+                    glyph_infos,
+                    ..
+                } = event {
+                    self.draw_glyphs(
+                        cx,
+                        origin + position,
+                        font_size,
+                        &glyph_infos, 
+                        font_atlas
+                    );
+                }
+                false
+            }
+        );
+    }
+
     /// Draws the given text with the turtle, using the given walk and alignment.
     pub fn draw_walk(
         &mut self,
@@ -453,6 +762,15 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return;
         };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -464,22 +782,9 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        // Take the line, word, and glyph info vectors from the context.
-        let mut line_infos = mem::take(&mut cx.line_infos);
-        let mut word_infos = mem::take(&mut cx.word_infos);
-        let mut glyph_infos = mem::take(&mut cx.glyph_infos);
-        
-        // Compute info for each line, word, and glyph in the text.
-        compute_infos(
-            text,
-            &[font_id],
-            self.text_style.font_size,
-            &mut line_infos,
-            &mut word_infos,
-            &mut glyph_infos,
-            font_atlas,
-            shape_cache,
-        );
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
 
         // Compute the fixed width of the bounding box, if it has one.
         let fixed_width = if !walk.width.is_fit() {
@@ -496,60 +801,84 @@ impl DrawText {
         };
 
         // If word wrapping is enabled, set the wrap width to the fixed width of the bounding box.
-        let wrap_width = if !walk.width.is_fit() && self.wrap == TextWrap::Word {
+        let wrap_width = if self.wrap == TextWrap::Word {
             fixed_width
         } else {
             None
         };
 
-        // Walk over the words of the text to determine the actual size of the bounding box.
-        let mut size = walk_words(
+        // Lay out the text to compute the width and height of the bounding box.
+        let mut max_width = 0.0;
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
             wrap_width,
-            self.font_scale,
-            self.text_style.line_scale,
-            self.text_style.line_spacing,
-            &line_infos,
-            &word_infos,
-            &glyph_infos,
-            |_, _| {}
+            font_atlas,
+            shape_cache,
+            |position, _, event, _| {
+                if let LayoutEvent::Chunk {
+                    width,
+                    ..
+                } = event {
+                    max_width = width.max(position.x + width);
+                }
+                false
+            }
         );
+        let mut width = max_width;
+        let mut height = position.y + line_height;
 
-        // If the bounding box has a fixed width, it overrides the actual width.
+        // If the bounding box has a fixed width, it overrides the computed width.
         if let Some(fixed_width) = fixed_width {
-            size.x = fixed_width;
+            width = fixed_width;
         }
 
-        // If the bounding box has a fixed height, it overrides the actual height.
+        // If the bounding box has a fixed height, it overrides the computed height.
         if let Some(fixed_height) = fixed_height {
-            size.y = fixed_height;
+            height = fixed_height;
         }
 
-        // Walk the turtle with the bounding box.
+        // Walk the turtle with the bounding box to obtain the draw rectangle.
         let rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
-            width: Size::Fixed(size.x),
-            height: Size::Fixed(size.y),
+            width: Size::Fixed(width),
+            height: Size::Fixed(height),
         });
 
         // cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
         
-        // Walk over the words of the text to draw the glyphs.
-        walk_words(
+        // Lay out the text again to draw the glyphs in the draw rectangle.
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
             wrap_width,
-            self.font_scale,
-            self.text_style.line_scale,
-            self.text_style.line_spacing,
-            &line_infos,
-            &word_infos,
-            &glyph_infos,
-            |position, glyph_infos| {
-                self.draw_glyphs(
-                    cx,
-                    dvec2(rect.pos.x + position.x, rect.pos.y + position.y),
+            font_atlas,
+            shape_cache,
+            |position, _, event, font_atlas| {
+                if let LayoutEvent::Chunk {
                     glyph_infos,
-                    font_atlas
-                );
+                    ..
+                    //string,
+                    //..
+                } = event {
+                    self.draw_glyphs(
+                        cx,
+                        rect.pos + position,
+                        font_size,
+                        glyph_infos,
+                        font_atlas,
+                    );
+                }
+                false
             }
         );
 
@@ -557,14 +886,6 @@ impl DrawText {
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
-
-        // Clear the line, word, and glyph info vectors and put them back onto the context.
-        line_infos.clear();
-        word_infos.clear();
-        glyph_infos.clear();
-        cx.line_infos = line_infos;
-        cx.word_infos = word_infos;
-        cx.glyph_infos = glyph_infos;
     }
 
     pub fn draw_walk_resumable(
@@ -590,6 +911,15 @@ impl DrawText {
         let Some(font_id) = self.text_style.font.font_id else {
             return
         };
+        let mut font_ids = [0, 0];
+        let font_ids = if let Some(font2_id) = self.text_style.font2.font_id {
+            font_ids[0] = font_id;
+            font_ids[1] = font2_id;
+            &font_ids[..2]
+        } else {
+            font_ids[0] = font_id;
+            &font_ids[..1]
+        };
 
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
@@ -601,53 +931,75 @@ impl DrawText {
         let mut shape_cache = shape_cache_rc.0.borrow_mut();
         let shape_cache = &mut *shape_cache;
 
-        // Take the line, word, and glyph info vectors from the context.
-        let mut line_infos = mem::take(&mut cx.line_infos);
-        let mut word_infos = mem::take(&mut cx.word_infos);
-        let mut glyph_infos = mem::take(&mut cx.glyph_infos);
+        let font_size = self.text_style.font_size * self.font_scale;
+        let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
+        let line_spacing = line_height * self.text_style.line_spacing;
 
-        // Compute info vectors for each line, word, and glyph in the text.
-        compute_infos(
-            text,
-            &[font_id],
-            self.text_style.font_size,
-            &mut line_infos,
-            &mut word_infos,
-            &mut glyph_infos,
-            font_atlas,
-            shape_cache,
-        );
+        let fixed_width = if cx.turtle().padded_rect().size.x.is_nan() {
+            None
+        } else {
+            Some(cx.turtle().padded_rect().size.x)
+        };
+
+        let wrap_width = if cx.turtle().layout().flow == Flow::RightWrap {
+            fixed_width
+        } else {
+            None
+        };
 
         let mut prev_rect_slot: Option<Rect> = None;
-        for line_info in &line_infos {
-            for word_info in &word_infos[line_info.word_info_start..line_info.word_info_end] {
-                let rect = cx.walk_turtle(Walk {
-                    abs_pos: None,
-                    margin: Margin::default(),
-                    width: Size::Fixed(word_info.width),
-                    height: Size::Fixed(line_info.height * self.text_style.top_drop)
-                });
+        let mut position = DVec2::new();
+        layout_text(
+            &mut position,
+            text,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            |_, _, event, font_atlas| {
+                match event {
+                    LayoutEvent::Chunk {
+                        width,
+                        glyph_infos,
+                        ..
+                    } => {
+                        let rect = cx.walk_turtle(Walk {
+                            abs_pos: None,
+                            margin: Margin::default(),
+                            width: Size::Fixed(width),
+                            height: Size::Fixed(line_height)
+                        });
 
-                if let Some(prev_rect) = &mut prev_rect_slot {
-                    if prev_rect.pos.y == rect.pos.y {
-                        prev_rect.size.x += rect.size.x;
-                    } else {
-                        f(cx, rect);
-                        prev_rect_slot = Some(rect);
+                        self.draw_glyphs(
+                            cx,
+                            rect.pos,
+                            font_size,
+                            &glyph_infos,
+                            font_atlas
+                        );
+
+                        if let Some(prev_rect) = &mut prev_rect_slot {
+                            if prev_rect.pos.y == rect.pos.y {
+                                prev_rect.size.x += rect.size.x;
+                            } else {
+                                f(cx, *prev_rect);
+                                prev_rect_slot = Some(rect);
+                            }
+                        } else {
+                            prev_rect_slot = Some(rect);
+                        }
                     }
-                } else {
-                    prev_rect_slot = Some(rect);
+                    LayoutEvent::Newline { is_soft, .. }  => {
+                        if is_soft {
+                            cx.turtle_new_line();
+                        }
+                    }
                 }
-
-                self.draw_glyphs(
-                    cx,
-                    rect.pos,
-                    &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end],
-                    font_atlas
-                );
+                false
             }
-            cx.turtle_new_line();
-        }
+        );
         if let Some(prev_rect) = prev_rect_slot {
             f(cx, prev_rect);
         }
@@ -656,14 +1008,6 @@ impl DrawText {
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
-
-        // Clear the line, word, and glyph info vectors and put them back onto the context.
-        line_infos.clear();
-        word_infos.clear();
-        glyph_infos.clear();
-        cx.line_infos = line_infos;
-        cx.word_infos = word_infos;
-        cx.glyph_infos = glyph_infos;
     }
 
     /// Draws a sequence of glyphs, defined by the given list of glyph infos, at the given position.
@@ -671,7 +1015,8 @@ impl DrawText {
         &mut self,
         cx: &mut Cx2d,
         position: DVec2,
-        glyph_infos: &[GlyphInfo],
+        font_size: f64,
+        glyph_infos: &[font_atlas::GlyphInfo],
         font_atlas: &mut CxFontAtlas,
     ) {
         // If the position is invalid, there is nothing to draw.
@@ -703,58 +1048,51 @@ impl DrawText {
         // Compute the glyph padding.
         let glyph_padding_dpx = 2.0;
         let glyph_padding_lpx = glyph_padding_dpx / device_pixel_ratio;
-        
-        let font_size = self.text_style.font_size;
 
         self.char_depth = self.draw_depth;
         let mut position = position;
         for glyph_info in glyph_infos {
             let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
             let units_per_em = font.ttf_font.units_per_em;
-
-            // Compute the ascender.
-            let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size);
+            let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size) * self.text_style.line_scale;
             
             // Use the glyph id to get the glyph from the font.
             let glyph = font.owned_font_face.with_ref(|face| {
                 font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
             });
 
-            // Compute the glyph position.
+            // Compute the position of the glyph.
             let glyph_position = dvec2(
                 units_to_lpxs(glyph.bounds.p_min.x, units_per_em, font_size),
                 units_to_lpxs(glyph.bounds.p_min.y, units_per_em, font_size),
             );
             
-            // Compute the glyph size in logical pixels.
+            // Compute the size of the bounding box of the glyph in logical pixels.
             let glyph_size_lpx = dvec2(
                 units_to_lpxs(glyph.bounds.p_max.x - glyph.bounds.p_min.x, units_per_em, font_size),
                 units_to_lpxs(glyph.bounds.p_max.y - glyph.bounds.p_min.y, units_per_em, font_size),
             );
 
-            // Compute the glyph size in device pixels.
+            // Compute the size of the bounding box of the glyph in device pixels.
             let glyph_size_dpx = glyph_size_lpx * device_pixel_ratio;
 
-            // Compute the padded glyph size in device pixels.
+            // Compute the padded size of the bounding box of the glyph in device pixels.
             let mut padded_glyph_size_dpx = glyph_size_dpx;
             if padded_glyph_size_dpx.x != 0.0 {
-                padded_glyph_size_dpx.x += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.x = padded_glyph_size_dpx.x.ceil() + glyph_padding_dpx * 2.0;
             }
             if padded_glyph_size_dpx.y != 0.0 {
-                padded_glyph_size_dpx.y += glyph_padding_dpx * 2.0;
+                padded_glyph_size_dpx.y = padded_glyph_size_dpx.y.ceil() + glyph_padding_dpx * 2.0;
             }
 
-            // Compute the padded glyph size in logical pixels.
+            // Compute the padded size of the bounding box of the glyph in logical pixels.
             let padded_glyph_size_lpx = padded_glyph_size_dpx / device_pixel_ratio;
             
             // Compute the left side bearing.
             let left_side_bearing = units_to_lpxs(glyph.horizontal_metrics.left_side_bearing, units_per_em, font_size);
-            
-            // Compute the advance width.
-            let advance_width = units_to_lpxs(glyph.horizontal_metrics.advance_width, units_per_em, font_size);
-            
+
             // Use the font size in device pixels to get the atlas page id from the font.
-            let atlas_page_id = font.get_atlas_page_id(units_to_lpxs(1.0, units_per_em, font_size) * device_pixel_ratio);
+            let atlas_page_id = font.get_atlas_page_id(units_to_lpxs(1.0, units_per_em, font_size / self.font_scale) * device_pixel_ratio);
 
             // Use the atlas page id to get the atlas page from the font.
             let atlas_page = &mut font.atlas_pages[atlas_page_id];
@@ -764,8 +1102,8 @@ impl DrawText {
                 font_atlas
                     .alloc
                     .alloc_atlas_glyph(
-                        padded_glyph_size_dpx.x,
-                        padded_glyph_size_dpx.y,
+                        padded_glyph_size_dpx.x / self.font_scale,
+                        padded_glyph_size_dpx.y / self.font_scale,
                         CxFontsAtlasTodo {
                             font_id: glyph_info.font_id,
                             atlas_page_id,
@@ -774,192 +1112,321 @@ impl DrawText {
                     )
             });
 
-            // Compute the distance from the current position to the rect.
+            // Compute the distance from the current position to the draw rectangle.
             let delta = dvec2(
-                left_side_bearing * self.font_scale,
-                (ascender - glyph_position.y) * self.font_scale,
-            ) * self.font_scale - glyph_padding_lpx;
+                left_side_bearing - glyph_padding_lpx,
+                ascender - glyph_position.y + glyph_padding_lpx
+            );
+
+            // Compute the advance width.
+            let advance_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, self.text_style.font_size, font_atlas);
             
             // Emit the instance data.
             self.font_t1 = atlas_glyph.t1;
             self.font_t2 = atlas_glyph.t2;
             self.rect_pos = (position + delta).into();
-            self.rect_size = (padded_glyph_size_lpx * self.font_scale).into();
-            self.delta.x = delta.x as f32;
-            self.delta.y = delta.y as f32;
-            self.advance = (advance_width * self.font_scale) as f32;
+            self.rect_size = padded_glyph_size_lpx.into();
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
             self.char_depth += ZBIAS_STEP;
             
             // Advance to the next position.
-            position.x += advance_width * self.font_scale;
+            position.x += advance_width;
         }
     }
 }
 
-// Info about a line in a text.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct LineInfo {
-    word_info_start: usize,
-    word_info_end: usize,
-    height: f64,
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IndexAffinity {
+    pub index: usize,
+    pub affinity: Affinity,
 }
 
-// Info about a word in a text.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct WordInfo {
-    glyph_info_start: usize,
-    glyph_info_end: usize,
-    width: f64,
+impl IndexAffinity {
+    pub fn new(index: usize, affinity: Affinity) -> Self {
+        IndexAffinity { index, affinity }
+    }
 }
 
-/// Computes info vectors for each line, word, and glyph in the text.
-fn compute_infos(
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Affinity {
+    Before,
+    After,
+}
+
+impl Default for Affinity {
+    fn default() -> Self {
+        Affinity::Before
+    }
+}
+
+fn layout_text(
+    position: &mut DVec2,
     text: &str,
     font_ids: &[usize],
     font_size: f64,
-    line_infos: &mut Vec<LineInfo>,
-    word_infos: &mut Vec<WordInfo>,
-    glyph_infos: &mut Vec<GlyphInfo>,
-    font_atlas: &mut CxFontAtlas,
-    shape_cache: &mut ShapeCache,
-) {
-    for (line_start, line_end) in line_ranges(text) {
-        let line = &text[line_start..line_end];
-
-        let word_info_start = word_infos.len();
-        for (word_start, word_end) in word_ranges(line) {
-            let word_start = line_start + word_start;
-            let word_end = line_start + word_end;
-
-            let glyph_info_start = glyph_infos.len();
-            for glyph_info in shape_cache.shape(
-                Direction::LeftToRight,
-                &text[word_start..word_end],
-                font_ids,
-                font_atlas
-            ) {
-                glyph_infos.push(GlyphInfo {
-                    font_id: glyph_info.font_id,
-                    glyph_id: glyph_info.glyph_id,
-                    index: glyph_info.index + word_start,
-                });
-            }
-
-            let mut width = 0.0;
-            for glyph_info in &glyph_infos[glyph_info_start..] {
-                let font = &font_atlas.fonts[glyph_info.font_id].as_ref().unwrap();
-                let units_per_em = font.ttf_font.units_per_em;
-                width += glyph_width(font_atlas, glyph_info, units_per_em, font_size);
-            }
-
-            word_infos.push(WordInfo {
-                glyph_info_start,
-                glyph_info_end: glyph_infos.len(),
-                width,
-            });
-        }
-
-        let font = &font_atlas.fonts[font_ids[0]].as_ref().unwrap();
-        let units_per_em = font.ttf_font.units_per_em;
-        line_infos.push(LineInfo {
-            word_info_start,
-            word_info_end: word_infos.len(),
-            height: line_height(font_atlas, font_ids[0], units_per_em, font_size)
-        });
-    }
-}
-
-// Returns an iterator over the range of each line in the given text.
-fn line_ranges(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
-    text
-        .lines()
-        .scan(0, |start, line| {
-            let end = *start + line.len();
-            let range = (*start, end);
-            *start = end + 1;
-            Some(range)
-        })
-}
-
-// Returns an iterator over the range of each word in the given line.
-fn word_ranges(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
-    unicode_linebreak::linebreaks(line)
-        .map(|(index, _)| index)
-        .scan(0, |start, end| {
-            let range = (*start, end);
-            *start = end;
-            Some(range)
-        })
-}
-
-/// Walk the words in a text using the given line, word, and glyph info vectors.
-///
-/// This function also takes several 'fudge factors' which can be used to tweak the way the text is
-/// layed out:
-/// - font_scale: used to scale the width of every glyph and the height of every line.
-/// - line_scale: used to scale the height of every line.
-/// - line_spacing: used to scale the height of every line except the last.
-fn walk_words(
-    wrap_width: Option<f64>,
-    font_scale: f64,
-    line_scale: f64,
     line_spacing: f64,
-    line_infos: &[LineInfo],
-    word_infos: &[WordInfo],
-    glyph_infos: &[GlyphInfo],
-    mut f: impl FnMut(DVec2, &[GlyphInfo]),
-) -> DVec2 {
-    let mut width = 0.0;
-    let mut position = DVec2::new();
-    for (index, line_info) in line_infos.iter().enumerate() {
-        for word_info in &word_infos[line_info.word_info_start..line_info.word_info_end] {
-            if let Some(max_width) = wrap_width {
-                if position.x + word_info.width * font_scale > max_width && position.x > 0.0 {
-                    position.x = 0.0;
-                    position.y += (line_info.height * line_spacing) * font_scale;
-                }
+    wrap_width: Option<f64>,
+    font_atlas: &mut CxFontAtlas,
+    shape_cache: &mut CxShapeCache,
+    mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
+    for (index, line) in lines(text).enumerate() {
+        let line_start = line.as_ptr() as usize - text.as_ptr() as usize;
+        let line_end = line_start + line.len();
+        if index > 0 {
+            if f(*position, line_start, LayoutEvent::Newline { is_soft: false }, font_atlas) {
+                return true;
             }
-            f(position, &glyph_infos[word_info.glyph_info_start..word_info.glyph_info_end]);
-            position.x += word_info.width * font_scale
+            position.x = 0.0;
+            position.y += line_spacing;
         }
-        width = width.max(position.x);
-        position.x = 0.0;
-        if index == line_infos.len() - 1 {
-            position.y += line_info.height * font_scale * line_scale;
-        } else {
-            position.y += line_info.height * font_scale * line_scale * line_spacing;
+        if layout_line(
+            position,
+            text,
+            line_start,
+            line_end,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas,
+            shape_cache,
+            &mut f,
+        ) {
+            return true;
         }
     }
-    dvec2(width, position.y)
+    false
 }
 
-fn line_height(font_atlas: &CxFontAtlas, font_id: usize, units_per_em: f64, font_size: f64) -> f64 {
-    let font = font_atlas.fonts[font_id].as_ref().unwrap();
-    units_to_lpxs(font.ttf_font.ascender - font.ttf_font.descender, units_per_em, font_size)
-}
-
-fn glyph_width(
-    font_atlas: &mut CxFontAtlas,
-    glyph_info: &GlyphInfo,
-    units_per_em: f64,
+fn layout_line(
+    position: &mut DVec2,
+    text: &str,
+    line_start: usize,
+    line_end: usize,
+    font_ids: &[usize],
     font_size: f64,
-) -> f64 {
-    let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
-    let glyph = font.owned_font_face.with_ref(|face| {
-        font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
-    });
-    units_to_lpxs(glyph.horizontal_metrics.advance_width, units_per_em, font_size)
+    line_spacing: f64,
+    wrap_width: Option<f64>,
+    font_atlas: &mut CxFontAtlas,
+    shape_cache: &mut CxShapeCache,
+    mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
+    let line = &text[line_start..line_end];
+    for (index, word) in words(line).enumerate() {
+        let word_start = word.as_ptr() as usize - text.as_ptr() as usize;
+        let word_end = word_start + word.len();
+        if layout_word(
+            position,
+            index == 0,
+            text,
+            word_start,
+            word_end,
+            font_ids,
+            font_size,
+            line_spacing,
+            wrap_width,
+            font_atlas, 
+            shape_cache,
+            &mut f,
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
-fn units_to_lpxs(units: f64, units_per_em: f64, points_per_em: f64) -> f64 {
+fn layout_word(
+    position: &mut DVec2,
+    is_first: bool,
+    text: &str,
+    word_start: usize,
+    word_end: usize,
+    font_ids: &[usize],
+    font_size: f64,
+    line_spacing: f64,
+    wrap_width: Option<f64>,
+    font_atlas: &mut CxFontAtlas,
+    shape_cache: &mut CxShapeCache,
+    mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
+    let word = &text[word_start..word_end];
+    let glyph_infos = shape(word, font_ids, font_atlas, shape_cache);
+    let width: f64 = glyph_infos.iter().map(|glyph_info| {
+        compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
+    }).sum();
+    if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) && !is_first {
+        if f(*position, word_start, LayoutEvent::Newline { is_soft: true }, font_atlas) {
+            return true;
+        }
+        position.x = 0.0;
+        position.y += line_spacing;
+    }
+    if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) {
+        for (index, grapheme) in graphemes(word).enumerate() {
+            let grapheme_start = grapheme.as_ptr() as usize - text.as_ptr() as usize;
+            let grapheme_end = grapheme_start + grapheme.len();
+            if layout_grapheme(
+                position,
+                index == 0,
+                text,
+                grapheme_start,
+                grapheme_end,
+                font_ids,
+                font_size,
+                line_spacing,
+                wrap_width,
+                font_atlas,
+                shape_cache,
+                &mut f,
+            ) {
+                return true;
+            }
+        }
+    } else {
+        if f(*position, word_start, LayoutEvent::Chunk {
+            width,
+            string: word,
+            glyph_infos
+        }, font_atlas) {
+            return true;
+        }
+        position.x += width;
+    }
+    false
+}
+
+fn layout_grapheme(
+    position: &mut DVec2,
+    is_first: bool,
+    text: &str,
+    grapheme_start: usize,
+    grapheme_end: usize,
+    font_ids: &[usize],
+    font_size: f64,
+    line_spacing: f64,
+    wrap_width: Option<f64>,
+    font_atlas: &mut CxFontAtlas,
+    shape_cache: &mut CxShapeCache, 
+    mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
+) -> bool {
+    let grapheme = &text[grapheme_start..grapheme_end];
+    let glyph_infos = shape(grapheme, font_ids, font_atlas, shape_cache);
+    let width: f64 = glyph_infos.iter().map(|glyph_info| {
+        compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
+    }).sum();
+    if wrap_width.map_or(false, |wrap_width| position.x + width > wrap_width) && !is_first {
+        if f(*position, grapheme_start, LayoutEvent::Newline { is_soft: true }, font_atlas) {
+            return true;
+        }
+        position.x = 0.0;
+        position.y += line_spacing;
+    }
+    if f(*position, grapheme_start, LayoutEvent::Chunk {
+        width,
+        string: grapheme,
+        glyph_infos
+    }, font_atlas) {
+        return true;
+    }
+    position.x += width;
+    false
+}
+
+enum LayoutEvent<'a> {
+    Chunk {
+        width: f64,
+        string: &'a str,
+        glyph_infos: &'a [font_atlas::GlyphInfo],
+    },
+    Newline {
+        is_soft: bool
+    }
+}
+
+fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+}
+
+fn words(line: &str) -> impl Iterator<Item = &str> {
+    split_at_indices(line, break_opportunities(line))
+}
+
+fn graphemes(word: &str) -> impl Iterator<Item = &str> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    word.graphemes(true)
+}
+
+fn break_opportunities(line: &str) -> impl Iterator<Item = usize> + '_ {
+    unicode_linebreak::linebreaks(line).map(|(index, _)| index).chain(if line.is_empty() {
+        Some(0)
+    } else {
+        None
+    })
+}
+
+fn split_at_indices(
+    string: &str,
+    indices: impl IntoIterator<Item = usize>
+) -> impl Iterator<Item = &str> {
+    indices.into_iter().scan(0, |start, end| {
+        let substring = &string[*start..end];
+        *start = end;
+        Some(substring)
+    })
+}
+
+fn compute_line_height(
+    font_ids: &[usize],
+    font_size: f64,
+    font_atlas: &CxFontAtlas,
+) -> f64 {
+    font_ids.iter().map(|&font_id| {
+        let font = font_atlas.fonts[font_id].as_ref().unwrap();
+        let units_per_em = font.ttf_font.units_per_em;
+        let line_height = font.ttf_font.ascender - font.ttf_font.descender;
+        units_to_lpxs(line_height, units_per_em, font_size)
+    }).reduce(|a, b| a.max(b)).unwrap()
+}
+
+fn compute_glyph_width(
+    font_id: usize,
+    glyph_id: usize,
+    font_size: f64,
+    font_atlas: &mut CxFontAtlas,
+) -> f64 {
+    let font = font_atlas.fonts[font_id].as_mut().unwrap();
+    let units_per_em = font.ttf_font.units_per_em;
+    let glyph_width = font.owned_font_face.with_ref(|face| {
+        let glyph = font.ttf_font.get_glyph_by_id(face, glyph_id as usize).unwrap();
+        glyph.horizontal_metrics.advance_width
+    });
+    units_to_lpxs(glyph_width, units_per_em, font_size)
+}
+
+fn units_to_lpxs(units: f64, units_per_em: f64, font_size: f64) -> f64 {
     const LPXS_PER_IN: f64 = 96.0;
     const PTS_PER_IN: f64 = 72.0;
 
     let ems = units / units_per_em;
-    let pts = ems * points_per_em;
+    let pts = ems * font_size;
     let ins = pts / PTS_PER_IN;
     let lpxs = ins * LPXS_PER_IN;
     lpxs
+}
+
+fn shape<'a>(
+    string: &str,
+    font_ids: &[usize],
+    font_atlas: &CxFontAtlas,
+    shape_cache: &'a mut CxShapeCache,
+) -> &'a [font_atlas::GlyphInfo] {
+    shape_cache.shape(
+        Direction::LeftToRight,
+        string,
+        font_ids,
+        font_atlas
+    )
 }

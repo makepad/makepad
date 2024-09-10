@@ -854,7 +854,7 @@ impl CxTexture {
             let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
             self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         }
-        if self.check_updated(){
+        if !self.get_and_clear_updated().is_empty() {
             fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
                 let region = MTLRegion {
                     origin: MTLOrigin {x: 0, y: 0, z: 0},

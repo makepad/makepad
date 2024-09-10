@@ -4,6 +4,7 @@ use crate::makepad_http::server::*;
 use crate::makepad_wasm_strip::*;
 use std::{
     io::prelude::*,
+    collections::HashMap,
     path::{PathBuf},
     fs::File,
     fs,
@@ -13,6 +14,15 @@ use std::{
 
 pub struct WasmBuildResult {
     app_dir: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+pub struct WasmConfig{
+    pub strip: bool,
+    pub lan:bool,
+    pub port:Option<u16>,
+    pub small_fonts: bool,
+    pub brotli: bool
 }
 
 pub fn generate_html(wasm:&str)->String{
@@ -53,7 +63,32 @@ pub fn generate_html(wasm:&str)->String{
     ")
 }
 
-pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
+fn brotli_compress(dest_path:&PathBuf){
+    let source_file_name = dest_path.file_name().unwrap().to_string_lossy().to_string();
+    let dest_path_br = dest_path.parent().unwrap().join(&format!("{}.br",source_file_name));
+    println!("Compressing {:?}", dest_path);
+    // lets read the dest_path
+    // lets brotli compress dest_path
+    let mut brotli_data = Vec::new();
+    let data = fs::read(&dest_path).expect("Can't read file"); 
+    {
+        let mut writer = brotli::CompressorWriter::new(&mut brotli_data, 4096 /* buffer size */, 12, 22);
+        writer.write_all(&data).expect("Can't write data");
+    }
+    let mut brotli_file = File::create(dest_path_br).unwrap();
+    brotli_file.write_all(&brotli_data).unwrap();
+}
+
+pub fn cp_brotli(source_path: &PathBuf, dest_path: &PathBuf, exec: bool, compress:bool) -> Result<(), String> {
+    cp(source_path, dest_path, exec)?;
+    if compress{
+        brotli_compress(dest_path);
+    }
+    Ok(())
+}
+    
+        
+pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args) ?;
     
     let base_args = &[
@@ -92,40 +127,75 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
         let underscore_build_crate = build_crate.replace('-', "_");
         let dst_dir = app_dir.join(underscore_build_crate).join("resources");
         mkdir(&dst_dir) ?;
-        cp_all(&local_resources_path, &dst_dir, false) ?;
+        //cp_all(&local_resources_path, &dst_dir, false) ?;
+        walk_all(&local_resources_path, &dst_dir, &mut |source_path, dest_dir|{
+            let source_file_name = source_path.file_name().ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?.to_string_lossy().to_string();
+            let dest_path = dest_dir.join(&source_file_name);
+            cp(&source_path, &dest_path, false)?;
+            if config.brotli{
+                brotli_compress(&dest_path);
+            }
+            Ok(())
+        }) ?;
+        
     }
     let resources = get_crate_dep_dirs(build_crate, &build_dir, "wasm32-unknown-unknown");
     for (name, dep_dir) in resources.iter() {
         // alright we need special handling for makepad-wasm-bridge
         // and makepad-platform
         if name == "makepad-wasm-bridge"{
-            cp(&dep_dir.join("src/wasm_bridge.js"), &app_dir.join("makepad_wasm_bridge/wasm_bridge.js"), false)?;
+            cp_brotli(&dep_dir.join("src/wasm_bridge.js"), &app_dir.join("makepad_wasm_bridge/wasm_bridge.js"), false, config.brotli)?;
         }
         if name == "makepad-platform"{
-            cp(&dep_dir.join("src/os/web/audio_worklet.js"), &app_dir.join("makepad_platform/audio_worklet.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/audio_worklet.js"), &app_dir.join("makepad_platform/audio_worklet.js"), false,config.brotli)?;
             
-            cp(&dep_dir.join("src/os/web/web_gl.js"), &app_dir.join("makepad_platform/web_gl.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/web_gl.js"), &app_dir.join("makepad_platform/web_gl.js"), false, config.brotli)?;
             
-            cp(&dep_dir.join("src/os/web/web_worker.js"), &app_dir.join("makepad_platform/web_worker.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/web_worker.js"), &app_dir.join("makepad_platform/web_worker.js"), false, config.brotli)?;
             
-            cp(&dep_dir.join("src/os/web/web.js"), &app_dir.join("makepad_platform/web.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/web.js"), &app_dir.join("makepad_platform/web.js"), false, config.brotli)?;
             
-            cp(&dep_dir.join("src/os/web/auto_reload.js"), &app_dir.join("makepad_platform/auto_reload.js"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/auto_reload.js"), &app_dir.join("makepad_platform/auto_reload.js"), false, config.brotli)?;
             
-            cp(&dep_dir.join("src/os/web/full_canvas.css"), &app_dir.join("makepad_platform/full_canvas.css"), false)?;
+            cp_brotli(&dep_dir.join("src/os/web/full_canvas.css"), &app_dir.join("makepad_platform/full_canvas.css"), false, config.brotli)?;
         }
         let name = name.replace("-","_");
         let resources_path = dep_dir.join("resources");
+        
+        let mut rename:HashMap<String,String> = HashMap::new();
+        
+        if config.small_fonts{
+            rename.insert("GoNotoKurrent-Bold.ttf".into(), "IBMPlexSans-SemiBold.ttf".into());
+            rename.insert("GoNotoKurrent-Regular.ttf".into(), "IBMPlexSans-Text.ttf".into());
+        }
+        
         if resources_path.is_dir(){
+            // alright so.. the easiest thing is to rename a bunch of resources
+            
             let dst_dir = app_dir.join(&name).join("resources");
             mkdir(&dst_dir) ?;
-            cp_all(&resources_path, &dst_dir, false) ?;
+            walk_all(&resources_path, &dst_dir, &mut |source_path, dest_dir|{
+                let source_file_name = source_path.file_name().ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?.to_string_lossy().to_string();
+                let source_path2 = if let Some(tgt) = rename.get(&source_file_name){
+                    //println!("RENAMING {} {}", source_file_name, tgt);
+                    &source_path.parent().unwrap().join(tgt)
+                }
+                else{
+                    source_path
+                };
+                let dest_path = dest_dir.join(&source_file_name);
+                cp(&source_path2, &dest_path, false)?;
+                if config.brotli{
+                    brotli_compress(&dest_path);
+                }
+                Ok(())
+            }) ?;
         }            
     }
 
     let wasm_source = build_dir.join(format!("{}.wasm", build_crate));
     let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
-    if strip{
+    if config.strip{
         if let Ok(data) = fs::read(&wasm_source) {
             if let Ok(strip) = wasm_strip_debug(&data) {
                 fs::write(&wasm_dest, strip).map_err( | e | format!("Can't write file {:?} {:?} ", wasm_dest, e)) ?;
@@ -141,10 +211,16 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
     else{
         cp(&wasm_source, &wasm_dest, false)?;
     }
+    if config.brotli{
+        brotli_compress(&wasm_dest);
+    }
     // generate html file
     let index_path = app_dir.join("index.html");
     let html = generate_html(build_crate);
     fs::write(&index_path, &html.as_bytes()).map_err( | e | format!("Can't write {:?} {:?} ", index_path, e)) ?;
+    if config.brotli{
+        brotli_compress(&index_path);
+    }
     println!("Created wasm package: {:?}", app_dir);
     println!("Copy this directory to any webserver, and serve with atleast these headers:");
     println!("Cross-Origin-Embedder-Policy: require-corp");
@@ -164,10 +240,10 @@ pub fn build(strip:bool, args: &[String]) -> Result<WasmBuildResult, String> {
 }
 
 
-pub fn run(lan:bool, port:u16, strip:bool, args: &[String]) -> Result<(), String> {
+pub fn run(config:WasmConfig, args: &[String]) -> Result<(), String> {
     // we should run the compiled folder root as webserver
-    let result = build(strip, args)?;
-    start_wasm_server(result.app_dir, lan, port);
+    let result = build(config, args)?;
+    start_wasm_server(result.app_dir, config.lan, config.port.unwrap_or(8010));
     return Err("Run is not implemented yet".into());
 }
 

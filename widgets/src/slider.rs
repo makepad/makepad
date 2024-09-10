@@ -38,8 +38,9 @@ pub struct DrawSlider {
 }
 
 #[derive(Live, Widget)]
+#[designable]
 pub struct Slider {
-    #[redraw] #[live] draw_slider: DrawSlider,
+    #[area] #[redraw] #[live] draw_slider: DrawSlider,
     
     #[walk] walk: Walk,
     
@@ -62,6 +63,11 @@ pub struct Slider {
     #[live] default: f64,
     
     #[live] bind: String,
+
+    // Indicates if the label of the slider responds to hover events
+    // The primary use case for this kind of emitted actions is for tooltips displaying
+    // and it is turned on by default, since this component already consumes finger events
+    #[live(true)] hover_actions_enabled: bool,
     
     #[rust] pub relative_value: f64,
     #[rust] pub dragging: Option<f64>,
@@ -124,7 +130,8 @@ impl Slider {
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             let walk = self.text_input.walk(cx);
-            self.text_input.draw_walk_text_input(cx, walk);
+            let mut scope = Scope::default();
+            let _ = self.text_input.draw_walk(cx, &mut scope, walk);
 
             let label_walk = dw.resolve(cx);
             cx.begin_turtle(label_walk, Layout::default());
@@ -148,12 +155,23 @@ impl Slider {
     }
 }
 
+impl WidgetDesign for Slider{
+    
+}
 
 impl Widget for Slider {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        
+        // alright lets match our designer against the slider backgdrop
+        match event.hit_designer(cx, self.draw_slider.area()){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
         
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
@@ -177,14 +195,16 @@ impl Widget for Slider {
             }
         };
 
-        match event.hits_with_capture_overload(cx, self.label_area, true) {
-            Hit::FingerHoverIn(fh) => {
-                cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+        if self.hover_actions_enabled {
+            match event.hits_with_capture_overload(cx, self.label_area, true) {
+                Hit::FingerHoverIn(fh) => {
+                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+                }
+                Hit::FingerHoverOut(_) => {
+                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
+                },
+                _ => ()
             }
-            Hit::FingerHoverOut(_) => {
-                cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
-            },
-            _ => ()
         }
 
         match event.hits(cx, self.draw_slider.area()) {
@@ -197,7 +217,7 @@ impl Widget for Slider {
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
-                self.text_input.read_only = true;
+                self.text_input.is_read_only = true;
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
@@ -207,9 +227,9 @@ impl Widget for Slider {
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
-                self.text_input.read_only = false;
+                self.text_input.is_read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
-                self.text_input.create_external_undo();
+                self.text_input.force_new_edit_group();
                 self.animator_play(cx, id!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));

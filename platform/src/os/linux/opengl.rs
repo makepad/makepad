@@ -1,6 +1,6 @@
 use {
     std::{
-        fs::File,
+        fs::{File, remove_file},
         io::prelude::*,
         mem,
         ptr,
@@ -66,7 +66,7 @@ impl Cx {
                         &shp.vertex,
                         &shp.pixel,
                         &sh.mapping,
-                        self.os_type.get_cache_dir().as_ref()
+                        &self.os_type,
                     ));
                 }
                 let shgl = shp.gl_shader.as_ref().unwrap();
@@ -123,7 +123,7 @@ impl Cx {
                     || vao.geom_vb != geometry.os.vb.gl_buffer
                     || vao.geom_ib != geometry.os.ib.gl_buffer
                     || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
-                    
+                        
                     if let Some(vao) = vao.vao.take(){
                         unsafe{gl_sys::DeleteVertexArrays(1, &vao)};
                     }
@@ -177,7 +177,6 @@ impl Cx {
                     GlShader::set_uniform_array(&shgl.draw_uniforms, draw_uniforms);
                     GlShader::set_uniform_array(&shgl.user_uniforms, &draw_call.user_uniforms);
                     GlShader::set_uniform_array(&shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
-                    
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
                         GlShader::set_uniform_array(&shgl.const_table_uniform, ct);
@@ -240,7 +239,7 @@ impl Cx {
                         instances as i32
                     );
                     
-                    gl_sys::BindVertexArray(0);
+                    //gl_sys::BindVertexArray(0);
                 }
                 
             }
@@ -524,19 +523,45 @@ pub struct GlShader {
 }
 
 impl GlShader{
-    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, cache_dir: Option<&String>)->Self{
-        unsafe fn read_cache(vertex:&str, pixel:&str, cache_dir:Option<&String>)->Option<gl_sys::GLuint>{ 
-            if let Some(cache_dir) = cache_dir {
+    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, os_type: &OsType)->Self{
+        unsafe fn read_cache(vertex: &str, pixel: &str, os_type: &OsType) -> Option<gl_sys::GLuint> {
+            if let Some(cache_dir) = os_type.get_cache_dir() {
                 let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
-                if let Ok(mut cache_file) = File::open(format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0)) {
+                let mut base_filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
+
+                match os_type {
+                    OsType::Android(params) => {
+                        base_filename = format!("{}_av{}_bn{}_kv{}", base_filename, params.android_version, params.build_number, params.kernel_version);
+                    },
+                    _ => (),
+                };
+
+                let filename = format!("{}.bin", base_filename);
+
+                if let Ok(mut cache_file) = File::open(&filename) {
                     let mut binary = Vec::new();
                     let mut format_bytes = [0u8; 4];
                     if cache_file.read(&mut format_bytes).is_ok() {
                         let binary_format = u32::from_be_bytes(format_bytes);
                         if cache_file.read_to_end(&mut binary).is_ok() {
-                            let program = gl_sys::CreateProgram();
-                            gl_sys::ProgramBinary(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
-                            return Some(program)
+                            let mut version_consistency_conflict = false;
+                            // On Android, invalidate the cached file if there have been significant system updates
+                            match os_type {
+                                OsType::Android(params) => {
+                                    let current_filename = format!("{}/shader_{:08x}_av{}_bn{}_kv{}.bin", cache_dir, shader_hash.0, params.android_version, params.build_number, params.kernel_version);
+                                    version_consistency_conflict = filename != current_filename;
+                                },
+                                _ => (),
+                            };
+            
+                            if !version_consistency_conflict {
+                                let program = gl_sys::CreateProgram();
+                                gl_sys::ProgramBinary(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
+                                return Some(program);
+                            } else {
+                                // Version mismatch, delete the old cache file
+                                let _ = remove_file(&filename);
+                            }
                         }
                     }
                 }
@@ -545,7 +570,7 @@ impl GlShader{
         }
         
         unsafe {
-            let program = if let Some(program) = read_cache(&vertex,&pixel,cache_dir){
+            let program = if let Some(program) = read_cache(&vertex,&pixel,os_type){
                 program
             }
             else{ 
@@ -576,7 +601,7 @@ impl GlShader{
                 program
             };
             
-            if let Some(cache_dir) = cache_dir {
+            if let Some(cache_dir) = os_type.get_cache_dir() {
                 let mut binary = Vec::new();
                 let mut binary_len = 0;
                 gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
@@ -588,8 +613,19 @@ impl GlShader{
                     if return_size != 0 {
                         //log!("GOT FORMAT {}", format);
                         let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+                        let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
+
+                        match os_type {
+                            Android(params) => {
+                                filename = format!("{}_av{}_bn{}_kv{}", filename, params.android_version, params.build_number, params.kernel_version);
+                            },
+                            _ => (),
+                        };
+
+                        filename = format!("{}.bin", filename);
+
                         binary.resize(return_size as usize, 0u8);
-                        if let Ok(mut cache) = File::create(format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0)) {
+                        if let Ok(mut cache) = File::create(filename) {
                             let _ = cache.write_all(&binary_format.to_be_bytes());
                             let _ = cache.write_all(&binary);
                         }
@@ -932,10 +968,10 @@ impl CxTexture {
             }
         }
     
-        if !self.check_updated() {
+        if self.get_and_clear_updated().is_empty() {
             return;
         }
-    
+        
         unsafe {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);

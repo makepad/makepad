@@ -203,6 +203,8 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
+            DesignerPickEvent,
+            HitDesigner,
         },
         action::{
             Action,
@@ -231,7 +233,7 @@ pub use {
         },
         live_prims::{
             LiveDependency,
-            RcStringMut,
+            ArcStringMut,
         },
         live_traits::{
             LiveHookDeref,

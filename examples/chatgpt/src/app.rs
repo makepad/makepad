@@ -51,9 +51,18 @@ Integer eu enim finibus, aliquet nunc sit amet, tincidunt quam. Proin accumsan m
             }
             
             message_input = <TextInput> {
-                text: "Hi!"
+                text: "xxxflyyy\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Ut vel velit ac urna imperdiet fermentum. Nullam eu quam elit. Cras condimentum purus quam, ac pellentesque arcu facilisis placerat. Maecenas accumsan sem quis mattis dignissim. Integer eget lacinia eros. Donec hendrerit nisl et ligula ornare, quis commodo lacus hendrerit. Morbi facilisis risus sit amet vestibulum malesuada. Duis nec ligula quis enim accumsan accumsan a et felis. Fusce orci nisl, scelerisque ac elit ut, eleifend sodales nisi.\nxxxflyyy\nxxxflyyy\nxxxflyyy\nxxxflyyy"
+                width: 500,
+                height: Fit,
+                draw_bg: {
+                    color: #1
+                }
+            }
+
+            message_input_2 = <TextInput> {
+                text: "xxxflyyy",
                 width: 300,
-                height: Fit
+                height: Fit,
                 draw_bg: {
                     color: #1
                 }
