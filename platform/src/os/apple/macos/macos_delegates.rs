@@ -2,8 +2,8 @@ use crate::apple_util::get_event_mouse_button;
 
 use {
     std::{
-        rc::Rc,
-        cell::Cell,
+        sync::Arc,
+        sync::Mutex,
         ffi::CStr,
         os::raw::{c_void}
     },
@@ -658,7 +658,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             msg_send![sender, draggingLocation]
         }));*/
         
-        let response = Rc::new(Cell::new(DragResponse::None));
+        let response = Arc::new(Mutex::new(DragResponse::None));
         
         let modifiers = unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
@@ -668,13 +668,14 @@ pub fn define_cocoa_view_class() -> *const Class {
         
         window.do_callback(MacosEvent::Drag(DragEvent {
             modifiers,
-            handled: Cell::new(false),
+            handled: Arc::new(Mutex::new(false)),
             abs: pos,
             items,
             response: response.clone()
         }));
         
-        match response.get() {
+        let v = response.lock().unwrap();
+        match *v{
             DragResponse::None => NSDragOperation::None,
             DragResponse::Copy => NSDragOperation::Copy,
             DragResponse::Link => NSDragOperation::Link,
@@ -687,7 +688,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.end_live_resize();
     }
     
-    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
+    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Arc<Vec<DragItem >>, DVec2) {
         //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
@@ -748,7 +749,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             }
             
         }
-        (Rc::new(items), pos)
+        (Arc::new(items), pos)
     }
     
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
@@ -763,7 +764,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
         window.do_callback(MacosEvent::Drop(DropEvent {
             modifiers,
-            handled: Cell::new(false),
+            handled: Arc::new(Mutex::new(false)),
             abs: pos,
             items
         }));

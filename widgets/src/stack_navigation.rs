@@ -244,16 +244,22 @@ impl WidgetNode for StackNavigation {
     fn walk(&mut self, cx:&mut Cx) -> Walk{
         self.view.walk(cx)
     }
-
+    fn area(&self)->Area{self.view.area()}
+    
     fn redraw(&mut self, cx: &mut Cx) {
         for widget_ref in self.get_active_views(cx).iter() {
             widget_ref.redraw(cx);
         }
     }
 
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.view.find_widgets(path, cached, results);
     }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        self.view.uid_to_widget(uid)
+    }
+    
 }
 
 impl WidgetMatchEvent for StackNavigation {
@@ -335,7 +341,7 @@ impl StackNavigationRef {
     }
 
     pub fn set_title(&self, stack_view_id: LiveId, title: &str) {
-        if let Some(mut inner) = self.borrow_mut() {
+        if let Some(inner) = self.borrow_mut() {
             let stack_view_ref = inner.stack_navigation_view(&[stack_view_id]);
             stack_view_ref.label(id!(title)).set_text(title);
         }
