@@ -39,6 +39,7 @@ pub mod window_menu;
 pub mod html;
 pub mod markdown;
 pub mod text_flow;
+pub mod multi_image;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -59,6 +60,7 @@ pub mod nav_control;
 pub mod view;
 pub mod widget;
 pub mod widget_match_event;
+pub mod toggle_panel;
 
 pub mod touch_gesture;
 
@@ -111,6 +113,7 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
+    toggle_panel::*,
     widget::{
         WidgetSet,
         WidgetSetIterator,
@@ -148,6 +151,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
+    crate::multi_image::live_design(cx);
     crate::image_blend::live_design(cx);
     crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
@@ -188,6 +192,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::root::live_design(cx);
     crate::bare_step::live_design(cx);
     crate::turtle_step::live_design(cx);
+    crate::toggle_panel::live_design(cx);
     
     crate::designer::live_design(cx);
     crate::designer_view::live_design(cx);

@@ -6,3 +6,4 @@ pub mod my_widget;
 pub mod iconbutton;
 pub mod diffuse;
 pub mod particles;
+pub mod birds;

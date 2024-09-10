@@ -78,7 +78,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
         
-    pub fn with_data_props<T: Any>(v: &'a mut T, w: &'b T)->Self{
+    pub fn with_data_props<T: Any + Sized>(v: &'a mut T, w: &'b T)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
@@ -136,6 +136,25 @@ impl<'a,'b> Scope<'a,'b>{
         self.path.push(id);
         let r = f(self);
         self.path.pop();
+        r
+    }
+    
+    pub fn override_props<T:Any, F, R>(&mut self, props:&'b T, f: F) -> R where F: FnOnce(&mut Scope) -> R{
+        let mut props = ScopeDataRef(Some(props));
+        std::mem::swap(&mut self.props, &mut props);
+        let r = f(self);
+        std::mem::swap(&mut self.props, &mut props);
+        r
+    }
+    
+    pub fn override_props_index<T:Any, F, R>(&mut self, props:&'b T, index:usize, f: F) -> R where F: FnOnce(&mut Scope) -> R{
+        let mut props = ScopeDataRef(Some(props));
+        let old_index = self.index;
+        self.index = index;
+        std::mem::swap(&mut self.props, &mut props);
+        let r = f(self);
+        std::mem::swap(&mut self.props, &mut props);
+        self.index = old_index;
         r
     }
 }

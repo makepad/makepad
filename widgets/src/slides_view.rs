@@ -27,15 +27,25 @@ impl WidgetNode for SlidesView{
     fn walk(&mut self, _cx:&mut Cx) -> Walk{
         self.walk
     }
-            
+    
+    fn area(&self)->Area{self.area}
+    
     fn redraw(&mut self, cx: &mut Cx){
         self.area.redraw(cx)
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
-        for child in self.children.values_mut() {
+    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        for child in self.children.values() {
             child.find_widgets(path, cached, results);
         }
+    }
+    
+    fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
+        for child in self.children.values() {
+            let x = child.uid_to_widget(uid);
+            if !x.is_empty(){return x}
+        }
+        WidgetRef::empty()
     }
 }   
 

@@ -208,7 +208,8 @@ impl Widget for ProfilerEventChart {
                    self.time_range = TimeRange{
                        start: (self.time_range.start - time) * zoom + time,
                        end: (self.time_range.end - time) * zoom + time,
-                   }
+                   };
+                   self.draw_bg.redraw(cx);
                }
             }
             Hit::FingerUp(_) => {

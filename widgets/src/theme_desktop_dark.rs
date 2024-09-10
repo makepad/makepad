@@ -179,17 +179,32 @@ live_design! {
     THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
 
-    THEME_FONT_LABEL = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
-    THEME_FONT_REGULAR = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } }
-    THEME_FONT_BOLD = { font: { path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf") } }
-    THEME_FONT_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-Italic.ttf") } }
-    THEME_FONT_BOLD_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-BoldItalic.ttf") } }
+    THEME_FONT_LABEL = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+    } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
+    THEME_FONT_REGULAR = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+    }
+    THEME_FONT_BOLD = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
+    }
+    THEME_FONT_ITALIC = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+    }
+    THEME_FONT_BOLD_ITALIC = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
+        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
+    }
     THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
-        brightness: 1.1
-        top_drop: 1.3
-        line_spacing: 2.0
+        //brightness: 1.1
+        line_scale: 1.2,
+        line_spacing: 1.16
     }
 
     Label = <LabelBase> {
@@ -563,7 +578,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         a = <HtmlLink> {}
@@ -665,7 +680,10 @@ live_design! {
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         paragraph_spacing: 16,
-
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -723,7 +741,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         draw_block: {
@@ -3213,74 +3231,53 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
 
         label_align: {y: 0.}
-        cursor_margin_bottom: (THEME_SPACE_1),
-        cursor_margin_top: (THEME_SPACE_1),
-        select_pad_edges: 3.0
-        cursor_size: 2.0,
-        numeric_only: false,
-        on_focus_select_all: false,
+        clip_x: false,
+        clip_y: false,
+
+        cursor_width: 2.0,
+
+        is_read_only: false,
+        is_numeric_only: false,
         empty_message: "0",
-        clip_x: false, clip_y: false,
 
-        draw_text: {
-            instance hover: 0.0
-            instance focus: 0.0
-            wrap: Word,
-            text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_LINE_SPACING),
-                font_size: (THEME_FONT_SIZE_P)
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_label: {hover: 0.0},
+                        draw_selection: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_label: {hover: 1.0},
+                        draw_selection: {hover: 1.0}
+                    }
+                }
             }
-            fn get_color(self) -> vec4 {
-                return
-                mix(
-                    mix(
-                        mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover),
-                        THEME_COLOR_TEXT_FOCUSED,
-                        self.focus
-                    ),
-                    mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_DEFAULT, self.hover),
-                    self.is_empty
-                )
-            }
-        }
-
-        draw_cursor: {
-            instance focus: 0.0
-            uniform border_radius: 0.5
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
-                return sdf.result
-            }
-        }
-
-        draw_select: {
-            instance hover: 0.0
-            instance focus: 0.0
-            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-            fn pixel(self) -> vec4 {
-                //return mix(#f00,#0f0,self.pos.y)
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-                sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN,
-                    THEME_COLOR_BG_HIGHLIGHT_INLINE,
-                    self.focus)
-                ); // Pad color
-                return sdf.result
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: .25}}
+                    apply: {
+                        draw_bg: {focus: 0.0},
+                        draw_label: {focus: 0.0},
+                        draw_cursor: {focus: 0.0},
+                        draw_selection: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_cursor: {focus: 1.0},
+                        draw_bg: {focus: 1.0},
+                        draw_selection: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                    }
+                }
             }
         }
 
@@ -3335,44 +3332,65 @@ live_design! {
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_select: {hover: 0.0}
-                        draw_text: {hover: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_select: {hover: 1.0}
-                        draw_text: {hover: 1.0}
-                    }
-                }
+        draw_label: {
+            instance hover: 0.0
+            instance focus: 0.0
+            wrap: Word,
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
             }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: .25}}
-                    apply: {
-                        draw_cursor: {focus: 0.0},
-                        draw_bg: {focus: 0.0},
-                        draw_select: {focus: 0.0}
-                        draw_text: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_cursor: {focus: 1.0},
-                        draw_bg: {focus: 1.0},
-                        draw_select: {focus: 1.0}
-                        draw_text: {focus: 1.0}
-                    }
-                }
+            fn get_color(self) -> vec4 {
+                return
+                mix(
+                    mix(
+                        mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover),
+                        THEME_COLOR_TEXT_FOCUSED,
+                        self.focus
+                    ),
+                    mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_DEFAULT, self.hover),
+                    self.is_empty
+                )
+            }
+        }
+
+        draw_cursor: {
+            instance focus: 0.0
+            uniform border_radius: 0.5
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                )
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
+                return sdf.result
+            }
+        }
+
+        draw_selection: {
+            instance hover: 0.0
+            instance focus: 0.0
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+            fn pixel(self) -> vec4 {
+                //return mix(#f00,#0f0,self.pos.y)
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                )
+                sdf.fill(
+                    mix(THEME_COLOR_U_HIDDEN,
+                    THEME_COLOR_BG_HIGHLIGHT_INLINE,
+                    self.focus)
+                ); // Pad color
+                return sdf.result
             }
         }
     }
@@ -3796,6 +3814,81 @@ live_design! {
         root_view = <View> {}
     }
 
+    TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
+    TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
+    TogglePanel = <TogglePanelBase> {
+        flow: Overlay,
+        width: 300,
+        height: Fill,
+
+        open_content = <CachedView> {
+            width: Fill
+            height: Fill
+
+            draw_bg: {
+                instance opacity: 1.0
+    
+                fn pixel(self) -> vec4 {
+                    let color = sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
+                    return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+                }
+            }
+        }
+
+        persistent_content = <View> {
+            height: Fit
+            width: Fill
+            default = <View> {
+                height: Fit,
+                width: Fill,
+                padding: {top: 58, left: 15, right: 15}
+                spacing: 10,
+
+                before = <View> {
+                    height: Fit,
+                    width: Fit,
+                    spacing: 10,
+                }
+
+                close = <Button> {
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_CLOSE_ICON),
+                    }
+                }
+
+                open = <Button> {
+                    visible: false,
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_OPEN_ICON),
+                    }
+                }
+
+                after = <View> {
+                    height: Fit,
+                    width: Fit,
+                    spacing: 10,
+                }
+            }
+        }
+
+        animator: {
+            panel = {
+                default: open,
+                open = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.3}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    apply: {animator_panel_progress: 1.0, open_content = { draw_bg: {opacity: 1.0} }}
+                }
+                close = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.3}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    apply: {animator_panel_progress: 0.0, open_content = { draw_bg: {opacity: 0.0} }}
+                }
+            }
+        }
+    }
 
     DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
         align: { y: 0.5 }
@@ -4267,7 +4360,7 @@ live_design! {
                 }
             }
         }
-        
+        /*
         <RoundedShadowView>{
             width: 250., height: 350.,
             abs_pos: vec2(25., 325.)
@@ -4375,7 +4468,7 @@ live_design! {
                     }
                 }
             }
-        }
+        }*/
     }
 
     DesignerContainer = <DesignerContainerBase>{
@@ -4483,6 +4576,16 @@ live_design! {
 
     DesignerView = <DesignerViewBase>{
         clear_color: #333333
+        draw_outline:{
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                sdf.stroke(#fff, 1.0);
+                return sdf.result;
+                //return vec4(self.color.xyz * self.color.w, self.color.w)
+            }
+        }
+        
         draw_bg: {
             texture image: texture2d
             varying scale: vec2

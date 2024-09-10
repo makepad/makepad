@@ -5,8 +5,12 @@ import javax.microedition.khronos.opengles.GL10;
 
 import android.app.Activity;
 import android.view.View;
+import android.view.Choreographer;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
+import android.view.Display;
+import android.view.WindowManager;
+import android.view.Window;
 import android.content.Context;
 
 import android.content.ClipData;
@@ -75,7 +79,10 @@ import android.media.MediaFormat;
 
 import java.nio.ByteBuffer;
 import android.media.MediaDataSource;
+
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 
 import dev.makepad.android.MakepadNative;
 
@@ -110,6 +117,7 @@ class MakepadSurface
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i("SAPP", "surfaceCreated");
         Surface surface = holder.getSurface();
+        //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceCreated(surface);
     }
 
@@ -127,6 +135,7 @@ class MakepadSurface
                                int height) {
         Log.i("SAPP", "surfaceChanged");
         Surface surface = holder.getSurface();
+        //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
@@ -263,7 +272,7 @@ MidiManager.OnDeviceOpenedListener{
         ResizingLayout layout = new ResizingLayout(this);
         layout.addView(view);
         setContentView(layout);
-
+  
         MakepadNative.activityOnCreate(this);
 
         HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
@@ -278,18 +287,39 @@ MidiManager.OnDeviceOpenedListener{
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
         boolean isEmulator = this.isEmulator();
+        String androidVersion = Build.VERSION.RELEASE;
+        String buildNumber = Build.DISPLAY;
+        String kernelVersion = this.getKernelVersion();
 
-        MakepadNative.onAndroidParams(cache_path, density, isEmulator);
+        MakepadNative.onAndroidParams(cache_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+        float refreshRate = getDeviceRefreshRate();
+        MakepadNative.initChoreographer(refreshRate);
         //% MAIN_ACTIVITY_ON_CREATE
     }
 
     @Override
     protected void onStart() {
         super.onStart();
+
+       // this forces a high framerate default 
+           /*
+        Window w = getWindow();
+        WindowManager.LayoutParams p = w.getAttributes();
+        Display.Mode[] modes = getDisplay().getSupportedModes();
+
+        for(Display.Mode mode: modes){    
+            if(mode.getRefreshRate() > 100.0){
+                p.preferredDisplayModeId = mode.getModeId();
+                w.setAttributes(p);
+                Log.w("Makepad", "width"+mode.getRefreshRate()+" id "+mode.getModeId());
+                break;
+            }
+        }
+*/      
         MakepadNative.activityOnStart();
     }
 
@@ -428,6 +458,7 @@ MidiManager.OnDeviceOpenedListener{
     }
 
     public void sendWebSocketMessage(long id, byte[] message) {
+
         MakepadWebSocket webSocket = mActiveWebsockets.get(id);
         if (webSocket != null) {
             webSocket.sendMessage(message);
@@ -602,5 +633,42 @@ MidiManager.OnDeviceOpenedListener{
             || Build.PRODUCT == "sdk"
             || Build.PRODUCT == "google_sdk"
             || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
+    }
+
+    private String getKernelVersion() {
+        try {
+            Process process = Runtime.getRuntime().exec("uname -r");
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder stringBuilder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                stringBuilder.append(line);
+            }
+            return stringBuilder.toString();
+        } catch (IOException e) {
+            return "Unknown";
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    public float getDeviceRefreshRate() {
+        float refreshRate = 60.0f;  // Default to a common refresh rate
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Use getDisplay() API on Android 11 and above
+            Display display = getDisplay();
+            if (display != null) {
+                refreshRate = display.getRefreshRate();
+            }
+        } else {
+            // Use the old method for Android 10 and below
+            WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (windowManager != null) {
+                Display display = windowManager.getDefaultDisplay();
+                refreshRate = display.getRefreshRate();
+            }
+        }
+
+        return refreshRate;
     }
 }
