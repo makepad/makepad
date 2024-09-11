@@ -194,6 +194,7 @@ impl CxTexture{
             TextureFormat::RenderBGRAu8{ initial, .. } => initial,
             TextureFormat::RenderRGBAf16{ initial, .. } => initial,
             TextureFormat::RenderRGBAf32{ initial, .. } => initial,
+            TextureFormat::SharedBGRAu8{ initial, .. } => initial,
             _ => panic!()
         }
     }
@@ -216,6 +217,7 @@ impl CxTexture{
             TextureFormat::RenderBGRAu8{ initial, .. } => initial,
             TextureFormat::RenderRGBAf16{ initial, .. } => initial,
             TextureFormat::RenderRGBAf32{ initial, .. } => initial,
+            TextureFormat::SharedBGRAu8{ initial, .. } => initial,
             _ => panic!()
         } = initial;
     }
