@@ -50,6 +50,12 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.4.0" }
 makepad-jni-sys = "0.4.0"
 makepad-android-state = "0.1.0"
 
+[target.'cfg(target_env = "ohos")'.dependencies]
+hilog-sys = "0.1.1"
+napi-derive-ohos = "0.0.9"
+napi-ohos = "0.1.3"
+ohos-sys = { version = "0.2.1", features = ["xcomponent"] }
+
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../libs/futures_legacy"
 version = "0.7.0"
