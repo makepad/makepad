@@ -736,6 +736,7 @@ impl Widget for View {
                             cx,
                             TextureFormat::RenderBGRAu8 {
                                 size: TextureSize::Auto,
+                                initial: true,
                             },
                         );
                         texture_cache.pass.add_color_texture(

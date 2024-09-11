@@ -39,7 +39,7 @@ use {
         draw_list::CxDrawListPool,
         web_socket::WebSocket,
         pass::CxPassPool,
-        texture::{CxTexturePool,TextureFormat,Texture},
+        texture::{CxTexturePool,TextureFormat,Texture,TextureUpdated},
         geometry::{
             Geometry,
             CxGeometryPool,
@@ -213,7 +213,8 @@ impl Cx {
         let null_texture = textures.alloc(TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
-            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            updated: TextureUpdated::Full,
         });
         
         let (executor, spawner) = executor::new_executor_and_spawner();

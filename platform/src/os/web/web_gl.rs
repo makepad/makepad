@@ -82,9 +82,9 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.format.is_vec(){
                         if cxtexture.alloc_vec(){}
-                        if !cxtexture.get_and_clear_updated().is_empty() {
+                        if !cxtexture.take_updated().is_empty() {
                             match &cxtexture.format{
-                                TextureFormat::VecBGRAu8_32{width, height, data}=>{
+                                TextureFormat::VecBGRAu8_32{width, height, data, .. }=>{
                                     self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
                                         texture_id: texture_id.0,
                                         width: *width,

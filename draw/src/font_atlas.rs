@@ -402,13 +402,15 @@ impl<'a> Cx2d<'a> {
                 width: ATLAS_WIDTH,
                 height: ATLAS_HEIGHT,
                 data: vec![],
-                unpack_row_length: None
+                unpack_row_length: None,
+                updated: TextureUpdated::Full,
             });
 
             let texture_svg = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
                 width: ATLAS_WIDTH,
                 height: ATLAS_HEIGHT,
                 data: vec![],
+                updated: TextureUpdated::Full,
             });
             
             let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg);
