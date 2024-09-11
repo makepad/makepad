@@ -432,6 +432,7 @@ impl Widget for DesignerView {
                 cx,
                 TextureFormat::RenderBGRAu8 {
                     size: TextureSize::Auto,
+                    initial: true,
                 },
             ));
         }

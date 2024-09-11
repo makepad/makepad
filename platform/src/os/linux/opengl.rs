@@ -333,7 +333,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_render_target(size.x as usize, size.y as usize);
-                    if cxtexture.check_initial(){
+                    if cxtexture.take_initial(){
                        clear_color = _clear_color;
                        clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                     }
@@ -360,7 +360,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[depth_texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_depth_stencil(size.x as usize, size.y as usize);
-                    if cxtexture.check_initial(){
+                    if cxtexture.take_initial(){
                         clear_depth = _clear_depth;
                         clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                     }
@@ -968,7 +968,7 @@ impl CxTexture {
             }
         }
     
-        if self.get_and_clear_updated().is_empty() {
+        if self.take_updated().is_empty() {
             return;
         }
         
@@ -979,27 +979,27 @@ impl CxTexture {
     
             // Set texture parameters based on the format
             let (width, height, internal_format, format, data_type, data, use_mipmaps) = match &self.format {
-                TextureFormat::VecBGRAu8_32{width, height, data} => 
+                TextureFormat::VecBGRAu8_32{width, height, data, ..} => 
                     (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false),
-                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _} => 
+                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
                     (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, true),
-                TextureFormat::VecRGBAf32{width, height, data} => 
+                TextureFormat::VecRGBAf32{width, height, data, ..} => 
                     (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ptr() as *const std::ffi::c_void, false),
-                TextureFormat::VecRu8{width, height, data, unpack_row_length} => {
+                TextureFormat::VecRu8{width, height, data, unpack_row_length, ..} => {
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
                     (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false)
                 },
-                TextureFormat::VecRGu8{width, height, data, unpack_row_length} => {
+                TextureFormat::VecRGu8{width, height, data, unpack_row_length, ..} => {
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
                     (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false)
                 },
-                TextureFormat::VecRf32{width, height, data} => 
+                TextureFormat::VecRf32{width, height, data, ..} => 
                     (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ptr() as *const std::ffi::c_void, false),
                 _ => panic!("Unsupported texture format"),
             };
@@ -1061,7 +1061,7 @@ impl CxTexture {
                 }
             }
         }
-        if self.check_initial() {
+        if self.take_initial() {
             unsafe{
                 gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
         
