@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, TextFlow};
 live_design! {
     ButtonBase = {{Button}} {}
 }
@@ -116,15 +116,22 @@ impl Widget for Button {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
         }
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+
+        if let Some(text_flow) = scope.data.get_mut::<TextFlow>() {
+            // Here: the text flow has already began drawing, so we just need to draw the text.
+            text_flow.draw_text(cx, self.text.as_ref());
+        } else {
+            self.draw_text
+                .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        }
+
         self.draw_bg.end(cx);
         DrawStep::done()
     }
