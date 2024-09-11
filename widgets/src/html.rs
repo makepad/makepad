@@ -380,7 +380,7 @@ impl Widget for Html {
 
 fn handle_custom_widget(
     cx: &mut Cx2d,
-    scope: &mut Scope,
+    _scope: &mut Scope,
     tf: &mut TextFlow,
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
@@ -400,7 +400,8 @@ fn handle_custom_widget(
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
         item.set_text(node.find_text().unwrap_or(""));
-        item.draw_all(cx, scope);
+        let mut draw_scope = Scope::with_data(tf);
+        item.draw_all(cx, &mut draw_scope);
     }
 
     node.jump_to_close();
@@ -469,7 +470,16 @@ impl Widget for HtmlLink {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.link.draw_walk(cx, scope, walk)
+        if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            tf.underline.push();
+            // TODO: how to handle colors for links? there are many DrawText instances
+            //       that could be selected by TextFlow, but we don't know which one to set...
+        }
+        let draw_step = self.link.draw_walk(cx, scope, walk);
+        if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            tf.underline.pop();
+        }
+        draw_step
     }
     
     fn text(&self)->String{
