@@ -251,6 +251,7 @@ impl RunView {
                             id: pi.id,
                             width: alloc_width as usize,
                             height: alloc_height as usize,
+                            initial: true,
                         })
                     })
                 });
