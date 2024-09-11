@@ -406,6 +406,7 @@ pub enum EglError {
     NoDisplay,
     InitializeFailed,
     CreateContextFailed,
+    ChooseConfigFailed,
 }
 
 pub struct Egl {}
@@ -497,5 +498,62 @@ pub unsafe fn create_egl_context(
         return Err(EglError::CreateContextFailed);
     }
     
+    return Ok((context, config, display));
+}
+
+#[cfg(target_env="ohos")]
+pub unsafe  fn create_egl_context(
+    egl: &mut LibEgl
+) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
+    let display = (egl.eglGetDisplay.unwrap())(null_mut());
+    if display == null_mut() {
+        return Err(EglError::NoDisplay);
+    }
+
+    if (egl.eglInitialize.unwrap())(display,null_mut(),null_mut()) == 0 {
+        return Err(EglError::InitializeFailed);
+    }
+
+    #[rustfmt::skip]
+    let cfg_attributes = vec![
+        EGL_SURFACE_TYPE,
+        EGL_WINDOW_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_RENDERABLE_TYPE,
+        EGL_OPENGL_ES2_BIT,
+        EGL_DEPTH_SIZE, 0,
+        EGL_STENCIL_SIZE, 0,
+        EGL_NONE
+    ];
+    let available_cfgs: Vec<EGLConfig> = vec![null_mut(); 1];
+    let mut cfg_count = 0;
+
+    if (egl.eglChooseConfig.unwrap())(
+        display,
+        cfg_attributes.as_ptr() as _,
+        available_cfgs.as_ptr() as _,
+        1,&mut cfg_count as *mut _ as *mut _,
+    ) == 0 {
+        return Err(EglError::ChooseConfigFailed);
+    }
+
+    assert!(cfg_count > 0);
+
+    let config = available_cfgs[0];
+
+    let ctx_attributes = vec![EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE];
+    let context = (egl.eglCreateContext.unwrap())(
+        display,
+        config,
+        /* EGL_NO_CONTEXT */ null_mut(),
+        ctx_attributes.as_ptr() as _
+    );
+    if context.is_null(){
+        return Err(EglError::CreateContextFailed);
+    }
+    crate::log!("create elg context success");
     return Ok((context, config, display));
 }

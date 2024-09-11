@@ -140,6 +140,12 @@ pub struct AndroidParams {
 
 #[derive(Clone, Debug)]
 pub struct OpenHarmonyParams {
+    pub files_dir:String,
+    pub cache_dir:String,
+    pub temp_dir:String,
+    pub device_type: String,
+    pub os_full_name: String,
+    pub display_density: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +203,9 @@ impl OsType {
     pub fn get_cache_dir(&self)->Option<String>{
         if let OsType::Android(params) = self {
             Some(params.cache_path.clone())
+        }
+        else if let OsType::OpenHarmony(params) = self {
+            Some(params.cache_dir.clone())
         }
         else {
             None
