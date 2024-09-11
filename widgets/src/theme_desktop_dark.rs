@@ -3484,9 +3484,9 @@ live_design! {
             cursor_margin_bottom: (THEME_SPACE_1),
             cursor_margin_top: (THEME_SPACE_1),
             select_pad_edges: 3.0
-            cursor_size: 2.0,
-            empty_message: "0",
-            numeric_only: true,
+            cursor_width: 2.0,
+            empty_text: "0",
+            is_numeric_only: true,
 
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
@@ -3583,9 +3583,9 @@ live_design! {
             cursor_margin_bottom: (THEME_SPACE_1),
             cursor_margin_top: (THEME_SPACE_1),
             select_pad_edges: (THEME_SPACE_1),
-            cursor_size: (THEME_SPACE_1),
-            empty_message: "0",
-            numeric_only: true,
+            cursor_width: (THEME_SPACE_1),
+            empty_text: "0",
+            is_numeric_only: true,
             draw_bg: {
                 color: (THEME_COLOR_D_HIDDEN)
             },

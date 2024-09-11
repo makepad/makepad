@@ -372,19 +372,19 @@ live_design!{
                             height: Fit, width: Fill,
                             spacing: (THEME_SPACE_2),
                             <H4> { text: "Inline Label", width: 175.}
-                            <TextInput> { empty_message: "Inline Label" }
+                            <TextInput> { empty_text: "Inline Label" }
                         }
                         <View> {
                             height: Fit, width: Fill,
                             spacing: (THEME_SPACE_2),
                             <H4> { text: "Secret", width: 175.}
-                            <TextInput> { text: "1234567", empty_message: "Password", secret: true }
+                            <TextInput> { text: "1234567", empty_text: "Password", secret: true }
                         }
                         <View> {
                             height: Fit, width: Fill,
                             spacing: (THEME_SPACE_2),
                             <H4> { text: "On focus select all", width: 175.}
-                            <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
+                            <TextInput> { text: "Lorem Ipsum", empty_text: "Inline Label", on_focus_select_all: true }
                         }
                         <View> {
                             height: Fit, width: Fill,
@@ -396,13 +396,13 @@ live_design!{
                             height: Fit, width: Fill,
                             spacing: (THEME_SPACE_2),
                             <H4> { text: "ASCII only", width: 175.}
-                            <TextInput> { empty_message: "No fancy characters", ascii_only: true }
+                            <TextInput> { empty_text: "No fancy characters", ascii_only: true }
                         }
                         // <View> {
                         //     height: Fit, width: Fill,
                         //     spacing: (THEME_SPACE_2),
                         //     <H4> { text: "Double Tap start", width: 175.}
-                        //     <TextInput> { empty_message: "Click twice", double_tap_start: TODO: UNCLEAR WHAT VALUE THIS NEEDS }
+                        //     <TextInput> { empty_text: "Click twice", double_tap_start: TODO: UNCLEAR WHAT VALUE THIS NEEDS }
                         // }
                     }
                 }
