@@ -105,18 +105,18 @@ impl LiveHook for DisplayAudio {
                         data[j * WAVE_SIZE_X + i] = left_u16 << 16 | right_u16;
                     }
                 }
-                data
+                Some(data)
             },
             width: WAVE_SIZE_X,
             height: WAVE_SIZE_Y,
+            updated: TextureUpdated::Full,
         });
     }
 }
 
 impl DisplayAudio {
     pub fn process_buffer(&mut self, cx: &mut Cx, chan: Option<usize>, voice: usize, audio: &AudioBuffer, gain:f32) {
-        let mut wave_buf = Vec::new();
-        self.wave_texture.swap_vec_u32(cx, &mut wave_buf);
+        let mut wave_buf = self.wave_texture.take_vec_u32(cx);
         let frames = audio.frame_count();
         let wave_off = self.data_offset[voice];
         let voice_offset = voice * WAVE_SIZE_X;
@@ -135,7 +135,7 @@ impl DisplayAudio {
             wave_buf[off] = left_u16 << 16 | right_u16;
         }
         self.draw_wave.gain = gain;
-        self.wave_texture.swap_vec_u32(cx, &mut wave_buf);
+        self.wave_texture.put_back_vec_u32(cx, wave_buf, None);
         self.data_offset[voice] = (self.data_offset[voice] + frames) % (WAVE_SIZE_X);
         if is_active {
             self.active[voice] = 6

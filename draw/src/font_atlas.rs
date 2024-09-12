@@ -401,15 +401,15 @@ impl<'a> Cx2d<'a> {
             let texture_sdf = Texture::new_with_format(cx, TextureFormat::VecRu8 {
                 width: ATLAS_WIDTH,
                 height: ATLAS_HEIGHT,
-                data: vec![],
+                data: Some(vec![]),
                 unpack_row_length: None,
-                updated: TextureUpdated::Full,
+                updated: TextureUpdated::Empty,
             });
 
             let texture_svg = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
                 width: ATLAS_WIDTH,
                 height: ATLAS_HEIGHT,
-                data: vec![],
+                data: Some(vec![]),
                 updated: TextureUpdated::Full,
             });
             
@@ -571,13 +571,12 @@ impl<'a> Cx2d<'a> {
             glyph_rast
         };
 
-        let mut atlas_data = vec![];
-        fonts_atlas.texture_sdf.swap_vec_u8(self.cx, &mut atlas_data);
+        let mut atlas_data = fonts_atlas.texture_sdf.take_vec_u8(self.cx);
         let (atlas_w, atlas_h) = fonts_atlas.texture_sdf.get_format(self.cx).vec_width_height().unwrap();
         if atlas_data.is_empty() {
-            atlas_data = vec![0; atlas_w*atlas_h];
+            atlas_data = vec![0; atlas_w * atlas_h];
         } else {
-            assert_eq!(atlas_data.len(), atlas_w*atlas_h);
+            assert_eq!(atlas_data.len(), atlas_w * atlas_h);
         }
 
         let sdf_pad = fonts_atlas.alloc.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
@@ -592,7 +591,10 @@ impl<'a> Cx2d<'a> {
                 src.advance((1, 0));
             }
         }
-        fonts_atlas.texture_sdf.swap_vec_u8(self.cx, &mut atlas_data);
+        fonts_atlas.texture_sdf.put_back_vec_u8(self.cx, atlas_data, Some(RectUsize::new(
+            PointUsize::new(atlas_x0, atlas_y0),
+            SizeUsize::new(atlas_w, atlas_h),
+        )));
     }
 }
 

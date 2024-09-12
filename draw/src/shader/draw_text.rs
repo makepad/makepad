@@ -86,7 +86,7 @@ live_design!{
             let dxt = length(dFdx(texel_coords));
             let dyt = length(dFdy(texel_coords));
             let scale = (dxt + dyt) * 4096.0 *0.5;
-            return self.sample_color(scale, self.tex_coord1.xy); // + vec4(1.0, 0.0, 0.0, 0.0);
+            return self.sample_color(scale, self.tex_coord1.xy);// + vec4(1.0, 0.0, 0.0, 0.0);
             // ok lets take our delta in the x direction
             /*
             //4x AA
@@ -686,6 +686,8 @@ impl DrawText {
     }
 
     fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, line: &str, font_atlas: &mut CxFontAtlas) {
+        self.char_depth = self.draw_depth;
+        
         // If the line is empty, there is nothing to draw.
         if line.is_empty() {
             return;
@@ -753,6 +755,8 @@ impl DrawText {
         _align: Align,
         text: &str,
     ) {
+        self.char_depth = self.draw_depth;
+        
         // If the text is empty, there is nothing to draw.
         if text.is_empty() {
             return;
@@ -771,7 +775,7 @@ impl DrawText {
             font_ids[0] = font_id;
             &font_ids[..1]
         };
-
+        
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas = font_atlas_rc.0.borrow_mut();
@@ -902,6 +906,8 @@ impl DrawText {
         text: &str,
         mut f: impl FnMut(&mut Cx2d, Rect)
     ) {
+        self.char_depth = self.draw_depth;
+        
         // If the text is empty, there is nothing to draw.
         if text.is_empty() {
             return
@@ -1049,7 +1055,7 @@ impl DrawText {
         let glyph_padding_dpx = 2.0;
         let glyph_padding_lpx = glyph_padding_dpx / device_pixel_ratio;
 
-        self.char_depth = self.draw_depth;
+        
         let mut position = position;
         for glyph_info in glyph_infos {
             let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();

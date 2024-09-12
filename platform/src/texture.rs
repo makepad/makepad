@@ -100,12 +100,12 @@ impl TextureSize{
 #[derive(Clone, Debug)]
 pub enum TextureFormat {
     Unknown,
-    VecBGRAu8_32{width:usize, height:usize, data:Vec<u32>, updated: TextureUpdated},
-    VecMipBGRAu8_32{width:usize, height:usize, data:Vec<u32>, max_level:Option<usize>, updated: TextureUpdated},
-    VecRGBAf32{width:usize, height:usize, data:Vec<f32>, updated: TextureUpdated},
-    VecRu8{width:usize, height:usize, data:Vec<u8>, unpack_row_length:Option<usize>, updated: TextureUpdated},
-    VecRGu8{width:usize, height:usize, data:Vec<u8>, unpack_row_length:Option<usize>, updated: TextureUpdated},
-    VecRf32{width:usize, height:usize, data:Vec<f32>, updated: TextureUpdated},
+    VecBGRAu8_32{width:usize, height:usize, data:Option<Vec<u32>>, updated: TextureUpdated},
+    VecMipBGRAu8_32{width:usize, height:usize, data:Option<Vec<u32>>, max_level:Option<usize>, updated: TextureUpdated},
+    VecRGBAf32{width:usize, height:usize, data:Option<Vec<f32>>, updated: TextureUpdated},
+    VecRu8{width:usize, height:usize, data:Option<Vec<u8>>, unpack_row_length:Option<usize>, updated: TextureUpdated},
+    VecRGu8{width:usize, height:usize, data:Option<Vec<u8>>, unpack_row_length:Option<usize>, updated: TextureUpdated},
+    VecRf32{width:usize, height:usize, data:Option<Vec<f32>>, updated: TextureUpdated},
     DepthD32{size:TextureSize, initial: bool},
     RenderBGRAu8{size:TextureSize, initial: bool},
     RenderRGBAf16{size:TextureSize, initial: bool},
@@ -157,6 +157,17 @@ impl TextureUpdated {
         match self {
             TextureUpdated::Empty => true,
             _ => false,
+        }
+    }
+
+    pub fn update(self, dirty_rect: Option<RectUsize>) -> Self {
+        match dirty_rect {
+            Some(dirty_rect) => match self {
+                TextureUpdated::Empty => TextureUpdated::Partial(dirty_rect),
+                TextureUpdated::Partial(rect) => TextureUpdated::Partial(rect.union(dirty_rect)),
+                TextureUpdated::Full => TextureUpdated::Full,
+            },
+            None => TextureUpdated::Full,
         }
     }
 }
@@ -493,48 +504,69 @@ impl Texture {
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
         &mut cx.textures[self.texture_id()].format
     }
-    
-    pub fn swap_vec_u32(&self, cx: &mut Cx, image: &mut Vec<u32>) {
-        let cxtexture = &mut cx.textures[self.texture_id()];
-        match &mut cxtexture.format{
-            TextureFormat::VecBGRAu8_32{data,..} => {
-                std::mem::swap(data, image);
-                cxtexture.set_updated(TextureUpdated::Full);
-            }
-            _=>{
-                panic!("Not the correct texture desc for u32 image buffer")
-            }
-        }
+
+    pub fn take_vec_u32(&self, cx: &mut Cx) -> Vec<u32> {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let data = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 { data, .. } => data,
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        data.take().expect("image data already taken")
+    }
+
+    pub fn put_back_vec_u32(&self, cx: &mut Cx, new_data: Vec<u32>, dirty_rect: Option<RectUsize>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        assert!(data.is_none(), "image data not taken or already put back");
+        *data = Some(new_data);
+        *updated = updated.update(dirty_rect);
+    }
+
+    pub fn take_vec_u8(&self, cx: &mut Cx) -> Vec<u8> {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let data = match &mut cx_texture.format {
+            TextureFormat::VecRu8 { data, .. } => data,
+            TextureFormat::VecRGu8 { data, .. } => data,
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        data.take().expect("image data already taken")
+    }
+
+    pub fn put_back_vec_u8(&self, cx: &mut Cx, new_data: Vec<u8>, dirty_rect: Option<RectUsize>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecRu8 { data, updated, .. } => (data, updated),
+            TextureFormat::VecRGu8 { data,updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for u8 image data"),
+        };
+        assert!(data.is_none(), "image data not taken or already put back");
+        *data = Some(new_data);
+        *updated = updated.update(dirty_rect);
     }
             
-    pub fn swap_vec_u8(&self, cx: &mut Cx, image: &mut Vec<u8>) {
-        let cxtexture = &mut cx.textures[self.texture_id()];
-        match &mut cxtexture.format{
-            TextureFormat::VecRu8{data,..} | TextureFormat::VecRGu8 { data, ..} => {
-                std::mem::swap(data, image);
-                cxtexture.set_updated(TextureUpdated::Full);
-            },
-            _=>{
-                panic!("Not the correct texture desc for u8 image buffer")
-            }
-        }
+    pub fn take_vec_f32(&self, cx: &mut Cx) -> Vec<f32> {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let data = match &mut cx_texture.format{
+            TextureFormat::VecRf32 { data, .. } => data,
+            TextureFormat::VecRGBAf32{data, .. } => data,
+            _ => panic!("Not the correct texture desc for f32 image data"),
+        };
+        data.take().expect("image data already taken")
     }
-    
-    pub fn swap_vec_f32(&self, cx: &mut Cx, image: &mut Vec<f32>) {
-        let cxtexture = &mut cx.textures[self.texture_id()];
-        match &mut cxtexture.format{
-            TextureFormat::VecRf32{data,..} => {
-                std::mem::swap(data, image);
-                cxtexture.set_updated(TextureUpdated::Full);
-            }
-            TextureFormat::VecRGBAf32{data,..} => {
-                std::mem::swap(data, image);
-                cxtexture.set_updated(TextureUpdated::Full);
-            }
-            _=>{
-                panic!("Not the correct texture desc for f32 image buffer")
-            }
-        }
+
+    pub fn put_back_vec_f32(&self, cx: &mut Cx, new_data: Vec<f32>, dirty_rect: Option<RectUsize>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecRf32 { data, updated, .. } => (data, updated),
+            TextureFormat::VecRGBAf32 { data, updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for f32 image data"),
+        };
+        assert!(data.is_none(), "image data not taken or already put back");
+        *data = Some(new_data);
+        *updated = updated.update(dirty_rect);
     }
 }
 
