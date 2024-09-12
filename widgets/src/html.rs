@@ -416,12 +416,12 @@ pub enum HtmlLinkAction {
 struct HtmlLink {
     #[animator] animator: Animator,
 
-    // this doesn't work yet of course, since multiple areas can't yet fulfill the area provider
-    // #[redraw] #[area] areas: SmallVec<[Area; 1]>,
+    // TODO: this is unusued; just here to invalidly satisfy the area provider.
     #[redraw] #[area] area: Area,
-
+    
     #[walk] walk: Walk,
     #[layout] layout: Layout,
+    #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
 
     #[live] pub text: ArcStringMut,
@@ -459,42 +459,43 @@ impl Widget for HtmlLink {
             self.redraw(cx);
         }
 
-        // TODO: self.area() isn't containing the hits here, so click detection doesn't work.
-        match event.hits(cx, self.area()) {
-            Hit::FingerDown(_fe) => {
-                if self.grab_key_focus {
-                    cx.set_key_focus(self.area());
+        for area in self.drawn_areas.clone().into_iter() {
+            match event.hits(cx, area) {
+                Hit::FingerDown(_fe) => {
+                    if self.grab_key_focus {
+                        cx.set_key_focus(self.area());
+                    }
+                    self.animator_play(cx, id!(hover.pressed));
                 }
-                self.animator_play(cx, id!(hover.pressed));
-            }
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            }
-            Hit::FingerUp(fe) => {
-                if fe.is_over {
-                    cx.widget_action(
-                        self.widget_uid(),
-                        &scope.path,
-                        HtmlLinkAction::Clicked {
-                            url: self.url.clone(),
-                            key_modifiers: fe.modifiers,
-                        },
-                    );
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.animator_play(cx, id!(hover.on));
+                }
+                Hit::FingerHoverOut(_) => {
+                    self.animator_play(cx, id!(hover.off));
+                }
+                Hit::FingerUp(fe) => {
+                    if fe.is_over {
+                        cx.widget_action(
+                            self.widget_uid(),
+                            &scope.path,
+                            HtmlLinkAction::Clicked {
+                                url: self.url.clone(),
+                                key_modifiers: fe.modifiers,
+                            },
+                        );
 
-                    if fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        if fe.device.has_hovers() {
+                            self.animator_play(cx, id!(hover.on));
+                        } else {
+                            self.animator_play(cx, id!(hover.off));
+                        }
                     } else {
                         self.animator_play(cx, id!(hover.off));
                     }
-                } else {
-                    self.animator_play(cx, id!(hover.off));
                 }
+                _ => (),
             }
-            _ => (),
         }
     }
     
@@ -505,13 +506,16 @@ impl Widget for HtmlLink {
 
         // Here: the text flow has already began drawing, so we just need to draw the text.
         tf.underline.push();
+        tf.areas_tracker.push_tracker();
         // TODO: how to handle colors for links? there are many DrawText instances
-        //       that could be selected by TextFlow, but we don't know which one to set...
+        //       that could be selected by TextFlow, but we don't know which one to set the color for...
         tf.draw_text(cx, self.text.as_ref());
         tf.underline.pop();
+        let (start, end) = tf.areas_tracker.pop_tracker();
 
-        // TODO: fix this, it's incorrect to use the TextFlow's entire area for the area of just this HtmlLink.
-        self.area = tf.area();
+        self.drawn_areas = SmallVec::from(
+            &tf.areas_tracker.areas[start..end]
+        );
 
         DrawStep::done()
     }

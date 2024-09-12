@@ -141,7 +141,7 @@ live_design!{
                     
                     <h2>Header 2 link to <a href=\"https://www.google.com\">Google link is long and might need to wrap</a> </h2>
 
-                    <b>Bold and <i>italic link to <a href=\"https://www.google.com\">Google but the link is really really long and needs to be wrapped multiple times across so many lines that it's hard to handle this</a></i></b>
+                    <b>Bold and <i>italic</i> link to <a href=\"https://www.google.com\">Google but the link is really really long and needs to be wrapped multiple times across so many lines that it's hard to handle this</a></b>
 
                     <h4>Header 4 <b> bold link to <a href=\"https://www.google.com\">Google test1 test2 test3 test4 test5 test6 test7 test8 test9 test10 </a></b></h4>
 
