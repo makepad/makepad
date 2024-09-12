@@ -18,6 +18,9 @@ live_design!{
     import crate::image_blend::ImageBlendBase;
     import crate::icon::IconBase;
     import crate::rotated_image::RotatedImageBase;
+    import crate::modal::ModalBase;
+    import crate::tooltip::TooltipBase;
+    import crate::popup_notification::PopupNotificationBase;
     import crate::video::VideoBase;
     import crate::popup_menu::PopupMenuBase;
     import crate::label::LabelBase;
@@ -947,6 +950,9 @@ live_design!{
     ImageBase = <ImageBase> {}
     IconBase = <IconBase> {}
     RotatedImageBase = <RotatedImageBase> {}
+    ModalBase = <ModalBase> {}
+    TooltipBase = <TooltipBase> {}
+    PopupNotificationBase = <PopupNotificationBase> {}
     VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}

@@ -83,7 +83,9 @@ pub struct TextFlow {
     #[rust] pub underline: StackCounter,
     #[rust] pub strikethrough: StackCounter,
     #[rust] pub inline_code: StackCounter,
-
+    
+    #[rust] pub areas_tracker: RectAreasTracker,
+    
     #[layout] layout: Layout,
     
     #[live] quote_layout: Layout,
@@ -127,6 +129,39 @@ impl LiveHook for TextFlow{
         nodes.skip_node(index)
     }
 } 
+
+#[derive(Default)]
+pub struct RectAreasTracker{
+    pub areas: SmallVec<[Area;4]>,
+    pos: usize,
+    stack: SmallVec<[usize;2]>,
+}
+
+impl RectAreasTracker{
+    fn clear_stack(&mut self){
+        self.pos = 0;
+        self.stack.clear();
+    }
+    
+    pub fn push_tracker(&mut self){
+        self.stack.push(self.pos);
+    }
+    
+    // this returns the range in the area vec    
+    pub fn pop_tracker(&mut self)->(usize, usize){
+        return (self.stack.pop().unwrap(), self.pos)
+    }
+    
+    pub fn track_rect(&mut self, cx:&mut Cx2d, rect:Rect){
+        if self.stack.len() >0{
+            if self.pos >= self.areas.len(){
+                self.areas.push(Area::Empty);
+            }
+            cx.add_aligned_rect_area(&mut self.areas[self.pos], rect);
+            self.pos += 1;
+        }
+    }
+}
 
 #[derive(Clone)]
 enum DrawState {
@@ -178,6 +213,7 @@ impl TextFlow{
     }
     
     fn clear_stacks(&mut self){
+        self.areas_tracker.clear_stack();
         self.bold.clear();
         self.italic.clear();
         self.fixed.clear();
@@ -192,6 +228,7 @@ impl TextFlow{
         self.ignore_newlines.clear();
     }
     
+        
     pub fn push_size_rel_scale(&mut self, scale: f64){
         self.font_sizes.push(
             self.font_sizes.last().unwrap_or(&self.font_size) * scale
@@ -318,30 +355,36 @@ impl TextFlow{
             dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
             //if let Some(font) = self.font
             // the turtle is at pos X so we walk it.
+           
+            let areas_tracker = &mut self.areas_tracker;
             if self.inline_code.value() > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
-                cx.walk_turtle(Walk{
+                let rect = cx.walk_turtle(Walk{
                     width: Size::Fixed(self.inline_code_margin.left),
                     height: Size::Fixed(0.0),
                     ..Default::default()
                 });
+                areas_tracker.track_rect(cx, rect);
                 dt.draw_walk_resumable_with(cx, text, |cx, mut rect|{
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
+                    areas_tracker.track_rect(cx, rect);
                 });
-                cx.walk_turtle(Walk{
+                let rect = cx.walk_turtle(Walk{
                     width:Size::Fixed(self.inline_code_margin.right),
                     height:Size::Fixed(0.0),
                     ..Default::default()
                 });
+                areas_tracker.track_rect(cx, rect);
             }
             else if self.strikethrough.value() > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::Strikethrough;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
+                    areas_tracker.track_rect(cx, rect);
                 });
             }
             else if self.underline.value() > 0{
@@ -349,10 +392,13 @@ impl TextFlow{
                 db.block_type = FlowBlockType::Underline;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
+                    areas_tracker.track_rect(cx, rect);
                 });
             }
             else{
-                dt.draw_walk_resumable(cx, text);
+                dt.draw_walk_resumable_with(cx, text, |cx, rect|{
+                    areas_tracker.track_rect(cx, rect);
+                });
             }
         }
     }
