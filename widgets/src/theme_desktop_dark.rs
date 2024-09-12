@@ -415,6 +415,13 @@ live_design! {
         width: Fit, height: Fit,
         align: {x: 0., y: 0.}
 
+        color: #x0000EE,
+        hover_color: #0969da,
+        pressed_color: #1a0dab
+        
+        instance hover: 0.0
+        instance pressed: 0.0
+
         animator: {
             hover = {
                 default: off,
@@ -422,6 +429,8 @@ live_design! {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
+                        // hover:   0.0,
+                        // pressed: 0.0,
                     }
                 }
 
@@ -432,6 +441,8 @@ live_design! {
                     }
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
+                        // hover:   [{time: 0.0, value: 1.0}],
+                        // pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
 
@@ -439,6 +450,8 @@ live_design! {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
+                        // hover:   [{time: 0.0, value: 1.0}],
+                        // pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
             }
@@ -454,6 +467,7 @@ live_design! {
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
