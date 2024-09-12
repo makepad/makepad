@@ -10,7 +10,7 @@ live_design!{
                 show_bg: true
                 width: Fill,
                 height: Fill
-                
+                window:{dpi_override:1.0},
                 draw_bg: {
                     fn pixel(self) -> vec4 {    // < --- Apply error: examples/simple/src/app.rs:21:20 - property: pixel target class not found
                         // 获取几何位置
@@ -18,7 +18,6 @@ live_design!{
                             self.geom_pos.x,
                             self.geom_pos.y
                         );
-                        
                         // 计算颜色，基于 x 和 y 位置及时间
                         let color = vec3(st.x, st.y, abs(sin(self.time)));
                         return vec4(color, 1.0);
@@ -32,6 +31,15 @@ live_design!{
                         x: 0.5,
                         y: 0.5
                     },
+                    <Label> {
+                        draw_text: {
+                            text_style: {
+                                font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Bold.ttf")}
+                                font_size: 9.5
+                            },
+                        }
+                        text: "https://test"
+                    }
                     button1 = <Button> {
                         text: "Hello world "
                         draw_text:{color:#f00}
