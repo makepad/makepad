@@ -403,7 +403,7 @@ impl<'a> Cx2d<'a> {
                 height: ATLAS_HEIGHT,
                 data: vec![],
                 unpack_row_length: None,
-                updated: TextureUpdated::Full,
+                updated: TextureUpdated::Empty,
             });
 
             let texture_svg = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
