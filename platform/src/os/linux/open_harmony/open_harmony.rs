@@ -195,26 +195,28 @@ impl Cx {
                 self.os.first_after_resize = true;
                 self.call_event_handler(&Event::ClearAtlasses);
             }
-            FromOhosMessage::Touch(point) => {
-                let mut point = point;
-                let time = point.time;
+            FromOhosMessage::Touch(mut touches) => {
+                let time = touches[0].time;
                 let window = &mut self.windows[CxWindowPool::id_zero()];
                 let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                point.abs /= dpi_factor;
-                let touches = vec![point];
+                for touch in &mut touches {
+                    // When the software keyboard shifted the UI in the vertical axis,
+                    //we need to make the math here to keep touch events positions synchronized.
+                    //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
+                    //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
+                    touch.abs /= dpi_factor;
+                }
                 self.fingers.process_touch_update_start(time, &touches);
-                let e = Event::TouchUpdate(TouchUpdateEvent {
-                    time,
-                    window_id: CxWindowPool::id_zero(),
-                    touches,
-                    modifiers: Default::default(),
-                });
+                let e = Event::TouchUpdate(
+                    TouchUpdateEvent {
+                        time,
+                        window_id: CxWindowPool::id_zero(),
+                        touches,
+                        modifiers: Default::default()
+                    }
+                );
                 self.call_event_handler(&e);
-                let e = if let Event::TouchUpdate(e) = e {
-                    e
-                } else {
-                    panic!()
-                };
+                let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
                 self.fingers.process_touch_update_end(&e.touches);
             }
             FromOhosMessage::TextInput(e) => {
