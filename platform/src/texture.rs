@@ -520,7 +520,7 @@ impl Texture {
             TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for u32 image data"),
         };
-        assert!(data.is_some(), "image data not taken or already put back");
+        assert!(data.is_none(), "image data not taken or already put back");
         *data = Some(new_data);
         *updated = updated.update(dirty_rect);
     }
@@ -542,6 +542,7 @@ impl Texture {
             TextureFormat::VecRGu8 { data,updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for u8 image data"),
         };
+        assert!(data.is_none(), "image data not taken or already put back");
         *data = Some(new_data);
         *updated = updated.update(dirty_rect);
     }
@@ -563,6 +564,7 @@ impl Texture {
             TextureFormat::VecRGBAf32 { data, updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for f32 image data"),
         };
+        assert!(data.is_none(), "image data not taken or already put back");
         *data = Some(new_data);
         *updated = updated.update(dirty_rect);
     }
