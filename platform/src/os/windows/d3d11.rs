@@ -833,19 +833,19 @@ impl CxTexture {
             
             let (sub_data, texture_desc) = match &self.format{
                 TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 TextureFormat::VecRGBAf32{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 TextureFormat::VecRu8{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 TextureFormat::VecRGu8{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 TextureFormat::VecRf32{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 _=>panic!()
             };
