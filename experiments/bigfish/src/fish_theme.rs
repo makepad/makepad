@@ -106,12 +106,12 @@ live_design! {
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (#0)}
         text_input: {
-            cursor_margin_bottom: (SSPACING_1),
-            cursor_margin_top: (SSPACING_1),
-            select_pad_edges: (SSPACING_1),
-            cursor_size: (SSPACING_1),
+            // cursor_margin_bottom: (SSPACING_1),
+            // cursor_margin_top: (SSPACING_1),
+            // select_pad_edges: (SSPACING_1),
+            // cursor_size: (SSPACING_1),
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
             draw_bg: {
                 color: (COLOR_DOWN_0)
             },

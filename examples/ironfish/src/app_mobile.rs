@@ -332,12 +332,12 @@ live_design!{
         text: "Change Me"
         label_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_6)}
         text_input: {
-            cursor_margin_bottom: 3.0,
-            cursor_margin_top: 4.0,
-            select_pad_edges: 3.0
-            cursor_size: 2.0,
+            // cursor_margin_bottom: 3.0,
+            // cursor_margin_top: 4.0,
+            // select_pad_edges: 3.0
+            // cursor_size: 2.0,
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
             draw_bg: {
                 shape: None
                 color: (COLOR_UP_OFF);
