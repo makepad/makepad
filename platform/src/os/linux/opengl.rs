@@ -979,29 +979,29 @@ impl CxTexture {
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
     
             // Set texture parameters based on the format
-            let (width, height, internal_format, format, data_type, data, use_mipmaps) = match &self.format {
+            let (width, height, internal_format, format, data_type, data, size_per_pixel, use_mipmaps) = match &self.format {
                 TextureFormat::VecBGRAu8_32{width, height, data, ..} => 
-                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, false),
+                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
-                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, true),
+                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, true),
                 TextureFormat::VecRGBAf32{width, height, data, ..} => 
-                    (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, false),
+                    (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 16, false),
                 TextureFormat::VecRu8{width, height, data, unpack_row_length, ..} => {
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
-                    (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, false)
+                    (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 1, false)
                 },
                 TextureFormat::VecRGu8{width, height, data, unpack_row_length, ..} => {
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
-                    (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, false)
+                    (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 2, false)
                 },
                 TextureFormat::VecRf32{width, height, data, ..} => 
-                    (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, false),
+                    (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
                 _ => panic!("Unsupported texture format"),
             };
     
@@ -1012,6 +1012,7 @@ impl CxTexture {
     
             match updated {
                 TextureUpdated::Partial(rect) => {
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, (width * size_per_pixel) as i32);
                     gl_sys::TexSubImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -1021,7 +1022,7 @@ impl CxTexture {
                         rect.size.height as i32,
                         format,
                         data_type,
-                        data
+                        (data as *const u8).add((rect.origin.y * width + rect.origin.x) * size_per_pixel) as *const std::ffi::c_void,
                     );
                 },
                 TextureUpdated::Full => {
