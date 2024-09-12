@@ -1,11 +1,6 @@
 use {
     crate::{
-        makepad_html::*,
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
-        text_flow::{TextFlow},
-        link_label::LinkLabel,
+        makepad_derive_widget::*, makepad_draw::*, makepad_html::*, text_flow::TextFlow, widget::*, View
     },
 };
 
@@ -419,7 +414,18 @@ pub enum HtmlLinkAction {
 
 #[derive(Live, Widget)]
 struct HtmlLink {
-    #[deref] link: LinkLabel,
+    #[animator] animator: Animator,
+
+    // this doesn't work yet of course, since multiple areas can't yet fulfill the area provider
+    // #[redraw] #[area] areas: SmallVec<[Area; 1]>,
+    #[redraw] #[area] area: Area,
+
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+    #[live(true)] grab_key_focus: bool,
+
+    #[live] pub text: ArcStringMut,
+    #[live] pub url: String,
 }
 
 impl LiveHook for HtmlLink {
@@ -430,13 +436,13 @@ impl LiveHook for HtmlLink {
         match apply.from {
             ApplyFrom::NewFromDoc {..} => {
                 let scope = apply.scope.as_ref().unwrap();
-                let doc =  scope.props.get::<HtmlDoc>().unwrap();
+                let doc = scope.props.get::<HtmlDoc>().unwrap();
                 let mut walker = doc.new_walker_with_index(scope.index + 1);
                 
                 if let Some((lc, attr)) = walker.while_attr_lc() {
                     match lc {
                         live_id!(href)=> {
-                            self.link.url = attr.into()
+                            self.url = attr.into()
                         }
                         _=>()
                     }
@@ -449,45 +455,73 @@ impl LiveHook for HtmlLink {
 
 impl Widget for HtmlLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.link.handle_event(cx, event, scope);
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.redraw(cx);
+        }
 
-        // Handle the action of the HtmlLink being clicked
-        match event {
-            Event::Actions(actions) => {
-                if let Some(key_modifiers) = self.link.clicked_modifiers(actions) {
+        // TODO: self.area() isn't containing the hits here, so click detection doesn't work.
+        match event.hits(cx, self.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.grab_key_focus {
+                    cx.set_key_focus(self.area());
+                }
+                self.animator_play(cx, id!(hover.pressed));
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => {
+                if fe.is_over {
                     cx.widget_action(
                         self.widget_uid(),
                         &scope.path,
                         HtmlLinkAction::Clicked {
                             url: self.url.clone(),
-                            key_modifiers,
+                            key_modifiers: fe.modifiers,
                         },
                     );
+
+                    if fe.device.has_hovers() {
+                        self.animator_play(cx, id!(hover.on));
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                } else {
+                    self.animator_play(cx, id!(hover.off));
                 }
             }
-            _ => ()
+            _ => (),
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if let Some(tf) = scope.data.get_mut::<TextFlow>() {
-            tf.underline.push();
-            // TODO: how to handle colors for links? there are many DrawText instances
-            //       that could be selected by TextFlow, but we don't know which one to set...
-        }
-        let draw_step = self.link.draw_walk(cx, scope, walk);
-        if let Some(tf) = scope.data.get_mut::<TextFlow>() {
-            tf.underline.pop();
-        }
-        draw_step
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+            return DrawStep::done();
+        };
+
+        // Here: the text flow has already began drawing, so we just need to draw the text.
+        tf.underline.push();
+        // TODO: how to handle colors for links? there are many DrawText instances
+        //       that could be selected by TextFlow, but we don't know which one to set...
+        tf.draw_text(cx, self.text.as_ref());
+        tf.underline.pop();
+
+        // TODO: fix this, it's incorrect to use the TextFlow's entire area for the area of just this HtmlLink.
+        self.area = tf.area();
+
+        DrawStep::done()
     }
     
-    fn text(&self)->String{
-        self.link.text()
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
     }
-    
-    fn set_text(&mut self, v:&str){
-        self.link.set_text(v);
+
+    fn set_text(&mut self, v: &str) {
+        self.text.as_mut_empty().push_str(v);
     }
 }
 
