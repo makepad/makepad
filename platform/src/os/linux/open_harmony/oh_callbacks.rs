@@ -118,31 +118,36 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
     }
     let touch_event = unsafe { touch_event.assume_init() };
 
-    let touch_state = match touch_event.type_ {
-        OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_DOWN => TouchState::Start,
-        OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_UP => TouchState::Stop,
-        OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_MOVE => TouchState::Move,
-        OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_CANCEL => TouchState::Move,
-        _ => {
-            crate::error!(
-                "Failed to dispatch call for touch Event {:?}",
-                touch_event.type_
-            );
-            TouchState::Move
-        }
-    };
-    let point = TouchPoint {
-        state: touch_state,
-        abs: dvec2(touch_event.x as f64, touch_event.y as f64),
-        time: touch_event.timeStamp as f64 / 1000.0,
-        uid: touch_event.id as u64,
-        rotation_angle: 0.0,
-        force: touch_event.force as f64,
-        radius: dvec2(1.0, 1.0),
-        handled: Cell::new(Area::Empty),
-        sweep_lock: Cell::new(Area::Empty),
-    };
-    send_from_ohos_message(FromOhosMessage::Touch(point));
+    let mut touches = Vec::with_capacity(touch_event.numPoints as usize);
+    for idx in 0..touch_event.numPoints {
+        let point = &(touch_event.touchPoints[idx as usize]);
+        let touch_state = match point.type_ {
+            OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_DOWN => TouchState::Start,
+            OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_UP => TouchState::Stop,
+            OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_MOVE => TouchState::Move,
+            OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_CANCEL => TouchState::Move,
+            _ => {
+                crate::error!(
+                    "Failed to dispatch call for touch Event {:?}",
+                    touch_event.type_
+                );
+                TouchState::Move
+            }
+        };
+        touches.push(TouchPoint{
+            state: touch_state,
+            abs: dvec2(point.x as f64, point.y as f64),
+            time: point.timeStamp as f64 / 1000000000.0,
+            uid: point.id as u64,
+            rotation_angle: 0.0,
+            force: point.force as f64,
+            radius: dvec2(1.0, 1.0),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+        })
+
+    }
+    send_from_ohos_message(FromOhosMessage::Touch(touches));
     //crate::log!("OnDispatchTouchEventCallBack");
 }
 
@@ -262,7 +267,7 @@ pub enum FromOhosMessage {
     },
     SurfaceDestroyed,
     VSync,
-    Touch(TouchPoint),
+    Touch(Vec<TouchPoint>),
     TextInput(TextInputEvent),
     DeleteLeft(i32),
     ResizeTextIME(bool, i32),
