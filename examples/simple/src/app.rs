@@ -10,7 +10,6 @@ live_design!{
                 show_bg: true
                 width: Fill,
                 height: Fill
-                window:{dpi_override:1.0},
                 draw_bg: {
                     fn pixel(self) -> vec4 {    // < --- Apply error: examples/simple/src/app.rs:21:20 - property: pixel target class not found
                         // 获取几何位置
