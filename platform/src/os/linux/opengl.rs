@@ -11,7 +11,7 @@ use {
         makepad_live_id::*,
         makepad_shader_compiler::generate_glsl,
         cx::{Cx, OsType, OsType::Android},
-        texture::{Texture, TextureFormat, TexturePixel, CxTexture},
+        texture::{Texture, TextureFormat, TexturePixel, TextureUpdated, CxTexture},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
@@ -968,7 +968,8 @@ impl CxTexture {
             }
         }
     
-        if self.take_updated().is_empty() {
+        let updated = self.take_updated();
+        if updated.is_empty() {
             return;
         }
         
@@ -1009,29 +1010,34 @@ impl CxTexture {
             gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_WIDTH, &mut current_width);
             gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_HEIGHT, &mut current_height);
     
-            // Update the texture if the dimensions match the previously allocated image
-            if current_width == width as i32 && current_height == height as i32 {
-                gl_sys::TexSubImage2D(
-                    gl_sys::TEXTURE_2D,
-                    0,
-                    0, 0,
-                    width as i32, height as i32,
-                    format,
-                    data_type,
-                    data
-                );
-            } else {
-                gl_sys::TexImage2D(
-                    gl_sys::TEXTURE_2D,
-                    0,
-                    internal_format as i32,
-                    width as i32, height as i32,
-                    0,
-                    format,
-                    data_type,
-                    data
-                );
-            }
+            match updated {
+                TextureUpdated::Partial(rect) => {
+                    gl_sys::TexSubImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        rect.origin.x as i32,
+                        rect.origin.y as i32,
+                        rect.size.width as i32,
+                        rect.size.height as i32,
+                        format,
+                        data_type,
+                        data
+                    );
+                },
+                TextureUpdated::Full => {
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        internal_format as i32,
+                        width as i32, height as i32,
+                        0,
+                        format,
+                        data_type,
+                        data
+                    );
+                },
+                TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
+            };
     
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
