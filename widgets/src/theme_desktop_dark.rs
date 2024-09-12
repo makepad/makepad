@@ -4693,6 +4693,100 @@ live_design! {
         }
     }
 
-    Root = <RootBase> { design_window = <Designer> {} }
+    Modal = <ModalBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 0.5, y: 0.5}
 
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        bg_view: <View> {
+            width: Fill
+            height: Fill
+            show_bg: true
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    return vec4(0., 0., 0., 0.7)
+                }
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+        }
+    }
+
+    Tooltip = <TooltipBase> {
+        width: Fill,
+        height: Fill,
+
+        flow: Overlay
+        align: {x: 0.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            <RoundedView> {
+                width: Fit,
+                height: Fit,
+
+                padding: 16,
+
+                draw_bg: {
+                    color: #fff,
+                    border_width: 1.0,
+                    border_color: #D0D5DD,
+                    radius: 2.
+                }
+
+                tooltip_label = <Label> {
+                    width: 270,
+                    draw_text: {
+                        text_style: <THEME_FONT_REGULAR>{font_size: 9},
+                        text_wrap: Word,
+                        color: #000
+                    }
+                }
+            }
+        }
+    }
+
+    PopupNotification = <PopupNotificationBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 1.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            cursor: Default
+            capture_overload: true
+        }
+    }
+
+    Root = <RootBase> { design_window = <Designer> {} }
 }
