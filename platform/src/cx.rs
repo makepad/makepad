@@ -222,7 +222,7 @@ impl Cx {
         let null_texture = textures.alloc(TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
-            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            data: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             updated: TextureUpdated::Full,
         });
         
