@@ -1,7 +1,9 @@
-use {
-    crate::{
-        makepad_derive_widget::*, makepad_draw::*, makepad_html::*, text_flow::TextFlow, widget::*, View
-    },
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    makepad_html::*,
+    text_flow::TextFlow,
+    widget::*,
 };
 
 const BULLET: &str = "•";
@@ -417,10 +419,13 @@ struct HtmlLink {
     #[animator] animator: Animator,
 
     // TODO: this is unusued; just here to invalidly satisfy the area provider.
+    //       I'm not sure how to implement `fn area()` given that it has multiple area rects.
     #[redraw] #[area] area: Area,
-    
+
+    // TODO: remove these if they're unneeded
     #[walk] walk: Walk,
     #[layout] layout: Layout,
+
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
 
