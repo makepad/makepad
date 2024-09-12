@@ -954,6 +954,7 @@ impl CxTexture {
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
     pub fn update_vec_texture(&mut self) {
+        let mut allocated = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
                 self.os = previous;
@@ -966,6 +967,7 @@ impl CxTexture {
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
+            allocated = true;
         }
     
         let updated = self.take_updated();
@@ -1012,6 +1014,18 @@ impl CxTexture {
     
             match updated {
                 TextureUpdated::Partial(rect) => {
+                    if allocated{
+                        gl_sys::TexImage2D(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32, height as i32,
+                            0,
+                            format,
+                            data_type,
+                            0 as *const _
+                        );
+                    }
                     gl_sys::TexSubImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
