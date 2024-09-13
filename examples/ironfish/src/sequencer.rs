@@ -311,11 +311,11 @@ impl Widget for Sequencer {
 
 impl SequencerRef {
 
-    pub fn set_step(&self, step: usize) {
+    /*pub fn set_step(&self, step: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.current_step = step;
         }
-    }
+    }*/
     
     pub fn clear_grid(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
