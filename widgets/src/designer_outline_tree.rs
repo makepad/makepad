@@ -438,7 +438,7 @@ impl Widget for DesignerOutlineTree {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
-        self.scroll_bars.handle_event(cx, event);
+        self.scroll_bars.handle_event(cx, event, scope);
                 
         match event {
             Event::DragEnd => self.dragging_node_id = None,
