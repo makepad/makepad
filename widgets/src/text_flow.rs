@@ -391,6 +391,7 @@ impl TextFlow{
             }
             else if self.strikethrough.value() > 0{
                 let db = &mut self.draw_block;
+                db.line_color = *font_color;
                 db.block_type = FlowBlockType::Strikethrough;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
@@ -399,6 +400,7 @@ impl TextFlow{
             }
             else if self.underline.value() > 0{
                 let db = &mut self.draw_block;
+                db.line_color = *font_color;
                 db.block_type = FlowBlockType::Underline;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);

@@ -429,7 +429,7 @@ struct HtmlLink {
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
 
-    #[live] hover: f32,
+    #[live] hovered: f32,
     #[live] pressed: f32,
 
     /// The default font color for the link when not hovered on or pressed.
@@ -471,7 +471,16 @@ impl LiveHook for HtmlLink {
 impl Widget for HtmlLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            self.redraw(cx);
+            // Currently, this conditional will never be true because the `scope`
+            // isn't yet populated with the Html's TextFlow.
+            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+                tf.redraw(cx);
+            } else {
+                self.drawn_areas.iter().for_each(|area| area.redraw(cx));
+            }
+
+            // This won't work, as this widget owns no views, so redrawing it does nothing.
+            // self.redraw(cx);
         }
 
         for area in self.drawn_areas.clone().into_iter() {
@@ -522,10 +531,8 @@ impl Widget for HtmlLink {
         // Here: the text flow has already began drawing, so we just need to draw the text.
         tf.underline.push();
         tf.areas_tracker.push_tracker();
-        // TODO: how to handle colors for links? there are many DrawText instances
-        //       that could be selected by TextFlow, but we don't know which one to set the color for...
         let mut pushed_color = false;
-        if self.hover > 0.0 {
+        if self.hovered > 0.0 {
             if let Some(color) = self.hover_color {
                 tf.font_colors.push(color);
                 pushed_color = true;
