@@ -417,7 +417,7 @@ live_design! {
 
         color: #x0000EE,
         hover_color: #x00EE00,
-        pressed_color: #1a0dab
+        pressed_color: #xEE0000,
         
         instance hover: 0.0
         instance pressed: 0.0
@@ -426,6 +426,7 @@ live_design! {
             hover = {
                 default: off,
                 off = {
+                    redraw: true,
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
@@ -435,6 +436,7 @@ live_design! {
                 }
 
                 on = {
+                    redraw: true,
                     from: {
                         all: Forward {duration: 0.1}
                         pressed: Forward {duration: 0.01}
@@ -447,6 +449,7 @@ live_design! {
                 }
 
                 pressed = {
+                    redraw: true,
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
