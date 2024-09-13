@@ -148,13 +148,13 @@ pub enum BuildManagerAction {
 // whether it is a wired connection, Wi-Fi or VPN.
 // But it requires the ability to access external networks.
 fn get_local_ip() -> String {
-    let ipv6 = UdpSocket::bind("[::]:0")
+    /*let ipv6 = UdpSocket::bind("[::]:0")
         .and_then(|socket| {
             socket.connect("[2001:4860:4860::8888]:80")?;
             socket.local_addr()
         })
         .ok();
-
+*/
     let ipv4 = UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
             socket.connect("8.8.8.8:80")?;
@@ -162,9 +162,8 @@ fn get_local_ip() -> String {
         })
         .ok();
 
-    match (ipv6, ipv4) {
-        (Some(SocketAddr::V6(addr)), _) if !addr.ip().is_loopback() => addr.ip().to_string(),
-        (_, Some(SocketAddr::V4(addr))) if !addr.ip().is_loopback() => addr.ip().to_string(),
+    match ipv4 {
+        Some(SocketAddr::V4(addr)) if !addr.ip().is_loopback() => addr.ip().to_string(),
         _ => "127.0.0.1".to_string(),
     }
 }
@@ -178,11 +177,11 @@ impl BuildManager {
         };
 
         let local_ip = get_local_ip();
-        eprintln!("local_ip : {:?}", local_ip);
-
         //self.studio_http = format!("http://172.20.10.4:{}/$studio_web_socket", self.http_port);
         // self.studio_http = format!("http://127.0.0.1:{}/$studio_web_socket", self.http_port);
         self.studio_http = format!("http://{}:{}/$studio_web_socket", local_ip, self.http_port);
+        
+        println!("Studio http : {:?}", self.studio_http);
         self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
