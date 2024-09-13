@@ -274,8 +274,18 @@ impl TextFlow{
         // lets draw the 'marker' at -x 
         // lets get the turtle position and abs draw 
         
-        let pos = cx.turtle().pos() - dvec2(pad,0.0);
-        
+        let marker_len = dot.chars().count();
+        let pos = match marker_len {
+            1 => {
+                cx.turtle().pos() - dvec2(pad, 0.0)
+            },
+            _ => {
+                // This calculation takes into account when numbers have more than one digit
+                // making sure they are properly aligned.
+                let pad = pad + self.draw_normal.get_font_size() * (marker_len - 2) as f64;
+                cx.turtle().pos() - dvec2(pad, 0.0)
+            }
+        };
         self.draw_normal.draw_abs(cx, pos, dot);
         
         self.area_stack.push(self.draw_block.draw_vars.area);
