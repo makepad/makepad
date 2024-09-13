@@ -429,14 +429,15 @@ struct HtmlLink {
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
 
+    #[live] hover: f32,
+    #[live] pressed: f32,
+
     /// The default font color for the link when not hovered on or pressed.
-    #[live] color: Vec4,
+    #[live] color: Option<Vec4>,
     /// The font color used when the link is hovered on.
-    #[live] hover_color: Vec4,
+    #[live] hover_color: Option<Vec4>,
     /// The font color used when the link is pressed.
-    #[live] pressed_color: Vec4,
-    // TODO: should the following be #[calc]??
-    #[rust] calc_font_color: Vec4,
+    #[live] pressed_color: Option<Vec4>,
 
     #[live] pub text: ArcStringMut,
     #[live] pub url: String,
@@ -473,7 +474,6 @@ impl Widget for HtmlLink {
             self.redraw(cx);
         }
 
-        let mut needs_redraw = false;
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
                 Hit::FingerDown(_fe) => {
@@ -481,19 +481,13 @@ impl Widget for HtmlLink {
                         cx.set_key_focus(self.area());
                     }
                     self.animator_play(cx, id!(hover.pressed));
-                    self.calc_font_color = self.pressed_color;
-                    needs_redraw = true;
                 }
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
                     self.animator_play(cx, id!(hover.on));
-                    self.calc_font_color = self.hover_color;
-                    needs_redraw = true;
                 }
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
-                    self.calc_font_color = self.color;
-                    needs_redraw = true;
                 }
                 Hit::FingerUp(fe) => {
                     if fe.is_over {
@@ -508,22 +502,15 @@ impl Widget for HtmlLink {
 
                         if fe.device.has_hovers() {
                             self.animator_play(cx, id!(hover.on));
-                            self.calc_font_color = self.hover_color;
                         } else {
                             self.animator_play(cx, id!(hover.off));
-                            self.calc_font_color = self.color
                         }
                     } else {
                         self.animator_play(cx, id!(hover.off));
-                        self.calc_font_color = self.color;
                     }
-                    needs_redraw = true;
                 }
                 _ => (),
             }
-        }
-        if needs_redraw {
-            self.redraw(cx);
         }
     }
     
@@ -537,9 +524,28 @@ impl Widget for HtmlLink {
         tf.areas_tracker.push_tracker();
         // TODO: how to handle colors for links? there are many DrawText instances
         //       that could be selected by TextFlow, but we don't know which one to set the color for...
-        tf.font_colors.push(self.calc_font_color);
+        let mut pushed_color = false;
+        if self.hover > 0.0 {
+            if let Some(color) = self.hover_color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        } else if self.pressed > 0.0 {
+            if let Some(color) = self.pressed_color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        } else {
+            if let Some(color) = self.color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        }
         tf.draw_text(cx, self.text.as_ref());
-        tf.font_colors.pop();
+        
+        if pushed_color {
+            tf.font_colors.pop();
+        }
         tf.underline.pop();
 
         let (start, end) = tf.areas_tracker.pop_tracker();
