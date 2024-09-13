@@ -3183,14 +3183,14 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {hover: 0.0},
+                        draw_text: {hover: 0.0},
                         draw_selection: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {hover: 1.0},
+                        draw_text: {hover: 1.0},
                         draw_selection: {hover: 1.0}
                     }
                 }
@@ -3201,7 +3201,7 @@ live_design! {
                     from: {all: Forward {duration: .25}}
                     apply: {
                         draw_bg: {focus: 0.0},
-                        draw_label: {focus: 0.0},
+                        draw_text: {focus: 0.0},
                         draw_cursor: {focus: 0.0},
                         draw_selection: {focus: 0.0}
                     }
@@ -3210,7 +3210,7 @@ live_design! {
                     from: {all: Snap}
                     apply: {
                         draw_bg: {focus: 1.0},
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                         draw_cursor: {focus: 1.0},
                         draw_selection: {focus: 1.0}
                     }
@@ -3269,7 +3269,7 @@ live_design! {
             }
         }
 
-        draw_label: {
+        draw_text: {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,

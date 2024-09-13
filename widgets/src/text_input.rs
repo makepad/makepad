@@ -24,7 +24,7 @@ pub struct TextInput {
     #[animator] animator: Animator,
     
     #[redraw] #[live] draw_bg: DrawColor,
-    #[live] draw_label: DrawLabel,
+    #[live] draw_text: DrawLabel,
     #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
     
@@ -93,7 +93,7 @@ impl TextInput {
 
     fn position_to_index_affinity(&self, cx: &mut Cx2d, width: f64, position: DVec2) -> IndexAffinity {
         let inner_walk = self.inner_walk();
-        self.draw_label.position_to_index_affinity(
+        self.draw_text.position_to_index_affinity(
             cx,
             inner_walk,
             self.label_align,
@@ -105,7 +105,7 @@ impl TextInput {
 
     fn cursor_position(&self, cx: &mut Cx2d, width: f64) -> DVec2 {
         let inner_walk = self.inner_walk();
-        self.draw_label.index_affinity_to_position(
+        self.draw_text.index_affinity_to_position(
             cx,
             inner_walk,
             self.label_align,
@@ -143,7 +143,7 @@ impl TextInput {
 
     fn move_cursor_up(&mut self, cx: &mut Cx2d, width: f64, is_select: bool) {
         let position = self.cursor_position(cx, width);
-        let line_spacing = self.draw_label.line_spacing(cx);
+        let line_spacing = self.draw_text.line_spacing(cx);
         let index_affinity = self.position_to_index_affinity(cx, width, DVec2 {
             x: position.x,
             y: position.y - 0.5 * line_spacing,
@@ -153,7 +153,7 @@ impl TextInput {
 
     fn move_cursor_down(&mut self, cx: &mut Cx2d, width: f64, is_select: bool) {
         let position = self.cursor_position(cx, width);
-        let line_spacing = self.draw_label.line_spacing(cx);
+        let line_spacing = self.draw_text.line_spacing(cx);
         let index_affinity = self.position_to_index_affinity(cx, width, DVec2 {
             x: position.x,
             y: position.y + 1.5 * line_spacing,
@@ -561,16 +561,16 @@ impl Widget for TextInput {
 
         // Draw text
         if self.text.is_empty() {
-            self.draw_label.is_empty = 1.0;
-            self.draw_label.draw_walk(
+            self.draw_text.is_empty = 1.0;
+            self.draw_text.draw_walk(
                 cx,
                 inner_walk,
                 self.label_align,
                 &self.empty_message,
             );
         } else {
-            self.draw_label.is_empty = 0.0;
-            self.draw_label.draw_walk(
+            self.draw_text.is_empty = 0.0;
+            self.draw_text.draw_walk(
                 cx,
                 inner_walk,
                 self.label_align,
@@ -581,7 +581,7 @@ impl Widget for TextInput {
         let padded_rect = cx.turtle().padded_rect();
 
         // Draw selection
-        let rects = self.draw_label.selected_rects(
+        let rects = self.draw_text.selected_rects(
             cx,
             inner_walk,
             self.label_align,
@@ -599,7 +599,7 @@ impl Widget for TextInput {
      
         // Draw cursor
         let cursor_position = self.cursor_position(cx, padded_rect.size.x);
-        let cursor_height = self.draw_label.line_height(cx);
+        let cursor_height = self.draw_text.line_height(cx);
         self.draw_cursor.draw_abs(cx, Rect {
             pos: padded_rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
             size: dvec2(self.cursor_width, cursor_height)
