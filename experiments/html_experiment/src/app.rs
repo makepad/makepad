@@ -137,13 +137,13 @@ live_design!{
                     }
 
                     body: "
-                    Testing plaintext link: <a href=\"https://www.google.com\">Google</a>
+                    Testing plaintext link: <a href=\"https://www.google.com\">Google multi-word link text here</a>
                     
-                    <h2>Header 2 link to <a href=\"https://www.google.com\">Google</a> </h2>
+                    <h2>Header 2 link to <a href=\"https://www.google.com\">Google link is long and might need to wrap</a> </h2>
 
-                    <b>Bold and <i>italic link to <a href=\"https://www.google.com\">Google</a></i></b>
+                    <b>Bold and <i>italic</i> link to <a href=\"https://www.google.com\">Google but the link is really really long and needs to be wrapped multiple times across so many lines that it's hard to handle this</a></b>
 
-                    <h4>Header 4 <b> bold link to <a href=\"https://www.google.com\">Google</a></b></h4>
+                    <h4>Header 4 <b> bold link to <a href=\"https://www.google.com\">Google test1 test2 test3 test4 test5 test6 test7 test8 test9 test10 </a></b></h4>
 
                     Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed venenatis, lorem sodales lacinia ornare, nisi lorem congue urna, eget dictum urna lacus ut quam. Duis elementum vehicula tellus vel mollis. Vivamus ut orci sed lorem aliquet posuere. Ut sem augue, gravida vitae luctus placerat, vulputate at ligula. Ut sit amet commodo massa. Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere cubilia curae; Pellentesque sodales, eros id dictum bibendum, nisi neque iaculis augue, ac suscipit dolor nisi et velit. Integer dignissim interdum metus. Etiam ultricies nibh eu bibendum ultricies. Maecenas dictum maximus mollis.
 
