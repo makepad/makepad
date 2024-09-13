@@ -416,7 +416,7 @@ live_design! {
         align: {x: 0., y: 0.}
 
         color: #x0000EE,
-        hover_color: #0969da,
+        hover_color: #x00EE00,
         pressed_color: #1a0dab
         
         instance hover: 0.0
@@ -429,8 +429,8 @@ live_design! {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
-                        // hover:   0.0,
-                        // pressed: 0.0,
+                        hover:   0.0,
+                        pressed: 0.0,
                     }
                 }
 
@@ -441,8 +441,8 @@ live_design! {
                     }
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
-                        // hover:   [{time: 0.0, value: 1.0}],
-                        // pressed: [{time: 0.0, value: 1.0}],
+                        hover:   [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
 
@@ -450,8 +450,8 @@ live_design! {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         // TODO: how to influence the TextFlow's active draw_text's color?
-                        // hover:   [{time: 0.0, value: 1.0}],
-                        // pressed: [{time: 0.0, value: 1.0}],
+                        hover:   [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
             }
