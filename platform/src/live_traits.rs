@@ -22,7 +22,7 @@ pub trait LiveHook {
         nodes.skip_node(index)
     }
     
-    fn apply_animator(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode])->bool{
+    fn skip_apply_animator(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode])->bool{
         false
     }
 
