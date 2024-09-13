@@ -90,7 +90,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
             tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
             tb.add("                            apply.override_from(ApplyFrom::AnimatorInit,|apply|{");
-            tb.add("                                if !<Self as LiveHook>::apply_animator(self, cx, apply, index, nodes){");
+            tb.add("                                if !<Self as LiveHook>::skip_apply_animator(self, cx, apply, index, nodes){");
             tb.add("                                    self.apply(cx, apply, index, nodes);");
             tb.add("                                }");
             tb.add("                             });");
@@ -104,7 +104,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
             tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
             tb.add("                            apply.override_from(ApplyFrom::AnimatorInit,|apply|{");
-            tb.add("                                if !<Self as LiveHook>::apply_animator(self, cx, apply, index, nodes){");
+            tb.add("                                if !<Self as LiveHook>::skip_apply_animator(self, cx, apply, index, nodes){");
             tb.add("                                    self.apply(cx, apply, index, nodes);");
             tb.add("                                }");
             tb.add("                            });");
@@ -128,7 +128,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                            if let LiveValue::Id(state_id) = nodes[index].value{");
             tb.add("                               if let Some(orig_index) = orig_nodes.child_by_path(orig_index, &[nodes[index].id.as_instance(), state_id.as_instance(), live_id!(apply).as_field()]){");
             tb.add("                                apply.override_from(ApplyFrom::AnimatorInit,|apply|{");
-            tb.add("                                      if !<Self as LiveHook>::apply_animator(self, cx, apply, orig_index, nodes){");
+            tb.add("                                      if !<Self as LiveHook>::skip_apply_animator(self, cx, apply, orig_index, nodes){");
             tb.add("                                          self.apply(cx, apply, orig_index, orig_nodes);");
             tb.add("                                      }");
             tb.add("                                   });");
@@ -157,7 +157,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("        if let Some(state) = self.").ident(&animator_field.name).add(".swap_out_state(){");
             tb.add("            let index = state.child_by_name(0,live_id!(state).as_field()).unwrap();");
             tb.add("            let mut apply = ApplyFrom::Animate.with_scope(scope);");
-            tb.add("            if !<Self as LiveHook>::apply_animator(self, cx, &mut apply, index, &state){");
+            tb.add("            if !<Self as LiveHook>::skip_apply_animator(self, cx, &mut apply, index, &state){");
             tb.add("                 self.apply(cx, &mut apply, index, &state);");
             tb.add("            }");
             tb.add("            self.").ident(&animator_field.name).add(".swap_in_state(state);");
