@@ -17,7 +17,8 @@ use {
             LiveIdAsProp,
             LiveNodeSliceApi,  
             LiveNodeVecApi
-         },
+        },
+        scope::Scope,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_id::*,
         makepad_derive_live::*,
@@ -52,9 +53,10 @@ pub trait AnimatorImpl {
         }
     }
     fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
-    fn animator_apply_state(&mut self, cx: &mut Cx);
+    fn animator_apply_state(&mut self, cx: &mut Cx, scope:&mut Scope);
     fn animator_after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
     fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction;
+    fn animator_handle_event_with_scope(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) -> AnimatorAction;
 }
 
 #[derive(Debug, Clone, Copy)]
