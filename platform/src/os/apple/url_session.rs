@@ -152,7 +152,6 @@ impl OsWebSocket{
             
     pub fn open(_socket_id:u64, request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         unsafe {
-            
             //self.lazy_init_ns_url_session();
             let ns_request = make_ns_request(&request);
             

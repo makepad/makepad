@@ -138,7 +138,7 @@ impl Widget for FlatList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
 
         let uid = self.widget_uid();
-        self.scroll_bars.handle_event(cx, event);
+        self.scroll_bars.handle_event(cx, event, scope);
         /*
         let mut scroll_to = None;
         self.scroll_bars.handle_event_with(cx, event, &mut | _cx, action | {
