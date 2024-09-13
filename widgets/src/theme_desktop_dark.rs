@@ -419,18 +419,17 @@ live_design! {
         hover_color: #x00EE00,
         pressed_color: #xEE0000,
         
-        instance hover: 0.0
-        instance pressed: 0.0
+        // instance hovered: 0.0
+        // instance pressed: 0.0
 
         animator: {
             hover = {
                 default: off,
                 off = {
                     redraw: true,
-                    from: {all: Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.01}}
                     apply: {
-                        // TODO: how to influence the TextFlow's active draw_text's color?
-                        hover:   0.0,
+                        hovered: 0.0,
                         pressed: 0.0,
                     }
                 }
@@ -442,18 +441,16 @@ live_design! {
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        // TODO: how to influence the TextFlow's active draw_text's color?
-                        hover:   [{time: 0.0, value: 1.0}],
+                        hovered: [{time: 0.0, value: 1.0}],
                         pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
 
                 pressed = {
                     redraw: true,
-                    from: {all: Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.01}}
                     apply: {
-                        // TODO: how to influence the TextFlow's active draw_text's color?
-                        hover:   [{time: 0.0, value: 1.0}],
+                        hovered: [{time: 0.0, value: 1.0}],
                         pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
