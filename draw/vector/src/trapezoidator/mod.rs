@@ -22,27 +22,26 @@ impl Trapezoidator {
 
     /// Returns an iterator over trapezoids corresponding to the given iterator over line path
     /// commands.
-    pub fn trapezoidate<P: LinePathIterator>(&mut self, path: P)->Option<Trapezoidate>{
+    pub fn trapezoidate<P: LinePathIterator>(&mut self, path: P) -> Option<Trapezoidate> {
         let mut initial_point = None;
         let mut current_point = None;
         if !path.for_each(&mut |command| {
             match command {
                 LinePathCommand::MoveTo(p) => {
-                    //assert!(initial_point == current_point);
                     initial_point = Some(p);
                     current_point = Some(p);
                 }
                 LinePathCommand::LineTo(p) => {
                     let p0 = current_point.replace(p).unwrap();
-                    if self.push_events_for_segment(LineSegment::new(p0, p)){
-                        return false
+                    if !self.push_events_for_segment(LineSegment::new(p0, p)) {
+                        return false;
                     }
                 }
                 LinePathCommand::Close => {
                     let p = initial_point.take().unwrap();
                     let p0 = current_point.replace(p).unwrap();
-                    if self.push_events_for_segment(LineSegment::new(p0, p)){
-                        return false
+                    if !self.push_events_for_segment(LineSegment::new(p0, p)) {
+                        return false;
                     }
                 }
             }
@@ -55,37 +54,72 @@ impl Trapezoidator {
         })
     }
 
-    fn push_events_for_segment(&mut self, segment: LineSegment)->bool {
+    /// Adds events for the given segment to the event queue.
+    fn push_events_for_segment(&mut self, segment: LineSegment) -> bool {
+        // Determine the winding, the leftmost point, and the rightmost point of the segment.
+        //
+        // The winding is used to determine which regions are considered inside, and which are
+        // considered outside. A region is considered inside if its winding is non-zero.
+        // Conceptually, the winding of a region is determined by casting an imaginary ray from
+        // any point inside the region to infinity in any direction, and adding the windings of
+        // all segments that are intersected by the ray. The winding of a segment is +1 if it
+        // intersects the ray from left to right, and -1 if it intersects the ray from right to
+        // left.
         let (winding, p0, p1) = match segment.p0.partial_cmp(&segment.p1) {
-            None => return true,
+            None => {
+                // The endpoints of the segment cannot be compared, so the segment is invalid.
+                // This can happen if the semgent has NaN coordinates. In this case, the input
+                // as a whole is invalid, so we bail out early.
+                return false;
+            },
             Some(Ordering::Less) => (1, segment.p0, segment.p1),
-            Some(Ordering::Equal) => return false,
+            Some(Ordering::Equal) => {
+                // The endpoints of the segment are equal, so the segment is empty. Empty segments
+                // do not affect the output of the trapezoidation algorithm, so they can safely be
+                // ignored.
+                return true;
+            }
             Some(Ordering::Greater) => (-1, segment.p1, segment.p0),
         };
+        // Add an event to the event queue for the leftmost point of the segment. This is where
+        // the segment starts intersecting the sweepline.
         self.event_queue.push(Event {
             point: p0,
             pending_segment: Some(PendingSegment { winding, p1 }),
         });
+        // Add an event to the event queue for the rightmost point of the segment. This is where
+        // the segment stops intersecting the sweepline.
         self.event_queue.push(Event {
             point: p1,
             pending_segment: None,
         });
-        false
+        true
     }
 
-    fn pop_events_for_point(
+    /// Removes all events at the next point where an event occurs from the event queue.
+    /// 
+    /// Returns the point at which the events occur, or `None` if the event queue is empty.
+    /// Appends the pending segments that start intersecting the sweepline at this point to
+    /// `pending_segments`.
+    fn pop_events_for_next_point(
         &mut self,
         pending_segments: &mut Vec<PendingSegment>,
     ) -> Option<Point> {
+        // Pop an event from the event queue. This will be the first event at the next point.
         self.event_queue.pop().map(|event| {
+            // If there is a segment that starts intersecting the sweepline at this point, add it
+            // to `pending_segments`.
             if let Some(pending_segment) = event.pending_segment {
                 pending_segments.push(pending_segment)
             }
+            // Keep popping events while they occur at the same point as the first one.
             while let Some(&next_event) = self.event_queue.peek() {
                 if next_event != event {
                     break;
                 }
                 self.event_queue.pop();
+                // If there is a segment that starts intersecting the sweepline at this point, add
+                // it to `pending_segments`.
                 if let Some(pending_segment) = next_event.pending_segment {
                     pending_segments.push(pending_segment);
                 }
@@ -94,6 +128,9 @@ impl Trapezoidator {
         })
     }
 
+    /// Handle all events that occur at the given point. `right_segments` is a list of segments that
+    /// start intersecting the sweepline at this point. `trapezoid_segments` is scratch space for a
+    /// list of segments for which we potentially have to generate trapezoids.
     fn handle_events_for_point<F>(
         &mut self,
         point: Point,
@@ -104,30 +141,51 @@ impl Trapezoidator {
     where
         F: FnMut(Trapezoid) -> bool,
     {
+        // Find the range of active segments that are incident with the given point.
         let mut incident_segment_range = self.find_incident_segment_range(point);
+        // If there is an active segment that lies below the current point, and the region below it
+        // is considered outside, then this segment is the lower boundary of a trapezoid. We split
+        // the segment where it intersects the sweepline, adding the part on the left to the list of
+        // trapezoid segments, while keeping the part on the right in the list of active segments.
         if let Some(trapezoid_segment) =
-            self.find_lower_trapezoid_segment(point, incident_segment_range.start)
+            self.find_trapezoid_segment_below(point, incident_segment_range.start)
         {
             trapezoid_segments.push(trapezoid_segment);
         }
+        // If there are any active segments that are incident with the given point, we remove them
+        // from the list of active segments, and then split each segment where it intersects the
+        // sweepline, adding the part on the left to the list of trapezoid segments, while adding
+        // the part on the right to the list of right segments.
         self.remove_incident_segments(
             point,
             &mut incident_segment_range,
             right_segments,
             trapezoid_segments,
         );
+        // Sort the right segments by their slope.
         self.sort_right_segments(point, right_segments);
+        // Insert the right segments into the list of active segments, updating the range of
+        // active segments that are incident with the given point accordingly.
         self.insert_right_segments(point, &mut incident_segment_range, right_segments);
+        // If there is an active segment that lies above the current point, and the region below it
+        // is considered inside, then this segment is the upper boundary of a trapezoid. We split the
+        // the segment where it intersects the sweepline, adding the part on the left to the list of
+        // trapezoid segments, while generating an event for the part on the right.
         if let Some(trapezoid_segment) =
-            self.find_upper_trapezoid_segment(point, incident_segment_range.end)
+            self.find_trapezoid_segment_above(point, incident_segment_range.end)
         {
             trapezoid_segments.push(trapezoid_segment);
         }
+        // At this point, `trapezoid_segments` contains a list of segments that stop intersecting the
+        // sweepline at the current point, and that potentially form trapezoid boundaries. We generate
+        // trapezoids for these segments, and pass them to the given closure.
         self.generate_trapezoids(trapezoid_segments, f)
     }
 
+    /// Finds the range of active segments that are incident with the given point.
     fn find_incident_segment_range(&self, point: Point) -> Range<usize> {
         Range {
+            // Find the index of the first active segment that does not lie below the given point.
             start: self
                 .active_segments
                 .iter()
@@ -135,6 +193,7 @@ impl Trapezoidator {
                     active_segment.segment.compare_to_point(point).unwrap() != Ordering::Less
                 })
                 .unwrap_or(self.active_segments.len()),
+            // Find the index of the first active segment that lies above the given point.
             end: self
                 .active_segments
                 .iter()
@@ -145,38 +204,43 @@ impl Trapezoidator {
         }
     }
 
-    fn find_lower_trapezoid_segment(
+    // Finds the first active segment that lies below the given point. If such a segment exists,
+    // and the region below it is considered outside, then this segment is the lower boundary of a
+    // trapezoid. We split the segment where it intersects the sweepline, keeping the part on the
+    // right in the list of active segments, and returning the part on the left.
+    fn find_trapezoid_segment_below(
         &mut self,
         point: Point,
         incident_segment_start: usize,
     ) -> Option<ActiveSegment> {
-        if 0 == incident_segment_start
-            || !self.active_segments[incident_segment_start - 1]
-                .upper_region
-                .is_inside
-        {
+        if incident_segment_start == 0
+            || !self.active_segments[incident_segment_start - 1].region_above.is_inside {
             return None;
         }
         let intersection = self.active_segments[incident_segment_start - 1]
             .segment
             .intersect_with_vertical_line(point.x)
-            .unwrap();
-        self.active_segments[incident_segment_start - 1].split_front_mut(intersection)
+            .unwrap_or(point);
+        self.active_segments[incident_segment_start - 1].split_left_mut(intersection)
     }
 
+    // Removes all active segments that are incident with the given point from the list of active
+    // segments, and then splits each segment where it intersects the sweepline, adding the part
+    // on the left to the list of trapezoid segments, while adding the part on the right to the
+    // list of right segments.
     fn remove_incident_segments(
         &mut self,
         point: Point,
         incident_segment_range: &mut Range<usize>,
-        pending_segments: &mut Vec<PendingSegment>,
+        right_segments: &mut Vec<PendingSegment>,
         trapezoid_segments: &mut Vec<ActiveSegment>,
     ) {
         trapezoid_segments.extend(
             Iterator::map(
                 self.active_segments.drain(incident_segment_range.clone()),
                 |mut active_segment| {
-                    if let Some(pending_segment) = active_segment.split_back_mut(point) {
-                        pending_segments.push(pending_segment);
+                    if let Some(pending_segment) = active_segment.split_right_mut(point) {
+                        right_segments.push(pending_segment);
                     }
                     active_segment
                 },
@@ -186,6 +250,8 @@ impl Trapezoidator {
         incident_segment_range.end = incident_segment_range.start;
     }
 
+    /// Sorts the given list of right segments by their slope, using the given point as the leftmost
+    /// endpoint.
     fn sort_right_segments(&mut self, point: Point, right_segments: &mut Vec<PendingSegment>) {
         right_segments.sort_by(|&right_segment_0, &right_segment_1| {
             right_segment_0.compare(right_segment_1, point).unwrap()
@@ -206,6 +272,8 @@ impl Trapezoidator {
         right_segments.truncate(index_0 + 1);
     }
 
+    // Inserts the given right segments into the list of active segments, updating the range of
+    // active segments that are incident with the given point accordingly.
     fn insert_right_segments(
         &mut self,
         point: Point,
@@ -218,7 +286,7 @@ impl Trapezoidator {
                 winding: 0,
             }
         } else {
-            self.active_segments[incident_segment_range.end - 1].upper_region
+            self.active_segments[incident_segment_range.end - 1].region_above
         };
         self.active_segments.splice(
             incident_segment_range.end..incident_segment_range.end,
@@ -233,7 +301,7 @@ impl Trapezoidator {
                 let right_segment = ActiveSegment {
                     winding: right_segment.winding,
                     segment: LineSegment::new(point, right_segment.p1),
-                    upper_region,
+                    region_above: upper_region,
                 };
                 lower_region = upper_region;
                 right_segment
@@ -242,15 +310,18 @@ impl Trapezoidator {
         incident_segment_range.end += right_segments.len();
     }
 
-    fn find_upper_trapezoid_segment(
+    // Finds the first active segment that lies above the given point. If such a segment exists,
+    // and the region below it is considered inside, then this segment is the upper boundary of a
+    // trapezoid. We split the segment where it intersects the sweepline, generating an event for
+    // the part on the right, and returning the part on the left.
+    fn find_trapezoid_segment_above(
         &mut self,
         point: Point,
         incident_segment_end: usize,
     ) -> Option<ActiveSegment> {
-        if 0 == incident_segment_end
-            || !self.active_segments[incident_segment_end - 1]
-                .upper_region
-                .is_inside
+        if incident_segment_end == self.active_segments.len()
+            || incident_segment_end == 0 
+            || !self.active_segments[incident_segment_end - 1].region_above.is_inside
         {
             return None;
         }
@@ -259,7 +330,7 @@ impl Trapezoidator {
             .intersect_with_vertical_line(point.x)
             .unwrap();
         if let Some(pending_segment) =
-            self.active_segments[incident_segment_end].split_back_mut(intersection)
+            self.active_segments[incident_segment_end].split_right_mut(intersection)
         {
             self.event_queue.push(Event {
                 point: intersection,
@@ -274,7 +345,7 @@ impl Trapezoidator {
         F: FnMut(Trapezoid) -> bool,
     {
         for trapezoid_segment_pair in trapezoid_segments.windows(2) {
-            if !trapezoid_segment_pair[0].upper_region.is_inside {
+            if !trapezoid_segment_pair[0].region_above.is_inside {
                 continue;
             }
             let lower_segment = trapezoid_segment_pair[0].segment;
@@ -310,7 +381,7 @@ impl<'a> InternalIterator for Trapezoidate<'a> {
     {
         let mut right_segments = Vec::new();
         let mut trapezoid_segments = Vec::new();
-        while let Some(point) = self.trapezoidator.pop_events_for_point(&mut right_segments) {
+        while let Some(point) = self.trapezoidator.pop_events_for_next_point(&mut right_segments) {
             let ok = self.trapezoidator.handle_events_for_point(
                 point,
                 &mut right_segments,
@@ -327,9 +398,12 @@ impl<'a> InternalIterator for Trapezoidate<'a> {
     }
 }
 
+// An event in the event queue.
 #[derive(Clone, Copy, Debug)]
 struct Event {
+    // The point at which the event occurs.
     point: Point,
+    // The pending segment that starts intersecting the sweepline at this point, if any.
     pending_segment: Option<PendingSegment>,
 }
 
@@ -353,9 +427,15 @@ impl PartialOrd for Event {
     }
 }
 
+/// A segment that is pending insertion into the list of active segments.
+///
+/// We only store the rightmost endpoint for these segments, since the leftmost endpoint is
+/// determined implicitly by the point at which the event that inserts the segment occurs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PendingSegment {
+    // The winding of the segment.
     winding: i32,
+    // The rightmost endpoint of the segment.
     p1: Point,
 }
 
@@ -394,15 +474,17 @@ impl PendingSegment {
     }
 }
 
+/// A segment that currently intersects the sweepline,
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ActiveSegment {
     winding: i32,
     segment: LineSegment,
-    upper_region: Region,
+    region_above: Region,
 }
 
 impl ActiveSegment {
-    fn split_front_mut(&mut self, p: Point) -> Option<ActiveSegment> {
+    // Splits this segment at the given point, returning the part on the left.
+    fn split_left_mut(&mut self, p: Point) -> Option<ActiveSegment> {
         let p0 = self.segment.p0;
         if p == p0 {
             return None;
@@ -411,11 +493,12 @@ impl ActiveSegment {
         Some(ActiveSegment {
             winding: self.winding,
             segment: LineSegment::new(p0, p),
-            upper_region: self.upper_region,
+            region_above: self.region_above,
         })
     }
 
-    fn split_back_mut(&mut self, p: Point) -> Option<PendingSegment> {
+    // Splits this segment at the given point, returning the part on the right.
+    fn split_right_mut(&mut self, p: Point) -> Option<PendingSegment> {
         let p1 = self.segment.p1;
         if p == p1 {
             return None;
@@ -433,59 +516,27 @@ struct Region {
     is_inside: bool,
     winding: i32,
 }
-/*
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use path::{Path, PathIterator};
+    use crate::path::{Path, PathIterator};
 
     #[test]
-    fn test() {
+    fn test_square() {
         let mut path = Path::new();
-        path.move_to(Point::new(1.0, 0.0));
-        path.quadratic_to(Point::new(1.0, 1.0), Point::new(0.0, 1.0));
-        path.quadratic_to(Point::new(-1.0, 1.0), Point::new(-1.0, 0.0));
-        path.quadratic_to(Point::new(-1.0, -1.0), Point::new(0.0, -1.0));
-        path.quadratic_to(Point::new(-1.0, -1.0), Point::new(0.0, -1.0));
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(1.0, 0.0));
+        path.line_to(Point::new(1.0, 1.0));
+        path.line_to(Point::new(0.0, 1.0));
         path.close();
-        assert_eq!(
-            Trapezoidator::new()
-                .trapezoidate(path.commands().linearize(0.1))
-                .collect::<Vec<_>>(),
-            [
-                Trapezoid {
-                    xs: [-1.0, -0.9375],
-                    ys: [0.0, -0.4375, 0.0, 0.4375]
-                },
-                Trapezoid {
-                    xs: [-0.9375, -0.75],
-                    ys: [-0.4375, -0.75, 0.4375, 0.75]
-                },
-                Trapezoid {
-                    xs: [-0.75, -0.4375],
-                    ys: [-0.75, -0.9375, 0.75, 0.9375]
-                },
-                Trapezoid {
-                    xs: [-0.4375, 0.0],
-                    ys: [-0.9375, -1.0, 0.9375, 1.0]
-                },
-                Trapezoid {
-                    xs: [0.0, 0.4375],
-                    ys: [-1.0, -0.5625, 1.0, 0.9375]
-                },
-                Trapezoid {
-                    xs: [0.4375, 0.75],
-                    ys: [-0.5625, -0.25, 0.9375, 0.75]
-                },
-                Trapezoid {
-                    xs: [0.75, 0.9375],
-                    ys: [-0.25, -0.0625, 0.75, 0.4375]
-                },
-                Trapezoid {
-                    xs: [0.9375, 1.0],
-                    ys: [-0.0625, 0.0, 0.4375, 0.0]
-                }
-            ]
-        );
+        let mut trapezoidator = Trapezoidator::new();
+        let trapezoids: Vec<_> = trapezoidator
+            .trapezoidate(path.commands().linearize(0.1))
+            .unwrap()
+            .collect();
+        assert_eq!(trapezoids, [
+            Trapezoid { xs: [0.0, 1.0], ys: [0.0, 0.0, 1.0, 1.0] }
+        ]);
     }
-}*/
+}
