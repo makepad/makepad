@@ -10,6 +10,7 @@ live_design!{
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
         font_size: 8,
+        // font_color: (THEME_COLOR_TEXT_DEFAULT),
         flow: RightWrap,
     }
 }
@@ -68,11 +69,15 @@ pub struct TextFlow {
     
     #[live] draw_block: DrawFlowBlock,
     
+    /// The default font size used for all text if not otherwise specified.
     #[live] font_size: f64,
+    /// The default font color used for all text if not otherwise specified.
+    #[live] font_color: Vec4,
     #[walk] walk: Walk,
     
     #[rust] area_stack: SmallVec<[Area;4]>,
     #[rust] pub font_sizes: SmallVec<[f64;8]>,
+    #[rust] pub font_colors: SmallVec<[Vec4;8]>,
    // #[rust] pub font: SmallVec<[Font;2]>,
     #[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust] pub combine_spaces: SmallVec<[bool;4]>,
@@ -222,6 +227,7 @@ impl TextFlow{
         self.inline_code.clear();
         //self.font.clear();
         self.font_sizes.clear();
+        self.font_colors.clear();
         self.area_stack.clear();
         self.top_drop.clear();
         self.combine_spaces.clear();
@@ -240,7 +246,7 @@ impl TextFlow{
             self.font_size * scale
         );
     }
-    
+
     pub fn end(&mut self, cx: &mut Cx2d){
         // lets end the turtle with how far we walked
         cx.end_turtle_with_area(&mut self.area);
@@ -263,6 +269,8 @@ impl TextFlow{
         // alright we are going to push a block with a layout and a walk
         let fs = self.font_sizes.last().unwrap_or(&self.font_size);
         self.draw_normal.text_style.font_size = *fs;
+        let fc = self.font_colors.last().unwrap_or(&self.font_color);
+        self.draw_normal.color = *fc;
         let pad = self.draw_normal.get_font_size() * pad;
         cx.begin_turtle(self.list_item_walk, Layout{
             padding:Padding{
@@ -349,8 +357,10 @@ impl TextFlow{
             };
 
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
+            let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
             dt.text_style.font_size = *font_size;
+            dt.color = *font_color;
             dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
             dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
             //if let Some(font) = self.font
@@ -381,6 +391,7 @@ impl TextFlow{
             }
             else if self.strikethrough.value() > 0{
                 let db = &mut self.draw_block;
+                db.line_color = *font_color;
                 db.block_type = FlowBlockType::Strikethrough;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
@@ -389,6 +400,7 @@ impl TextFlow{
             }
             else if self.underline.value() > 0{
                 let db = &mut self.draw_block;
+                db.line_color = *font_color;
                 db.block_type = FlowBlockType::Underline;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
