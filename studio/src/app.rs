@@ -447,14 +447,19 @@ impl MatchEvent for App{
                             
         if let Some(file_id) = file_tree.file_clicked(&actions) {
             // ok lets open the file
-            let tab_id = dock.unique_tab_id(file_id.0);
-            self.data.file_system.request_open_file(tab_id, file_id);
-            // lets add a file tab 'some
-            let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
-            dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
-                                        
-            // lets scan the entire doc for duplicates
-            self.data.file_system.ensure_unique_tab_names(cx, &dock)
+            if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
+                // If the tab is already open, focus it
+                dock.select_tab(cx, tab_id);
+            } else {
+                let tab_id = dock.unique_tab_id(file_id.0);
+                self.data.file_system.request_open_file(tab_id, file_id);
+                // lets add a file tab 'some
+                let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+                dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
+                                            
+                // lets scan the entire doc for duplicates
+                self.data.file_system.ensure_unique_tab_names(cx, &dock)
+            }
         }
     }
     
