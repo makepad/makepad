@@ -557,6 +557,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         event: &Event,
+        scope: &mut Scope,
         session: &mut Session,
     ) -> Vec<CodeEditorAction> {
         let mut actions = Vec::new();
@@ -565,7 +566,7 @@ impl CodeEditor {
 
         session.handle_changes();
 
-        if self.scroll_bars.handle_event(cx, event).len()>0{
+        if self.scroll_bars.handle_event(cx, event, scope).len()>0{
             self.redraw(cx);
         };
         
