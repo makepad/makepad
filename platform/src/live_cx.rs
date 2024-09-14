@@ -285,6 +285,7 @@ impl Cx {
     }
     
     // ok so now what. now we should run the expansion
+    #[tracing::instrument(skip_all)]
     pub fn live_expand(&mut self) {
         let mut errs = Vec::new();
         let mut live_registry = self.live_registry.borrow_mut();
@@ -323,6 +324,7 @@ impl Cx {
         }
     }
     
+    #[tracing::instrument(skip_all)]
     pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
         for file in &live_registry.live_files {

@@ -424,6 +424,7 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    #[tracing::instrument(skip_all)]
     pub fn draw_icon_atlas(&mut self) {
         let draw_atlas_rc = self.cx.get_global::<CxDrawIconAtlasRc>().clone();
         let mut draw_atlas = draw_atlas_rc.0.borrow_mut();

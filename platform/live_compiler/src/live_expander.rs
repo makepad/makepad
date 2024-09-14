@@ -45,6 +45,7 @@ impl<'a> LiveExpander<'a> {
         }
     }
     
+    // #[tracing::instrument(fields(file = self.live_registry.file_id_to_file_name(self.in_file_id)), skip_all)]
     pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation: LiveFileGeneration) {
          
         //out_doc.nodes.push(in_doc.nodes[0].clone());

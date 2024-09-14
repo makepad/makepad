@@ -601,7 +601,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onMidiDeviceOpen
     });
 }
 
-unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
+pub unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
     (**env).ReleaseStringUTFChars.unwrap()(env, java_string, chars);
@@ -635,6 +635,7 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     ndk_utils::call_void_method!(env, get_activity(), "setFullScreen", "(Z)V", fullscreen as i32);
 }
 
+#[tracing::instrument]
 pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
     let env = attach_jni_env();
 

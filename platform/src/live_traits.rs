@@ -132,6 +132,7 @@ pub trait LiveNew: LiveApply {
         Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
     }
     
+    #[tracing::instrument(skip_all)]
     fn new_from_module(cx: &mut Cx, module_id: LiveModuleId, id: LiveId) -> Option<Self> where Self: Sized {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();

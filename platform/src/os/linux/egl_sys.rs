@@ -343,6 +343,7 @@ impl Drop for Module {
 }
 
 impl LibEgl {
+    #[tracing::instrument]
     pub fn try_load() -> Option<LibEgl> {
         
         let module = Module::load("libEGL.so").or_else(|_| Module::load("libEGL.so.1")).ok()?;
@@ -412,6 +413,7 @@ pub enum EglError {
 pub struct Egl {}
 
 #[cfg(target_os="android")]
+#[tracing::instrument(skip_all)]
 pub unsafe fn create_egl_context(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,

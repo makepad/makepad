@@ -430,7 +430,8 @@ impl<'a> Cx2d<'a> {
             fonts_atlas.reset_fonts_atlas();
         }
     }
-        
+
+    #[tracing::instrument(skip_all)]
     pub fn draw_font_atlas(&mut self) {
         let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();

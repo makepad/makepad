@@ -1166,6 +1166,7 @@ impl Default for Affinity {
     }
 }
 
+#[tracing::instrument(fields(text = text), skip_all)]
 fn layout_text(
     position: &mut DVec2,
     text: &str,
@@ -1206,6 +1207,7 @@ fn layout_text(
     false
 }
 
+// #[tracing::instrument(fields(line_start = line_start, line_end = line_end), skip_all)]
 fn layout_line(
     position: &mut DVec2,
     text: &str,
@@ -1243,6 +1245,7 @@ fn layout_line(
     false
 }
 
+// #[tracing::instrument(fields(word_start = word_start, word_end = word_end), skip_all)]
 fn layout_word(
     position: &mut DVec2,
     is_first: bool,
@@ -1303,6 +1306,7 @@ fn layout_word(
     false
 }
 
+// #[tracing::instrument(fields(grapheme_start = grapheme_start, grapheme_end = grapheme_end), skip_all)]
 fn layout_grapheme(
     position: &mut DVec2,
     is_first: bool,
