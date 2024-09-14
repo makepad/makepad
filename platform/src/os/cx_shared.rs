@@ -42,6 +42,7 @@ impl Cx {
         false
     }
     
+    #[tracing::instrument(skip_all)]
     pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<PassId>) {
         passes_todo.clear();
         
@@ -109,7 +110,7 @@ impl Cx {
     
     // event handler wrappers
     
-    
+    #[tracing::instrument(skip_all)]
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
         if Cx::has_studio_web_socket(){
@@ -175,6 +176,7 @@ impl Cx {
         }
     }
     
+    #[tracing::instrument(skip_all)]
     pub (crate) fn call_event_handler(&mut self, event: &Event) {
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
@@ -198,6 +200,7 @@ impl Cx {
         self.call_event_handler(&Event::Draw(draw_event));
     }
 
+    #[tracing::instrument(skip_all)]
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);

@@ -13,4 +13,4 @@ metadata.makepad-auto-version = "syydsVL84Wg1XgRpcxLFZQtLGrs="
 makepad-derive-live = { path = "../derive_live", version = "0.4.0" }
 makepad-math = { path = "../../libs/math", version = "0.4.0" }
 makepad-live-tokenizer = { path = "../live_tokenizer", version = "0.4.0" }
-
+#tracing = "0.1"

@@ -7,7 +7,7 @@ import java.nio.ByteBuffer;
 
 public class MakepadNative {
     // belongs to MakepadActivity class
-    public native static void activityOnCreate(Object activity);
+    public native static void activityOnCreate(Object activity, String external_storage_path);
     public native static void activityOnStart();
     public native static void activityOnResume();
     public native static void activityOnPause();

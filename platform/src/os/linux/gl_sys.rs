@@ -203,6 +203,7 @@ mod storage {
     pub static mut GetString: FnPtr = FnPtr::default();
 }
 
+#[tracing::instrument(skip_all)]
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
     storage::GenVertexArrays = FnPtr::new(metaloadfn(&mut loadfn, "glGenVertexArrays", &["glGenVertexArraysAPPLE", "glGenVertexArraysOES"]));
     storage::BindVertexArray = FnPtr::new(metaloadfn(&mut loadfn, "glBindVertexArray", &["glBindVertexArrayOES"]));

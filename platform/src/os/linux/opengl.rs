@@ -22,6 +22,7 @@ use {
 
 impl Cx {
     
+    #[tracing::instrument(skip_all)]
     pub (crate) fn render_view(
         &mut self,
         pass_id: PassId,
@@ -55,6 +56,12 @@ impl Cx {
                     continue;
                 };
                 
+                let span = tracing::span!(tracing::Level::INFO, "draw_item",
+                    draw_item_id = draw_item.draw_item_id,
+                    instances_len = draw_item.instances.as_ref().unwrap().len(),
+                    shader_id = draw_call.draw_shader.draw_shader_id);
+                let _span_guard = span.enter();
+
                 let sh = &self.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
                 if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
@@ -449,6 +456,7 @@ impl Cx {
         }
     }
     
+    #[tracing::instrument(skip_all)]
     pub fn opengl_compile_shaders(&mut self) {
         //let p = profile_start();
         for draw_shader_ptr in &self.draw_shaders.compile_set {

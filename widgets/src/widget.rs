@@ -413,10 +413,13 @@ impl WidgetRef {
             inner.widget.handle_event_with(cx, event, scope, sweep_area)
         }
     }
+
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope:&mut Scope){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
             if let Event::Draw(e) = event{
+                let span = tracing::span!(tracing::Level::INFO, "draw_all");
+                let _span_guard = span.enter();
                 let cx = &mut Cx2d::new(cx, e);
                 return inner.widget.draw_all(cx, scope);
             }

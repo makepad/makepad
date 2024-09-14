@@ -1,9 +1,28 @@
 
 use crate::event::Event;
 use crate::cx::Cx;
+use std::fs::File;
+use std::path::PathBuf;
+use tracing_perfetto::PerfettoLayer;
+use tracing_subscriber::prelude::*;
 
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
+}
+
+pub fn init_tracing(path: &str) {
+    let mut path = PathBuf::from(path);
+    path.push("makepad.ptrace");
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log!("Create directory error: {}", e);
+        }
+    }
+    let output_file = File::create(&path).unwrap();
+    let layer = PerfettoLayer::new(output_file).with_debug_annotations(true);
+    tracing_subscriber::registry()
+        .with(layer)
+        .init();
 }
 
 #[macro_export]
@@ -58,19 +77,29 @@ macro_rules!app_main {
         #[cfg(target_os = "android")]
         #[no_mangle]
         pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnCreate(
-            _: *const std::ffi::c_void,
+            jni_env: *mut makepad_jni_sys::JNIEnv,
             _: *const std::ffi::c_void,
             activity: *const std::ffi::c_void,
+            external_storage_path: makepad_jni_sys::jstring,
         ) {
+            let ext_storage_path = android::android_jni::jstring_to_string(jni_env, external_storage_path);
+            log!("android onCreate {}", ext_storage_path);
+            init_tracing(&ext_storage_path);
+            let span = tracing::span!(tracing::Level::INFO, "activityOnCreate");
+            let _span_guard = span.enter();
             Cx::android_entry(activity, ||{
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                     if let Event::Startup = event {
+                        let span = tracing::span!(tracing::Level::INFO, "Startup");
+                        let _span_guard = span.enter();
                         *app.borrow_mut() = Some($app::new_main(cx));
                     }
                     if let Event::LiveEdit = event{
                         app.borrow_mut().update_main(cx);
                     }
+                    let span = tracing::span!(tracing::Level::INFO, "AppMain handle_event", event = event.name());
+                    let _span_guard = span.enter();
                     app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
                 })));
                 $app::register_main_module(&mut cx);

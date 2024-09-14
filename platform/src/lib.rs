@@ -65,6 +65,9 @@ pub use makepad_objc_sys;
 #[cfg(target_os = "windows")]
 pub use ::makepad_windows as windows;
 
+#[cfg(target_os = "android")]
+pub use makepad_jni_sys;
+
 pub use makepad_futures;
  
 pub use {
@@ -83,6 +86,7 @@ pub use {
     makepad_math::*,
     makepad_live_id::*,
     app_main::AppMain,
+    app_main::init_tracing,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,

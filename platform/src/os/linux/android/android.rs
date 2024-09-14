@@ -109,6 +109,7 @@ impl Cx {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn handle_all_pending_messages(&mut self, from_java_rx: &mpsc::Receiver<FromJavaMessage>) {
         // Handle the messages that arrived during the last frame
         while let Ok(msg) = from_java_rx.try_recv() {
@@ -117,6 +118,9 @@ impl Cx {
     }
 
     fn handle_message(&mut self, msg: FromJavaMessage) {
+        // let msg_name = format!("{:?}", msg);
+        // let span = tracing::span!(tracing::Level::INFO, "handle_message", msg = msg_name);
+        // let _span_guard = span.enter();
         match msg {
             FromJavaMessage::RenderLoop => {
                 // This should not happen here, as it's handled in the main loop
@@ -427,6 +431,7 @@ impl Cx {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn handle_drawing(&mut self) {
         if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
             if !self.new_next_frames.is_empty() {
@@ -457,6 +462,7 @@ impl Cx {
 
     /// Processes events that need to be checked regularly, regardless of incoming messages.
     /// This includes timers, signals, video updates, live edits, and platform operations.
+    #[tracing::instrument(skip_all)]
     fn handle_other_events(&mut self) {
         // Timers
         for event in self.os.timers.get_dispatch() {
@@ -659,7 +665,7 @@ impl Cx {
     }
    */
 
-
+    #[tracing::instrument(skip_all)]
     pub fn android_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
             if let Some(data) = unsafe {to_java_load_asset(path)} {
@@ -673,6 +679,7 @@ impl Cx {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
@@ -704,6 +711,8 @@ impl Cx {
         };
 
         if !self.passes[pass_id].dont_clear {
+            let span = tracing::span!(tracing::Level::INFO, "gl clear");
+            let _span_guard = span.enter();
             unsafe {
                 //gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
                 gl_sys::ClearDepthf(clear_depth as f32);
@@ -729,12 +738,15 @@ impl Cx {
         //}
     }
 
+    #[tracing::instrument(skip_all)]
     pub (crate) fn handle_repaint(&mut self) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            let span = tracing::span!(tracing::Level::INFO, "pass", pass_id = pass_id.0);
+            let _span_guard = span.enter();
             self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
@@ -750,6 +762,8 @@ impl Cx {
                         ////self.os.frame_time += frame_time;
                         //let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
                         if let Some(display) = &mut self.os.display { 
+                            let span = tracing::span!(tracing::Level::INFO, "eglSwapBuffers");
+                            let _span_guard = span.enter();
                             //(display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_DESTROYED);
                             (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
 
@@ -873,6 +887,7 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
+    #[tracing::instrument(skip_all)]
     fn init_cx_os(&mut self) {
         self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();

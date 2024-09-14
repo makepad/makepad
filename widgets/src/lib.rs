@@ -83,6 +83,8 @@ pub mod designer_outline;
 pub mod designer_data;
 pub mod designer_toolbox;
 
+pub use tracing;
+
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
@@ -143,7 +145,7 @@ pub use crate::{
     }
 };
 
-
+#[tracing::instrument(skip_all)]
 pub fn live_design(cx: &mut Cx) {
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);

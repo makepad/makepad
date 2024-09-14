@@ -273,7 +273,8 @@ MidiManager.OnDeviceOpenedListener{
         layout.addView(view);
         setContentView(layout);
   
-        MakepadNative.activityOnCreate(this);
+        String externalStoragePath = this.getExternalFilesDir(null).getAbsolutePath();
+        MakepadNative.activityOnCreate(this, externalStoragePath);
 
         HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
         decoderThreadHandler.start(); // TODO: only start this if its needed.
