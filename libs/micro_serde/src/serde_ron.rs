@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::str::Chars;
+use makepad_live_id::LiveId;
 
 pub struct SerRonState {
     pub out: String
@@ -475,9 +476,13 @@ impl DeRonState {
                 },
                 'a'..='z' | 'A'..='Z' | '_' => {
                     self.identbuf.clear();
+                    self.identbuf.push(self.cur);
+                    self.next(i);
+                    
                     while self.cur >= 'a' && self.cur <= 'z'
                         || self.cur >= 'A' && self.cur <= 'Z'
-                        || self.cur == '_' {
+                        || self.cur == '_' || 
+                        self.cur >= '0' && self.cur <='9' {
                         self.identbuf.push(self.cur);
                         self.next(i);
                     }
@@ -873,3 +878,38 @@ impl<T> DeRon for Box<T> where T: DeRon {
         Ok(Box::new(DeRon::de_ron(s, i) ?))
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LiveIdRon(pub LiveId);
+    
+impl SerRon for LiveId {
+    fn ser_ron(&self, _d: usize, s: &mut SerRonState) {
+        self.as_string(|v|{
+            if let Some(v) = v{
+                s.out.push_str(v);
+            }
+            else{
+                s.out.push_str(&self.0.to_string());
+            }
+        });
+    }
+}
+    
+impl DeRon for LiveId {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<LiveId, DeRonErr> {
+        let liveid = match s.tok{
+            DeRonTok::U64(value)=>LiveId(value),
+            DeRonTok::I64(value)=>LiveId(value as u64),            
+            DeRonTok::F64(value)=>LiveId(value as u64),
+            DeRonTok::Ident=>{
+                LiveId::from_str_with_lut(&s.identbuf).unwrap()
+            }
+            _=>{ // err
+                return Err(s.err_token("liveid"))
+            }
+        };
+        s.next_tok(i) ?;
+        Ok(liveid)
+    }
+}
+    
