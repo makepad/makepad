@@ -1,4 +1,3 @@
-
 use crate::{
     widget::*,
     makepad_derive_widget::*,
@@ -21,6 +20,7 @@ enum ScrollState {
     Drag{samples:Vec<ScrollSample>},
     Flick {delta: f64, next_frame: NextFrame},
     Pulldown {next_frame: NextFrame},
+    ScrollingTo {target_id: usize, delta: f64, next_frame: NextFrame},
 }
 
 #[derive(Clone)]
@@ -634,7 +634,6 @@ impl PortalList {
 
 
 impl Widget for PortalList {
-
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
@@ -669,6 +668,22 @@ impl Widget for PortalList {
         }
         
         match &mut self.scroll_state {
+            ScrollState::ScrollingTo {target_id, delta, next_frame} => {
+                if let Some(_) = next_frame.is_event(event) {
+
+		    let target_reached_or_passed = (*target_id as isize - self.first_id as isize).signum() == delta.signum() as isize;
+
+                    if !target_reached_or_passed {
+                        *next_frame = cx.new_next_frame();
+                        let delta = *delta;
+                        self.delta_top_scroll(cx, delta, true);
+                        cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+                        self.area.redraw(cx);
+                    } else {
+                        self.scroll_state = ScrollState::Stopped;
+                    }
+                }
+            }
             ScrollState::Flick {delta, next_frame} => {
                 if let Some(_) = next_frame.is_event(event) {
                     *delta = *delta * self.flick_scroll_decay;
@@ -989,6 +1004,33 @@ impl PortalListRef {
                 }
             }
         }
+    }
+
+    /// Initiates a smooth scrolling animation to the specified target item in the list.
+    ///
+    /// # Parameters
+    /// - `target_id`: The ID of the item to scroll to.
+    /// - `speed`: A positive floating-point value that controls the speed of the animation.
+    ///   The `speed` will always be treated as an absolute value, with the direction of the scroll
+    ///   (up or down) determined by whether `target_id` is above or below the current item.
+    ///
+    /// # Example
+    /// ```
+    /// smooth_scroll_to(&mut cx, 42, 100.0); // Scrolls to item 42 at speed 100.0
+    /// ```
+    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, target_id: usize, speed: f64) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        if inner.items.is_empty() { return };
+
+        if !(inner.range_start..=inner.range_end).contains(&target_id) { return };
+
+	let scroll_direction = if target_id > inner.first_id { -1 } else { 1 };
+
+        inner.scroll_state = ScrollState::ScrollingTo {
+	    target_id,
+            delta: speed * scroll_direction as f64,
+            next_frame: cx.new_next_frame()
+        };
     }
 
     /// Trigger an scrolling animation to the end of the list
