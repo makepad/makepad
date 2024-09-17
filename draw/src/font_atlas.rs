@@ -593,7 +593,7 @@ impl<'a> Cx2d<'a> {
         }
         fonts_atlas.texture_sdf.put_back_vec_u8(self.cx, atlas_data, Some(RectUsize::new(
             PointUsize::new(atlas_x0, atlas_y0),
-            SizeUsize::new(atlas_w, atlas_h),
+            SizeUsize::new(glyph_out.width(), glyph_out.height()),
         )));
     }
 }

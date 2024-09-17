@@ -954,12 +954,11 @@ impl CxTexture {
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
     pub fn update_vec_texture(&mut self) {
-        let mut newly_allocated = false;
+        let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
                 self.os = previous;
             } 
-            
             if self.os.gl_texture.is_none() {
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -967,7 +966,7 @@ impl CxTexture {
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
-            newly_allocated = true;
+            needs_realloc = true;
         }
     
         let updated = self.take_updated();
@@ -981,7 +980,7 @@ impl CxTexture {
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
     
             // Set texture parameters based on the format
-            let (width, height, internal_format, format, data_type, data, size_per_pixel, use_mipmaps) = match &self.format {
+            let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &self.format {
                 TextureFormat::VecBGRAu8_32{width, height, data, ..} => 
                     (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
@@ -1007,14 +1006,9 @@ impl CxTexture {
                 _ => panic!("Unsupported texture format"),
             };
     
-            let mut current_width = 0;
-            let mut current_height = 0;
-            gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_WIDTH, &mut current_width);
-            gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_HEIGHT, &mut current_height);
-    
             match updated {
                 TextureUpdated::Partial(rect) => {
-                    /*if newly_allocated {
+                    if needs_realloc {
                         gl_sys::TexImage2D(
                             gl_sys::TEXTURE_2D,
                             0,
@@ -1036,8 +1030,8 @@ impl CxTexture {
                         rect.size.height as i32,
                         format,
                         data_type,
-                        (data as *const u8).add((rect.origin.y * width + rect.origin.x) * size_per_pixel) as *const std::ffi::c_void,
-                    );*/
+                        (data as *const u8).add((rect.origin.y * width + rect.origin.x) * bytes_per_pixel) as *const std::ffi::c_void,
+                    );
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
