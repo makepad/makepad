@@ -675,24 +675,22 @@ impl Widget for PortalList {
                     let target_id = *target_id;
 
                     let distance_to_target = target_id as isize - self.first_id as isize;
-
                     let target_passed = distance_to_target.signum() == delta.signum() as isize;
-                    let target_reached = distance_to_target.signum() == 0;
+                    // check to see if we passed the target and fix it. this may happen if the delta is too high,
+                    // so we can just correct the first id, since the animation isn't being smooth anyways.
+                    if target_passed {
+                        self.first_id = target_id;
+                    }
 
-                    if !target_reached || !target_passed {
+                    let distance_to_target = target_id as isize - self.first_id as isize;
+                    let target_reached = distance_to_target == 0;
+
+                    if !target_reached {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
 
-                        
                         self.delta_top_scroll(cx, delta, true);
                         cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
-
-                        // check to see if we passed the target and fix it. this may happen if the delta is too high,
-                        // so we can just correct the first id, since the animation isn't being smooth anyways.
-                        if target_passed {
-                            self.first_id = target_id;
-                            self.scroll_state = ScrollState::Stopped;
-                        }
 
                         self.area.redraw(cx);
                     } else {
