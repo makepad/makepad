@@ -598,40 +598,40 @@ impl GlShader{
                 }
                 gl_sys::DeleteShader(vs);
                 gl_sys::DeleteShader(fs);
-                program
-            };
             
-            if let Some(cache_dir) = os_type.get_cache_dir() {
-                let mut binary = Vec::new();
-                let mut binary_len = 0;
-                gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
-                if binary_len != 0 {
-                    binary.resize(binary_len as usize, 0u8);
-                    let mut return_size = 0i32;
-                    let mut binary_format = 0u32;
-                    gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
-                    if return_size != 0 {
-                        //log!("GOT FORMAT {}", format);
-                        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
-                        let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
+                if let Some(cache_dir) = os_type.get_cache_dir() {
+                    let mut binary = Vec::new();
+                    let mut binary_len = 0;
+                    gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
+                    if binary_len != 0 {
+                        binary.resize(binary_len as usize, 0u8);
+                        let mut return_size = 0i32;
+                        let mut binary_format = 0u32;
+                        gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
+                        if return_size != 0 {
+                            //log!("GOT FORMAT {}", format);
+                            let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+                            let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
 
-                        match os_type {
-                            Android(params) => {
-                                filename = format!("{}_av{}_bn{}_kv{}", filename, params.android_version, params.build_number, params.kernel_version);
-                            },
-                            _ => (),
-                        };
+                            match os_type {
+                                Android(params) => {
+                                    filename = format!("{}_av{}_bn{}_kv{}", filename, params.android_version, params.build_number, params.kernel_version);
+                                },
+                                _ => (),
+                            };
 
-                        filename = format!("{}.bin", filename);
+                            filename = format!("{}.bin", filename);
 
-                        binary.resize(return_size as usize, 0u8);
-                        if let Ok(mut cache) = File::create(filename) {
-                            let _ = cache.write_all(&binary_format.to_be_bytes());
-                            let _ = cache.write_all(&binary);
+                            binary.resize(return_size as usize, 0u8);
+                            if let Ok(mut cache) = File::create(filename) {
+                                let _ = cache.write_all(&binary_format.to_be_bytes());
+                                let _ = cache.write_all(&binary);
+                            }
                         }
                     }
-                } 
-            }
+                }
+                program
+            };
 
             Self{
                 program,
