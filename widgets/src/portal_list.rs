@@ -672,7 +672,6 @@ impl Widget for PortalList {
         match &mut self.scroll_state {
             ScrollState::ScrollingTo {target_id, delta, next_frame} => {
                 if let Some(_) = next_frame.is_event(event) {
-
 		    let target_reached_or_passed = (*target_id as isize - self.first_id as isize).signum() == delta.signum() as isize;
 
                     if !target_reached_or_passed {
