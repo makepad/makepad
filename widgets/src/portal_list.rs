@@ -1,3 +1,4 @@
+
 use crate::{
     widget::*,
     makepad_derive_widget::*,
@@ -634,6 +635,7 @@ impl PortalList {
 
 
 impl Widget for PortalList {
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
