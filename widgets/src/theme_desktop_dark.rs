@@ -415,30 +415,43 @@ live_design! {
         width: Fit, height: Fit,
         align: {x: 0., y: 0.}
 
+        color: #x0000EE,
+        hover_color: #x00EE00,
+        pressed_color: #xEE0000,
+        
+        // instance hovered: 0.0
+        // instance pressed: 0.0
+
         animator: {
             hover = {
                 default: off,
                 off = {
-                    from: {all: Forward {duration: 0.1}}
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
                     apply: {
-                        // TODO: how to influence the TextFlow's active draw_text's color?
+                        hovered: 0.0,
+                        pressed: 0.0,
                     }
                 }
 
                 on = {
+                    redraw: true,
                     from: {
                         all: Forward {duration: 0.1}
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        // TODO: how to influence the TextFlow's active draw_text's color?
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
 
                 pressed = {
-                    from: {all: Forward {duration: 0.2}}
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
                     apply: {
-                        // TODO: how to influence the TextFlow's active draw_text's color?
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
             }
@@ -454,6 +467,7 @@ live_design! {
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
@@ -3183,14 +3197,14 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {hover: 0.0},
+                        draw_text: {hover: 0.0},
                         draw_selection: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {hover: 1.0},
+                        draw_text: {hover: 1.0},
                         draw_selection: {hover: 1.0}
                     }
                 }
@@ -3201,7 +3215,7 @@ live_design! {
                     from: {all: Forward {duration: .25}}
                     apply: {
                         draw_bg: {focus: 0.0},
-                        draw_label: {focus: 0.0},
+                        draw_text: {focus: 0.0},
                         draw_cursor: {focus: 0.0},
                         draw_selection: {focus: 0.0}
                     }
@@ -3210,7 +3224,7 @@ live_design! {
                     from: {all: Snap}
                     apply: {
                         draw_bg: {focus: 1.0},
-                        draw_label: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                         draw_cursor: {focus: 1.0},
                         draw_selection: {focus: 1.0}
                     }
@@ -3269,7 +3283,7 @@ live_design! {
             }
         }
 
-        draw_label: {
+        draw_text: {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,

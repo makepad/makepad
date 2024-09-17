@@ -35,8 +35,8 @@ live_design!{
  
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
-    #[rust] data: AppData,
+    #[live] pub ui: WidgetRef,
+    #[rust] pub data: AppData,
 }
 
 impl LiveRegister for App{
@@ -66,6 +66,30 @@ impl App {
             let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
             dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(CodeEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
+        }
+    }
+    
+    pub fn load_state(&mut self, cx:&mut Cx){
+        if let Ok(contents) = std::fs::read_to_string("makepad_state.ron") {
+            match AppStateRon::deserialize_ron(&contents) {
+                Ok(state)=>{ 
+                    // Now we need to apply the saved state
+                    
+                    let dock = self.ui.dock(id!(dock));
+                    if let Some(mut dock) = dock.borrow_mut() {
+                        // lets load the code editors
+                        // Set the dock's items to the loaded dock_items
+                        dock.load_state(cx, state.dock_items);
+                        //self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
+                        for (tab_id, file_node_id) in state.tab_id_to_file_node_id.iter() {
+                            self.data.file_system.request_open_file(*tab_id, *file_node_id);
+                        }
+                    };
+                }
+                Err(e)=>{
+                    println!("ERR {:?}",e);
+                }
+            }
         }
     }
 }
@@ -109,6 +133,8 @@ impl MatchEvent for App{
         self.data.build_manager.init(cx, &root_path);
         //self.data.build_manager.discover_external_ip(cx);
         self.data.build_manager.start_http_server();
+        // lets load the tabs
+        
     }
     
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
@@ -323,6 +349,7 @@ impl MatchEvent for App{
         match action.cast(){
             FileSystemAction::TreeLoaded => {
                 file_tree.redraw(cx);
+                self.load_state(cx);
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
             FileSystemAction::RecompileNeeded => {
@@ -447,14 +474,19 @@ impl MatchEvent for App{
                             
         if let Some(file_id) = file_tree.file_clicked(&actions) {
             // ok lets open the file
-            let tab_id = dock.unique_tab_id(file_id.0);
-            self.data.file_system.request_open_file(tab_id, file_id);
-            // lets add a file tab 'some
-            let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
-            dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
-                                        
-            // lets scan the entire doc for duplicates
-            self.data.file_system.ensure_unique_tab_names(cx, &dock)
+            if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
+                // If the tab is already open, focus it
+                dock.select_tab(cx, tab_id);
+            } else {
+                let tab_id = dock.unique_tab_id(file_id.0);
+                self.data.file_system.request_open_file(tab_id, file_id);
+                // lets add a file tab 'some
+                let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
+                dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
+                                            
+                // lets scan the entire doc for duplicates
+                self.data.file_system.ensure_unique_tab_names(cx, &dock)
+            }
         }
     }
     
@@ -484,26 +516,29 @@ impl AppMain for App {
         }*/
          
         if let Some(mut dock_items) = dock.needs_save(){
-            dock_items.retain(|di| {
-                if let DockItemStore::Tab{kind,..} = di{
-                    if kind.0 == live_id!(RunView){
+            // remove the runviews
+            dock_items.retain(|_id, di| {
+                if let DockItem::Tab{kind,..} = di{
+                    if *kind == live_id!(RunView){
                         return false
                     }
                 }
                 true 
             }); 
-            let state = PersistentState{
-                dock_items
-            };
             // alright lets save it to disk
+            let state = AppStateRon{
+                dock_items,
+                tab_id_to_file_node_id: self.data.file_system.tab_id_to_file_node_id.clone()
+            };
             let saved = state.serialize_ron();
             let mut f = File::create("makepad_state.ron").expect("Unable to create file");
             f.write_all(saved.as_bytes()).expect("Unable to write data");
         }
     }
 }
-
-#[derive(Clone, Debug, SerRon, DeRon)]
-struct PersistentState{
-    dock_items: Vec<DockItemStore>
+use std::collections::HashMap;
+#[derive(SerRon, DeRon)]
+pub struct AppStateRon{
+    dock_items: HashMap<LiveId, DockItem>,
+    tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
 }
