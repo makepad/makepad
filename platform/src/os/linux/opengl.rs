@@ -1008,7 +1008,6 @@ impl CxTexture {
     
             match updated {
                 TextureUpdated::Partial(rect) => {
-                    crate::log!("RECT {:?} {} {}", rect, bytes_per_pixel, width);
                     if needs_realloc {
                         gl_sys::TexImage2D(
                             gl_sys::TEXTURE_2D,
