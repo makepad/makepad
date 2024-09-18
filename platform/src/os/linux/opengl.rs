@@ -988,14 +988,14 @@ impl CxTexture {
                 TextureFormat::VecRGBAf32{width, height, data, ..} => 
                     (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 16, false),
                 TextureFormat::VecRu8{width, height, data, unpack_row_length, ..} => {
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    //gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
                     (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 1, false)
                 },
                 TextureFormat::VecRGu8{width, height, data, unpack_row_length, ..} => {
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    //gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
@@ -1008,6 +1008,7 @@ impl CxTexture {
     
             match updated {
                 TextureUpdated::Partial(rect) => {
+                    crate::log!("RECT {:?} {} {}", rect, bytes_per_pixel, width);
                     if needs_realloc {
                         gl_sys::TexImage2D(
                             gl_sys::TEXTURE_2D,
@@ -1020,30 +1021,28 @@ impl CxTexture {
                             0 as *const _
                         );
                     }
-                   /* gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
                     gl_sys::TexSubImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
                         rect.origin.x as i32,
-                        rect.origin.y as i32,
+                        rect.origin.y as i32 ,
                         rect.size.width as i32,
                         rect.size.height as i32,
-                        format,
-                        data_type,
-                        (data as *const u8).add((rect.origin.y * width + rect.origin.x) * bytes_per_pixel) as *const std::ffi::c_void,
-                    );*/
-                    gl_sys::TexImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        internal_format as i32,
-                        width as i32, height as i32,
-                        0,
                         format,
                         data_type,
                         data
                     );
                 },
                 TextureUpdated::Full => {
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS, 0);
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
