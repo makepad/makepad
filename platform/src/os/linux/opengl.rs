@@ -1020,7 +1020,7 @@ impl CxTexture {
                             0 as *const _
                         );
                     }
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                   /* gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     gl_sys::TexSubImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -1031,7 +1031,7 @@ impl CxTexture {
                         format,
                         data_type,
                         (data as *const u8).add((rect.origin.y * width + rect.origin.x) * bytes_per_pixel) as *const std::ffi::c_void,
-                    );
+                    );*/
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
