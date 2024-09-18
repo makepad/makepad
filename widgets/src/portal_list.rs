@@ -36,6 +36,7 @@ enum ListDrawState {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum PortalListAction {
     Scroll,
+    SmoothScrollReached,
     None
 }
 impl ListDrawState {
@@ -680,10 +681,15 @@ impl Widget for PortalList {
                     // so we can just correct the first id, since the animation isn't being smooth anyways.
                     if target_passed {
                         self.first_id = target_id;
+                        self.area.redraw(cx);
                     }
 
                     let distance_to_target = target_id as isize - self.first_id as isize;
-                    let target_reached = distance_to_target == 0;
+
+                    // If the target is under first_id (its bigger than it), and end is reached,
+                    // first_id would never be the target, so we just take it as reached.
+                    let target_visible_at_end = self.at_end && target_id > self.first_id;
+                    let target_reached = distance_to_target == 0 || target_visible_at_end;
 
                     if !target_reached {
                         *next_frame = cx.new_next_frame();
@@ -695,6 +701,7 @@ impl Widget for PortalList {
                         self.area.redraw(cx);
                     } else {
                         self.scroll_state = ScrollState::Stopped;
+                        cx.widget_action(uid, &scope.path, PortalListAction::SmoothScrollReached);
                     }
                 }
             }
@@ -1045,6 +1052,26 @@ impl PortalListRef {
             delta: speed * scroll_direction as f64,
             next_frame: cx.new_next_frame()
         };
+    }
+
+    /// Returns wether a smooth_scroll is happening or not.
+    pub fn is_smooth_scrolling(&self) -> bool {
+        let Some(mut inner) = self.borrow_mut() else { return false };
+
+        if let ScrollState::ScrollingTo { .. } = inner.scroll_state {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns whether the given `actions` contain an action indicating that this PortalList completed
+    /// a smooth scroll, reaching the target.
+    pub fn smooth_scroll_reached(&self, actions: &Actions) -> bool {
+        if let PortalListAction::SmoothScrollReached = actions.find_widget_action(self.widget_uid()).cast() {
+            return true;
+        }
+        false
     }
 
     /// Trigger an scrolling animation to the end of the list
