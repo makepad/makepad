@@ -39,7 +39,7 @@ use {
         draw_list::CxDrawListPool,
         web_socket::WebSocket,
         pass::CxPassPool,
-        texture::{CxTexturePool,TextureFormat,Texture},
+        texture::{CxTexturePool,TextureFormat,Texture,TextureUpdated},
         geometry::{
             Geometry,
             CxGeometryPool,
@@ -140,6 +140,12 @@ pub struct AndroidParams {
 
 #[derive(Clone, Debug)]
 pub struct OpenHarmonyParams {
+    pub files_dir:String,
+    pub cache_dir:String,
+    pub temp_dir:String,
+    pub device_type: String,
+    pub os_full_name: String,
+    pub display_density: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -198,6 +204,9 @@ impl OsType {
         if let OsType::Android(params) = self {
             Some(params.cache_path.clone())
         }
+        else if let OsType::OpenHarmony(params) = self {
+            Some(params.cache_dir.clone())
+        }
         else {
             None
         }
@@ -213,7 +222,8 @@ impl Cx {
         let null_texture = textures.alloc(TextureFormat::VecBGRAu8_32 {
             width: 4,
             height: 4,
-            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            data: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            updated: TextureUpdated::Full,
         });
         
         let (executor, spawner) = executor::new_executor_and_spawner();

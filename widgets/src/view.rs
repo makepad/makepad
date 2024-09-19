@@ -598,7 +598,7 @@ impl Widget for View {
         }
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             let mut actions = Vec::new();
-            scroll_bars.handle_main_event(cx, event, &mut actions);
+            scroll_bars.handle_main_event(cx, event, scope, &mut actions);
             if actions.len() > 0 {
                 cx.redraw_area_and_children(self.area);
             };
@@ -670,7 +670,7 @@ impl Widget for View {
         }
 
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-            scroll_bars.handle_scroll_event(cx, event, &mut Vec::new());
+            scroll_bars.handle_scroll_event(cx, event, scope, &mut Vec::new());
         }
     }
 
@@ -736,6 +736,7 @@ impl Widget for View {
                             cx,
                             TextureFormat::RenderBGRAu8 {
                                 size: TextureSize::Auto,
+                                initial: true,
                             },
                         );
                         texture_cache.pass.add_color_texture(

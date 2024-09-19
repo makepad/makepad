@@ -503,4 +503,3 @@ impl ops::Neg for DVec2 {
     type Output = DVec2;
     fn neg(self) -> Self {DVec2 {x: -self.x, y: -self.y}}
 }
-
