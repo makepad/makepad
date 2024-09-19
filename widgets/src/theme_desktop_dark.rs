@@ -415,95 +415,45 @@ live_design! {
         width: Fit, height: Fit,
         align: {x: 0., y: 0.}
 
-        label_walk: { width: Fit, height: Fit }
-
-        draw_icon: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                )
-            }
-        }
+        color: #x0000EE,
+        hover_color: #x00EE00,
+        pressed_color: #xEE0000,
+        
+        // instance hovered: 0.0
+        // instance pressed: 0.0
 
         animator: {
             hover = {
                 default: off,
                 off = {
-                    from: {all: Forward {duration: 0.1}}
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                        hovered: 0.0,
+                        pressed: 0.0,
                     }
                 }
 
                 on = {
+                    redraw: true,
                     from: {
                         all: Forward {duration: 0.1}
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
 
                 pressed = {
-                    from: {all: Forward {duration: 0.2}}
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
                     apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
-            }
-        }
-
-        draw_bg: {
-            instance pressed: 0.0
-            instance hover: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                ), mix(0.0, 0.8, self.hover));
-            }
-        }
-
-        draw_text: {
-            wrap: Word
-            color: (THEME_COLOR_TEXT_DEFAULT),
-            instance color_hover: (THEME_COLOR_TEXT_HOVER),
-            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
-            instance pressed: 0.0
-            instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR>{
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        self.color,
-                        self.color_hover,
-                        self.hover
-                    ),
-                    self.color_pressed,
-                    self.pressed
-                )
             }
         }
     }
@@ -517,6 +467,7 @@ live_design! {
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
@@ -578,7 +529,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         a = <HtmlLink> {}
@@ -680,7 +631,10 @@ live_design! {
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         paragraph_spacing: 16,
-
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -738,7 +692,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         draw_block: {
@@ -3243,14 +3197,14 @@ live_design! {
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_label: {hover: 0.0},
+                        draw_text: {hover: 0.0},
                         draw_selection: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_label: {hover: 1.0},
+                        draw_text: {hover: 1.0},
                         draw_selection: {hover: 1.0}
                     }
                 }
@@ -3261,7 +3215,7 @@ live_design! {
                     from: {all: Forward {duration: .25}}
                     apply: {
                         draw_bg: {focus: 0.0},
-                        draw_label: {focus: 0.0},
+                        draw_text: {focus: 0.0},
                         draw_cursor: {focus: 0.0},
                         draw_selection: {focus: 0.0}
                     }
@@ -3269,10 +3223,10 @@ live_design! {
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_cursor: {focus: 1.0},
                         draw_bg: {focus: 1.0},
-                        draw_selection: {focus: 1.0}
                         draw_text: {focus: 1.0}
+                        draw_cursor: {focus: 1.0},
+                        draw_selection: {focus: 1.0}
                     }
                 }
             }
@@ -3329,7 +3283,7 @@ live_design! {
             }
         }
 
-        draw_label: {
+        draw_text: {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
@@ -3478,12 +3432,12 @@ live_design! {
 
         text_input: <TextInput> {
             width: Fit, padding: 0.,
-            cursor_margin_bottom: (THEME_SPACE_1),
-            cursor_margin_top: (THEME_SPACE_1),
-            select_pad_edges: 3.0
-            cursor_size: 2.0,
+            // cursor_margin_bottom: (THEME_SPACE_1),
+            // cursor_margin_top: (THEME_SPACE_1),
+            // select_pad_edges: 3.0
+            // cursor_size: 2.0,
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
 
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
@@ -3577,12 +3531,12 @@ live_design! {
         text: "CutOff1"
         // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
         text_input: {
-            cursor_margin_bottom: (THEME_SPACE_1),
-            cursor_margin_top: (THEME_SPACE_1),
-            select_pad_edges: (THEME_SPACE_1),
-            cursor_size: (THEME_SPACE_1),
+            // cursor_margin_bottom: (THEME_SPACE_1),
+            // cursor_margin_top: (THEME_SPACE_1),
+            // select_pad_edges: (THEME_SPACE_1),
+            // cursor_size: (THEME_SPACE_1),
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
             draw_bg: {
                 color: (THEME_COLOR_D_HIDDEN)
             },
@@ -4690,6 +4644,100 @@ live_design! {
         }
     }
 
-    Root = <RootBase> { design_window = <Designer> {} }
+    Modal = <ModalBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 0.5, y: 0.5}
 
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        bg_view: <View> {
+            width: Fill
+            height: Fill
+            show_bg: true
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    return vec4(0., 0., 0., 0.7)
+                }
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+        }
+    }
+
+    Tooltip = <TooltipBase> {
+        width: Fill,
+        height: Fill,
+
+        flow: Overlay
+        align: {x: 0.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            <RoundedView> {
+                width: Fit,
+                height: Fit,
+
+                padding: 16,
+
+                draw_bg: {
+                    color: #fff,
+                    border_width: 1.0,
+                    border_color: #D0D5DD,
+                    radius: 2.
+                }
+
+                tooltip_label = <Label> {
+                    width: 270,
+                    draw_text: {
+                        text_style: <THEME_FONT_REGULAR>{font_size: 9},
+                        text_wrap: Word,
+                        color: #000
+                    }
+                }
+            }
+        }
+    }
+
+    PopupNotification = <PopupNotificationBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 1.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            cursor: Default
+            capture_overload: true
+        }
+    }
+
+    Root = <RootBase> { design_window = <Designer> {} }
 }

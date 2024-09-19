@@ -8,14 +8,19 @@ use {
             FileNotification,
             FileRequest,
             FileResponse,
+            SaveKind,
+            SaveFileResponse,
+            OpenFileResponse
         },
     },
     std::{
+        thread,
         cmp::Ordering,
         fmt,
         fs,
+        time::Duration,
         path::{Path, PathBuf},
-        sync::{Arc, RwLock},
+        sync::{Arc, RwLock, Mutex},
     },
 };
 
@@ -47,7 +52,9 @@ impl FileServer {
         FileServerConnection {
             _connection_id:connection_id,
             shared: self.shared.clone(),
-            _notification_sender: notification_sender
+            _notification_sender: notification_sender,
+            open_files: Default::default(),
+            stop_observation: Default::default()
         }
     }
 }
@@ -60,6 +67,8 @@ pub struct FileServerConnection {
     shared: Arc<RwLock<Shared >>,
     // Used to send notifications for this connection.
     _notification_sender: Box<dyn NotificationSender>,
+    open_files: Arc<Mutex<Vec<(String, u64, Vec<u8>)>>>,
+    stop_observation: Arc<Mutex<bool>>,
 }
 
 impl FileServerConnection {
@@ -72,8 +81,8 @@ impl FileServerConnection {
         
         match request {
             FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
-            FileRequest::OpenFile(path,id) => FileResponse::OpenFile(self.open_file(path, id)),
-            FileRequest::SaveFile(path, delta, id, was_patch) => FileResponse::SaveFile(self.save_file(path, delta, id, was_patch)),
+            FileRequest::OpenFile{path,id} => FileResponse::OpenFile(self.open_file(path, id)),
+            FileRequest::SaveFile{path, data, id, patch} => FileResponse::SaveFile(self.save_file(path, data, id, patch)),
         }
     }
     
@@ -164,13 +173,64 @@ impl FileServerConnection {
         path
     }
     
+    fn start_observation(&self) {
+        let open_files = self.open_files.clone();
+        let shared = self.shared.clone();
+        let notification_sender = self._notification_sender.clone();
+        let stop_observation = self.stop_observation.clone();
+        
+        thread::spawn(move || {
+            let stop = *stop_observation.lock().unwrap();
+            while !stop{
+                let mut files = open_files.lock().unwrap();
+                for (path, file_id, last_content) in files.iter_mut() {
+                    let full_path = {
+                        let shared = shared.read().unwrap();
+                        shared.root_path.join(&path)
+                    };
+                    if let Ok(bytes) = fs::read(&full_path) {
+                        if bytes.len() > 0 && bytes != *last_content {
+                            let new_data = String::from_utf8_lossy(&bytes);
+                            let old_data = String::from_utf8_lossy(&last_content);
+                            // Send notification of external file change.
+                            notification_sender
+                            .send_notification(FileNotification::FileChangedOnDisk(
+                                SaveFileResponse{
+                                    path: path.to_string(),
+                                    new_data: new_data.to_string(),
+                                    old_data: old_data.to_string(),
+                                    kind: SaveKind::Observation,
+                                    id: *file_id
+                                }
+                            ));
+                            *last_content = bytes;
+                        }
+                    }
+                }
+            }
+                
+            // Sleep for 500ms.
+            thread::sleep(Duration::from_millis(100));
+        });
+    }
+    
     // Handles an `OpenFile` request.
-    fn open_file(&self, child_path: String, id:u64) -> Result<(String, String, u64), FileError> {
+    fn open_file(&self, child_path: String, id:u64) -> Result<OpenFileResponse, FileError> {
         let path = self.make_full_path(&child_path);
         
         let bytes = fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
         ) ?;
+        
+        let mut open_files = self.open_files.lock().unwrap();
+        
+        if open_files.iter().find(|(cp,_,_)| *cp == child_path).is_none(){
+            open_files.push((child_path.clone(), id, bytes.clone()));
+        }
+        
+        if open_files.len() == 1 {
+            self.start_observation();
+        }
         // Converts the file contents to a `Text`. This is necessarily a lossy conversion
         // because `Text` assumes everything is UTF-8 encoded, and this isn't always the
         // case for files on disk (is this a problem?)
@@ -180,28 +240,47 @@ impl FileServerConnection {
             .collect::<Vec<_ >>());*/
         
         let text = String::from_utf8_lossy(&bytes);
-        Ok((child_path, text.to_string(), id))
+        Ok(OpenFileResponse{
+            path: child_path,
+            data: text.to_string(),
+            id
+        })
     }
     
     // Handles an `ApplyDelta` request.
     fn save_file(
         &self,
         child_path: String,
-        new_content: String,
+        new_data: String,
         id: u64,
-        was_patch: bool
-    ) -> Result<(String, String, String, u64, bool), FileError> {
+        patch: bool
+    ) -> Result<SaveFileResponse, FileError> {
+        let mut open_files = self.open_files.lock().unwrap();
+                
+        if let Some(of) = open_files.iter_mut().find(|(cp,_,_)| *cp == child_path){
+            of.2 =  new_data.as_bytes().to_vec();
+        }
+        else{
+            open_files.push((child_path.clone(), id, new_data.as_bytes().to_vec()));
+        }
+        
         let path = self.make_full_path(&child_path);
         
-        let old_content = String::from_utf8_lossy(&fs::read(&path).map_err(
+        let old_data = String::from_utf8_lossy(&fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
         ) ?).to_string();
 
-        fs::write(&path, &new_content).map_err(
+        fs::write(&path, &new_data).map_err(
             | error | FileError::Unknown(error.to_string())
         ) ?;
         
-        Ok((child_path, old_content, new_content, id, was_patch))
+        Ok(SaveFileResponse{
+            path: child_path, 
+            old_data,
+            new_data,
+            id,
+            kind: if patch{SaveKind::Patch}else{SaveKind::Save}
+        })
     }
 }
 

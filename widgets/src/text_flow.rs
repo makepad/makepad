@@ -10,6 +10,7 @@ live_design!{
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
         font_size: 8,
+        // font_color: (THEME_COLOR_TEXT_DEFAULT),
         flow: RightWrap,
     }
 }
@@ -68,11 +69,15 @@ pub struct TextFlow {
     
     #[live] draw_block: DrawFlowBlock,
     
+    /// The default font size used for all text if not otherwise specified.
     #[live] font_size: f64,
+    /// The default font color used for all text if not otherwise specified.
+    #[live] font_color: Vec4,
     #[walk] walk: Walk,
     
     #[rust] area_stack: SmallVec<[Area;4]>,
     #[rust] pub font_sizes: SmallVec<[f64;8]>,
+    #[rust] pub font_colors: SmallVec<[Vec4;8]>,
    // #[rust] pub font: SmallVec<[Font;2]>,
     #[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust] pub combine_spaces: SmallVec<[bool;4]>,
@@ -83,7 +88,9 @@ pub struct TextFlow {
     #[rust] pub underline: StackCounter,
     #[rust] pub strikethrough: StackCounter,
     #[rust] pub inline_code: StackCounter,
-
+    
+    #[rust] pub areas_tracker: RectAreasTracker,
+    
     #[layout] layout: Layout,
     
     #[live] quote_layout: Layout,
@@ -127,6 +134,39 @@ impl LiveHook for TextFlow{
         nodes.skip_node(index)
     }
 } 
+
+#[derive(Default)]
+pub struct RectAreasTracker{
+    pub areas: SmallVec<[Area;4]>,
+    pos: usize,
+    stack: SmallVec<[usize;2]>,
+}
+
+impl RectAreasTracker{
+    fn clear_stack(&mut self){
+        self.pos = 0;
+        self.stack.clear();
+    }
+    
+    pub fn push_tracker(&mut self){
+        self.stack.push(self.pos);
+    }
+    
+    // this returns the range in the area vec    
+    pub fn pop_tracker(&mut self)->(usize, usize){
+        return (self.stack.pop().unwrap(), self.pos)
+    }
+    
+    pub fn track_rect(&mut self, cx:&mut Cx2d, rect:Rect){
+        if self.stack.len() >0{
+            if self.pos >= self.areas.len(){
+                self.areas.push(Area::Empty);
+            }
+            cx.add_aligned_rect_area(&mut self.areas[self.pos], rect);
+            self.pos += 1;
+        }
+    }
+}
 
 #[derive(Clone)]
 enum DrawState {
@@ -178,6 +218,7 @@ impl TextFlow{
     }
     
     fn clear_stacks(&mut self){
+        self.areas_tracker.clear_stack();
         self.bold.clear();
         self.italic.clear();
         self.fixed.clear();
@@ -186,12 +227,14 @@ impl TextFlow{
         self.inline_code.clear();
         //self.font.clear();
         self.font_sizes.clear();
+        self.font_colors.clear();
         self.area_stack.clear();
         self.top_drop.clear();
         self.combine_spaces.clear();
         self.ignore_newlines.clear();
     }
     
+        
     pub fn push_size_rel_scale(&mut self, scale: f64){
         self.font_sizes.push(
             self.font_sizes.last().unwrap_or(&self.font_size) * scale
@@ -203,7 +246,7 @@ impl TextFlow{
             self.font_size * scale
         );
     }
-    
+
     pub fn end(&mut self, cx: &mut Cx2d){
         // lets end the turtle with how far we walked
         cx.end_turtle_with_area(&mut self.area);
@@ -226,6 +269,8 @@ impl TextFlow{
         // alright we are going to push a block with a layout and a walk
         let fs = self.font_sizes.last().unwrap_or(&self.font_size);
         self.draw_normal.text_style.font_size = *fs;
+        let fc = self.font_colors.last().unwrap_or(&self.font_color);
+        self.draw_normal.color = *fc;
         let pad = self.draw_normal.get_font_size() * pad;
         cx.begin_turtle(self.list_item_walk, Layout{
             padding:Padding{
@@ -312,47 +357,60 @@ impl TextFlow{
             };
 
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
+            let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
             dt.text_style.font_size = *font_size;
+            dt.color = *font_color;
             dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
             dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
             //if let Some(font) = self.font
             // the turtle is at pos X so we walk it.
+           
+            let areas_tracker = &mut self.areas_tracker;
             if self.inline_code.value() > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
-                cx.walk_turtle(Walk{
+                let rect = cx.walk_turtle(Walk{
                     width: Size::Fixed(self.inline_code_margin.left),
                     height: Size::Fixed(0.0),
                     ..Default::default()
                 });
+                areas_tracker.track_rect(cx, rect);
                 dt.draw_walk_resumable_with(cx, text, |cx, mut rect|{
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
+                    areas_tracker.track_rect(cx, rect);
                 });
-                cx.walk_turtle(Walk{
+                let rect = cx.walk_turtle(Walk{
                     width:Size::Fixed(self.inline_code_margin.right),
                     height:Size::Fixed(0.0),
                     ..Default::default()
                 });
+                areas_tracker.track_rect(cx, rect);
             }
             else if self.strikethrough.value() > 0{
                 let db = &mut self.draw_block;
+                db.line_color = *font_color;
                 db.block_type = FlowBlockType::Strikethrough;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
+                    areas_tracker.track_rect(cx, rect);
                 });
             }
             else if self.underline.value() > 0{
                 let db = &mut self.draw_block;
+                db.line_color = *font_color;
                 db.block_type = FlowBlockType::Underline;
                 dt.draw_walk_resumable_with(cx, text, |cx, rect|{
                     db.draw_abs(cx, rect);
+                    areas_tracker.track_rect(cx, rect);
                 });
             }
             else{
-                dt.draw_walk_resumable(cx, text);
+                dt.draw_walk_resumable_with(cx, text, |cx, rect|{
+                    areas_tracker.track_rect(cx, rect);
+                });
             }
         }
     }
