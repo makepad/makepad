@@ -155,8 +155,18 @@ impl FileSystem {
                     FileClientMessage::Notification(notification) => {
                         match notification{
                             FileNotification::FileChangedOnDisk(response)=>{
+                               
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){
-                                    self.open_documents.insert(file_id.clone(), OpenDoc::Document(Document::new(response.new_data.clone().into(), DecorationSet::new())));
+                                    
+                                    if let Some(OpenDoc::Document(doc)) = self.open_documents.get_mut(&file_id){
+                                        if let Some(tab_id) = 
+                                        // lets grab a session id for our first session
+                                        self.tab_id_to_file_node_id.iter()
+                                        .find_map(|(k, v)| if v == file_id { Some(k) } else { None }){
+                                            let session = self.tab_id_to_session.get(&tab_id).unwrap();
+                                            doc.replace(session.id(), response.new_data.clone().into());
+                                        }
+                                    }
                                     ui.redraw(cx);
                                 }
                                 self.process_save_response(cx, response.clone());

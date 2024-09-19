@@ -189,7 +189,7 @@ impl FileServerConnection {
                         shared.root_path.join(&path)
                     };
                     if let Ok(bytes) = fs::read(&full_path) {
-                        if bytes != *last_content {
+                        if bytes.len() > 0 && bytes != *last_content {
                             let new_data = String::from_utf8_lossy(&bytes);
                             let old_data = String::from_utf8_lossy(&last_content);
                             // Send notification of external file change.
