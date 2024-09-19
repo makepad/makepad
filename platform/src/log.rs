@@ -101,7 +101,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
        }
     }
     else{
-       Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
+        Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
             file_name: file_name.to_string(),
             line_start,
             column_start,
