@@ -596,7 +596,6 @@ impl BuildManager {
                         response_sender,
                         headers,
                     } => {
-                        println!("CONNECT MSG");
                         if let Some(id) = headers.path.rsplit("/").next() {
                             if let Ok(id) = id.parse::<u64>() {
                                 socket_id_to_build_id.insert(web_socket_id, LiveId(id));
