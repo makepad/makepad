@@ -60,7 +60,8 @@ impl LiveHook for Window {
         self.window.set_pass(cx, &self.pass);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
         self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
-            size:TextureSize::Auto
+            size:TextureSize::Auto,
+            initial: true,
         });
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         // check if we are ar/vr capable

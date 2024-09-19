@@ -123,9 +123,9 @@ live_design!{
                     draw_block:{ 
                         line_color: (MESSAGE_TEXT_COLOR)
                         sep_color: (MESSAGE_TEXT_COLOR)
+                        code_color: (#3)
                         quote_bg_color: (#4)
                         quote_fg_color: (#7)
-                        block_color: (#3)
                     }
                     list_item_layout: { line_spacing: 5.0, padding: {top: 1.0, bottom: 1.0}, }
 
@@ -137,6 +137,14 @@ live_design!{
                     }
 
                     body: "
+                    Testing plaintext link: <a href=\"https://www.google.com\">Google multi-word link text here</a>
+                    
+                    <h2>Header 2 link to <a href=\"https://www.google.com\">Google link is long and might need to wrap</a> </h2>
+
+                    <b>Bold and <i>italic</i> link to <a href=\"https://www.google.com\">Google but the link is really really long and needs to be wrapped multiple times across so many lines that it's hard to handle this</a></b>
+
+                    <h4>Header 4 <b> bold link to <a href=\"https://www.google.com\">Google test1 test2 test3 test4 test5 test6 test7 test8 test9 test10 </a></b></h4>
+
                     Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed venenatis, lorem sodales lacinia ornare, nisi lorem congue urna, eget dictum urna lacus ut quam. Duis elementum vehicula tellus vel mollis. Vivamus ut orci sed lorem aliquet posuere. Ut sem augue, gravida vitae luctus placerat, vulputate at ligula. Ut sit amet commodo massa. Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere cubilia curae; Pellentesque sodales, eros id dictum bibendum, nisi neque iaculis augue, ac suscipit dolor nisi et velit. Integer dignissim interdum metus. Etiam ultricies nibh eu bibendum ultricies. Maecenas dictum maximus mollis.
 
                     Morbi sit amet placerat metus. Vivamus eleifend elementum lectus, in dignissim elit pulvinar sed. Nam eleifend a dui condimentum vestibulum. Nam nec orci pretium, sodales orci quis, aliquam dolor. Maecenas id neque tempor, sollicitudin nisi at, bibendum turpis. Donec consectetur tellus a ornare dictum. Mauris mollis laoreet consequat. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Nunc in fermentum velit.

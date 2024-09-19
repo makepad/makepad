@@ -11,7 +11,7 @@ use {
         makepad_live_id::*,
         makepad_shader_compiler::generate_glsl,
         cx::{Cx, OsType, OsType::Android},
-        texture::{Texture, TextureFormat, TexturePixel, CxTexture},
+        texture::{Texture, TextureFormat, TexturePixel, TextureUpdated, CxTexture},
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
@@ -333,7 +333,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_render_target(size.x as usize, size.y as usize);
-                    if cxtexture.check_initial(){
+                    if cxtexture.take_initial(){
                        clear_color = _clear_color;
                        clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                     }
@@ -360,7 +360,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[depth_texture.texture_id()];
                     let size = dpi_factor * pass_size;
                     cxtexture.update_depth_stencil(size.x as usize, size.y as usize);
-                    if cxtexture.check_initial(){
+                    if cxtexture.take_initial(){
                         clear_depth = _clear_depth;
                         clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                     }
@@ -598,40 +598,40 @@ impl GlShader{
                 }
                 gl_sys::DeleteShader(vs);
                 gl_sys::DeleteShader(fs);
-                program
-            };
             
-            if let Some(cache_dir) = os_type.get_cache_dir() {
-                let mut binary = Vec::new();
-                let mut binary_len = 0;
-                gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
-                if binary_len != 0 {
-                    binary.resize(binary_len as usize, 0u8);
-                    let mut return_size = 0i32;
-                    let mut binary_format = 0u32;
-                    gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
-                    if return_size != 0 {
-                        //log!("GOT FORMAT {}", format);
-                        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
-                        let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
+                if let Some(cache_dir) = os_type.get_cache_dir() {
+                    let mut binary = Vec::new();
+                    let mut binary_len = 0;
+                    gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
+                    if binary_len != 0 {
+                        binary.resize(binary_len as usize, 0u8);
+                        let mut return_size = 0i32;
+                        let mut binary_format = 0u32;
+                        gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
+                        if return_size != 0 {
+                            //log!("GOT FORMAT {}", format);
+                            let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+                            let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
 
-                        match os_type {
-                            Android(params) => {
-                                filename = format!("{}_av{}_bn{}_kv{}", filename, params.android_version, params.build_number, params.kernel_version);
-                            },
-                            _ => (),
-                        };
+                            match os_type {
+                                Android(params) => {
+                                    filename = format!("{}_av{}_bn{}_kv{}", filename, params.android_version, params.build_number, params.kernel_version);
+                                },
+                                _ => (),
+                            };
 
-                        filename = format!("{}.bin", filename);
+                            filename = format!("{}.bin", filename);
 
-                        binary.resize(return_size as usize, 0u8);
-                        if let Ok(mut cache) = File::create(filename) {
-                            let _ = cache.write_all(&binary_format.to_be_bytes());
-                            let _ = cache.write_all(&binary);
+                            binary.resize(return_size as usize, 0u8);
+                            if let Ok(mut cache) = File::create(filename) {
+                                let _ = cache.write_all(&binary_format.to_be_bytes());
+                                let _ = cache.write_all(&binary);
+                            }
                         }
                     }
-                } 
-            }
+                }
+                program
+            };
 
             Self{
                 program,
@@ -954,11 +954,11 @@ impl CxTexture {
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
     pub fn update_vec_texture(&mut self) {
+        let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
                 self.os = previous;
             } 
-            
             if self.os.gl_texture.is_none() {
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
@@ -966,9 +966,11 @@ impl CxTexture {
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
+            needs_realloc = true;
         }
     
-        if !self.check_updated() {
+        let updated = self.take_updated();
+        if updated.is_empty() {
             return;
         }
         
@@ -978,60 +980,81 @@ impl CxTexture {
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
     
             // Set texture parameters based on the format
-            let (width, height, internal_format, format, data_type, data, use_mipmaps) = match &self.format {
-                TextureFormat::VecBGRAu8_32{width, height, data} => 
-                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false),
-                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _} => 
-                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, true),
-                TextureFormat::VecRGBAf32{width, height, data} => 
-                    (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ptr() as *const std::ffi::c_void, false),
-                TextureFormat::VecRu8{width, height, data, unpack_row_length} => {
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+            let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &self.format {
+                TextureFormat::VecBGRAu8_32{width, height, data, ..} => 
+                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
+                TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
+                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, true),
+                TextureFormat::VecRGBAf32{width, height, data, ..} => 
+                    (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 16, false),
+                TextureFormat::VecRu8{width, height, data, unpack_row_length, ..} => {
+                    //gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
-                    (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false)
+                    (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 1, false)
                 },
-                TextureFormat::VecRGu8{width, height, data, unpack_row_length} => {
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                TextureFormat::VecRGu8{width, height, data, unpack_row_length, ..} => {
+                    //gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
                         gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
-                    (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ptr() as *const std::ffi::c_void, false)
+                    (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 2, false)
                 },
-                TextureFormat::VecRf32{width, height, data} => 
-                    (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ptr() as *const std::ffi::c_void, false),
+                TextureFormat::VecRf32{width, height, data, ..} => 
+                    (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
                 _ => panic!("Unsupported texture format"),
             };
     
-            let mut current_width = 0;
-            let mut current_height = 0;
-            gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_WIDTH, &mut current_width);
-            gl_sys::GetTexLevelParameteriv(gl_sys::TEXTURE_2D, 0, gl_sys::TEXTURE_HEIGHT, &mut current_height);
-    
-            // Update the texture if the dimensions match the previously allocated image
-            if current_width == width as i32 && current_height == height as i32 {
-                gl_sys::TexSubImage2D(
-                    gl_sys::TEXTURE_2D,
-                    0,
-                    0, 0,
-                    width as i32, height as i32,
-                    format,
-                    data_type,
-                    data
-                );
-            } else {
-                gl_sys::TexImage2D(
-                    gl_sys::TEXTURE_2D,
-                    0,
-                    internal_format as i32,
-                    width as i32, height as i32,
-                    0,
-                    format,
-                    data_type,
-                    data
-                );
-            }
+            match updated {
+                TextureUpdated::Partial(rect) => {
+                    if needs_realloc {
+                        gl_sys::TexImage2D(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32, height as i32,
+                            0,
+                            format,
+                            data_type,
+                            0 as *const _
+                        );
+                    }
+
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
+                    gl_sys::TexSubImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        rect.origin.x as i32,
+                        rect.origin.y as i32 ,
+                        rect.size.width as i32,
+                        rect.size.height as i32,
+                        format,
+                        data_type,
+                        data
+                    );
+                },
+                TextureUpdated::Full => {
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS, 0);
+                    gl_sys::TexImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        internal_format as i32,
+                        width as i32, height as i32,
+                        0,
+                        format,
+                        data_type,
+                        data
+                    );
+                },
+                TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
+            };
     
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
@@ -1061,7 +1084,7 @@ impl CxTexture {
                 }
             }
         }
-        if self.check_initial() {
+        if self.take_initial() {
             unsafe{
                 gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
         

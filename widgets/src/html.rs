@@ -1,12 +1,9 @@
-use {
-    crate::{
-        makepad_html::*,
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
-        text_flow::{TextFlow},
-        link_label::LinkLabel,
-    },
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    makepad_html::*,
+    text_flow::TextFlow,
+    widget::*,
 };
 
 const BULLET: &str = "•";
@@ -380,7 +377,7 @@ impl Widget for Html {
 
 fn handle_custom_widget(
     cx: &mut Cx2d,
-    scope: &mut Scope,
+    _scope: &mut Scope,
     tf: &mut TextFlow,
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
@@ -400,7 +397,8 @@ fn handle_custom_widget(
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
         item.set_text(node.find_text().unwrap_or(""));
-        item.draw_all(cx, scope);
+        let mut draw_scope = Scope::with_data(tf);
+        item.draw_all(cx, &mut draw_scope);
     }
 
     node.jump_to_close();
@@ -418,7 +416,31 @@ pub enum HtmlLinkAction {
 
 #[derive(Live, Widget)]
 struct HtmlLink {
-    #[deref] link: LinkLabel,
+    #[animator] animator: Animator,
+
+    // TODO: this is unusued; just here to invalidly satisfy the area provider.
+    //       I'm not sure how to implement `fn area()` given that it has multiple area rects.
+    #[redraw] #[area] area: Area,
+
+    // TODO: remove these if they're unneeded
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+
+    #[rust] drawn_areas: SmallVec<[Area; 2]>,
+    #[live(true)] grab_key_focus: bool,
+
+    #[live] hovered: f32,
+    #[live] pressed: f32,
+
+    /// The default font color for the link when not hovered on or pressed.
+    #[live] color: Option<Vec4>,
+    /// The font color used when the link is hovered on.
+    #[live] hover_color: Option<Vec4>,
+    /// The font color used when the link is pressed.
+    #[live] pressed_color: Option<Vec4>,
+
+    #[live] pub text: ArcStringMut,
+    #[live] pub url: String,
 }
 
 impl LiveHook for HtmlLink {
@@ -429,13 +451,13 @@ impl LiveHook for HtmlLink {
         match apply.from {
             ApplyFrom::NewFromDoc {..} => {
                 let scope = apply.scope.as_ref().unwrap();
-                let doc =  scope.props.get::<HtmlDoc>().unwrap();
+                let doc = scope.props.get::<HtmlDoc>().unwrap();
                 let mut walker = doc.new_walker_with_index(scope.index + 1);
                 
                 if let Some((lc, attr)) = walker.while_attr_lc() {
                     match lc {
                         live_id!(href)=> {
-                            self.link.url = attr.into()
+                            self.url = attr.into()
                         }
                         _=>()
                     }
@@ -448,36 +470,106 @@ impl LiveHook for HtmlLink {
 
 impl Widget for HtmlLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.link.handle_event(cx, event, scope);
-
-        // Handle the action of the HtmlLink being clicked
-        match event {
-            Event::Actions(actions) => {
-                if let Some(key_modifiers) = self.link.clicked_modifiers(actions) {
-                    cx.widget_action(
-                        self.widget_uid(),
-                        &scope.path,
-                        HtmlLinkAction::Clicked {
-                            url: self.url.clone(),
-                            key_modifiers,
-                        },
-                    );
-                }
+        if self.animator_handle_event(cx, event).must_redraw() {
+            // Currently, this conditional will never be true because the `scope`
+            // isn't yet populated with the Html's TextFlow.
+            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+                tf.redraw(cx);
+            } else {
+                self.drawn_areas.iter().for_each(|area| area.redraw(cx));
             }
-            _ => ()
+
+            // This won't work, as this widget owns no views, so redrawing it does nothing.
+            // self.redraw(cx);
+        }
+
+        for area in self.drawn_areas.clone().into_iter() {
+            match event.hits(cx, area) {
+                Hit::FingerDown(_fe) => {
+                    if self.grab_key_focus {
+                        cx.set_key_focus(self.area());
+                    }
+                    self.animator_play(cx, id!(hover.pressed));
+                }
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.animator_play(cx, id!(hover.on));
+                }
+                Hit::FingerHoverOut(_) => {
+                    self.animator_play(cx, id!(hover.off));
+                }
+                Hit::FingerUp(fe) => {
+                    if fe.is_over {
+                        cx.widget_action(
+                            self.widget_uid(),
+                            &scope.path,
+                            HtmlLinkAction::Clicked {
+                                url: self.url.clone(),
+                                key_modifiers: fe.modifiers,
+                            },
+                        );
+
+                        if fe.device.has_hovers() {
+                            self.animator_play(cx, id!(hover.on));
+                        } else {
+                            self.animator_play(cx, id!(hover.off));
+                        }
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                }
+                _ => (),
+            }
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.link.draw_walk(cx, scope, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+            return DrawStep::done();
+        };
+
+        // Here: the text flow has already began drawing, so we just need to draw the text.
+        tf.underline.push();
+        tf.areas_tracker.push_tracker();
+        let mut pushed_color = false;
+        if self.hovered > 0.0 {
+            if let Some(color) = self.hover_color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        } else if self.pressed > 0.0 {
+            if let Some(color) = self.pressed_color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        } else {
+            if let Some(color) = self.color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        }
+        tf.draw_text(cx, self.text.as_ref());
+        
+        if pushed_color {
+            tf.font_colors.pop();
+        }
+        tf.underline.pop();
+
+        let (start, end) = tf.areas_tracker.pop_tracker();
+
+        self.drawn_areas = SmallVec::from(
+            &tf.areas_tracker.areas[start..end]
+        );
+
+        DrawStep::done()
     }
     
-    fn text(&self)->String{
-        self.link.text()
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
     }
-    
-    fn set_text(&mut self, v:&str){
-        self.link.set_text(v);
+
+    fn set_text(&mut self, v: &str) {
+        self.text.as_mut_empty().push_str(v);
     }
 }
 
