@@ -720,6 +720,7 @@ pub trait WidgetActionCxExt {
 pub trait WidgetActionsApi {
     fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
+    fn filter_widget_actions(&self, widget_uid: WidgetUid) -> Option<Vec<&WidgetAction>>;
 }
 
 pub trait WidgetActionOptionApi{
@@ -779,6 +780,23 @@ impl WidgetActionsApi for Actions{
         T::default()
     }
     
+    fn filter_widget_actions(&self, widget_uid: WidgetUid) -> Option<Vec<&WidgetAction>> {
+        let actions = self.iter().filter_map(|action| {
+            if let Some(action) = action.downcast_ref::<WidgetAction>(){
+                if action.widget_uid == widget_uid {
+                    return Some(action)
+                }
+            }
+            None
+        }).collect::<Vec<_>>();
+
+        if actions.is_empty(){
+            None
+        }
+        else {
+            Some(actions)
+        }
+    }
 }
 
 impl WidgetActionCxExt for Cx {
