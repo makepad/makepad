@@ -24,7 +24,7 @@ pub struct TextInput {
     #[animator] animator: Animator,
     
     #[redraw] #[live] draw_bg: DrawColor,
-    #[live] draw_label: DrawLabel,
+    #[live] draw_text: DrawLabel,
     #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
     
@@ -83,10 +83,19 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
+    fn inner_walk(&self) -> Walk {
+        if self.walk.width.is_fit() {
+            Walk::fit()
+        } else {
+            Walk::fill_fit()
+        }
+    }
+
     fn position_to_index_affinity(&self, cx: &mut Cx2d, width: f64, position: DVec2) -> IndexAffinity {
-        self.draw_label.position_to_index_affinity(
+        let inner_walk = self.inner_walk();
+        self.draw_text.position_to_index_affinity(
             cx,
-            Walk::fill(),
+            inner_walk,
             self.label_align,
             width,
             &self.text,
@@ -95,9 +104,10 @@ impl TextInput {
     }
 
     fn cursor_position(&self, cx: &mut Cx2d, width: f64) -> DVec2 {
-        self.draw_label.index_affinity_to_position(
+        let inner_walk = self.inner_walk();
+        self.draw_text.index_affinity_to_position(
             cx,
-            Walk::fill(),
+            inner_walk,
             self.label_align,
             width,
             &self.text,
@@ -133,7 +143,7 @@ impl TextInput {
 
     fn move_cursor_up(&mut self, cx: &mut Cx2d, width: f64, is_select: bool) {
         let position = self.cursor_position(cx, width);
-        let line_spacing = self.draw_label.line_spacing(cx);
+        let line_spacing = self.draw_text.line_spacing(cx);
         let index_affinity = self.position_to_index_affinity(cx, width, DVec2 {
             x: position.x,
             y: position.y - 0.5 * line_spacing,
@@ -143,7 +153,7 @@ impl TextInput {
 
     fn move_cursor_down(&mut self, cx: &mut Cx2d, width: f64, is_select: bool) {
         let position = self.cursor_position(cx, width);
-        let line_spacing = self.draw_label.line_spacing(cx);
+        let line_spacing = self.draw_text.line_spacing(cx);
         let index_affinity = self.position_to_index_affinity(cx, width, DVec2 {
             x: position.x,
             y: position.y + 1.5 * line_spacing,
@@ -547,20 +557,22 @@ impl Widget for TextInput {
 
         self.draw_selection.append_to_draw_call(cx);
 
+        let inner_walk = self.inner_walk();
+
         // Draw text
         if self.text.is_empty() {
-            self.draw_label.is_empty = 1.0;
-            self.draw_label.draw_walk(
+            self.draw_text.is_empty = 1.0;
+            self.draw_text.draw_walk(
                 cx,
-                Walk::fill(),
+                inner_walk,
                 self.label_align,
                 &self.empty_message,
             );
         } else {
-            self.draw_label.is_empty = 0.0;
-            self.draw_label.draw_walk(
+            self.draw_text.is_empty = 0.0;
+            self.draw_text.draw_walk(
                 cx,
-                Walk::fill(),
+                inner_walk,
                 self.label_align,
                 &self.text,
             );
@@ -569,9 +581,9 @@ impl Widget for TextInput {
         let padded_rect = cx.turtle().padded_rect();
 
         // Draw selection
-        let rects = self.draw_label.selected_rects(
+        let rects = self.draw_text.selected_rects(
             cx,
-            Walk::fill(),
+            inner_walk,
             self.label_align,
             padded_rect.size.x,
             &self.text,
@@ -587,7 +599,7 @@ impl Widget for TextInput {
      
         // Draw cursor
         let cursor_position = self.cursor_position(cx, padded_rect.size.x);
-        let cursor_height = self.draw_label.line_height(cx);
+        let cursor_height = self.draw_text.line_height(cx);
         self.draw_cursor.draw_abs(cx, Rect {
             pos: padded_rect.pos + dvec2(cursor_position.x - 0.5 * self.cursor_width, cursor_position.y),
             size: dvec2(self.cursor_width, cursor_height)
@@ -669,6 +681,39 @@ impl TextInputRef {
         }
     }
 
+    /// Saves the internal state of this text input widget
+    /// to a new `TextInputState` object.
+    pub fn save_state(&self) -> TextInputState {
+        if let Some(inner) = self.borrow() {
+            TextInputState {
+                text: inner.text.clone(),
+                cursor: inner.cursor,
+                history: inner.history.clone(),
+            }
+        } else {
+            TextInputState::default()
+        }
+    }
+
+    /// Restores the internal state of this text input widget
+    /// from the given `TextInputState` object.
+    pub fn restore_state(&self, state: TextInputState) {
+        if let Some(mut inner) = self.borrow_mut() {
+            // Don't use `set_text()` here, as it has other side effects.
+            inner.text = state.text;
+            inner.cursor = state.cursor;
+            inner.history = state.history;
+        }
+    }
+
+}
+
+/// The saved (checkpointed) state of a text input widget.
+#[derive(Clone, Debug, Default)]
+pub struct TextInputState {
+    pub text: String,
+    pub cursor: Cursor,
+    history: History,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

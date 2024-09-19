@@ -254,6 +254,7 @@ impl Cx {
                                         id: presentable_image.id,
                                         width: swapchain.alloc_width as usize,
                                         height: swapchain.alloc_height as usize,
+                                        initial: true,
                                     };
                                     let texture = Texture::new_with_format(self, format);
                                     if self.textures[texture.texture_id()].update_from_shared_handle(

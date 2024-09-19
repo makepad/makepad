@@ -83,7 +83,7 @@ pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[repr(C)]
 pub struct DrawVars {
     pub area: Area,

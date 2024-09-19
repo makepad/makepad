@@ -40,7 +40,7 @@ impl Widget for StudioEditor {
         let data = scope.data.get_mut::<AppData>().unwrap();
         let uid = self.widget_uid();
         if let Some(session) = data.file_system.get_session_mut(session_id){
-            for action in self.editor.handle_event(cx, event, session){
+            for action in self.editor.handle_event(cx, event, &mut Scope::empty(), session){
                 cx.widget_action(uid, &scope.path, action);
             }
             data.file_system.handle_sessions();

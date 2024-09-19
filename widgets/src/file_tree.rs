@@ -198,6 +198,7 @@ impl FileTreeNode {
         cx: &mut Cx,
         event: &Event,
         node_id: LiveId,
+        _scope: &mut Scope,
         actions: &mut Vec<(LiveId, FileTreeNodeAction)>,
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -395,7 +396,7 @@ impl Widget for FileTree {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         
-        self.scroll_bars.handle_event(cx, event);
+        self.scroll_bars.handle_event(cx, event, scope);
                 
         match event {
             Event::DragEnd => self.dragging_node_id = None,
@@ -405,7 +406,7 @@ impl Widget for FileTree {
         let mut node_actions = Vec::new();
                 
         for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
-            node.handle_event(cx, event, *node_id, &mut node_actions);
+            node.handle_event(cx, event, *node_id, scope, &mut node_actions);
         }
                 
         for (node_id, node_action) in node_actions {

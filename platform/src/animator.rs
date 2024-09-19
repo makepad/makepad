@@ -17,7 +17,8 @@ use {
             LiveIdAsProp,
             LiveNodeSliceApi,  
             LiveNodeVecApi
-         },
+        },
+        scope::Scope,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_id::*,
         makepad_derive_live::*,
@@ -31,30 +32,42 @@ use {
 
 pub trait AnimatorImpl {
     
-    fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
-    fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
-    fn animator_toggle(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+    fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]){
+        self.animator_cut_with_scope(cx, state, &mut Scope::empty())
+    }
+    fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]){
+        self.animator_play_with_scope(cx, state, &mut Scope::empty())
+    }
+    fn animator_cut_with_scope(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope:&mut Scope);
+    fn animator_play_with_scope(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope:&mut Scope);
+    fn animator_toggle_with_scope(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2], scope:&mut Scope) {
         if is_state_1 {
             if let Animate::Yes = animate {
-                self.animator_play(cx, state1)
+                self.animator_play_with_scope(cx, state1, scope)
             }
             else {
-                self.animator_cut(cx, state1)
+                self.animator_cut_with_scope(cx, state1, scope)
             }
         }
         else {
             if let Animate::Yes = animate {
-                self.animator_play(cx, state2)
+                self.animator_play_with_scope(cx, state2, scope)
             }
             else {
-                self.animator_cut(cx, state2)
+                self.animator_cut_with_scope(cx, state2, scope)
             }
         }
     }
+    fn animator_toggle(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+        self.animator_toggle_with_scope(cx, is_state_1, animate, state1, state2, &mut Scope::empty())
+    }
     fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
-    fn animator_apply_state(&mut self, cx: &mut Cx);
+    fn animator_apply_state(&mut self, cx: &mut Cx, scope:&mut Scope);
     fn animator_after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]);
-    fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction;
+    fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event) -> AnimatorAction{
+        self.animator_handle_event_with_scope(cx, event, &mut Scope::empty())
+    }
+    fn animator_handle_event_with_scope(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) -> AnimatorAction;
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -72,6 +72,9 @@ pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
 pub const NO_ERROR: types::GLenum = 0x0;
 pub const UNPACK_ALIGNMENT: types::GLenum = 0x0CF5;
 pub const UNPACK_ROW_LENGTH: types::GLenum = 0x0CF2;
+pub const UNPACK_SKIP_PIXELS: types::GLenum = 0x0CF4;
+pub const UNPACK_SKIP_ROWS: types::GLenum = 0x0CF3;
+
 pub const TEXTURE_EXTERNAL_OES: types::GLenum = 0x8D65;
 pub const EXTENSIONS: types::GLenum = 0x1F03;
 pub const VENDOR: types::GLenum = 0x1F00;
