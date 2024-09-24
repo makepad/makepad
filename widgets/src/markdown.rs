@@ -65,8 +65,11 @@ impl Widget for Markdown {
                     tf.font_sizes.pop();
                     cx.turtle_new_line();
                 },
-                MarkdownNode::NewLine=>{
+                MarkdownNode::NewLine{paragraph: true}=>{
                     cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                },
+                MarkdownNode::NewLine{paragraph: false}=>{
+                    cx.turtle_new_line();
                 },
                 MarkdownNode::BeginNormal=>{
                     cx.turtle_new_line_with_spacing(self.paragraph_spacing);
