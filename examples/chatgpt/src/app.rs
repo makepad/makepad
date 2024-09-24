@@ -13,7 +13,7 @@ live_design!{
             show_bg: true
             
             flow: Down,
-            spacing: 20,
+            
 	    /*
             align: {
                 x: 0.5,
@@ -21,8 +21,8 @@ live_design!{
             },
 	    */
 	    padding: {
-		left: 100.0,
-		top: 100.0,
+            top: 10
+		          left: 100.0,
             },
             
             width: Fill,
@@ -33,28 +33,34 @@ live_design!{
                     return mix(#3, #1, self.pos.y);
                 }
             }
-            
-            message_label = <Label> {
-                width: 300,
-                height: Fit
-                draw_text: {
-                    color: #f
-                },
-                text: r#"Chat"#
-            }
-            
-            message_input = <TextInput> {
-                text: "Hi"
-                width: 500,
-                height: Fit,
-                draw_bg: {
-                    color: #1
+            <ScrollYView>{
+                flow: Down
+                spacing: 20,
+                height: Fill
+                
+                
+                message_input = <TextInput> {
+                    text: "Message"
+                    width: 500,
+                    height: Fit,
+                    draw_bg: {
+                        color: #1
+                    }
                 }
-            }
-            
-            send_button = <Button> {
-                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                text: "send"
+                                    
+                send_button = <Button> {
+                    icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                    text: "send"
+                }
+                
+                message_label = <Label> {
+                    width: 300,
+                    height: Fit
+                    draw_text: {
+                        color: #f
+                    },
+                    text: r#"Output"#
+                }           
             }
         }}
     }
@@ -88,8 +94,8 @@ impl App {
         
         request.set_json_body(ChatPrompt {
             messages: vec![ChatMessage {content: Some(message), role: Some("user".to_string()), refusal: Some(JsonValue::Null)}],
-            model: "gpt-3.5-turbo".to_string(),
-            max_tokens: 100,
+            model: "gpt-4o".to_string(),
+            max_tokens: 1000,
             stream: true,
         });
         self.ui.label(id!(message_label)).set_text_and_redraw(cx, "Answering:..\n");
@@ -117,11 +123,16 @@ impl MatchEvent for App {
                    for data in data.split("\n\n"){
                         if let Some(data) = data.strip_prefix("data: "){
                             if data != "[DONE]"{
-                                let chat_response =  ChatResponse::deserialize_json(data).unwrap(); 
-                                if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
-                                    let msg = format!("{}{}", label.text(), content);
-                                    println!("{}", msg);
-                                    label.set_text_and_redraw(cx, &msg);
+                                match ChatResponse::deserialize_json(data){
+                                    Ok(chat_response)=>{
+                                        if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
+                                            let msg = format!("{}{}", label.text(), content);
+                                            label.set_text_and_redraw(cx, &msg);
+                                        }
+                                    }
+                                    Err(e)=>{
+                                        println!("JSon parse error {:?} {}", e, data);
+                                    }
                                 }
                             }
                         }
