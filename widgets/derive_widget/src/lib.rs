@@ -1,4 +1,4 @@
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
 
 mod derive_widget;
 use crate::derive_widget::*;
