@@ -2,7 +2,7 @@ use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 
-const OPENAI_BASE_URL: &str = "https://makepad.nl/v1";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 live_design!{
     import makepad_widgets::theme_desktop_dark::*;
@@ -40,28 +40,12 @@ live_design!{
                 draw_text: {
                     color: #f
                 },
-                text: r#"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut vel velit ac urna imperdiet fermentum. Nullam eu quam elit. Cras condimentum purus quam, ac pellentesque arcu facilisis placerat. Maecenas accumsan sem quis mattis dignissim. Integer eget lacinia eros. Donec hendrerit nisl et ligula ornare, quis commodo lacus hendrerit. Morbi facilisis risus sit amet vestibulum malesuada. Duis nec ligula quis enim accumsan accumsan a et felis. Fusce orci nisl, scelerisque ac elit ut, eleifend sodales nisi."#
-                /*
-
-Etiam scelerisque, turpis eget finibus convallis, diam sapien gravida erat, eu ornare dolor mauris quis leo. Morbi eget porttitor purus, a sagittis erat. Duis porttitor bibendum porttitor. Quisque aliquam eros quam, at interdum ipsum elementum non. Morbi mollis nunc ut luctus iaculis. Mauris turpis mauris, ultrices eget pharetra at, finibus pellentesque magna. Aliquam pulvinar cursus erat, non interdum lorem accumsan sit amet. Ut placerat ante eu mauris consequat, non volutpat leo hendrerit. Nam volutpat malesuada nunc. Quisque tincidunt malesuada est, vitae faucibus massa egestas vitae. Integer at purus elit. Proin nec ipsum arcu. Integer sit amet arcu a libero posuere congue. Cras eu venenatis lacus, nec fermentum eros. Vivamus ut tristique mauris, a porta ipsum.
-
-Integer eu enim finibus, aliquet nunc sit amet, tincidunt quam. Proin accumsan massa in lacus hendrerit, ut vulputate nisl blandit. Quisque tincidunt hendrerit libero at congue. Sed ultrices, nunc in auctor porta, dolor sem commodo arcu, ut mollis tortor arcu eu mi. Pellentesque in enim non risus fringilla aliquam. Cras quis erat non risus maximus volutpat. Interdum et malesuada fames ac ante ipsum primis in faucibus. Nullam iaculis interdum felis, eget vestibulum libero feugiat in. Suspendisse nibh metus, tempor eu viverra sed, semper eget risus. Praesent mauris quam, tempor id lectus vitae, consequat bibendum ligula. Nunc eu nulla accumsan, pharetra tellus id, egestas tellus. In pretium augue eu quam tempus, at congue quam rutrum. Etiam quis mauris sed enim tristique rhoncus quis a massa. In et neque lacus.
-"#,
-*/
+                text: r#"Chat"#
             }
             
             message_input = <TextInput> {
-                text: "xxxflyyy\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Ut vel velit ac urna imperdiet fermentum. Nullam eu quam elit. Cras condimentum purus quam, ac pellentesque arcu facilisis placerat. Maecenas accumsan sem quis mattis dignissim. Integer eget lacinia eros. Donec hendrerit nisl et ligula ornare, quis commodo lacus hendrerit. Morbi facilisis risus sit amet vestibulum malesuada. Duis nec ligula quis enim accumsan accumsan a et felis. Fusce orci nisl, scelerisque ac elit ut, eleifend sodales nisi.\nxxxflyyy\nxxxflyyy\nxxxflyyy\nxxxflyyy"
+                text: "Hi"
                 width: 500,
-                height: Fit,
-                draw_bg: {
-                    color: #1
-                }
-            }
-
-            message_input_2 = <TextInput> {
-                text: "xxxflyyy",
-                width: 300,
                 height: Fit,
                 draw_bg: {
                     color: #1
@@ -92,20 +76,23 @@ impl LiveRegister for App {
 impl App {
     // This performs and event-based http request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
-    fn send_message(cx: &mut Cx, message: String) {
+    fn send_message(&self, cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
         let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
-        
+        request.set_is_streaming();
+        let ai_key = std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string());
+        println!("{}", ai_key);
         request.set_header("Content-Type".to_string(), "application/json".to_string());
-        request.set_header("Authorization".to_string(), "Bearer <your-token>".to_string());
+        request.set_header("Authorization".to_string(), format!("Bearer {ai_key}"));
         
         request.set_json_body(ChatPrompt {
-            messages: vec![Message {content: message, role: "user".to_string()}],
+            messages: vec![ChatMessage {content: Some(message), role: Some("user".to_string()), refusal: Some(JsonValue::Null)}],
             model: "gpt-3.5-turbo".to_string(),
-            max_tokens: 100
+            max_tokens: 100,
+            stream: true,
         });
-        
+        self.ui.label(id!(message_label)).set_text_and_redraw(cx, "Answering:..\n");
         cx.http_request(request_id, request);
     }
 }
@@ -113,26 +100,46 @@ impl App {
 impl MatchEvent for App {
 
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(send_button)).clicked(&actions) {
+        if self.ui.button(id!(send_button)).clicked(&actions) || 
+           self.ui.text_input(id!(message_input)).returned(&actions).is_some()
+        {
             let user_prompt = self.ui.text_input(id!(message_input)).text();
-            Self::send_message(cx, user_prompt);
+            self.send_message(cx, user_prompt);
         }
     }
     
     fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
+       let label = self.ui.label(id!(message_label));
        for event in responses{
            match &event.response {
+               NetworkResponse::HttpStreamResponse(response)=>{
+                   let data = response.get_string_body().unwrap();
+                   for data in data.split("\n\n"){
+                        if let Some(data) = data.strip_prefix("data: "){
+                            if data != "[DONE]"{
+                                let chat_response =  ChatResponse::deserialize_json(data).unwrap(); 
+                                if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
+                                    let msg = format!("{}{}", label.text(), content);
+                                    println!("{}", msg);
+                                    label.set_text_and_redraw(cx, &msg);
+                                }
+                            }
+                        }
+                    }
+               }
+               NetworkResponse::HttpStreamComplete=>{
+                   println!("Stream complete");
+               }
                NetworkResponse::HttpResponse(response) => {
-                   let label = self.ui.label(id!(message_label));
+                   
                    match event.request_id {
                        live_id!(SendChatMessage) => {
                            if response.status_code == 200 {
                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
-                               label.set_text_and_redraw(cx, &chat_response.choices[0].message.content);
+                               label.set_text_and_redraw(cx, &chat_response.choices[0].message.as_ref().unwrap().content.as_ref().unwrap());
                            } else {
                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
                            }
-                           label.redraw(cx);
                        },
                        _ => (),
                    }
@@ -156,37 +163,55 @@ impl AppMain for App {
 
 #[derive(SerJson, DeJson)]
 struct ChatPrompt {
-    pub messages: Vec<Message>,
+    pub messages: Vec<ChatMessage>,
     pub model: String,
-    pub max_tokens: i32
+    pub max_tokens: i32,
+    pub stream: bool
 }
 
 #[derive(SerJson, DeJson)]
-struct Message {
-    pub content: String,
-    pub role: String
-}
+struct ChatMessage {
+    pub content: Option<String>,
+    pub role: Option<String>,
+    pub refusal: Option<JsonValue>
+} 
 
-#[derive(SerJson, DeJson)]
+#[allow(unused)]
+#[derive(DeJson)]
 struct ChatResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i32,
-    pub model: String,
-    pub usage: Usage,
-    pub choices: Vec<Choice>,
+    id: String,
+    object: String,
+    created: i32,
+    model: String,
+    system_fingerprint: JsonValue,
+    usage: Option<ChatUsage>,
+    choices: Vec<ChatChoice>,
 }
 
-#[derive(SerJson, DeJson)]
-pub struct Usage {
+#[allow(unused)]
+#[derive(DeJson)]
+pub struct CompletionDetails {
+    reasoning_tokens: i32,
+}
+
+#[allow(unused)]
+#[derive(DeJson)]
+pub struct ChatUsage {
     prompt_tokens: i32,
     completion_tokens: i32,
     total_tokens: i32,
+    completion_tokens_details: CompletionDetails
 }
 
-#[derive(SerJson, DeJson)]
-struct Choice {
-    message: Message,
-    finish_reason: String,
+#[allow(unused)]
+#[derive(DeJson)]
+struct ChatChoice {
+    message: Option<ChatMessage>,
+    delta: Option<ChatMessage>,
+    finish_reason: Option<String>,
+    logprobs: JsonValue,
     index: i32,
 }
+
+
+
