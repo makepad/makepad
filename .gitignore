@@ -22,6 +22,8 @@ key.ron
 .vscode
 rustc*.txt
 
+OPENAI_KEY
+
 /local
 
 /tools/cargo_makepad/android_*
