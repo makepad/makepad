@@ -267,6 +267,7 @@ impl Widget for DesignerView {
                         if let Some(action) = action.as_widget_action(){
                             match action.cast(){
                                 WidgetDesignAction::PickedBody=>{
+                                    println!("{:?}", action);
                                     // alright so lets draw a quad on top
                                     // alright our widget got clicked.
                                     let comp = cd.component.uid_to_widget(action.widget_uid);

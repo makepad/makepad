@@ -1056,8 +1056,7 @@ impl PortalListRef {
 
     /// Returns wether a smooth_scroll is happening or not.
     pub fn is_smooth_scrolling(&self) -> bool {
-        let Some(mut inner) = self.borrow_mut() else { return false };
-
+        let Some(inner) = self.borrow_mut() else { return false };
         if let ScrollState::ScrollingTo { .. } = inner.scroll_state {
             true
         } else {
