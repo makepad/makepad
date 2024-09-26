@@ -360,7 +360,7 @@ impl MatchEvent for App{
                 //self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
                 log_list.redraw(cx);
             }
-            FileSystemAction::FileChangedOnDisk(res)=>{
+            FileSystemAction::FileChangedOnDisk(_res)=>{
                 
             }
             FileSystemAction::None=>()
