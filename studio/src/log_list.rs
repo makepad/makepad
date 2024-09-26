@@ -255,8 +255,17 @@ impl LogList{
                         item.apply_over(cx, live!{
                             binary = {text: (&binary)}
                             icon = {active_page: (map_level_to_icon(msg.level))},
-                            body = {text: (&msg.message)}
-                            location = {text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))}
+                            body = {text: (
+                                if let Some(explanation) = &msg.explanation{
+                                    format!("{}\n{}", msg.message, explanation)
+                                }
+                                else{
+                                    msg.message.to_string()
+                                }
+                            )}
+                            location = {
+                                text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))
+                            }
                             draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         });
                         item.draw_all(cx, &mut Scope::empty());

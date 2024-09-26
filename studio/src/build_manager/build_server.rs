@@ -430,7 +430,6 @@ pub trait MsgSender: Send {
 
     fn process_compiler_message(&self, cmd_id: LiveId, msg: RustcCompilerMessage) {
         if let Some(msg) = msg.message {
-            println!("{:?}", msg);
             let level = match msg.level.as_ref() {
                 "error" => LogLevel::Error,
                 "warning" => LogLevel::Warning,
@@ -458,7 +457,7 @@ pub trait MsgSender: Send {
                     span.file_name.clone(),
                     span.start(),
                     span.end(),
-                    msg.message.clone(),
+                    msg.rendered.unwrap_or(msg.message),
                     None
                 );
                 /*
