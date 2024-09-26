@@ -132,7 +132,7 @@ impl FileSystem {
                                         let dec = dec.clone();
                                         self.open_documents.insert(file_id, OpenDoc::Document(Document::new(response.data.into(), dec)));
                                     }else {panic!()}
-                                    ui.redraw(cx);
+                                    dock.redraw(cx);
                                 }
                                 Err(FileError::CannotOpen(_unix_path)) => {
                                 }

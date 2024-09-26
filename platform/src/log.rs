@@ -108,6 +108,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
             line_end,
             column_end,
             message,
+            explanation: None,
             level
         }));
     }
