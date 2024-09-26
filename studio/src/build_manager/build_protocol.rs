@@ -151,6 +151,7 @@ pub struct LogItemLocation {
     pub start: Position,
     pub end: Position,
     pub message: String,
+    pub explanation: Option<String>
 }
 
 #[derive(Clone, Debug)]

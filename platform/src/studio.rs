@@ -25,6 +25,7 @@ pub struct StudioLogItem{
     pub column_start: u32,
     pub column_end: u32,
     pub message: String,
+    pub explanation: Option<String>,
     pub level: LogLevel
 }
 

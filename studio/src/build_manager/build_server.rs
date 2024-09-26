@@ -413,6 +413,7 @@ pub trait MsgSender: Send {
         start: Position,
         end: Position,
         message: String,
+        explanation: Option<String>,
     ) {
         self.send_message(BuildClientMessageWrap {
             cmd_id,
@@ -422,12 +423,14 @@ pub trait MsgSender: Send {
                 start,
                 end,
                 message,
+                explanation
             })),
         });
     }
 
     fn process_compiler_message(&self, cmd_id: LiveId, msg: RustcCompilerMessage) {
         if let Some(msg) = msg.message {
+            println!("{:?}", msg);
             let level = match msg.level.as_ref() {
                 "error" => LogLevel::Error,
                 "warning" => LogLevel::Warning,
@@ -456,6 +459,7 @@ pub trait MsgSender: Send {
                     span.start(),
                     span.end(),
                     msg.message.clone(),
+                    None
                 );
                 /*
                 if let Some(label) = &span.label {

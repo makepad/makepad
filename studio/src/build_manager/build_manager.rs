@@ -418,6 +418,7 @@ impl BuildManager {
                                     start,
                                     end,
                                     message: item.message,
+                                    explanation: item.explanation
                                 }),
                             ));
                             cx.action(AppAction::RedrawLog)
