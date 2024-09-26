@@ -7,7 +7,7 @@ const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
-    App = {{App}} {
+    App = {{App}} { in ch
         ui: <Window> {body = {
             
             show_bg: true
@@ -38,7 +38,6 @@ live_design!{
                 spacing: 20,
                 height: Fill
                 
-                
                 message_input = <TextInput> {
                     text: "Message"
                     width: 500,
@@ -46,6 +45,7 @@ live_design!{
                     draw_bg: {
                         color: #1
                     }
+                    
                 }
                                     
                 send_button = <Button> {
@@ -58,7 +58,9 @@ live_design!{
                     height: Fit
                     draw_text: {
                         color: #f
+                        text_style:{font_size: 30}
                     },
+                    
                     text: r#"Output"#
                 }           
             }

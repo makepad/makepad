@@ -292,8 +292,9 @@ impl Widget for LogList {
                     if let Some((_build_id, log_item)) = data.build_manager.log.get(item_id as usize) {
                         match log_item {
                             LogItem::Location(msg) => {
+                                
                                 cx.action(AppAction::JumpTo(JumpToFile{
-                                    file_name:msg.file_name.clone(), 
+                                    file_name: msg.file_name.clone(), 
                                     line: msg.start.line_index as u32,
                                     column: msg.start.byte_index as u32
                                 }));
