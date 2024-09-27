@@ -39,6 +39,10 @@ live_design!{
                         }
                         text: "https://test"
                     }
+                    <RoundedShadowView>{
+                        width:100,
+                        height:100,
+                    }
                     button1 = <Button> {
                         text: "Hello world "
                         draw_text:{color:#f00}
@@ -80,9 +84,7 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        let () = actions;
         if self.ui.button(id!(button1)).clicked(&actions) {
-            log!("Press button {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));

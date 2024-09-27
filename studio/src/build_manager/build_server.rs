@@ -457,8 +457,8 @@ pub trait MsgSender: Send {
                     span.file_name.clone(),
                     span.start(),
                     span.end(),
-                    msg.rendered.unwrap_or(msg.message),
-                    None
+                    msg.message,
+                    msg.rendered
                 );
                 /*
                 if let Some(label) = &span.label {

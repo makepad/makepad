@@ -1026,7 +1026,20 @@ impl PortalListRef {
             }
         }
     }
-
+    
+    pub fn any_items_with_actions(&self, actions: &Actions)->bool {
+        let uid = self.widget_uid();
+        for action in actions {
+            if let Some(action) = action.as_widget_action(){
+                if let Some(group) = &action.group{
+                    if group.group_uid == uid{
+                        return true
+                    }
+                }
+            }
+        }
+        false
+    }
     /// Initiates a smooth scrolling animation to the specified target item in the list.
     ///
     /// # Parameters
