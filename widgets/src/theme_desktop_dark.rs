@@ -3138,6 +3138,7 @@ live_design! {
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
+                        open: 0.0
                         draw_bg: {open: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
@@ -3146,6 +3147,7 @@ live_design! {
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
+                        open: 1.0
                         draw_bg: {open: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                     }
                 }

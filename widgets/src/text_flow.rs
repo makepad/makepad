@@ -116,7 +116,7 @@ pub struct TextFlow {
         
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust(Some(Default::default()))] items: Option<ComponentMap<(LiveId,LiveId), WidgetRef>>,
+    #[rust(Some(Default::default()))] items: Option<ComponentMap<LiveId,(WidgetRef, LiveId)>>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
 }
 
@@ -130,7 +130,7 @@ impl LiveHook for TextFlow{
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     // lets apply this thing over all our childnodes with that template
-                    for ((_, templ_id), node) in self.items.as_mut().unwrap().iter_mut() {
+                    for (node, templ_id) in self.items.as_mut().unwrap().values_mut() {
                         if *templ_id == id {
                             node.apply(cx, apply, index, nodes);
                         }
@@ -209,7 +209,7 @@ impl Widget for TextFlow {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        for ((id,_),entry) in self.items.as_mut().unwrap().iter_mut(){
+        for (id,(entry,_)) in self.items.as_mut().unwrap().iter_mut(){
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
@@ -354,20 +354,21 @@ impl TextFlow{
         LiveId(self.item_counter)
     }
     
-    pub fn draw_item(&mut self, cx: &mut Cx2d, template: LiveId) {
+    pub fn draw_item(&mut self, cx: &mut Cx2d, template: LiveId)->LiveId {
         let entry_id = self.count_item();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
             item.draw_all(cx, &mut Scope::with_data(tf));
-        })
+        });
+        entry_id
     }
         
     pub fn item_with<T:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)>(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId, f:T) {
         let mut items = self.items.take().unwrap();
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = items.get_or_insert(cx, (entry_id, template), | cx | {
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
+            let entry = items.get_or_insert(cx, entry_id, | cx | {
+                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
             });
-            f(cx, &entry, self);
+            f(cx, &entry.0, self);
         }
         self.items = Some(items);
     }
@@ -375,12 +376,21 @@ impl TextFlow{
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (entry_id, template), | cx | {
-                WidgetRef::new_from_ptr(cx, Some(*ptr))
+            let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
+                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
             });
-            return Some(entry.clone())
+            return Some(entry.0.clone())
         }
         None 
+    }
+    
+    pub fn existing_item(&mut self, entry_id: LiveId) -> WidgetRef {
+        if let Some(item) = self.items.as_mut().unwrap().get(&entry_id){
+            item.0.clone()
+        }
+        else{
+            WidgetRef::empty()
+        }
     }
         
     pub fn clear_items(&mut self){
@@ -390,10 +400,10 @@ impl TextFlow{
 
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (entry_id, template), | cx | {
-                WidgetRef::new_from_ptr_with_scope(cx, scope, Some(*ptr))
+            let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
+                (WidgetRef::new_from_ptr_with_scope(cx, scope, Some(*ptr)), template)
             });
-            return Some(entry.clone())
+            return Some(entry.0.clone())
         }
         None 
     }
@@ -478,11 +488,11 @@ impl TextFlow{
         })
     }
     
-    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, label:&str, data:impl WidgetActionTrait){
+    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl WidgetActionTrait, label:&str){
         let entry_id = self.count_item();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
             item.set_text(label);
-            item.as_text_flow_link().set_clicked_data(data);
+            item.set_action_data(data);
             item.draw_all(cx, &mut Scope::with_data(tf));
         })
     }
@@ -522,18 +532,10 @@ struct TextFlowLink {
     
     #[live] pub text: ArcStringMut,
         
-    #[rust] action_data: WidgetActionData,
+    #[action_data] #[rust] action_data: WidgetActionData,
 }
 
 impl LiveHook for TextFlowLink {}
-
-impl TextFlowLinkRef{
-    pub fn set_clicked_data(&self, data:impl WidgetActionTrait){
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.action_data.add(live_id!(clicked), data);
-        }
-    }
-}
 
 impl Widget for TextFlowLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -554,7 +556,6 @@ impl Widget for TextFlowLink {
                     self.animator_play(cx, id!(hover.pressed));
                     if self. click_on_down{
                         cx.widget_action_with_data(
-                            live_id!(clicked),
                             &self.action_data,
                             self.widget_uid(),
                             &scope.path,
@@ -575,7 +576,6 @@ impl Widget for TextFlowLink {
                     if fe.is_over {
                         if !self.click_on_down{
                             cx.widget_action_with_data(
-                                live_id!(clicked),
                                 &self.action_data,
                                 self.widget_uid(),
                                 &scope.path,
