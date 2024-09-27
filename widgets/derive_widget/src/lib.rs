@@ -20,7 +20,8 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
     find,
     wrap,
     area,
-    event
+    event,
+    action_data
 ))]
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
