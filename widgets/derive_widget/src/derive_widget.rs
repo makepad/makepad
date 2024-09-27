@@ -93,7 +93,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
                 tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(deref_field).add(".walk(cx)}");
             }
             else{
-                return error("Need either a field marked walk or deref to find walk method")
+                tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { Walk::default()}");
             }
             if !redraw_fields.is_empty(){
                 tb.add("    fn redraw(&mut self, cx:&mut Cx) {");
