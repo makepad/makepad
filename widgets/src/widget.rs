@@ -37,6 +37,7 @@ pub trait WidgetNode: LiveApply {
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
+    fn set_action_data(&mut self, _data:Box<dyn WidgetActionTrait>){}
 }
 
 pub trait Widget: WidgetNode {
@@ -480,6 +481,12 @@ impl WidgetRef {
         }
         false
     }
+    
+    pub fn set_action_data(&self, data:impl WidgetActionTrait){
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.set_action_data(Box::new(data));
+        }
+    }
 
     pub fn data_to_widget(&self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
@@ -630,7 +637,8 @@ impl WidgetRef {
         self.apply(cx, &mut ApplyFrom::Over.into(), 0, nodes);
         self.redraw(cx);
     }
-
+    
+    
     fn apply(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut inner = self.0.borrow_mut();
         if let LiveValue::Class { live_type, .. } = nodes[index].value {
@@ -671,6 +679,7 @@ impl WidgetRef {
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
         nodes.skip_node(index)
     }
+    
 }
 
 impl LiveHook for WidgetRef {}
@@ -732,26 +741,20 @@ impl Clone for Box<dyn WidgetActionTrait> {
 
 #[derive(Default)]
 pub struct WidgetActionData{
-    data: SmallVec<[(LiveId, Box<dyn WidgetActionTrait>);1]>
+    data: Option<Box<dyn WidgetActionTrait>>
 }
 
 impl WidgetActionData{
-    pub fn add(&mut self, id:LiveId, data:impl WidgetActionTrait){
-        if let Some(item) = self.data.iter_mut().find(|(i,_)| *i == id){
-            item.1 = Box::new(data);
-        }
-        else{
-            self.data.push((id, Box::new(data)));
-        }
+    pub fn set(&mut self,  data:impl WidgetActionTrait){
+        self.data = Some(Box::new(data));
     }
     
-    pub fn clone_data(&self, id:LiveId)->Option<Box<dyn WidgetActionTrait>>{
-        if let Some(item) = self.data.iter().find(|(i, _)| *i == id){
-            Some(item.1.clone())
-        }
-        else{
-            None
-        }
+    pub fn set_box(&mut self,  data:Box<dyn  WidgetActionTrait>){
+        self.data = Some(data);
+    }
+    
+    pub fn clone_data(&self)->Option<Box<dyn WidgetActionTrait>>{
+        self.data.clone()
     }
 }
 
@@ -774,7 +777,6 @@ pub trait WidgetActionCxExt {
     fn widget_action(&mut self, uid: WidgetUid, path: &HeapLiveIdPath, t: impl WidgetActionTrait);
     fn widget_action_with_data(
         &mut self,
-        action_id: LiveId,
         action_data: &WidgetActionData,
         widget_uid: WidgetUid,
         path: &HeapLiveIdPath,
@@ -996,7 +998,6 @@ impl WidgetActionCxExt for Cx {
     
     fn widget_action_with_data(
         &mut self,
-        action_id: LiveId,
         action_data: &WidgetActionData,
         widget_uid: WidgetUid,
         path: &HeapLiveIdPath,
@@ -1004,7 +1005,7 @@ impl WidgetActionCxExt for Cx {
     ) {
         self.action(WidgetAction {
             widget_uid,
-            data: action_data.clone_data(action_id),
+            data: action_data.clone_data(),
             path: path.clone(),
             action: Box::new(t),
             group: None,

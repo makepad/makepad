@@ -88,6 +88,13 @@ live_design!{
             height: Fit
             width: Fill,
             height: Fit
+            
+            fold_button = <FoldButton>{
+                animator:{
+                    
+                }
+            }
+            
             wait_icon = <Icon> {
                 draw_bg: {
                     fn pixel(self) -> vec4 {
@@ -246,12 +253,32 @@ impl LogList{
                             }
                             LogItem::Location(msg) => {
                                 tf.draw_item(cx, map_level_to_icon(msg.level));
+                                // alright what next.
+                                let fold_button_id = if msg.explanation.is_some(){
+                                    Some(tf.draw_item(cx, live_id!(fold_button)))
+                                }
+                                else{
+                                    None
+                                };
                                 
                                 format_reuse!(location, "{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1);
-                                
-                                tf.draw_link(cx, live_id!(link), &location, JumpToFileLink{item_id});
+                                tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id},&location);
                                 
                                 tf.draw_text(cx, &msg.message);
+                                if let Some(explanation) = &msg.explanation{
+                                    cx.turtle_new_line();
+                                    // ok we want a code block now right
+                                    // lets get the folded state value
+                                    let fb = tf.existing_item(fold_button_id.unwrap()).as_fold_button();
+                                    // alright lets use a code-editor widget here
+                                    
+                                    tf.begin_code(cx);
+                                    tf.fixed.push();
+                                    tf.draw_text(cx, explanation);
+                                    tf.fixed.pop();
+                                    tf.end_code(cx);
+                                }
+                                
                                 /*
                                 let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
                                 item.apply_over(cx, live!{

@@ -39,6 +39,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         let mut area_field = None;
         let mut deref_field = None;
         let mut wrap_field = None;
+        let mut action_data_field = None;
         let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
         for field in &mut fields {
@@ -60,12 +61,20 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             if field.attrs.iter().any(|v| v.name == "area"){
                 area_field = Some(field.name.clone());
             }
+            if field.attrs.iter().any(|v| v.name == "action_data"){
+                action_data_field = Some(field.name.clone());
+            }
         }
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
         if designable{
             tb.add("    fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign>{return Some(self)}");
         }
+        
+        if let Some(action_data_field) = &action_data_field{
+            tb.add("    fn set_action_data(&mut self, action_data:Box<dyn WidgetActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
+        }
+        
         if let Some(wrap_field) = &wrap_field{
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(wrap_field).add(".redraw(cx)}");
