@@ -80,7 +80,7 @@ pub trait Widget: WidgetNode {
         false
     }
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
-
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
 
     fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
@@ -99,7 +99,7 @@ pub trait Widget: WidgetNode {
     fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
         while self.draw(cx, scope).is_step() {}
     }
-
+    
     fn text(&self) -> String {
         String::new()
     }
@@ -729,9 +729,36 @@ impl Clone for Box<dyn WidgetActionTrait> {
     }
 }
 
+
+#[derive(Default)]
+pub struct WidgetActionData{
+    data: SmallVec<[(LiveId, Box<dyn WidgetActionTrait>);1]>
+}
+
+impl WidgetActionData{
+    pub fn add(&mut self, id:LiveId, data:impl WidgetActionTrait){
+        if let Some(item) = self.data.iter_mut().find(|(i,_)| *i == id){
+            item.1 = Box::new(data);
+        }
+        else{
+            self.data.push((id, Box::new(data)));
+        }
+    }
+    
+    pub fn clone_data(&self, id:LiveId)->Option<Box<dyn WidgetActionTrait>>{
+        if let Some(item) = self.data.iter().find(|(i, _)| *i == id){
+            Some(item.1.clone())
+        }
+        else{
+            None
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
     action: Box<dyn WidgetActionTrait>,
+    data: Option< Box<dyn WidgetActionTrait>>,
     pub widget_uid: WidgetUid,
     pub path: HeapLiveIdPath,
     pub group: Option<WidgetActionGroup>,
@@ -745,6 +772,14 @@ pub struct WidgetActionGroup {
 
 pub trait WidgetActionCxExt {
     fn widget_action(&mut self, uid: WidgetUid, path: &HeapLiveIdPath, t: impl WidgetActionTrait);
+    fn widget_action_with_data(
+        &mut self,
+        action_id: LiveId,
+        action_data: &WidgetActionData,
+        widget_uid: WidgetUid,
+        path: &HeapLiveIdPath,
+        t: impl WidgetActionTrait,
+    );
     fn group_widget_actions<F, R>(&mut self, group_id: WidgetUid, item_id: WidgetUid, f: F) -> R
     where
         F: FnOnce(&mut Cx) -> R;
@@ -819,6 +854,12 @@ pub trait WidgetActionsApi {
     ) -> impl Iterator<Item = T>
     where
         T: Default + Clone;
+        
+    fn filter_actions_data<T: WidgetActionTrait + 'static + Send>(
+            &self,
+        ) -> impl Iterator<Item = T>
+        where
+        T: Clone;
 }
 
 pub trait WidgetActionOptionApi {
@@ -911,6 +952,30 @@ impl WidgetActionsApi for Actions {
             }
         })
     }
+    
+    fn filter_actions_data<T: WidgetActionTrait + 'static + Send>(
+        &self,
+    ) -> impl Iterator<Item = T>
+    where
+    T: Clone,
+    
+    {
+        self.iter().filter_map(move |action| {
+            action
+            .downcast_ref::<WidgetAction>()
+            .and_then(|action|{
+                if let Some(a) = &action.data{
+                    if let Some(a) = a.downcast_ref::<T>() {
+                        Some(a.clone())
+                    }else {
+                        None
+                    }
+                }else {
+                    None
+                }
+            })
+        })
+    }
 }
 
 impl WidgetActionCxExt for Cx {
@@ -922,6 +987,24 @@ impl WidgetActionCxExt for Cx {
     ) {
         self.action(WidgetAction {
             widget_uid,
+            data: None,
+            path: path.clone(),
+            action: Box::new(t),
+            group: None,
+        })
+    }
+    
+    fn widget_action_with_data(
+        &mut self,
+        action_id: LiveId,
+        action_data: &WidgetActionData,
+        widget_uid: WidgetUid,
+        path: &HeapLiveIdPath,
+        t: impl WidgetActionTrait,
+    ) {
+        self.action(WidgetAction {
+            widget_uid,
+            data: action_data.clone_data(action_id),
             path: path.clone(),
             action: Box::new(t),
             group: None,
