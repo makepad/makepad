@@ -73,6 +73,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         
         if let Some(action_data_field) = &action_data_field{
             tb.add("    fn set_action_data(&mut self, action_data:Box<dyn WidgetActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
+            tb.add("    fn action_data(&mut self)->Option<Box<dyn WidgetActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
         }
         
         if let Some(wrap_field) = &wrap_field{

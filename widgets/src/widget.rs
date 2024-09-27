@@ -38,6 +38,7 @@ pub trait WidgetNode: LiveApply {
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
     fn set_action_data(&mut self, _data:Box<dyn WidgetActionTrait>){}
+    fn action_data(&mut self)->Option<Box<dyn WidgetActionTrait>>{None}
 }
 
 pub trait Widget: WidgetNode {
