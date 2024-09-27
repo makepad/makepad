@@ -31,6 +31,16 @@ macro_rules!error {
 }
 
 #[macro_export]
+macro_rules! format_reuse {
+    ($dst:expr, $($arg:tt)*) => {
+        $dst.clear();
+        $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
+        #[allow(unused_must_use)]
+        &$dst
+    };
+}
+
+#[macro_export]
 macro_rules!warning {
     ( $ ( $ t: tt) *) => {
         $crate::log::log_with_level(

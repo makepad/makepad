@@ -172,7 +172,7 @@ impl Window {
         }
 
         if self.show_performance_view {
-            self.performance_view.draw(cx, &mut Scope::empty()).unwrap();
+            self.performance_view.draw_all(cx, &mut Scope::empty());
         }
 
         cx.end_pass_sized_turtle();

@@ -13,6 +13,15 @@ live_design!{
         // font_color: (THEME_COLOR_TEXT_DEFAULT),
         flow: RightWrap,
     }
+    
+    TextFlowLinkBase = {{TextFlowLink}} {
+        link = {
+            draw_text = {
+                // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
+                color: #1a0dab
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook)]
@@ -89,6 +98,8 @@ pub struct TextFlow {
     #[rust] pub strikethrough: StackCounter,
     #[rust] pub inline_code: StackCounter,
     
+    #[rust] pub item_counter: u64,
+    
     #[rust] pub areas_tracker: RectAreasTracker,
     
     #[layout] layout: Layout,
@@ -105,7 +116,7 @@ pub struct TextFlow {
         
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] items: ComponentMap<(LiveId,LiveId), WidgetRef>,
+    #[rust(Some(Default::default()))] items: Option<ComponentMap<(LiveId,LiveId), WidgetRef>>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
 }
 
@@ -119,7 +130,7 @@ impl LiveHook for TextFlow{
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     // lets apply this thing over all our childnodes with that template
-                    for ((_, templ_id), node) in self.items.iter_mut() {
+                    for ((_, templ_id), node) in self.items.as_mut().unwrap().iter_mut() {
                         if *templ_id == id {
                             node.apply(cx, apply, index, nodes);
                         }
@@ -198,7 +209,7 @@ impl Widget for TextFlow {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        for ((id,_),entry) in self.items.iter_mut(){
+        for ((id,_),entry) in self.items.as_mut().unwrap().iter_mut(){
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
@@ -218,6 +229,7 @@ impl TextFlow{
     }
     
     fn clear_stacks(&mut self){
+        self.item_counter = 0;
         self.areas_tracker.clear_stack();
         self.bold.clear();
         self.italic.clear();
@@ -250,7 +262,7 @@ impl TextFlow{
     pub fn end(&mut self, cx: &mut Cx2d){
         // lets end the turtle with how far we walked
         cx.end_turtle_with_area(&mut self.area);
-        self.items.retain_visible();
+        self.items.as_mut().unwrap().retain_visible();
     } 
 
     pub fn begin_code(&mut self, cx:&mut Cx2d){
@@ -319,10 +331,51 @@ impl TextFlow{
         self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
         self.draw_block.end(cx);
     }
+    /*
+    pub fn counted_item(&mut self, cx: &mut Cx, template: LiveId) -> Option<WidgetRef> {
+        self.item_counter += 1;
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (LiveId(self.item_counter), template), | cx | {
+                WidgetRef::new_from_ptr(cx, Some(*ptr))
+            });
+            return Some(entry.clone())
+        }
+        None 
+    }*/
+    
+    pub fn draw_item_id(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId,) {
+        self.item_with(cx, entry_id, template, |cx, item, tf|{
+            item.draw_all(cx, &mut Scope::with_data(tf));
+        })
+    }
+    
+    pub fn count_item(&mut self)->LiveId{
+        self.item_counter += 1;
+        LiveId(self.item_counter)
+    }
+    
+    pub fn draw_item(&mut self, cx: &mut Cx2d, template: LiveId) {
+        let entry_id = self.count_item();
+        self.item_with(cx, entry_id, template, |cx, item, tf|{
+            item.draw_all(cx, &mut Scope::with_data(tf));
+        })
+    }
+        
+    pub fn item_with<T:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)>(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId, f:T) {
+        let mut items = self.items.take().unwrap();
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = items.get_or_insert(cx, (entry_id, template), | cx | {
+                WidgetRef::new_from_ptr(cx, Some(*ptr))
+            });
+            f(cx, &entry, self);
+        }
+        self.items = Some(items);
+    }
+        
     
     pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
             return Some(entry.clone())
@@ -331,13 +384,13 @@ impl TextFlow{
     }
         
     pub fn clear_items(&mut self){
-        self.items.clear();
+        self.items.as_mut().unwrap().clear();
     }
         
 
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+            let entry = self.items.as_mut().unwrap().get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr_with_scope(cx, scope, Some(*ptr))
             });
             return Some(entry.clone())
@@ -380,11 +433,7 @@ impl TextFlow{
             if self.inline_code.value() > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
-                let rect = cx.walk_turtle(Walk{
-                    width: Size::Fixed(self.inline_code_margin.left),
-                    height: Size::Fixed(0.0),
-                    ..Default::default()
-                });
+                let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
                 areas_tracker.track_rect(cx, rect);
                 dt.draw_walk_resumable_with(cx, text, |cx, mut rect|{
                     rect.pos -= self.inline_code_padding.left_top();
@@ -392,11 +441,7 @@ impl TextFlow{
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
                 });
-                let rect = cx.walk_turtle(Walk{
-                    width:Size::Fixed(self.inline_code_margin.right),
-                    height:Size::Fixed(0.0),
-                    ..Default::default()
-                });
+                let rect = TextFlow::walk_margin(cx, self.inline_code_margin.right);
                 areas_tracker.track_rect(cx, rect);
             }
             else if self.strikethrough.value() > 0{
@@ -424,9 +469,187 @@ impl TextFlow{
             }
         }
     }
+    
+    pub fn walk_margin(cx:&mut Cx2d, margin:f64)->Rect{
+        cx.walk_turtle(Walk{
+            width: Size::Fixed(margin),
+            height: Size::Fixed(0.0),
+            ..Default::default()
+        })
+    }
+    
+    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, label:&str, data:impl WidgetActionTrait){
+        let entry_id = self.count_item();
+        self.item_with(cx, entry_id, template, |cx, item, tf|{
+            item.set_text(label);
+            item.as_text_flow_link().set_clicked_data(data);
+            item.draw_all(cx, &mut Scope::with_data(tf));
+        })
+    }
 }
 
+#[derive(Debug, Clone, DefaultNone)]
+pub enum TextFlowLinkAction {
+    Clicked {
+        key_modifiers: KeyModifiers,
+    },
+    None,
+}
 
+#[derive(Live, Widget)]
+struct TextFlowLink {
+    #[animator] animator: Animator,
+    
+    // TODO: this is unusued; just here to invalidly satisfy the area provider.
+    //       I'm not sure how to implement `fn area()` given that it has multiple area rects.
+    #[redraw] #[area] area: Area,
+    
+    // TODO: remove these if they're unneeded
+    //#[walk] walk: Walk,
+    #[live] click_on_down: bool,
+    #[rust] drawn_areas: SmallVec<[Area; 2]>,
+    #[live(true)] grab_key_focus: bool,
+    #[live] margin: Margin,
+    #[live] hovered: f32,
+    #[live] pressed: f32,
+    
+    /// The default font color for the link when not hovered on or pressed.
+    #[live] color: Option<Vec4>,
+    /// The font color used when the link is hovered on.
+    #[live] hover_color: Option<Vec4>,
+    /// The font color used when the link is pressed.
+    #[live] pressed_color: Option<Vec4>,
+    
+    #[live] pub text: ArcStringMut,
+        
+    #[rust] action_data: WidgetActionData,
+}
+
+impl LiveHook for TextFlowLink {}
+
+impl TextFlowLinkRef{
+    pub fn set_clicked_data(&self, data:impl WidgetActionTrait){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.action_data.add(live_id!(clicked), data);
+        }
+    }
+}
+
+impl Widget for TextFlowLink {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.animator_handle_event(cx, event).must_redraw() {
+            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+                tf.redraw(cx);
+            } else {
+                self.drawn_areas.iter().for_each(|area| area.redraw(cx));
+            }
+        }
+        
+        for area in self.drawn_areas.clone().into_iter() {
+            match event.hits(cx, area) {
+                Hit::FingerDown(fe) => {
+                    if self.grab_key_focus {
+                        cx.set_key_focus(self.area());
+                    }
+                    self.animator_play(cx, id!(hover.pressed));
+                    if self. click_on_down{
+                        cx.widget_action_with_data(
+                            live_id!(clicked),
+                            &self.action_data,
+                            self.widget_uid(),
+                            &scope.path,
+                            TextFlowLinkAction::Clicked {
+                                key_modifiers: fe.modifiers,
+                            },
+                        );
+                    }
+                }
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.animator_play(cx, id!(hover.on));
+                }
+                Hit::FingerHoverOut(_) => {
+                    self.animator_play(cx, id!(hover.off));
+                }
+                Hit::FingerUp(fe) => {
+                    if fe.is_over {
+                        if !self.click_on_down{
+                            cx.widget_action_with_data(
+                                live_id!(clicked),
+                                &self.action_data,
+                                self.widget_uid(),
+                                &scope.path,
+                                TextFlowLinkAction::Clicked {
+                                    key_modifiers: fe.modifiers,
+                                },
+                            );
+                        }
+                        
+                        if fe.device.has_hovers() {
+                            self.animator_play(cx, id!(hover.on));
+                        } else {
+                            self.animator_play(cx, id!(hover.off));
+                        }
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+        
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+            return DrawStep::done();
+        };
+        
+        // Here: the text flow has already began drawing, so we just need to draw the text.
+        tf.underline.push();
+        tf.areas_tracker.push_tracker();
+        let mut pushed_color = false;
+        if self.hovered > 0.0 {
+            if let Some(color) = self.hover_color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        } else if self.pressed > 0.0 {
+            if let Some(color) = self.pressed_color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        } else {
+            if let Some(color) = self.color {
+                tf.font_colors.push(color);
+                pushed_color = true;
+            }
+        }
+        TextFlow::walk_margin(cx, self.margin.left);
+        tf.draw_text(cx, self.text.as_ref());
+        TextFlow::walk_margin(cx, self.margin.right);
+                                
+        if pushed_color {
+            tf.font_colors.pop();
+        }
+        tf.underline.pop();
+        
+        let (start, end) = tf.areas_tracker.pop_tracker();
+        
+        self.drawn_areas = SmallVec::from(
+            &tf.areas_tracker.areas[start..end]
+        );
+        
+        DrawStep::done()
+    }
+        
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
+    }
+    
+    fn set_text(&mut self, v: &str) {
+        self.text.as_mut_empty().push_str(v);
+    }
+}
 /*
 #[derive(Clone)]
 pub struct HtmlId(pub HtmlString);

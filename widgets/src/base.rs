@@ -55,7 +55,9 @@ live_design!{
     import crate::markdown::MarkdownBase,
     import crate::markdown::MarkdownLinkBase;
     import crate::root::RootBase;
-    
+    import crate::text_flow::TextFlowBase;
+    import crate::text_flow::TextFlowLinkBase;
+        
     import crate::designer::DesignerBase;
     import crate::designer_outline::DesignerOutlineBase;
     import crate::designer_view::DesignerViewBase;
@@ -933,6 +935,8 @@ live_design!{
     RootBase = <RootBase>{}
     HtmlBase = <HtmlBase>{}
     HtmlLinkBase = <HtmlLinkBase>{}
+    TextFlowBase = <TextFlowBase>{}
+    TextFlowLinkBase = <TextFlowLinkBase>{}
     MarkdownBase = <MarkdownBase>{}
     MarkdownLinkBase = <MarkdownLinkBase>{}
     KeyboardViewBase = <KeyboardViewBase>{}
