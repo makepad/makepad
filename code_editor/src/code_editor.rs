@@ -498,8 +498,9 @@ impl CodeEditor {
         // the cell size, then shift by the viewport origin.
         
         cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x,
-            self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y},
+            session.layout().width() * self.cell_size.x +pad_left_top.x,
+            self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y}
+            +pad_left_top.y * self.height_scale
         );
         
         //println!("{} {}", session.layout().height() * self.cell_size.y, (self.viewport_rect.size.y));
