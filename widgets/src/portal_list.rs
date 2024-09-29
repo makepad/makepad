@@ -503,9 +503,8 @@ impl PortalList {
     ///   this returns a reference to that widget.
     /// * If a new widget was created successfully, this returns a reference to that new widget.
     /// * If the given `template` could not be found, this returns `None`.
-    pub fn item(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
-        self.item_with_existed(cx, entry_id, template)
-            .map(|(item, _)| item)
+    pub fn item(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> WidgetRef {
+        self.item_with_existed(cx, entry_id, template).0
     }
 
     /// Creates a new widget from the given `template` or returns an existing widget,
@@ -522,28 +521,28 @@ impl PortalList {
     ///   did not exist or because the existing item with the given `entry_id` did not use the given `template`,
     ///   this returns a tuple of that widget and `false`.
     /// * If the given `template` could not be found, this returns `None`.
-    pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
+    pub fn item_with_existed(&mut self, cx: &mut Cx, entry_id: usize, template: LiveId) -> (WidgetRef, bool) {
         use std::collections::hash_map::Entry;
         if let Some(ptr) = self.templates.get(&template) {
             match self.items.entry(entry_id) {
                 Entry::Occupied(mut occ) => {
                     if occ.get().0 == template {
-                        Some((occ.get().1.clone(), true))
+                        (occ.get().1.clone(), true)
                     } else {
                         let widget_ref = WidgetRef::new_from_ptr(cx, Some(*ptr));
                         occ.insert((template, widget_ref.clone()));
-                        Some((widget_ref, false))
+                        (widget_ref, false)
                     }
                 }
                 Entry::Vacant(vac) => {
                     let widget_ref = WidgetRef::new_from_ptr(cx, Some(*ptr));
                     vac.insert((template, widget_ref.clone()));
-                    Some((widget_ref, false))
+                    (widget_ref, false)
                 }
             }
         } else {
             warning!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
-            None
+            (WidgetRef::empty(), false)
         }
     }
 
@@ -980,15 +979,23 @@ impl PortalListRef {
     }
     
     /// See [`PortalList::item()`].
-    pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<WidgetRef> {
-        let mut inner = self.borrow_mut()?;
-        inner.item(cx, entry_id, template)
+    pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> WidgetRef {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.item(cx, entry_id, template)
+        }
+        else{
+            WidgetRef::empty()
+        }
     }
 
     /// See [`PortalList::item_with_existed()`].
-    pub fn item_with_existed(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> Option<(WidgetRef, bool)> {
-        let mut inner = self.borrow_mut()?;
-        inner.item_with_existed(cx, entry_id, template)
+    pub fn item_with_existed(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> (WidgetRef, bool) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.item_with_existed(cx, entry_id, template)
+        }
+        else{
+            (WidgetRef::empty(), false)
+        }
     }
 
     /// See [`PortalList::get_item()`].
