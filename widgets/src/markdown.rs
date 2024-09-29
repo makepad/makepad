@@ -95,12 +95,11 @@ impl Widget for Markdown {
                 },
                 MarkdownNode::Link{start, url_start, end}=>{
                     auto_id += 1;
-                    if let Some(item) = tf.item(cx, LiveId(auto_id), live_id!(link)) {
-                        item.set_text(&self.doc.decoded[*start..*url_start]);
-                        item.as_markdown_link()
-                            .set_href(&self.doc.decoded[*url_start..*end]);
-                        item.draw_all(cx, &mut Scope::empty());
-                    }
+                    let item = tf.item(cx, LiveId(auto_id), live_id!(link));
+                    item.set_text(&self.doc.decoded[*start..*url_start]);
+                    item.as_markdown_link()
+                        .set_href(&self.doc.decoded[*url_start..*end]);
+                    item.draw_all_unscoped(cx);
                 },
                 MarkdownNode::Image{start, url_start, end}=>{
                     tf.draw_text(cx, "Image[name:");

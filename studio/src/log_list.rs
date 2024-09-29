@@ -5,6 +5,7 @@ use {
             build_manager::*,
             build_protocol::*,
         },
+        code_view::*,
         makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
@@ -19,6 +20,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
+    import crate::code_view::CodeView;
     
     Icon = <View> {
         width: 10, height: 10
@@ -89,9 +91,13 @@ live_design!{
             width: Fill,
             height: Fit
             
+            code_view = <CodeView>{
+                editor:{height:Fit}
+            }
+            
             fold_button = <FoldButton>{
                 animator:{
-                    
+                    open={default:off}
                 }
             }
             
@@ -240,7 +246,7 @@ impl LogList{
                     }
                     else {""}
                 }else {""};
-                let mut item = list.item(cx, item_id, live_id!(LogItem)).unwrap().as_view();
+                let mut item = list.item(cx, item_id, live_id!(LogItem)).into_ref().as_view();
                 item.apply_over(cx, live!{
                     draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                 });
@@ -248,35 +254,46 @@ impl LogList{
                     if let Some(mut tf) = step.as_text_flow().borrow_mut(){
                         match log_item {
                             LogItem::Bare(msg) => {
-                                tf.draw_item(cx, map_level_to_icon(msg.level));
+                                tf.draw_item_counted(cx, map_level_to_icon(msg.level));
                                 tf.draw_text(cx,&msg.line);
                             }
                             LogItem::Location(msg) => {
-                                tf.draw_item(cx, map_level_to_icon(msg.level));
+                                tf.draw_item_counted(cx, map_level_to_icon(msg.level));
                                 // alright what next.
-                                let fold_button_id = if msg.explanation.is_some(){
-                                    Some(tf.draw_item(cx, live_id!(fold_button)))
+                                let fold_button = if msg.explanation.is_some(){
+                                    tf.draw_item_counted_ref(cx, live_id!(fold_button)).as_fold_button()
                                 }
                                 else{
-                                    None
+                                    Default::default()
                                 };
                                 
                                 format_reuse!(location, "{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1);
-                                tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id},&location);
+                                tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id}, &location);
                                 
                                 tf.draw_text(cx, &msg.message);
                                 if let Some(explanation) = &msg.explanation{
-                                    cx.turtle_new_line();
+                                    let open = fold_button.open_float();
+                                    if open > 0.0{
+                                        cx.turtle_new_line();
+                                        let code = tf.item_counted(cx, live_id!(code_view));
+                                        code.set_text(explanation);
+                                        code.as_code_view().borrow_mut().unwrap().editor.height_scale = open;
+                                        code.draw_all_unscoped(cx);
+                                    }
                                     // ok we want a code block now right
                                     // lets get the folded state value
-                                    let fb = tf.existing_item(fold_button_id.unwrap()).as_fold_button();
+                                    /*let code = tf.item(cx, live_id!(code_view)){
+                                        
+                                    }*/
+                                    
+                                    /*tf.existing_item(fold_button_id.unwrap()).as_fold_button();
                                     // alright lets use a code-editor widget here
                                     
                                     tf.begin_code(cx);
                                     tf.fixed.push();
                                     tf.draw_text(cx, explanation);
                                     tf.fixed.pop();
-                                    tf.end_code(cx);
+                                    tf.end_code(cx);*/
                                 }
                                 
                                 /*

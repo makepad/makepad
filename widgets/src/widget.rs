@@ -102,6 +102,10 @@ pub trait Widget: WidgetNode {
         while self.draw(cx, scope).is_step() {}
     }
     
+    fn draw_all_unscoped(&mut self, cx: &mut Cx2d) {
+        self.draw_all(cx, &mut Scope::empty());
+    }
+    
     fn text(&self) -> String {
         String::new()
     }
@@ -393,8 +397,30 @@ impl PartialEq for WidgetRef {
         !Rc::ptr_eq(&self.0, &other.0)
     }
 }
+pub trait OptionWidgetRefExt{
+    fn into_ref(self) -> WidgetRef;
+}
+impl OptionWidgetRefExt for Option<WidgetRef>{
+    fn into_ref(self) -> WidgetRef{
+        if let Some(v) = self{
+            return v
+        }
+        else{
+            WidgetRef::empty()
+        }     
+    }
+}
 
 impl WidgetRef {
+    pub fn into_option(self)->Option<WidgetRef>{
+        if self.is_empty(){
+            None
+        }
+        else{
+            Some(self)
+        }
+    }
+    
     pub fn empty() -> Self {
         Self(Rc::new(RefCell::new(None)))
     }
@@ -579,6 +605,12 @@ impl WidgetRef {
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all(cx, scope);
+        }
+    }
+    
+    pub fn draw_all_unscoped(&self, cx: &mut Cx2d) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.draw_all_unscoped(cx);
         }
     }
 
