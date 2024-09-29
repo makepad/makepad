@@ -343,25 +343,36 @@ impl<'a> Cx2d<'a> {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard_area, guard_area)
         }
         
+        let turtle_align_start = turtle.align_start;
+        let turtle_abs_pos = turtle.walk.abs_pos;
+        let turtle_margin = turtle.walk.margin;
+        let turtle_walks_start = turtle.turtle_walks_start;
+        let turtle_shift = turtle.shift;
+                
         // computed width / height
         let w = if turtle.width.is_nan() {
-            Size::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
+            let w = turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x;
+            // we should update the clip pos
+            if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
+                p2.x = p1.x + w;
+            }
+            Size::Fixed(w)
         }
         else {
             Size::Fixed(turtle.width)
         };
         
         let h = if turtle.height.is_nan() {
-            Size::Fixed(turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y)
+            let h =  turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y;
+            // we should update the clip pos
+            if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
+                p2.y = p1.y + h;
+            }
+            Size::Fixed(h)
         }
         else {
             Size::Fixed(turtle.height)
         };
-        let turtle_align_start = turtle.align_start;
-        let turtle_abs_pos = turtle.walk.abs_pos;
-        let turtle_margin = turtle.walk.margin;
-        let turtle_walks_start = turtle.turtle_walks_start;
-        let turtle_shift = turtle.shift;
                 
         match turtle.layout.flow {
             Flow::Right => {

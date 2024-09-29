@@ -343,6 +343,19 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
             
+            tb.add("impl Default for ").ident(&ref_name).add("{");
+            tb.add("    fn default()->Self{Self(Default::default())}");
+            tb.add("}");
+/*
+            tb.add("impl ").ident(&widget_ref_ext).add(" for Option<WidgetRef>{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
+            tb.add("        if let Some(s) = &self{").ident(&ref_name).add("(s.widget(path))}else{").ident(&ref_name).add("(WidgetRef::empty())}");
+            tb.add("    }");
+            tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
+            tb.add("        if let Some(s) = &self{").ident(&ref_name).add("(s.clone())}else{").ident(&ref_name).add("(WidgetRef::empty())}");
+            tb.add("    }");
+            tb.add("}"); */
+                        
             tb.add("pub trait").ident(&widget_ext).add("{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
             tb.add("}");
