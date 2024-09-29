@@ -246,7 +246,7 @@ impl LogList{
                     }
                     else {""}
                 }else {""};
-                let mut item = list.item(cx, item_id, live_id!(LogItem)).into_ref().as_view();
+                let mut item = list.item(cx, item_id, live_id!(LogItem)).as_view();
                 item.apply_over(cx, live!{
                     draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                 });
@@ -317,7 +317,7 @@ impl LogList{
                 }
                 continue
             }
-            let item = list.item(cx, item_id, live_id!(Empty)).unwrap().as_view();
+            let item = list.item(cx, item_id, live_id!(Empty)).as_view();
             item.apply_over(cx, live!{draw_bg: {is_even: (if is_even {1.0} else {0.0})}});
             item.draw_all(cx, &mut Scope::empty());
         }

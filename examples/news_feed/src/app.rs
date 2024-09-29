@@ -351,7 +351,7 @@ impl Widget for NewsFeed{
                         x if x % 5 == 0 => live_id!(PostImage),
                         _ => live_id!(Post)
                     };
-                    let item = list.item(cx, item_id, template).unwrap();
+                    let item = list.item(cx, item_id, template);
                     let text = match item_id % 4 {
                         1 => format!("Message id: {}", item_id),
                         2 => format!("How are you\nItem id: {}", item_id),
