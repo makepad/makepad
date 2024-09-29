@@ -343,45 +343,76 @@ impl TextFlow{
         None 
     }*/
     
-    pub fn draw_item_id(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId,) {
-        self.item_with(cx, entry_id, template, |cx, item, tf|{
-            item.draw_all(cx, &mut Scope::with_data(tf));
-        })
-    }
-    
-    pub fn count_item(&mut self)->LiveId{
-        self.item_counter += 1;
-        LiveId(self.item_counter)
-    }
-    
-    pub fn draw_item(&mut self, cx: &mut Cx2d, template: LiveId)->LiveId {
-        let entry_id = self.count_item();
+    pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId,)->LiveId{
+        let entry_id = self.new_counted_id();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
             item.draw_all(cx, &mut Scope::with_data(tf));
         });
         entry_id
     }
+    
+    pub fn new_counted_id(&mut self)->LiveId{
+        self.item_counter += 1;
+        LiveId(self.item_counter)
+    }
+    
+    pub fn draw_item(&mut self, cx: &mut Cx2d, entry_id: LiveId, template: LiveId){
+        self.item_with(cx, entry_id, template, |cx, item, tf|{
+            item.draw_all(cx, &mut Scope::with_data(tf));
+        });
+    }
+    
+    pub fn draw_item_counted_ref(&mut self, cx: &mut Cx2d, template: LiveId,)->WidgetRef{
+        let entry_id = self.new_counted_id();
+        self.item_with(cx, entry_id, template, |cx, item, tf|{
+            item.draw_all(cx, &mut Scope::with_data(tf));
+            item.clone()
+        })
+    }
         
-    pub fn item_with<T:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)>(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId, f:T) {
+    pub fn draw_item_ref(&mut self, cx: &mut Cx2d, entry_id: LiveId, template: LiveId)->WidgetRef{
+        self.item_with(cx, entry_id, template, |cx, item, tf|{
+            item.draw_all(cx, &mut Scope::with_data(tf));
+            item.clone()
+        })
+    }
+    
+    pub fn item_with<F,R:Default>(&mut self, cx: &mut Cx2d, entry_id:LiveId, template: LiveId, f:F)->R
+    where F:FnOnce(&mut Cx2d, &WidgetRef, &mut TextFlow)->R{
         let mut items = self.items.take().unwrap();
-        if let Some(ptr) = self.templates.get(&template) {
+        let r = if let Some(ptr) = self.templates.get(&template) {
             let entry = items.get_or_insert(cx, entry_id, | cx | {
                 (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
             });
-            f(cx, &entry.0, self);
-        }
+            f(cx, &entry.0, self)
+        }else{
+            R::default()
+        };
         self.items = Some(items);
+        r
     }
         
     
-    pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+    pub fn item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> WidgetRef {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
                 (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
             });
-            return Some(entry.0.clone())
+            return entry.0.clone()
         }
-        None 
+        WidgetRef::empty() 
+    }
+    
+    
+    pub fn item_counted(&mut self, cx: &mut Cx, template: LiveId) -> WidgetRef {
+        let entry_id = self.new_counted_id();
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
+                (WidgetRef::new_from_ptr(cx, Some(*ptr)), template)
+            });
+            return entry.0.clone()
+        }
+        WidgetRef::empty() 
     }
     
     pub fn existing_item(&mut self, entry_id: LiveId) -> WidgetRef {
@@ -489,7 +520,7 @@ impl TextFlow{
     }
     
     pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl WidgetActionTrait, label:&str){
-        let entry_id = self.count_item();
+        let entry_id = self.new_counted_id();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
             item.set_text(label);
             item.set_action_data(data);

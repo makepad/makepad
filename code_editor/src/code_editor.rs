@@ -242,7 +242,7 @@ pub struct CodeEditor {
     #[rust] unscrolled_rect: Rect,
     #[rust] line_start: usize,
     #[rust] line_end: usize,
-
+    #[rust(1.0)] pub height_scale: f64,
     #[live(true)] word_wrap: bool,
 
     #[live(0.5)] blink_speed: f64,
@@ -426,9 +426,15 @@ impl CodeEditor {
             }
             KeepCursorInView::Off => {}
         }
-
+        
+        // if height = Fit, we need to compute it based on layout
+        let height_is_fit = walk.height.is_fit();
+        //if height_is_fit{
+        //    walk.height = Size::Fixed(100000.0);
+       // }
+        const MAX_HEIGHT:f64 = 100_0000.0;
         self.scroll_bars.begin(cx, walk, Layout::default());
-
+        
         let turtle_rect = cx.turtle().rect();
         let gutter_width = (session
             .document()
@@ -443,7 +449,7 @@ impl CodeEditor {
             pos: turtle_rect.pos,
             size: DVec2 {
                 x: gutter_width,
-                y: turtle_rect.size.y,
+                y: if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
         self.viewport_rect = Rect {
@@ -453,7 +459,7 @@ impl CodeEditor {
             },
             size: DVec2 {
                 x: turtle_rect.size.x - gutter_width,
-                y: turtle_rect.size.y,
+                y:if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
 
@@ -490,11 +496,13 @@ impl CodeEditor {
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-
+        
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x,
-            session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y),
+            self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y},
         );
+        
+        //println!("{} {}", session.layout().height() * self.cell_size.y, (self.viewport_rect.size.y));
 
         self.scroll_bars.end(cx);
         if session.update_folds() {
