@@ -54,6 +54,7 @@ impl Widget for CodeView {
         let session = self.session.as_mut().unwrap();
         for _action in self.editor.handle_event(cx, event, &mut Scope::empty(), session){
             //cx.widget_action(uid, &scope.path, action);
+            session.handle_changes();
         }
     }
     
