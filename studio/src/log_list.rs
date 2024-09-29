@@ -259,14 +259,12 @@ impl LogList{
                             }
                             LogItem::Location(msg) => {
                                 tf.draw_item_counted(cx, map_level_to_icon(msg.level));
-                                // alright what next.
                                 let fold_button = if msg.explanation.is_some(){
                                     tf.draw_item_counted_ref(cx, live_id!(fold_button)).as_fold_button()
                                 }
                                 else{
                                     Default::default()
                                 };
-                                
                                 format_reuse!(location, "{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1);
                                 tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id}, &location);
                                 
@@ -280,36 +278,7 @@ impl LogList{
                                         code.as_code_view().borrow_mut().unwrap().editor.height_scale = open;
                                         code.draw_all_unscoped(cx);
                                     }
-                                    // ok we want a code block now right
-                                    // lets get the folded state value
-                                    /*let code = tf.item(cx, live_id!(code_view)){
-                                        
-                                    }*/
-                                    
-                                    /*tf.existing_item(fold_button_id.unwrap()).as_fold_button();
-                                    // alright lets use a code-editor widget here
-                                    
-                                    tf.begin_code(cx);
-                                    tf.fixed.push();
-                                    tf.draw_text(cx, explanation);
-                                    tf.fixed.pop();
-                                    tf.end_code(cx);*/
-                                }
-                                
-                                /*
-                                let item = list.item(cx, item_id, live_id!(Location)).unwrap().as_view();
-                                item.apply_over(cx, live!{
-                                    first = {
-                                        binary = {text: (&binary)}
-                                        icon = {active_page: (map_level_to_icon(msg.level))},
-                                        body = {text: (msg.message)}
-                                        location = {
-                                            text: (format!("{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1))
-                                        }
-                                    }
-                                    draw_bg: {is_even: (if is_even {1.0} else {0.0})}
-                                });
-                                item.draw_all(cx, &mut Scope::empty());*/
+                                };
                             }
                             _ => {}
                         }
