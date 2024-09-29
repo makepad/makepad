@@ -134,6 +134,7 @@ pub use crate::{
         WidgetAction,
         WidgetActionCast,
         WidgetActionOptionApi,
+        OptionWidgetRefExt,
         WidgetRef,
         Widget,
         WidgetNode,
