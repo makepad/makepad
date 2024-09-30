@@ -86,7 +86,7 @@ impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
-            let () = actions;
+            //let () = actions;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
