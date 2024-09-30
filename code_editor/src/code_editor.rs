@@ -244,7 +244,8 @@ pub struct CodeEditor {
     #[rust] line_end: usize,
     #[rust(1.0)] pub height_scale: f64,
     #[live(true)] word_wrap: bool,
-
+    #[live(false)] read_only: bool,
+    
     #[live(0.5)] blink_speed: f64,
 
     #[animator] animator: Animator,
@@ -557,9 +558,14 @@ impl CodeEditor {
     }
 
     pub fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
-        self.animator_cut(cx, id!(blink.off));
-        cx.stop_timer(self.blink_timer);
-        self.blink_timer = cx.start_timeout(self.blink_speed)
+        if self.read_only{
+            self.animator_cut(cx, id!(blink.off));
+        }
+        else{
+            self.animator_cut(cx, id!(blink.off));
+            cx.stop_timer(self.blink_timer);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
     }
 
     pub fn handle_event(
@@ -767,7 +773,7 @@ impl CodeEditor {
                 ref input,
                 was_paste: false,
                 ..
-            }) if input.len() > 0 => {
+            }) if input.len() > 0 && !self.read_only => {
                 session.insert(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -777,7 +783,7 @@ impl CodeEditor {
                 ref input,
                 was_paste: true,
                 ..
-            }) if input.len() > 0 => {
+            }) if input.len() > 0 && !self.read_only => {
                 session.paste(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -796,7 +802,7 @@ impl CodeEditor {
                 key_code: KeyCode::Tab,
                 modifiers: KeyModifiers { shift: false, .. },
                 ..
-            }) => {
+            }) if !self.read_only => {
                 session.indent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -806,7 +812,7 @@ impl CodeEditor {
                 key_code: KeyCode::Tab,
                 modifiers: KeyModifiers { shift: true, .. },
                 ..
-            }) => {
+            }) if !self.read_only=> {
                 session.outdent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -815,7 +821,7 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
-            }) => {
+            }) if !self.read_only=> {
                 session.delete();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -824,7 +830,7 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
-            }) => {
+            }) if !self.read_only=> {
                 session.backspace();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -834,7 +840,7 @@ impl CodeEditor {
                 *ce.response.borrow_mut() = Some(session.copy());
                 keyboard_moved_cursor = true;
             }
-            Hit::TextCut(ce) => {
+            Hit::TextCut(ce) if !self.read_only=> {
                 *ce.response.borrow_mut() = Some(session.copy());
                 session.delete();
                 keyboard_moved_cursor = true;
@@ -849,7 +855,7 @@ impl CodeEditor {
                         ..
                     },
                 ..
-            }) => {
+            }) if !self.read_only => {
                 if session.undo() {
                     cx.redraw_all();
                     actions.push(CodeEditorAction::TextDidChange);
@@ -865,7 +871,7 @@ impl CodeEditor {
                         ..
                     },
                 ..
-            }) => {
+            }) if !self.read_only => {
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);
@@ -1659,7 +1665,7 @@ impl<'a> DrawSelectionLayer<'a> {
                     let mut byte_index = 0;
                     let mut row_index = 0;
                     let mut column_index = 0;
-                    self.handle_event(
+                    self.draw_selection_event(
                         cx,
                         line_index,
                         line,
@@ -1676,7 +1682,7 @@ impl<'a> DrawSelectionLayer<'a> {
                                 text,
                             } => {
                                 for grapheme in text.graphemes() {
-                                    self.handle_event(
+                                    self.draw_selection_event(
                                         cx,
                                         line_index,
                                         line,
@@ -1688,7 +1694,7 @@ impl<'a> DrawSelectionLayer<'a> {
                                     );
                                     byte_index += grapheme.len();
                                     column_index += grapheme.column_count();
-                                    self.handle_event(
+                                    self.draw_selection_event(
                                         cx,
                                         line_index,
                                         line,
@@ -1724,7 +1730,7 @@ impl<'a> DrawSelectionLayer<'a> {
                             }
                         }
                     }
-                    self.handle_event(
+                    self.draw_selection_event(
                         cx,
                         line_index,
                         line,
@@ -1757,7 +1763,7 @@ impl<'a> DrawSelectionLayer<'a> {
         }
     }
 
-    fn handle_event(
+    fn draw_selection_event(
         &mut self,
         cx: &mut Cx2d,
         line_index: usize,
