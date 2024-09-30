@@ -5,10 +5,10 @@ use {
             build_manager::*,
             build_protocol::*,
         },
-        code_view::*,
         makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
+        makepad_code_editor::code_view::*,
     },
     std::{
         fmt::Write,
@@ -20,7 +20,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    import crate::code_view::CodeView;
+    import makepad_code_editor::code_view::CodeView;
     
     Icon = <View> {
         width: 10, height: 10
