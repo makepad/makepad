@@ -458,13 +458,14 @@ impl MatchEvent for App{
         } = event;
         if *control || *logo {
             if let KeyCode::Backtick = key_code {
-                cx.action(AppAction::StartRecompile)
+                cx.action(AppAction::ClearLog);
+                cx.action(AppAction::StartRecompile);
             }
             else if let KeyCode::KeyK = key_code {
-                cx.action(AppAction::ClearLog)
+                cx.action(AppAction::ClearLog);
             }
             else if let KeyCode::KeyR = key_code{
-                cx.action(AppAction::ReloadFileTree)
+                cx.action(AppAction::ReloadFileTree);
             }
         }
     }
