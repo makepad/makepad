@@ -459,6 +459,7 @@ impl MatchEvent for App{
         if *control || *logo {
             if let KeyCode::Backtick = key_code {
                 cx.action(AppAction::ClearLog);
+                cx.action(AppAction::RecompileStarted);
                 cx.action(AppAction::StartRecompile);
             }
             else if let KeyCode::KeyK = key_code {
