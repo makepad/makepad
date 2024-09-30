@@ -18,6 +18,7 @@ pub mod token;
 pub mod tokenizer;
 pub mod widgets;
 pub mod wrap;
+pub mod code_view;
 
 pub use self::{
     code_editor::CodeEditor, document::Document, history::History, layout::Line,
@@ -26,4 +27,5 @@ pub use self::{
 
 pub fn live_design(cx: &mut Cx) {
     crate::code_editor::live_design(cx);
+    crate::code_view::live_design(cx);
 }
