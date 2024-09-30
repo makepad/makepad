@@ -3,7 +3,6 @@ use {
     crate::{
         app::{AppData},
         makepad_widgets::*,
-        makepad_code_editor::CodeEditor,
     },
     std::{
         env,
@@ -27,10 +26,10 @@ pub struct AiChat{
 }
 
 impl Widget for AiChat {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk:Walk)->DrawStep{
         // alright we have a scope, and an id, so now we can properly draw the editor.
         // alright lets fetch the chat-id from the scope
-        let chat_id = scope.path.from_end(1);
+        let _chat_id = scope.path.from_end(1);
         self.view.draw_all_unscoped(cx);
         /*
         let session_id = scope.path.from_end(1);
