@@ -15,6 +15,7 @@ live_design!{
         
     CodeView = {{CodeView}}{
         editor: <CodeEditor>{
+            read_only: true
         }
     }
 } 
@@ -30,10 +31,12 @@ pub struct CodeView{
 
 impl CodeView{
     fn lazy_init_session(&mut self){
-        let dec = DecorationSet::new();
-        let doc = Document::new(self.text.as_ref().into(), dec);
-        self.session = Some(Session::new(doc));
-        self.session.as_mut().unwrap().handle_changes();
+        if self.session.is_none(){
+            let dec = DecorationSet::new();
+            let doc = Document::new(self.text.as_ref().into(), dec);
+            self.session = Some(Session::new(doc));
+            self.session.as_mut().unwrap().handle_changes();
+        }
     }
 }
 
