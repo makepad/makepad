@@ -180,6 +180,7 @@ impl Widget for DiffuseThing{
                 cx,
                 TextureFormat::RenderBGRAu8   {
                     size: TextureSize::Auto,
+                    initial: true,
                 },
             ));
         }
@@ -189,6 +190,7 @@ impl Widget for DiffuseThing{
                 cx,
                 TextureFormat::RenderBGRAu8 {
                     size: TextureSize::Auto,
+                    initial: true,
                 },
             ));
         }
