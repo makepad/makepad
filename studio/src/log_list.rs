@@ -92,7 +92,9 @@ live_design!{
             height: Fit
             
             code_view = <CodeView>{
-                editor:{height:Fit}
+                editor:{
+                    margin:{left:25}
+                }
             }
             
             fold_button = <FoldButton>{
