@@ -439,13 +439,13 @@ impl CodeEditor {
         
         let turtle_rect = cx.turtle().rect();
         
-        self.gutter_chars =  (session
+        self.gutter_chars =  session
             .document()
             .as_text()
             .as_lines()
             .len()
             .to_string()
-            .column_count()+1);
+            .column_count()+1;
         let gutter_width = self.gutter_chars as f64 * self.cell_size.x;    
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
@@ -454,7 +454,6 @@ impl CodeEditor {
                 y: if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
-        println!("WIDTH {}", gutter_width);
         self.viewport_rect = Rect {
             pos: DVec2 {
                 x: turtle_rect.pos.x + gutter_width,
