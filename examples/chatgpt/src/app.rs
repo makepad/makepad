@@ -3,23 +3,27 @@ use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::env;
 
-const OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
-const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
-const OPENAI_MODEL_ENV: &str = "OPENAI_MODEL";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 live_design!{
     import makepad_widgets::theme_desktop_dark::*;
     
-    App = {{App}} {
+    App = {{App}} { in ch
         ui: <Window> {body = {
             
             show_bg: true
             
             flow: Down,
-            spacing: 20,
+            
+	    /*
             align: {
                 x: 0.5,
                 y: 1.0
+            },
+	    */
+	    padding: {
+            top: 10
+		          left: 100.0,
             },
             
             width: Fill,
@@ -30,44 +34,36 @@ live_design!{
                     return mix(#3, #1, self.pos.y);
                 }
             }
-
-            <ScrollXYView> {
-                flow: Down,
+            <ScrollYView>{
+                flow: Down
                 spacing: 20,
-                align: {
-                    x: 0.5,
-                    y: 1.0
-                },
-
-                width: Fill,
                 height: Fill
-
+                
+                message_input = <TextInput> {
+                    text: "Message"
+                    width: 500,
+                    height: Fit,
+                    draw_bg: {
+                        color: #1
+                    }
+                    
+                }
+                                    
+                send_button = <Button> {
+                    icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                    text: "send"
+                }
+                
                 message_label = <Label> {
-                    width: 350,
+                    width: 300,
                     height: Fit
                     draw_text: {
                         color: #f
+                        text_style:{font_size: 30}
                     },
-                    text: "hi! how may I assist you today?",
-                }
-            }
-            
-            message_input = <TextInput> {
-                text: "Hi!",
-                empty_message: "Type a message...",
-                width: 400,
-                height: Fit
-                draw_bg: {
-                    color: #1
-                }
-            }
-            
-            send_button = <Button> {
-                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                text: "send",
-                margin: {
-                    bottom: 10,
-                }
+                    
+                    text: r#"Output"#
+                }           
             }
         }}
     }
@@ -102,78 +98,77 @@ impl App {
 
     // This performs an event-based HTTP request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
-    fn send_message(&mut self, cx: &mut Cx, message: String) {
-        let openai_base_url = env::var(OPENAI_BASE_URL_ENV).unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let openai_api_key = env::var(OPENAI_API_KEY_ENV).unwrap_or_else(|_| "".to_string());
-        let openai_model = env::var(OPENAI_MODEL_ENV).unwrap_or_else(|_| "gpt-4o".to_string());
-        
-        if openai_api_key.is_empty() {
-            eprintln!("Error: The OPENAI_API_KEY environment variable is not set.");
-            std::process::exit(1);
-        }
 
-        // Add the user message to the conversation history
-        self.conversation_history.push(Message {
-            content: message.clone(),
-            role: "user".to_string()
-        });
-
-        // Update the gui 
-        self.update_message_label(cx);
-
-        // Send the request 
-        let completion_url = format!("{}/chat/completions", openai_base_url);
+    fn send_message(&self, cx: &mut Cx, message: String) {
         let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
-        
+        request.set_is_streaming();
+        let ai_key = std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string());
+        println!("{}", ai_key);
         request.set_header("Content-Type".to_string(), "application/json".to_string());
-        if !openai_api_key.is_empty() {
-            request.set_header("Authorization".to_string(), format!("Bearer {}", openai_api_key));
-        }
+        request.set_header("Authorization".to_string(), format!("Bearer {ai_key}"));
         
         request.set_json_body(ChatPrompt {
-            messages: self.conversation_history.clone(),
-            model: openai_model,
-            max_tokens: 1000
+            messages: vec![ChatMessage {content: Some(message), role: Some("user".to_string()), refusal: Some(JsonValue::Null)}],
+            model: "gpt-4o".to_string(),
+            max_tokens: 1000,
+            stream: true,
+
         });
-        
+        self.ui.label(id!(message_label)).set_text_and_redraw(cx, "Answering:..\n");
         cx.http_request(request_id, request);
     }
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let text_input = self.ui.text_input(id!(message_input));
-        let send_button = self.ui.button(id!(send_button));
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        if self.ui.button(id!(send_button)).clicked(&actions) || 
+           self.ui.text_input(id!(message_input)).returned(&actions).is_some()
+        {
+            let user_prompt = self.ui.text_input(id!(message_input)).text();
+            self.send_message(cx, user_prompt);
 
-        if send_button.clicked(&actions) || text_input.returned(&actions).is_some() {
-            self.send_message(cx, text_input.text());
-            text_input.set_text_and_redraw(cx, "");
-            text_input.set_cursor(0, 0);
         }
     }
 
     fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
+       let label = self.ui.label(id!(message_label));
        for event in responses{
            match &event.response {
+               NetworkResponse::HttpStreamResponse(response)=>{
+                   let data = response.get_string_body().unwrap();
+                   for data in data.split("\n\n"){
+                        if let Some(data) = data.strip_prefix("data: "){
+                            if data != "[DONE]"{
+                                match ChatResponse::deserialize_json(data){
+                                    Ok(chat_response)=>{
+                                        if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
+                                            let msg = format!("{}{}", label.text(), content);
+                                            label.set_text_and_redraw(cx, &msg);
+                                        }
+                                    }
+                                    Err(e)=>{
+                                        println!("JSon parse error {:?} {}", e, data);
+                                    }
+                                }
+                            }
+                        }
+                    }
+               }
+               NetworkResponse::HttpStreamComplete=>{
+                   println!("Stream complete");
+               }
                NetworkResponse::HttpResponse(response) => {
                    match event.request_id {
                        live_id!(SendChatMessage) => {
                            let label = self.ui.label(id!(message_label));
                            if response.status_code == 200 {
                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
-                               let assistant_message = chat_response.choices[0].message.content.clone();
-                               
-                               self.conversation_history.push(Message {
-                                   content: assistant_message,
-                                   role: "assistant".to_string()
-                               });
-                               
-                               self.update_message_label(cx);
+                               label.set_text_and_redraw(cx, &chat_response.choices[0].message.as_ref().unwrap().content.as_ref().unwrap());
+
                            } else {
                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
                            }
-                           label.redraw(cx);
                        },
                        _ => (),
                    }
@@ -198,39 +193,56 @@ impl AppMain for App {
 
 #[derive(SerJson, DeJson, Clone)]
 struct ChatPrompt {
-    pub messages: Vec<Message>,
+    pub messages: Vec<ChatMessage>,
     pub model: String,
-    pub max_tokens: i32
-}
-
-#[derive(SerJson, DeJson, Clone)]
-struct Message {
-    pub content: String,
-    pub role: String
+    pub max_tokens: i32,
+    pub stream: bool
 }
 
 #[derive(SerJson, DeJson)]
+struct ChatMessage {
+    pub content: Option<String>,
+    pub role: Option<String>,
+    pub refusal: Option<JsonValue>
+} 
+
+#[allow(unused)]
+#[derive(DeJson)]
 struct ChatResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i32,
-    pub model: String,
-    pub usage: Usage,
-    pub choices: Vec<Choice>,
-    pub system_fingerprint: Option<String>,
+    id: String,
+    object: String,
+    created: i32,
+    model: String,
+    system_fingerprint: JsonValue,
+    usage: Option<ChatUsage>,
+    choices: Vec<ChatChoice>,
 }
 
-#[derive(SerJson, DeJson)]
-pub struct Usage {
+#[allow(unused)]
+#[derive(DeJson)]
+pub struct CompletionDetails {
+    reasoning_tokens: i32,
+}
+
+#[allow(unused)]
+#[derive(DeJson)]
+pub struct ChatUsage {
     prompt_tokens: i32,
     completion_tokens: i32,
     total_tokens: i32,
+    completion_tokens_details: CompletionDetails
 }
 
-#[derive(SerJson, DeJson)]
-struct Choice {
-    message: Message,
-    finish_reason: String,
+#[allow(unused)]
+#[derive(DeJson)]
+struct ChatChoice {
+    message: Option<ChatMessage>,
+    delta: Option<ChatMessage>,
+    finish_reason: Option<String>,
+    logprobs: JsonValue,
     index: i32,
     logprobs: Option<String>,
 }
+
+
+

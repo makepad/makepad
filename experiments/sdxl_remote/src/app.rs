@@ -39,6 +39,9 @@ live_design!{
                     width: Fill,
                     height: Fill,
                     margin: 0
+                    fn get_color(self) -> vec4 {
+                        return self.get_color_scale_pan(self.image_scale, self.image_pan)*2.0
+                    }
                 }
                 
             }
@@ -107,7 +110,7 @@ impl AppMain for App {
 
 impl App{
     fn open_websocket(&mut self, _cx:&mut Cx){
-        let request = HttpRequest::new("http://172.20.10.4:8009".into(), HttpMethod::GET);
+        let request = HttpRequest::new("http://10.0.0.105:8009".into(), HttpMethod::GET);
         self.web_socket = Some(WebSocket::open(request));
     }
 }

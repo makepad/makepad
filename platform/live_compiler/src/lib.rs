@@ -36,8 +36,7 @@ pub use {
             LiveComponentRegistry
         },
         live_eval::{
-            live_eval,
-            LiveEval
+            live_eval_value,
         },
         live_registry::{
             LiveFileChange,

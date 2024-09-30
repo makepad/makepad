@@ -12,6 +12,5 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
-#[target.'cfg(target_os = "android")'.dependencies]
 [dependencies]
-makepad-jni-sys = { path = "../jni-sys", version = "0.4.0" }
+makepad-jni-sys = "0.4.0"

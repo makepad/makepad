@@ -45,6 +45,11 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentMap<K,V>{
             Entry::Vacant(v) => v.insert(cb(cx))
         }
     }
+
+    pub fn entry(&mut self, key: K) -> Entry<K, V> {
+        self.visible.insert(key);
+        self.map.entry(key)
+    }
 }
  
 impl<K,V> Deref for ComponentMap<K,V> {

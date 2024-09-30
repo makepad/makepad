@@ -228,13 +228,17 @@ export class ToWasmMsg {
     
     // i forgot how to do memcpy with typed arrays. so, we'll do this.
     push_data_u8(input_buffer) {
+        
+        
         let app = this.app;
         
         let u8_len = input_buffer.byteLength;
         let output_ptr = app.wasm_new_data_u8(u8_len);
         var u8_out = new Uint8Array(app.memory.buffer, output_ptr, u8_len)
         var u8_in = new Uint8Array(input_buffer)
+        
         u8_out.set(u8_in);
+        
         app.u32[this.u32_offset ++] = output_ptr;
         app.u32[this.u32_offset ++] = u8_len;
     }

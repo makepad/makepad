@@ -1,5 +1,5 @@
 use makepad_widgets::*;
-       
+        
 live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*; 
@@ -10,11 +10,16 @@ live_design!{
                 show_bg: true
                 width: Fill,
                 height: Fill
-                
                 draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        // test
-                        return mix(#7, #3, self.pos.y);
+                    fn pixel(self) -> vec4 {    // < --- Apply error: examples/simple/src/app.rs:21:20 - property: pixel target class not found
+                        // 获取几何位置
+                        let st = vec2(
+                            self.geom_pos.x,
+                            self.geom_pos.y
+                        );
+                        // 计算颜色，基于 x 和 y 位置及时间
+                        let color = vec3(st.x, st.y, abs(sin(self.time)));
+                        return vec4(color, 1.0);
                     }
                 }
                 
@@ -25,19 +30,37 @@ live_design!{
                         x: 0.5,
                         y: 0.5
                     },
+                    <Label> {
+                        draw_text: {
+                            text_style: {
+                                font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Bold.ttf")}
+                                font_size: 9.5
+                            },
+                        }
+                        text: "https://test"
+                    }
+                    <RoundedShadowView>{
+                        width:100,
+                        height:100,
+                    }
                     button1 = <Button> {
-                        text: "Hello world"
+                        text: "Hello world "
                         draw_text:{color:#f00}
                     }
                     input1 = <TextInput> {
-                        width: 100, height: 30
-                        text: "Click to count "
+                        width: 100
+                        text: "Click to count 获取几何位置"
                     }
                     label1 = <Label> {
                         draw_text: {
                             color: #f
                         },
-                        text: "Counter: 0"
+                        text: r#"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Praesent tristique condimentum tristique. Donec sapien arcu, molestie vitae neque pretium, ultrices luctus diam. Aenean a eros ac lectus sollicitudin eleifend non in tellus. Nullam sapien velit, sodales et tincidunt vestibulum, sollicitudin et purus. Praesent elementum risus rhoncus enim consectetur pulvinar. Quisque rutrum leo quis odio mattis blandit. Etiam sit amet nibh felis. Vivamus maximus hendrerit turpis, vitae efficitur risus faucibus in. Vestibulum lorem dui, consectetur consectetur magna nec, hendrerit bibendum magna. Mauris faucibus rhoncus turpis luctus porta. Aenean interdum auctor sapien ac hendrerit.
+
+                        Aliquam erat volutpat. Praesent velit felis, iaculis at interdum sed, pellentesque nec tortor. Nulla mauris augue, sollicitudin non nisi ac, consequat dapibus lorem. Maecenas mollis, nulla id tincidunt finibus, neque enim ultricies libero, vel accumsan metus libero vel mauris. Vivamus et suscipit nisl, vel lacinia massa. Sed et bibendum lectus, nec pellentesque tortor. Cras non est ut eros venenatis volutpat quis quis risus. Suspendisse convallis vestibulum orci. Etiam sit amet nisl eleifend, semper nibh sit amet, tincidunt leo. Sed ut tristique nunc. Nulla dictum hendrerit augue.
+                        
+                        Vivamus ac porttitor sem. In auctor posuere velit ac molestie. Suspendisse ornare ex quis eros porttitor tincidunt. Praesent tincidunt purus tellus, vel malesuada dui condimentum at. Morbi pellentesque, velit euismod tristique rhoncus, metus mi tincidunt lacus, at faucibus tortor nunc ut nibh. Etiam efficitur est diam, ut commodo enim bibendum at. Suspendisse accumsan gravida nisi, sit amet sodales lectus maximus eu."#,
+                        width: 200.0,
                     }
                 }
             }
@@ -55,17 +78,6 @@ pub struct App {
  
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
-        //println!("{}", std::mem::size_of::<LiveNode2>());
-        /*makepad_draw::live_design(cx);
-        makepad_widgets::base::live_design(cx);
-        makepad_widgets::theme_desktop_dark::live_design(cx);
-        makepad_widgets::label::live_design(cx);
-        makepad_widgets::view::live_design(cx);
-        makepad_widgets::button::live_design(cx);
-        makepad_widgets::window::live_design(cx);
-        makepad_widgets::scroll_bar::live_design(cx);
-        makepad_widgets::scroll_bars::live_design(cx);
-        makepad_widgets::root::live_design(cx);*/
         crate::makepad_widgets::live_design(cx);
     }
 }
@@ -73,12 +85,11 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
-            log!("BUTTON jk {}", self.counter); 
             self.counter += 1;
+            //let () = actions;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
-            
         }
     }
 }
@@ -88,8 +99,7 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
-} 
-
+}
 /*
 
 // This is our custom allocator!

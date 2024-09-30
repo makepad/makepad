@@ -71,7 +71,7 @@ impl Default for Axis2 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
 #[live_ignore]
 pub enum Flow {
     #[pick] Right,
@@ -338,48 +338,72 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
-        let turtle = self.turtles.pop().unwrap();
+        let turtle = self.turtles.last().unwrap();
         if guard_area != turtle.guard_area {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard_area, guard_area)
         }
         
+        let turtle_align_start = turtle.align_start;
+        let turtle_abs_pos = turtle.walk.abs_pos;
+        let turtle_margin = turtle.walk.margin;
+        let turtle_walks_start = turtle.turtle_walks_start;
+        let turtle_shift = turtle.shift;
+                
         // computed width / height
         let w = if turtle.width.is_nan() {
-            Size::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
+            let w = turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x;
+            // we should update the clip pos
+            if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
+                p2.x = p1.x + w;
+            }
+            Size::Fixed(w)
         }
         else {
             Size::Fixed(turtle.width)
         };
         
         let h = if turtle.height.is_nan() {
-            Size::Fixed(turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y)
+            let h =  turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y;
+            // we should update the clip pos
+            if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
+                p2.y = p1.y + h;
+            }
+            Size::Fixed(h)
         }
         else {
             Size::Fixed(turtle.height)
         };
-        
+                
         match turtle.layout.flow {
             Flow::Right => {
                 if turtle.defer_count > 0 {
                     let left = turtle.width_left();
                     let part = left / turtle.defer_count as f64;
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
+                    let align_y = turtle.layout.align.y;
+                    let padded_height_or_used = turtle.padded_height_or_used();
+                    for i in turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = walk.defer_index as f64 * part;
-                        let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
+                        let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
                     }
                 }
                 else {
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * turtle.width_left();
-                        let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                    let align_x = turtle.layout.align.x;
+                    let align_y = turtle.layout.align.y;
+                    let width_left = turtle.width_left();
+                    let padded_height_or_used = turtle.padded_height_or_used();
+                    if align_x != 0.0 || align_y != 0.0{
+                        for i in turtle_walks_start..self.turtle_walks.len() {
+                            let walk = &self.turtle_walks[i];
+                            let shift_x = align_x * width_left;
+                            let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
+                            let align_start = walk.align_start;
+                            let align_end = self.get_turtle_walk_align_end(i);
+                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                        }
                     }
                 }
             },
@@ -391,39 +415,53 @@ impl<'a> Cx2d<'a> {
                 if turtle.defer_count > 0 {
                     let left = turtle.height_left();
                     let part = left / turtle.defer_count as f64;
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
+                    let padded_width_or_used = turtle.padded_width_or_used();
+                    let align_x = turtle.layout.align.x;
+                    for i in turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
+                        let shift_x = align_x * (padded_width_or_used- walk.rect.size.x);
                         let shift_y = walk.defer_index as f64 * part;
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
                     }
                 }
                 else {
-                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
-                        let shift_y = turtle.layout.align.y * turtle.height_left();
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                    let align_x = turtle.layout.align.x;
+                    let align_y = turtle.layout.align.y;
+                    let padded_width_or_used = turtle.padded_width_or_used();
+                    let height_left = turtle.height_left();
+                    if align_x != 0.0 || align_y != 0.0{
+                        for i in turtle_walks_start..self.turtle_walks.len() {
+                            let walk = &self.turtle_walks[i];
+                            let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
+                            let shift_y = align_y * height_left;
+                            let align_start = walk.align_start;
+                            let align_end = self.get_turtle_walk_align_end(i);
+                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                        }
                     }
                 }
             },
             Flow::Overlay => {
-                for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                    let walk = &self.turtle_walks[i];
-                    let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
-                    let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
-                    let align_start = walk.align_start;
-                    let align_end = self.get_turtle_walk_align_end(i);
-                    self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
+                let align_x = turtle.layout.align.x;
+                let align_y = turtle.layout.align.y;
+                if align_x != 0.0 || align_y != 0.0{
+                    let padded_width_or_used = turtle.padded_width_or_used();
+                    let padded_height_or_used = turtle.padded_height_or_used();
+                    for i in turtle_walks_start..self.turtle_walks.len() {
+                        let walk = &self.turtle_walks[i];
+                        let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
+                        let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
+                        let align_start = walk.align_start;
+                        let align_end = self.get_turtle_walk_align_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                    }
                 }
             }
         }
-
-        self.turtle_walks.truncate(turtle.turtle_walks_start);
+        self.turtles.pop();
+        self.turtle_walks.truncate(turtle_walks_start);
         self.align_list.push(AlignEntry::EndTurtle);
         if self.turtles.len() == 0 {
             return Rect {
@@ -431,7 +469,7 @@ impl<'a> Cx2d<'a> {
                 size: dvec2(w.fixed_or_zero(), h.fixed_or_zero())
             }
         }
-        let rect = self.walk_turtle_move(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start);
+        let rect = self.walk_turtle_move(Walk {width: w, height: h, abs_pos:turtle_abs_pos, margin:turtle_margin}, turtle_align_start);
         rect
     }
     
@@ -793,6 +831,10 @@ impl Turtle {
     
     pub fn layout(&self)->&Layout{
         &self.layout
+    }
+
+    pub fn layout_mut(&mut self)-> &mut Layout {
+        &mut self.layout
     }
     
     pub fn used(&self) -> DVec2 {
@@ -1286,22 +1328,8 @@ impl LiveHook for Size {
                 Some(nodes.skip_node(index))
             }
             LiveValue::Expr {..} => {
-                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
-                    Ok(ret) => match ret {
-                        LiveEval::Float64(v) => {
-                            *self = Self::Fixed(v);
-                        }
-                        LiveEval::Int64(v) => {
-                            *self = Self::Fixed(v as f64);
-                        }
-                        _ => {
-                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "bool", ret);
-                        }
-                    }
-                    Err(err) => cx.apply_error_eval(err)
-                }
-                Some(nodes.skip_node(index))
-            }
+                panic!("Expr node found whilst deserialising DSL")
+            },
             LiveValue::Float32(v) => {
                 *self = Self::Fixed(*v as f64);
                 Some(index + 1)

@@ -39,6 +39,10 @@ pub mod window_menu;
 pub mod html;
 pub mod markdown;
 pub mod text_flow;
+pub mod multi_image;
+pub mod modal;
+pub mod tooltip;
+pub mod popup_notification;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -59,6 +63,7 @@ pub mod nav_control;
 pub mod view;
 pub mod widget;
 pub mod widget_match_event;
+pub mod toggle_panel;
 
 pub mod touch_gesture;
 
@@ -92,6 +97,9 @@ pub use crate::{
     html::*,
     check_box::*,
     drop_down::*,
+    modal::*,
+    tooltip::*,
+    popup_notification::*,
     video::*,
     radio_button::*,
     text_input::*,
@@ -111,6 +119,7 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
+    toggle_panel::*,
     widget::{
         WidgetSet,
         WidgetSetIterator,
@@ -125,6 +134,7 @@ pub use crate::{
         WidgetAction,
         WidgetActionCast,
         WidgetActionOptionApi,
+        OptionWidgetRefExt,
         WidgetRef,
         Widget,
         WidgetNode,
@@ -148,9 +158,13 @@ pub fn live_design(cx: &mut Cx) {
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
+    crate::multi_image::live_design(cx);
     crate::image_blend::live_design(cx);
     crate::icon::live_design(cx);
     crate::rotated_image::live_design(cx);
+    crate::modal::live_design(cx);
+    crate::tooltip::live_design(cx);
+    crate::popup_notification::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
     crate::fold_button::live_design(cx);
@@ -188,6 +202,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::root::live_design(cx);
     crate::bare_step::live_design(cx);
     crate::turtle_step::live_design(cx);
+    crate::toggle_panel::live_design(cx);
     
     crate::designer::live_design(cx);
     crate::designer_view::live_design(cx);

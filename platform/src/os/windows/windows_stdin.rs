@@ -191,6 +191,7 @@ impl Cx {
                             id: pi.id,
                             width: new_swapchain.alloc_width as usize,
                             height: new_swapchain.alloc_height as usize,
+                            initial: true,
                         };
                         let texture = Texture::new_with_format(self, format);
                         self.textures[texture.texture_id()].update_from_shared_handle(d3d11_cx, handle);

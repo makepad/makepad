@@ -14,9 +14,13 @@ live_design!{
     import crate::fold_button::FoldButtonBase;
     import crate::fold_header::FoldHeaderBase;
     import crate::image::ImageBase;
+    import crate::multi_image::MultiImageBase;
     import crate::image_blend::ImageBlendBase;
     import crate::icon::IconBase;
     import crate::rotated_image::RotatedImageBase;
+    import crate::modal::ModalBase;
+    import crate::tooltip::TooltipBase;
+    import crate::popup_notification::PopupNotificationBase;
     import crate::video::VideoBase;
     import crate::popup_menu::PopupMenuBase;
     import crate::label::LabelBase;
@@ -49,8 +53,11 @@ live_design!{
     import crate::html::HtmlBase;
     import crate::html::HtmlLinkBase;
     import crate::markdown::MarkdownBase,
+    import crate::markdown::MarkdownLinkBase;
     import crate::root::RootBase;
-    
+    import crate::text_flow::TextFlowBase;
+    import crate::text_flow::TextFlowLinkBase;
+        
     import crate::designer::DesignerBase;
     import crate::designer_outline::DesignerOutlineBase;
     import crate::designer_view::DesignerViewBase;
@@ -62,6 +69,7 @@ live_design!{
     
     import crate::bare_step::BareStep;
     import crate::turtle_step::TurtleStep;
+    import crate::toggle_panel::*;
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
 
@@ -130,6 +138,35 @@ live_design!{
                 return self.get_color_scale_pan(self.image_scale, self.image_pan)
             }
             
+            fn pixel(self) -> vec4 {
+                let color = self.get_color();
+                return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+            }
+        }
+    }
+    
+    MultiImage = <ImageBase> {
+        width: 100
+        height: 100
+                
+        draw_bg: {
+            texture image1: texture2d
+            texture image2: texture2d
+            texture image3: texture2d
+            texture image4: texture2d
+            
+            instance opacity: 1.0
+            instance image_scale: vec2(1.0, 1.0)
+            instance image_pan: vec2(0.0, 0.0)
+                        
+            fn get_color_scale_pan(self, scale: vec2, pan: vec2) -> vec4 {
+                return sample2d(self.image1, self.pos * scale + pan).xyzw;
+            }
+                        
+            fn get_color(self) -> vec4 {
+                return self.get_color_scale_pan(self.image_scale, self.image_pan)
+            }
+                        
             fn pixel(self) -> vec4 {
                 let color = self.get_color();
                 return Pal::premul(vec4(color.xyz, color.w * self.opacity))
@@ -898,7 +935,10 @@ live_design!{
     RootBase = <RootBase>{}
     HtmlBase = <HtmlBase>{}
     HtmlLinkBase = <HtmlLinkBase>{}
+    TextFlowBase = <TextFlowBase>{}
+    TextFlowLinkBase = <TextFlowLinkBase>{}
     MarkdownBase = <MarkdownBase>{}
+    MarkdownLinkBase = <MarkdownLinkBase>{}
     KeyboardViewBase = <KeyboardViewBase>{}
     PageFlipBase = <PageFlipBase>{}
     ViewBase = <ViewBase>{}
@@ -916,6 +956,9 @@ live_design!{
     ImageBase = <ImageBase> {}
     IconBase = <IconBase> {}
     RotatedImageBase = <RotatedImageBase> {}
+    ModalBase = <ModalBase> {}
+    TooltipBase = <TooltipBase> {}
+    PopupNotificationBase = <PopupNotificationBase> {}
     VideoBase = <VideoBase> {}
     LabelBase = <LabelBase> {}
     LinkLabelBase = <LinkLabelBase> {}
@@ -943,6 +986,7 @@ live_design!{
     BareStep = <BareStep>{}
     TurtleStep = <TurtleStep>{}
     ColorPicker = <ColorPicker>{}
+    TogglePanelBase = <TogglePanelBase>{}
     
     DesignerBase = <DesignerBase>{}
     DesignerOutlineBase = <DesignerOutlineBase>{}

@@ -14,10 +14,10 @@ live_design!{
                 width: Fill, height: Fill
             }
         } 
-    }
+    }  
 }
 app_main!(App);
-
+  
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,

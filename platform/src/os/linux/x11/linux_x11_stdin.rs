@@ -183,6 +183,7 @@ impl Cx {
                                     id: pi.id,
                                     width: new_swapchain.alloc_width as usize,
                                     height: new_swapchain.alloc_height as usize,
+                                    initial: true,
                                 };
                                 new_texture = Texture::new_with_format(self, desc);
                                 self.textures[new_texture.texture_id()]

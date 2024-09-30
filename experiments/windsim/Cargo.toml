@@ -1,0 +1,13 @@
+[package]
+name = "makepad-experiment-windsim"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad teamtalk"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "shZoP-LMDS_D9QdOWJ-1eEmE1m4="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }

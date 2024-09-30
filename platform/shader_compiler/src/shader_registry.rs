@@ -21,6 +21,7 @@ pub struct ShaderRegistry {
     pub structs: HashMap<StructPtr, StructDef>,
     pub builtins: HashMap<Ident, Builtin>,
     pub enums: HashMap<LiveType, ShaderEnum>,
+    pub const_gather_active: bool
 }
 
 pub struct ShaderEnum {
@@ -29,8 +30,9 @@ pub struct ShaderEnum {
 }
 
 impl ShaderRegistry {
-    pub fn new() -> Self {
+    pub fn new(const_gather_active: bool) -> Self {
         Self {
+            const_gather_active,
             structs: HashMap::new(),
             enums: HashMap::new(),
             draw_shader_defs: HashMap::new(),
@@ -196,26 +198,19 @@ impl ShaderRegistry {
                 }
                 LiveValue::Expr{..} => {
                     // ok lets eval the expr to get a type
-                    match live_eval(live_registry, index, &mut (index + 1), nodes){
-                        Ok(value) => {
-                            if let Some(ty) = Ty::from_live_eval(value){
-                                if let Some(ty_lit) = ty.maybe_ty_lit(){
-                                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
-                                }
-                            }
-                            return LiveNodeFindResult::Error(
-                                LiveError {
-                                    origin: live_error_origin!(),
-                                    message: format!("Type of eval result not valid for shader"),
-                                    span: nodes[index].origin.token_id().unwrap().into()
-                                }
-                            );
-                        }
-                        Err(err)=>{
-                            println!("find_live_node_by_path - Cannot find node in expression");
-                            return LiveNodeFindResult::Error(err)
+                    
+                    if let Ok(ty) = Ty::from_live_node(live_registry, index, nodes){
+                        if let Some(ty_lit) = ty.maybe_ty_lit(){
+                            return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
                         }
                     }
+                    return LiveNodeFindResult::Error(
+                        LiveError {
+                            origin: live_error_origin!(),
+                            message: format!("Type of eval result not valid for shader"),
+                            span: nodes[index].origin.token_id().unwrap().into()
+                        }
+                    );
                 }
                 LiveValue::DSL {token_start, ..} => {
                     // lets get the first token
@@ -348,7 +343,8 @@ impl ShaderRegistry {
                     shader_registry: self,
                     is_inside_loop: false,
                     options: ShaderAnalyseOptions {
-                        no_const_collapse: true
+                        no_const_collapse: true,
+                        const_gather_active: self.const_gather_active
                     }
                 };
                 fa.analyse_fn_decl() ?;
@@ -477,7 +473,8 @@ impl ShaderRegistry {
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
-                        no_const_collapse: true
+                        no_const_collapse: true,
+                        const_gather_active: self.const_gather_active
                     }
                 };
                 sa.analyse_struct() ?;
@@ -793,7 +790,8 @@ impl ShaderRegistry {
                     draw_shader_def: draw_shader_def,
                     scopes: &mut Scopes::new(),
                     options: ShaderAnalyseOptions {
-                        no_const_collapse: true
+                        no_const_collapse: true,
+                        const_gather_active: self.const_gather_active
                     }
                 };
                 sa.analyse_shader() ?;

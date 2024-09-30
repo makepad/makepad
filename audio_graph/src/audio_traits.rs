@@ -175,7 +175,7 @@ pub type AudioResult<'a> = Result<(), &'a mut Box<dyn AudioComponent >>;
 
 pub trait AudioResultApi<'a> {
     fn not_found() -> AudioResult<'a> {AudioResult::Ok(())}
-    fn found(arg: &'a mut Box<dyn AudioComponent>) -> AudioResult {AudioResult::Err(arg)}
+    fn found(arg: &'a mut Box<dyn AudioComponent>) -> AudioResult<'a> {AudioResult::Err(arg)}
     fn is_not_found(&self) -> bool;
     fn is_found(&self) -> bool;
     fn into_found(self) -> Option<&'a mut Box<dyn AudioComponent >>;

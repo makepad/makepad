@@ -31,6 +31,16 @@ macro_rules!error {
 }
 
 #[macro_export]
+macro_rules! format_reuse {
+    ($dst:expr, $($arg:tt)*) => {
+        $dst.clear();
+        $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
+        #[allow(unused_must_use)]
+        &$dst
+    };
+}
+
+#[macro_export]
 macro_rules!warning {
     ( $ ( $ t: tt) *) => {
         $crate::log::log_with_level(
@@ -74,31 +84,41 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
             unsafe{js_console_log(buf.as_ptr() as u32, buf.len() as u32)};        
         }    
     }
-    
+
     if !Cx::has_studio_web_socket() {
         #[cfg(not (target_os = "android"))]
         println!("{}:{}:{} - {}", file_name, line_start + 1, column_start + 1, message);
        // if android, also log to ADB
-        #[cfg(target_os = "android")]
-        {
-            use std::ffi::c_int;
-            extern "C" { 
-                pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
-            }
+       #[cfg(target_os = "android")]
+       {
+           use std::ffi::c_int;
+           extern "C" { 
+               pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
+           }
+           let msg = format!("{}:{}:{} - {}\0", file_name, line_start, column_start, message);
+           unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
+       }
+       #[cfg(target_env="ohos")]
+       {
             let msg = format!("{}:{}:{} - {}\0", file_name, line_start, column_start, message);
-            unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
-        }
+            let hilevel:hilog_sys::LogLevel = match level {
+                LogLevel::Warning => {hilog_sys::LogLevel::LOG_WARN}
+                LogLevel::Error => {hilog_sys::LogLevel::LOG_ERROR}
+                LogLevel::Log => {hilog_sys::LogLevel::LOG_INFO}
+                _=> {hilog_sys::LogLevel::LOG_INFO}
+            };
+            unsafe {hilog_sys::OH_LOG_Print(hilog_sys::LogType::LOG_APP,hilevel, 0x03D00,c"makepad-ohos".as_ptr(), c"%{public}s".as_ptr(),msg.as_ptr())};
+       }
     }
     else{
-        
-
-       Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
+        Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
             file_name: file_name.to_string(),
             line_start,
             column_start,
             line_end,
             column_end,
             message,
+            explanation: None,
             level
         }));
     }

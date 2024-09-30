@@ -51,6 +51,8 @@ pub const LINEAR_MIPMAP_LINEAR: types::GLenum = 0x2703;
 pub const TEXTURE_BASE_LEVEL: types::GLenum = 0x813C;
 pub const TEXTURE_MAX_LEVEL: types::GLenum = 0x813D;
 pub const TEXTURE_MAG_FILTER: types::GLenum = 0x2800;
+pub const TEXTURE_WIDTH: types::GLenum = 0x1000;
+pub const TEXTURE_HEIGHT: types::GLenum = 0x1001;
 pub const RGBA: types::GLenum = 0x1908;
 pub const BGRA: types::GLenum = 0x80E1;
 pub const RED: types::GLenum = 0x1903;
@@ -70,6 +72,9 @@ pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
 pub const NO_ERROR: types::GLenum = 0x0;
 pub const UNPACK_ALIGNMENT: types::GLenum = 0x0CF5;
 pub const UNPACK_ROW_LENGTH: types::GLenum = 0x0CF2;
+pub const UNPACK_SKIP_PIXELS: types::GLenum = 0x0CF4;
+pub const UNPACK_SKIP_ROWS: types::GLenum = 0x0CF3;
+
 pub const TEXTURE_EXTERNAL_OES: types::GLenum = 0x8D65;
 pub const EXTENSIONS: types::GLenum = 0x1F03;
 pub const VENDOR: types::GLenum = 0x1F00;
@@ -118,6 +123,8 @@ pub const RENDERER: types::GLenum = 0x1F01;
 #[inline] pub unsafe fn GenTextures(n: types::GLsizei, textures: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenTextures.f)(n, textures) }
 #[inline] pub unsafe fn TexParameteri(target: types::GLenum, pname: types::GLenum, param: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLenum, types::GLint) -> ()>(storage::TexParameteri.f)(target, pname, param) }
 #[inline] pub unsafe fn TexImage2D(target: types::GLenum, level: types::GLint, internalformat: types::GLint, width: types::GLsizei, height: types::GLsizei, border: types::GLint, format: types::GLenum, type_: types::GLenum, pixels: *const raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLint, types::GLint, types::GLsizei, types::GLsizei, types::GLint, types::GLenum, types::GLenum, *const raw::c_void) -> ()>(storage::TexImage2D.f)(target, level, internalformat, width, height, border, format, type_, pixels) }
+#[inline] pub unsafe fn TexSubImage2D(target: types::GLenum, level: types::GLint, xoffset: types::GLint, yoffset: types::GLint, width: types::GLsizei, height: types::GLsizei, format: types::GLenum, type_: types::GLenum, pixels: *const raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLint, types::GLint, types::GLint, types::GLsizei, types::GLsizei, types::GLenum, types::GLenum, *const raw::c_void) -> ()>(storage::TexSubImage2D.f)(target, level, xoffset, yoffset, width, height, format, type_, pixels) }
+#[inline] pub unsafe fn GetTexLevelParameteriv(target: types::GLenum, level: types::GLint, pname: types::GLenum, params: *mut types::GLint) { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLint, types::GLenum, *mut types::GLint)>(storage::GetTexLevelParameteriv.f)(target, level, pname, params) }
 #[inline] pub unsafe fn DeleteTextures(n: types::GLsizei, textures: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteTextures.f)(n, textures) }
 #[inline] pub unsafe fn GenBuffers(n: types::GLsizei, buffers: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenBuffers.f)(n, buffers) }
 #[inline] pub unsafe fn BufferData(target: types::GLenum, size: types::GLsizeiptr, data: *const raw::c_void, usage: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLsizeiptr, *const raw::c_void, types::GLenum) -> ()>(storage::BufferData.f)(target, size, data, usage) }
@@ -180,6 +187,8 @@ mod storage {
     pub static mut GenTextures: FnPtr = FnPtr::default();
     pub static mut TexParameteri: FnPtr = FnPtr::default();
     pub static mut TexImage2D: FnPtr = FnPtr::default();
+    pub static mut TexSubImage2D: FnPtr = FnPtr::default();
+    pub static mut GetTexLevelParameteriv: FnPtr = FnPtr::default();
     pub static mut DeleteTextures: FnPtr = FnPtr::default();
     pub static mut GenBuffers: FnPtr = FnPtr::default();
     pub static mut BufferData: FnPtr = FnPtr::default();
@@ -241,6 +250,8 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::GenTextures = FnPtr::new(metaloadfn(&mut loadfn, "glGenTextures", &[]));
     storage::TexParameteri = FnPtr::new(metaloadfn(&mut loadfn, "glTexParameteri", &[]));
     storage::TexImage2D = FnPtr::new(metaloadfn(&mut loadfn, "glTexImage2D", &[]));
+    storage::TexSubImage2D = FnPtr::new(metaloadfn(&mut loadfn, "glTexSubImage2D", &[]));
+    storage::GetTexLevelParameteriv = FnPtr::new(metaloadfn(&mut loadfn, "glGetTexLevelParameteriv", &[]));
     storage::DeleteTextures = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteTextures", &[]));
     storage::GenBuffers = FnPtr::new(metaloadfn(&mut loadfn, "glGenBuffers", &["glGenBuffersARB"]));
     storage::BufferData = FnPtr::new(metaloadfn(&mut loadfn, "glBufferData", &["glBufferDataARB"]));

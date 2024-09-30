@@ -6,13 +6,13 @@ export class WasmWebBrowser extends WasmBridge {
         if (wasm === undefined) {
             return
         }
-        
+        /*
         window.onbeforeunload = _ => {
             this.clear_memory_refs();
             for (let worker of this.workers) {
                 worker.terminate();
             }
-        }
+        }*/
         
         this.wasm_app = this.wasm_create_app();
         
@@ -79,6 +79,7 @@ export class WasmWebBrowser extends WasmBridge {
             window_info: this.window_info,
             deps: deps
         });
+        
         this.do_wasm_pump();
         // only bind the event handlers now
         // to stop them firing into wasm early
@@ -92,6 +93,18 @@ export class WasmWebBrowser extends WasmBridge {
         var loaders = document.getElementsByClassName('canvas_loader');
         for (var i = 0; i < loaders.length; i ++) {
             loaders[i].parentNode.removeChild(loaders[i])
+        }
+    }
+    
+    FromWasmOpenUrl(args){
+        if(args.in_place){
+            window.location.href = args.url;
+        }
+        else{
+            var link = document.createElement("a");
+            link.href = args.url;
+            link.target = "_blank";
+            link.click();
         }
     }
     
@@ -516,6 +529,8 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmHTTPResponse({
                 request_id_lo: args.request_id_lo,
                 request_id_hi: args.request_id_hi,
+                metadata_id_lo: args.metadata_id_lo,
+                metadata_id_hi: args.metadata_id_hi,
                 status: responseEvent.status,
                 body: responseEvent.response,
                 headers: responseEvent.getAllResponseHeaders()
@@ -620,6 +635,19 @@ export class WasmWebBrowser extends WasmBridge {
     
 
     wasm_process_msg(to_wasm) {
+        if(this.debug_sum_ptr !== undefined){
+            console.log("CECKING IN PROCESS MSG");
+            let ptr = this.debug_sum_ptr;
+            this.debug_sum_ptr = undefined;
+            var u8_out = new Uint8Array(this.memory.buffer, ptr.ptr, ptr.len);
+            let sum = 0
+            for(let i = 0; i<ptr.len;i++){
+                sum += u8_out[i];
+            }
+            console.log("Got sum"+sum);
+        }
+        
+        
         let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership(), this.wasm_app)
         this.update_array_buffer_refs();
         return this.new_from_wasm(ret_ptr);
@@ -914,7 +942,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_touchstart = e => {
             e.preventDefault()
             this.to_wasm.ToWasmTouchUpdate({
-                time: e.timeStamp,
+                time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 1)
             });
@@ -925,7 +953,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_touchmove = e => {
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
-                time: e.timeStamp,
+                time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 2)
             });
@@ -936,7 +964,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_touch_end_cancel_leave = e => {
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
-                time: e.timeStamp,
+                time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 3)
             });

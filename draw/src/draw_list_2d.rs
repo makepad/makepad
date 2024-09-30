@@ -365,6 +365,7 @@ impl<'a> Cx2d<'a> {
             rect,
             draw_clip:Default::default(),
         });
+        
         let new_area = Area::Rect(RectArea {
             draw_list_id,
             redraw_id: self.redraw_id,

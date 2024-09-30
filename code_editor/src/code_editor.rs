@@ -126,6 +126,10 @@ live_design! {
         draw_text: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {}
+            fn get_brightness(self)->float{
+                return 1.1    
+            }
+            
             fn blend_color(self, incol: vec4) -> vec4 {
                 if self.outline < 0.5 {
                     return incol
@@ -238,7 +242,7 @@ pub struct CodeEditor {
     #[rust] unscrolled_rect: Rect,
     #[rust] line_start: usize,
     #[rust] line_end: usize,
-
+    #[rust(1.0)] pub height_scale: f64,
     #[live(true)] word_wrap: bool,
 
     #[live(0.5)] blink_speed: f64,
@@ -319,11 +323,19 @@ impl CodeEditor {
         self.scroll_bars.redraw(cx);
     }
     
+    pub fn area(&self)->Area{
+        self.scroll_bars.area()
+    }
+    
     pub fn walk(&self, _cx:&mut Cx)->Walk{
         self.walk
     }
     
-    pub fn find_widgets(&mut self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet){
+    pub fn uid_to_widget(&self, _uid:WidgetUid)->WidgetRef{
+        WidgetRef::empty()    
+    }
+    
+    pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet){
     }
         
     pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut Session, walk:Walk) {
@@ -414,9 +426,15 @@ impl CodeEditor {
             }
             KeepCursorInView::Off => {}
         }
-
+        
+        // if height = Fit, we need to compute it based on layout
+        let height_is_fit = walk.height.is_fit();
+        //if height_is_fit{
+        //    walk.height = Size::Fixed(100000.0);
+       // }
+        const MAX_HEIGHT:f64 = 100_0000.0;
         self.scroll_bars.begin(cx, walk, Layout::default());
-
+        
         let turtle_rect = cx.turtle().rect();
         let gutter_width = (session
             .document()
@@ -431,7 +449,7 @@ impl CodeEditor {
             pos: turtle_rect.pos,
             size: DVec2 {
                 x: gutter_width,
-                y: turtle_rect.size.y,
+                y: if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
         self.viewport_rect = Rect {
@@ -441,7 +459,7 @@ impl CodeEditor {
             },
             size: DVec2 {
                 x: turtle_rect.size.x - gutter_width,
-                y: turtle_rect.size.y,
+                y:if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
 
@@ -478,11 +496,14 @@ impl CodeEditor {
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
-
+        
         cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x,
-            session.layout().height() * self.cell_size.y + (self.viewport_rect.size.y),
+            session.layout().width() * self.cell_size.x +pad_left_top.x,
+            self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y}
+            +pad_left_top.y * self.height_scale
         );
+        
+        //println!("{} {}", session.layout().height() * self.cell_size.y, (self.viewport_rect.size.y));
 
         self.scroll_bars.end(cx);
         if session.update_folds() {
@@ -545,6 +566,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         event: &Event,
+        scope: &mut Scope,
         session: &mut Session,
     ) -> Vec<CodeEditorAction> {
         let mut actions = Vec::new();
@@ -553,7 +575,7 @@ impl CodeEditor {
 
         session.handle_changes();
 
-        if self.scroll_bars.handle_event(cx, event).len()>0{
+        if self.scroll_bars.handle_event(cx, event, scope).len()>0{
             self.redraw(cx);
         };
         
@@ -1205,6 +1227,7 @@ impl CodeEditor {
 
     fn pick(&self, session: &Session, position: DVec2) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
+        
         if position.y < 0.0 {
             return (
                 (
