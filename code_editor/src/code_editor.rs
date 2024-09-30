@@ -1227,6 +1227,7 @@ impl CodeEditor {
 
     fn pick(&self, session: &Session, position: DVec2) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
+        
         if position.y < 0.0 {
             return (
                 (
