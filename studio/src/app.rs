@@ -47,7 +47,6 @@ impl LiveRegister for App{
         crate::log_list::live_design(cx);
         crate::profiler::live_design(cx);
         crate::run_view::live_design(cx);
-        crate::code_view::live_design(cx);
         crate::studio_editor::live_design(cx);
         crate::studio_file_tree::live_design(cx);
         crate::app_ui::live_design(cx);

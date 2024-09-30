@@ -1,9 +1,9 @@
 
 use {
     crate::{
-        makepad_code_editor::{Document, decoration::{DecorationSet}, Session},
+        {Document, decoration::{DecorationSet}, Session},
         makepad_widgets::*,
-        makepad_code_editor::CodeEditor,
+        CodeEditor,
     },
     std::{
         env,
@@ -11,7 +11,7 @@ use {
 };
 
 live_design!{
-    import makepad_code_editor::code_editor::CodeEditor;
+    import crate::code_editor::CodeEditor;
         
     CodeView = {{CodeView}}{
         editor: <CodeEditor>{
