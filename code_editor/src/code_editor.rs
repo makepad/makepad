@@ -246,7 +246,9 @@ pub struct CodeEditor {
     #[rust(1.0)] pub height_scale: f64,
     #[live(true)] word_wrap: bool,
     #[live(false)] read_only: bool,
-    
+    #[live(true)] show_gutter: bool,
+    #[live(2usize)] gutter_pad: usize,
+        
     #[live(0.5)] blink_speed: f64,
 
     #[animator] animator: Animator,
@@ -439,14 +441,20 @@ impl CodeEditor {
         
         let turtle_rect = cx.turtle().rect();
         
-        self.gutter_chars =  session
-            .document()
-            .as_text()
-            .as_lines()
-            .len()
-            .to_string()
-            .column_count()+1;
-        let gutter_width = self.gutter_chars as f64 * self.cell_size.x;    
+        let gutter_width = if self.show_gutter{
+            self.gutter_chars =  session
+                .document()
+                .as_text()
+                .as_lines()
+                .len()
+                .to_string()
+                .column_count()+1;
+            self.gutter_chars as f64 * self.cell_size.x + self.gutter_pad as f64 * self.cell_size.x
+        }
+        else{
+            self.gutter_chars = 0;
+            0.0
+        };
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
             size: DVec2 {
@@ -487,8 +495,9 @@ impl CodeEditor {
         );
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
-
-        self.draw_gutter(cx, session);
+        if self.show_gutter{
+            self.draw_gutter(cx, session);
+        }
         self.draw_selection_layer(cx, session);
         self.draw_text_layer(cx, session);
         self.draw_indent_guide_layer(cx, session);

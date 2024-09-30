@@ -15,7 +15,9 @@ live_design!{
         
     CodeView = {{CodeView}}{
         editor: <CodeEditor>{
-            read_only: true
+            height:Fit
+            read_only: true,
+            show_gutter: false
         }
     }
 } 
