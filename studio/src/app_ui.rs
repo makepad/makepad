@@ -5,6 +5,7 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     import makepad_studio::studio_editor::StudioEditor;
+    import makepad_studio::ai_chat::AiChat;
     import makepad_studio::studio_file_tree::StudioFileTree;
     import makepad_studio::run_view::RunView;
     import makepad_studio::log_list::LogList;
