@@ -36,6 +36,7 @@ live_design! {
     THEME_TEXTSELECTION_CORNER_RADIUS = (THEME_CORNER_RADIUS * .5)
     THEME_TAB_HEIGHT = 32.0,
     THEME_SPLITTER_HORIZONTAL = 16.0,
+    THEME_SPLITTER_SIZE = 10.0,
     THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
     THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
     THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
@@ -78,6 +79,7 @@ live_design! {
         mix(THEME_COLOR_W, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT),
         pow(0.36, THEME_COLOR_CONTRAST))
     )
+    THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_FG_APP)
     THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
     THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
@@ -177,17 +179,32 @@ live_design! {
     THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
 
-    THEME_FONT_LABEL = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
-    THEME_FONT_REGULAR = { font: { path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf") } }
-    THEME_FONT_BOLD = { font: { path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf") } }
-    THEME_FONT_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-Italic.ttf") } }
-    THEME_FONT_BOLD_ITALIC = { font: { path: dep("crate://self/resources/NotoSans-BoldItalic.ttf") } }
+    THEME_FONT_LABEL = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+    } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
+    THEME_FONT_REGULAR = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+    }
+    THEME_FONT_BOLD = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
+    }
+    THEME_FONT_ITALIC = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+    }
+    THEME_FONT_BOLD_ITALIC = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
+        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
+    }
     THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
-        brightness: 1.1
-        top_drop: 1.3
-        line_spacing: 2.0
+        //brightness: 1.1
+        line_scale: 1.2,
+        line_spacing: 1.16
     }
 
     Label = <LabelBase> {
@@ -394,7 +411,538 @@ live_design! {
     // Spacer = <View> { width: Fill, height: Fill }
     Filler = <View> { width: Fill, height: Fill }
 
+
+    LinkLabel = <LinkLabelBase> {
+        // TODO: adda  focus states
+        instance hover: 0.0
+        instance pressed: 0.0
+
+        width: Fit, height: Fit,
+        padding: { top: (THEME_SPACE_2), bottom: 2. }
+        spacing: 7.5,
+        align: {x: 0., y: 0.}
+
+        label_walk: { width: Fit, height: Fit, },
+
+        draw_bg: {
+            instance pressed: 0.0
+            instance hover: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                ), mix(.7, 1., self.hover));
+            }
+        }
+
+        draw_text: {
+            wrap: Word
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            instance color_hover: (THEME_COLOR_TEXT_HOVER),
+            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
+            instance pressed: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_pressed,
+                    self.pressed
+                )
+            }
+        }
+
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+
+                pressed = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+        }
+
+    }
+
+    LinkLabelIcon = <LinkLabel> {
+        padding: { bottom: 2. }
+        label_walk: { margin: { left: -5. }},
+        draw_icon: {
+            instance focus: 0.0
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        mix(self.color, #f, 0.5),
+                        self.hover
+                    ),
+                    self.color * 0.75,
+                    self.pressed
+                )
+            }
+        }
+    }
+
     HtmlLink = <HtmlLinkBase> {
+        width: Fit, height: Fit,
+        align: {x: 0., y: 0.}
+
+        color: #x0000EE,
+        hover_color: #x00EE00,
+        pressed_color: #xEE0000,
+        
+        // instance hovered: 0.0
+        // instance pressed: 0.0
+
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
+                    apply: {
+                        hovered: 0.0,
+                        pressed: 0.0,
+                    }
+                }
+
+                on = {
+                    redraw: true,
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
+                    }
+                }
+
+                pressed = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
+                    apply: {
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
+                    }
+                }
+            }
+        }
+    }
+
+    Html = <HtmlBase> {
+        width: Fill, height: Fit,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: <THEME_MSPACE_1> {}
+
+        line_spacing: (THEME_FONT_LINE_SPACING),
+        font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
+
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        code_walk: { width: Fill, height: Fit }
+
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        quote_walk: { width: Fill, height: Fit, }
+
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
+        }
+
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_1> {}
+        }
+
+        a = <HtmlLink> {}
+
+        draw_block:{
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.quote_bg_color)
+                        sdf.box(
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
+                            1.5
+                        );
+                        sdf.fill(self.quote_fg_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.sep_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y * 0.45,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                }
+                return #f00
+            }
+        }
+    }
+    
+    TextFlowLink = <TextFlowLinkBase> {
+        color: #xa,
+        hover_color: #xf,
+        pressed_color: #x3,
+        
+        margin:{right:5}
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
+                    apply: {
+                        hovered: 0.0,
+                        pressed: 0.0,
+                    }
+                }
+                
+                on = {
+                    redraw: true,
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
+                    }
+                }
+                
+                pressed = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
+                    apply: {
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
+                    }
+                }
+            }
+        }
+    }
+    
+    TextFlow = <TextFlowBase> {
+        width: Fill, height: Fit,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: 0
+        
+        line_spacing: (THEME_FONT_LINE_SPACING),
+        font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
+        
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        code_walk: { width: Fill, height: Fit }
+        
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        quote_walk: { width: Fill, height: Fit, }
+        
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
+        }
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_1> {}
+        }
+        
+        link = <TextFlowLink> {}
+        
+        draw_block:{
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.quote_bg_color)
+                        sdf.box(
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
+                            1.5
+                        );
+                        sdf.fill(self.quote_fg_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.sep_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y * 0.45,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                }
+                return #f00
+            }
+        }
+    }
+
+    MarkdownLink = <MarkdownLinkBase> {
         width: Fit, height: Fit,
         align: {x: 0., y: 0.}
 
@@ -491,170 +1039,6 @@ live_design! {
         }
     }
 
-    Html = <HtmlBase> {
-        width: Fill, height: Fit,
-        flow: RightWrap,
-        width:Fill,
-        height:Fit,
-        padding: <THEME_MSPACE_1> {}
-
-        line_spacing: (THEME_FONT_LINE_SPACING),
-        font_size: (THEME_FONT_SIZE_P),
-
-        draw_normal: {
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_italic: {
-            text_style: <THEME_FONT_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_bold: {
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_bold_italic: {
-            text_style: <THEME_FONT_BOLD_ITALIC> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        draw_fixed: {
-            text_style: <THEME_FONT_CODE> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            color: (THEME_COLOR_TEXT_DEFAULT)
-        }
-
-        code_layout: {
-            flow: RightWrap,
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
-        }
-        code_walk: { width: Fill, height: Fit }
-
-        quote_layout: {
-            flow: RightWrap,
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
-        }
-        quote_walk: { width: Fill, height: Fit, }
-
-        list_item_layout: {
-            flow: RightWrap,
-            padding: <THEME_MSPACE_1> {}
-        }
-        list_item_walk: {
-            height: Fit, width: Fill,
-        }
-
-        inline_code_padding: <THEME_MSPACE_1> {},
-        inline_code_margin: <THEME_MSPACE_1> {},
-
-        sep_walk: {
-            width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
-        }
-
-        a = <HtmlLink> {}
-
-        draw_block:{
-            line_color: (THEME_COLOR_TEXT_DEFAULT)
-            sep_color: (THEME_COLOR_DIVIDER)
-            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
-            code_color: (THEME_COLOR_BG_HIGHLIGHT)
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                match self.block_type {
-                    FlowBlockType::Quote => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
-                        sdf.fill(self.quote_bg_color)
-                        sdf.box(
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            THEME_SPACE_1,
-                            self.rect_size.y - THEME_SPACE_2,
-                            1.5
-                        );
-                        sdf.fill(self.quote_fg_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Sep => {
-                        sdf.box(
-                            0.,
-                            1.,
-                            self.rect_size.x-1,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.sep_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Code => {
-                        sdf.box(
-                            0.,
-                            0.,
-                            self.rect_size.x,
-                            self.rect_size.y,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::InlineCode => {
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x-2.,
-                            self.rect_size.y-2.,
-                            2.
-                        );
-                        sdf.fill(self.code_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Underline => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y-2,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
-                    }
-                    FlowBlockType::Strikethrough => {
-                        sdf.box(
-                            0.,
-                            self.rect_size.y * 0.45,
-                            self.rect_size.x,
-                            2.0,
-                            0.5
-                        );
-                        sdf.fill(self.line_color);
-                        return sdf.result;
-                    }
-                }
-                return #f00
-            }
-        }
-    }
-
     Markdown = <MarkdownBase> {
         width:Fill, height:Fit,
         flow: RightWrap,
@@ -663,7 +1047,10 @@ live_design! {
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         paragraph_spacing: 16,
-
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -721,7 +1108,7 @@ live_design! {
 
         sep_walk: {
             width: Fill, height: 4.
-            margin: <THEME_MSPACE_V_3> {}
+            margin: <THEME_MSPACE_V_1> {}
         }
 
         draw_block: {
@@ -812,6 +1199,8 @@ live_design! {
                 return #f00
             }
         }
+
+        link = <MarkdownLink> {}
     }
 
     ScrollBarTabs = <ScrollBarBase> {
@@ -2749,6 +3138,7 @@ live_design! {
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
+                        open: 0.0
                         draw_bg: {open: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
@@ -2757,6 +3147,7 @@ live_design! {
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
+                        open: 1.0
                         draw_bg: {open: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                     }
                 }
@@ -2789,113 +3180,6 @@ live_design! {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
                     }
                 }
-            }
-        }
-    }
-
-    LinkLabel = <LinkLabelBase> {
-        // TODO: adda  focus states
-        instance hover: 0.0
-        instance pressed: 0.0
-
-        width: Fit, height: Fit,
-        padding: { top: (THEME_SPACE_2), bottom: 2. }
-        spacing: 7.5,
-        align: {x: 0., y: 0.}
-
-        label_walk: { width: Fit, height: Fit, },
-
-        draw_bg: {
-            instance pressed: 0.0
-            instance hover: 0.0
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                ), mix(.7, 1., self.hover));
-            }
-        }
-
-        draw_text: {
-            wrap: Word
-            instance pressed: 0.0
-            instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                )
-            }
-        }
-
-        animator: {
-            hover = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
-                    }
-                }
-
-                on = {
-                    from: {
-                        all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                    }
-                }
-
-                pressed = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                    }
-                }
-            }
-        }
-
-    }
-
-    LinkLabelIcon = <LinkLabel> {
-        padding: { bottom: 2. }
-        label_walk: { margin: { left: -5. }},
-        draw_icon: {
-            instance focus: 0.0
-            instance hover: 0.0
-            instance pressed: 0.0
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        self.color,
-                        mix(self.color, #f, 0.5),
-                        self.hover
-                    ),
-                    self.color * 0.75,
-                    self.pressed
-                )
             }
         }
     }
@@ -3211,74 +3495,53 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
 
         label_align: {y: 0.}
-        cursor_margin_bottom: (THEME_SPACE_1),
-        cursor_margin_top: (THEME_SPACE_1),
-        select_pad_edges: 3.0
-        cursor_size: 2.0,
-        numeric_only: false,
-        on_focus_select_all: false,
+        clip_x: false,
+        clip_y: false,
+
+        cursor_width: 2.0,
+
+        is_read_only: false,
+        is_numeric_only: false,
         empty_message: "0",
-        clip_x: false, clip_y: false,
 
-        draw_text: {
-            instance hover: 0.0
-            instance focus: 0.0
-            wrap: Word,
-            text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_LINE_SPACING),
-                font_size: (THEME_FONT_SIZE_P)
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_text: {hover: 0.0},
+                        draw_selection: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_text: {hover: 1.0},
+                        draw_selection: {hover: 1.0}
+                    }
+                }
             }
-            fn get_color(self) -> vec4 {
-                return
-                mix(
-                    mix(
-                        mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover),
-                        THEME_COLOR_TEXT_FOCUSED,
-                        self.focus
-                    ),
-                    mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_DEFAULT, self.hover),
-                    self.is_empty
-                )
-            }
-        }
-
-        draw_cursor: {
-            instance focus: 0.0
-            uniform border_radius: 0.5
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
-                return sdf.result
-            }
-        }
-
-        draw_select: {
-            instance hover: 0.0
-            instance focus: 0.0
-            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-            fn pixel(self) -> vec4 {
-                //return mix(#f00,#0f0,self.pos.y)
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-                sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN,
-                    THEME_COLOR_BG_HIGHLIGHT_INLINE,
-                    self.focus)
-                ); // Pad color
-                return sdf.result
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: .25}}
+                    apply: {
+                        draw_bg: {focus: 0.0},
+                        draw_text: {focus: 0.0},
+                        draw_cursor: {focus: 0.0},
+                        draw_selection: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {focus: 1.0},
+                        draw_text: {focus: 1.0}
+                        draw_cursor: {focus: 1.0},
+                        draw_selection: {focus: 1.0}
+                    }
+                }
             }
         }
 
@@ -3333,44 +3596,65 @@ live_design! {
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_select: {hover: 0.0}
-                        draw_text: {hover: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_select: {hover: 1.0}
-                        draw_text: {hover: 1.0}
-                    }
-                }
+        draw_text: {
+            instance hover: 0.0
+            instance focus: 0.0
+            wrap: Word,
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
             }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: .25}}
-                    apply: {
-                        draw_cursor: {focus: 0.0},
-                        draw_bg: {focus: 0.0},
-                        draw_select: {focus: 0.0}
-                        draw_text: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_cursor: {focus: 1.0},
-                        draw_bg: {focus: 1.0},
-                        draw_select: {focus: 1.0}
-                        draw_text: {focus: 1.0}
-                    }
-                }
+            fn get_color(self) -> vec4 {
+                return
+                mix(
+                    mix(
+                        mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover),
+                        THEME_COLOR_TEXT_FOCUSED,
+                        self.focus
+                    ),
+                    mix(THEME_COLOR_TEXT_PLACEHOLDER, THEME_COLOR_TEXT_DEFAULT, self.hover),
+                    self.is_empty
+                )
+            }
+        }
+
+        draw_cursor: {
+            instance focus: 0.0
+            uniform border_radius: 0.5
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                )
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
+                return sdf.result
+            }
+        }
+
+        draw_selection: {
+            instance hover: 0.0
+            instance focus: 0.0
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+            fn pixel(self) -> vec4 {
+                //return mix(#f00,#0f0,self.pos.y)
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                )
+                sdf.fill(
+                    mix(THEME_COLOR_U_HIDDEN,
+                    THEME_COLOR_BG_HIGHLIGHT_INLINE,
+                    self.focus)
+                ); // Pad color
+                return sdf.result
             }
         }
     }
@@ -3457,16 +3741,16 @@ live_design! {
             }
         }
 
-        label_walk: { width: Fill, height: Fill }
+        label_walk: { width: Fill, height: Fit }
 
         text_input: <TextInput> {
             width: Fit, padding: 0.,
-            cursor_margin_bottom: (THEME_SPACE_1),
-            cursor_margin_top: (THEME_SPACE_1),
-            select_pad_edges: 3.0
-            cursor_size: 2.0,
+            // cursor_margin_bottom: (THEME_SPACE_1),
+            // cursor_margin_top: (THEME_SPACE_1),
+            // select_pad_edges: 3.0
+            // cursor_size: 2.0,
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
 
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
@@ -3560,12 +3844,12 @@ live_design! {
         text: "CutOff1"
         // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
         text_input: {
-            cursor_margin_bottom: (THEME_SPACE_1),
-            cursor_margin_top: (THEME_SPACE_1),
-            select_pad_edges: (THEME_SPACE_1),
-            cursor_size: (THEME_SPACE_1),
+            // cursor_margin_bottom: (THEME_SPACE_1),
+            // cursor_margin_top: (THEME_SPACE_1),
+            // select_pad_edges: (THEME_SPACE_1),
+            // cursor_size: (THEME_SPACE_1),
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
             draw_bg: {
                 color: (THEME_COLOR_D_HIDDEN)
             },
@@ -3710,7 +3994,11 @@ live_design! {
                 width: Fill, height: Fit,
                 align: {x: 0.5, y: 0.5}
 
-                title = <H4> { text: "Stack View Title" }
+                title = <H4> {
+                    width: Fit, height: Fit,
+                    margin: 0,
+                    text: "Stack View Title"
+                }
             }
 
             button_container = <View> {
@@ -3790,6 +4078,81 @@ live_design! {
         root_view = <View> {}
     }
 
+    TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
+    TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
+    TogglePanel = <TogglePanelBase> {
+        flow: Overlay,
+        width: 300,
+        height: Fill,
+
+        open_content = <CachedView> {
+            width: Fill
+            height: Fill
+
+            draw_bg: {
+                instance opacity: 1.0
+    
+                fn pixel(self) -> vec4 {
+                    let color = sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
+                    return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+                }
+            }
+        }
+
+        persistent_content = <View> {
+            height: Fit
+            width: Fill
+            default = <View> {
+                height: Fit,
+                width: Fill,
+                padding: {top: 58, left: 15, right: 15}
+                spacing: 10,
+
+                before = <View> {
+                    height: Fit,
+                    width: Fit,
+                    spacing: 10,
+                }
+
+                close = <Button> {
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_CLOSE_ICON),
+                    }
+                }
+
+                open = <Button> {
+                    visible: false,
+                    draw_icon: {
+                        svg_file: (TOGGLE_PANEL_OPEN_ICON),
+                    }
+                }
+
+                after = <View> {
+                    height: Fit,
+                    width: Fit,
+                    spacing: 10,
+                }
+            }
+        }
+
+        animator: {
+            panel = {
+                default: open,
+                open = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.3}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    apply: {animator_panel_progress: 1.0, open_content = { draw_bg: {opacity: 1.0} }}
+                }
+                close = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.3}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    apply: {animator_panel_progress: 0.0, open_content = { draw_bg: {opacity: 0.0} }}
+                }
+            }
+        }
+    }
 
     DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
         align: { y: 0.5 }
@@ -4261,7 +4624,7 @@ live_design! {
                 }
             }
         }
-        
+        /*
         <RoundedShadowView>{
             width: 250., height: 350.,
             abs_pos: vec2(25., 325.)
@@ -4369,7 +4732,7 @@ live_design! {
                     }
                 }
             }
-        }
+        }*/
     }
 
     DesignerContainer = <DesignerContainerBase>{
@@ -4477,6 +4840,16 @@ live_design! {
 
     DesignerView = <DesignerViewBase>{
         clear_color: #333333
+        draw_outline:{
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                sdf.stroke(#fff, 1.0);
+                return sdf.result;
+                //return vec4(self.color.xyz * self.color.w, self.color.w)
+            }
+        }
+        
         draw_bg: {
             texture image: texture2d
             varying scale: vec2
@@ -4584,6 +4957,100 @@ live_design! {
         }
     }
 
-    Root = <RootBase> { design_window = <Designer> {} }
+    Modal = <ModalBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 0.5, y: 0.5}
 
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        bg_view: <View> {
+            width: Fill
+            height: Fill
+            show_bg: true
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    return vec4(0., 0., 0., 0.7)
+                }
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+        }
+    }
+
+    Tooltip = <TooltipBase> {
+        width: Fill,
+        height: Fill,
+
+        flow: Overlay
+        align: {x: 0.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            <RoundedView> {
+                width: Fit,
+                height: Fit,
+
+                padding: 16,
+
+                draw_bg: {
+                    color: #fff,
+                    border_width: 1.0,
+                    border_color: #D0D5DD,
+                    radius: 2.
+                }
+
+                tooltip_label = <Label> {
+                    width: 270,
+                    draw_text: {
+                        text_style: <THEME_FONT_REGULAR>{font_size: 9},
+                        text_wrap: Word,
+                        color: #000
+                    }
+                }
+            }
+        }
+    }
+
+    PopupNotification = <PopupNotificationBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 1.0, y: 0.0}
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+
+            cursor: Default
+            capture_overload: true
+        }
+    }
+
+    Root = <RootBase> { design_window = <Designer> {} }
 }

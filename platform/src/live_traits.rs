@@ -21,6 +21,10 @@ pub trait LiveHook {
         }
         nodes.skip_node(index)
     }
+    
+    fn skip_apply_animator(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode])->bool{
+        false
+    }
 
     fn apply_value_instance(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         nodes.skip_node(index)
@@ -102,12 +106,16 @@ pub trait LiveNew: LiveApply {
     
     fn new_main(cx: &mut Cx) -> Self where Self: Sized {
         let lti = Self::live_type_info(cx);
+        Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
+    }
+    
+    fn register_main_module(cx: &mut Cx) {
+        let lti = Self::live_type_info(cx);
         {
             let live_registry_rc = cx.live_registry.clone();
             let mut live_registry = live_registry_rc.borrow_mut();
             live_registry.main_module = Some(lti.clone());
         }
-        Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
     }
     
     fn update_main(&mut self, cx:&mut Cx){
@@ -195,8 +203,26 @@ pub struct Apply<'a,'b,'c> {
     pub scope: Option<&'c mut Scope<'a,'b>>,
 }
 
+impl <'a,'b,'c> Apply<'a,'b,'c>{
+    pub fn override_from<F, R>(&mut self, from:ApplyFrom, f: F) -> R where F: FnOnce(&mut Apply) -> R{
+        if let Some(scope) = &mut self.scope{
+            f(&mut Apply{
+                from: from,
+                scope: Some(*scope)
+            })
+        }
+        else{
+            f(&mut Apply{
+                from: from,
+                scope: None
+            })
+            
+        }
+    }
+}
+
 impl ApplyFrom{
-    fn with_scope<'a, 'b, 'c>(self, scope:&'c mut Scope<'a,'b>)->Apply<'a, 'b, 'c>{
+    pub fn with_scope<'a, 'b, 'c>(self, scope:&'c mut Scope<'a,'b>)->Apply<'a, 'b, 'c>{
         Apply{
             from: self,
             scope: Some(scope)

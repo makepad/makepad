@@ -13,7 +13,7 @@ live_design!{
     StudioFileTree = {{StudioFileTree}}{
         file_tree: <FileTree>{}
     }
-} 
+}
  
 #[derive(Live, LiveHook, Widget)] 
 pub struct StudioFileTree{

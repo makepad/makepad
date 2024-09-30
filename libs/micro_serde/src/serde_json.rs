@@ -688,6 +688,24 @@ impl JsonValue{
     }
 }
 
+impl SerJson for JsonValue{
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        match self{
+            JsonValue::String(v)=>v.ser_json(d,s),
+            JsonValue::Char(v)=>v.to_string().ser_json(d, s),
+            JsonValue::U64(v)=>v.ser_json(d, s),
+            JsonValue::I64(v)=>v.ser_json(d, s),
+            JsonValue::F64(v)=>v.ser_json(d, s),
+            JsonValue::Bool(v)=>v.ser_json(d, s),
+            JsonValue::BareIdent(v)=>v.ser_json(d, s),
+            JsonValue::Null=>s.out.push_str("null"),
+            JsonValue::Undefined=>s.out.push_str("undefined"),
+            JsonValue::Object(v)=>v.ser_json(d, s),
+            JsonValue::Array(v)=>v.ser_json(d, s)
+        }
+    }
+}
+
 impl DeJson for JsonValue{
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<JsonValue, DeJsonErr> {
         // lets check what tokenm we have

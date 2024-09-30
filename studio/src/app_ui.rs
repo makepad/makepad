@@ -286,7 +286,19 @@ live_design!{
                 axis: Horizontal,
                 align: Weighted(0.5),
                 a: edit_tabs,
+                b: split3
+            }
+            split3 = Splitter {
+                axis: Horizontal,
+                align: FromA(20),
+                a: split4,
                 b: run_tabs
+            }
+            split4 = Splitter {
+                axis: Horizontal,
+                align: Weighted(0.5),
+                a: outline_tabs,
+                b: design_tabs
             }
             /*
             split3 = Splitter {
@@ -297,15 +309,25 @@ live_design!{
             }*/
 
             file_tree_tabs = Tabs {
-                tabs: [file_tree_tab, search, run_list_tab, outline_first],
+                tabs: [file_tree_tab, run_list_tab, search],
                 selected: 0
             }
 
             edit_tabs = Tabs {
-                tabs: [edit_first, design_first],
+                tabs: [edit_first],
                 selected: 0
             }
-
+            
+            design_tabs = Tabs {
+                tabs: [design_first],
+                selected: 0
+            }
+            
+            outline_tabs = Tabs {
+                tabs: [outline_first],
+                selected: 0
+            }
+            
             log_tabs = Tabs {
                 tabs: [log_list_tab, profiler],
                 selected: 0
@@ -400,7 +422,7 @@ live_design!{
                         <ButtonFlat> { width: Fit, text: "Docs"}
                     }
                 }
-                editor = <StudioEditor> {}
+                editor = <StudioEditor> {} 
             }
             EditFirst = <RectView> {
                 <View> {

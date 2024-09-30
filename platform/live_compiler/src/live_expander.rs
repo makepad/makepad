@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
 
 use {
-    std::rc::Rc,
+    std::sync::Arc,
     crate::{
         makepad_live_id::*,
         makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
         live_ptr::{LiveFileId, LivePtr, LiveFileGeneration},
         live_error::{LiveError},
+        live_eval::live_eval_value,
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveValue, LiveNode, LiveFieldKind, LivePropType},
         live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
@@ -134,10 +135,38 @@ impl<'a> LiveExpander<'a> {
                             message: format!("Cannot define edit info after first prop def of {}", in_node.id)
                         });
                     }
+                    
+                    if out_value.is_expr(){
+                        panic!("No expressions expected in out_value")
+                    }
                     // object override
                     if in_value.is_object() && (out_value.is_clone() || out_value.is_class() || out_value.is_object()) { // lets set the target ptr
                         // do nothing
                     }
+                    else if in_value.is_expr(){
+                        
+                        if !out_value.is_single_node(){
+                            panic!("overriding is_expr on not is_single_node ");
+                        }
+                        // lets expand it and output a single LiveValue instead
+                        let mut index = in_index;
+                        match live_eval_value(&self.live_registry, &mut index, &in_doc.nodes, &out_doc.nodes){
+                            Ok(v)=>{
+                                out_doc.nodes[overwrite] = in_node.clone();
+                                out_doc.nodes[overwrite].value = v;
+                            }
+                            Err(e)=>{ // output a None 
+                                out_doc.nodes[overwrite] = in_node.clone();
+                                out_doc.nodes[overwrite].value = LiveValue::None;
+                                self.errors.push(e);
+                            }
+                        }
+                        // lets skip the nodes
+                        out_doc.nodes[overwrite].origin.inherit_origin(out_origin);
+                        in_index = in_doc.nodes.skip_node(in_index);
+                        continue;
+                    }
+                    /*
                     // replacing object types
                     else if out_value.is_expr() || in_value.is_expr() && out_value.is_single_node() {
                         // replace range
@@ -151,7 +180,7 @@ impl<'a> LiveExpander<'a> {
                         in_index = in_doc.nodes.skip_node(in_index);
                         out_doc.nodes[overwrite].origin.inherit_origin(out_origin);
                         continue;
-                    }
+                    }*/
                     else if out_value.is_open() && in_value.is_open() { // just replace the whole thing
                         let next_index = out_doc.nodes.skip_node(overwrite);
                         let old_len = out_doc.nodes.len();
@@ -188,11 +217,24 @@ impl<'a> LiveExpander<'a> {
                     
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
                     if in_node.is_expr() {
-                        // splice it in
-                        let old_len = out_doc.nodes.len();
-                        out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
-                        self.shift_parent_stack(&mut current_parent, &out_doc.nodes, insert_point - 1, old_len, out_doc.nodes.len());
                         
+                        // lets eval the expression
+                        let mut index = in_index;
+                        let old_len = out_doc.nodes.len();
+                                                
+                        match live_eval_value(&self.live_registry, &mut index, &in_doc.nodes, &out_doc.nodes){
+                            Ok(v)=>{
+                                out_doc.nodes.insert(insert_point, in_node.clone());
+                                out_doc.nodes[insert_point].value = v; 
+                            }
+                            Err(e)=>{
+                                out_doc.nodes.insert(insert_point, in_node.clone());
+                                out_doc.nodes[insert_point].value = LiveValue::None;
+                                self.errors.push(e);
+                            } 
+                        }
+                        self.shift_parent_stack(&mut current_parent, &out_doc.nodes, insert_point - 1, old_len, out_doc.nodes.len());
+                        // lets skip the nodes
                         in_index = in_doc.nodes.skip_node(in_index);
                         continue;
                     }
@@ -218,7 +260,7 @@ impl<'a> LiveExpander<'a> {
                         let mut final_path = self.live_registry.file_id_to_cargo_manifest_path(file_id);
                         final_path.push('/');
                         final_path.push_str(path);
-                        out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                        out_doc.nodes[out_index].value = LiveValue::Dependency(Arc::new(final_path));
                     } else if let Some(path) = path.strip_prefix("crate://") {
                         let mut split = path.split('/');
                         if let Some(crate_name) = split.next() {
@@ -227,7 +269,7 @@ impl<'a> LiveExpander<'a> {
                                     final_path.push('/');
                                     final_path.push_str(next);
                                 }
-                                out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                                out_doc.nodes[out_index].value = LiveValue::Dependency(Arc::new(final_path));
                             }
                         }
                     }
@@ -449,9 +491,9 @@ impl<'a> LiveExpander<'a> {
             if out_doc.nodes[i].value.is_dsl() {
                 out_doc.nodes[i].value.set_dsl_expand_index_if_none(i);
             }
-            if out_doc.nodes[i].value.is_expr() {
+            /*if out_doc.nodes[i].value.is_expr() {
                 out_doc.nodes[i].value.set_expr_expand_index_if_none(i);
-            }
+            }*/
         }
     }
     

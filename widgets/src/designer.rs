@@ -26,9 +26,6 @@ impl LiveHook for Designer {
     fn before_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
         self.data.update_from_live_registry(cx);
     }
-    
-    // ok now we can iterate our top level components
-    // and instance them
 }
 
 impl Designer{

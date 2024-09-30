@@ -31,7 +31,7 @@ use {
             Event,
             NetworkResponseChannel
         },
-        cx_api::{CxOsApi, CxOsOp},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx, OsType},
     }
 };
@@ -150,6 +150,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    self.handle_action_receiver();
                     if self.handle_live_edit(){
                         // self.draw_shaders.ptr_to_item.clear();
                         // self.draw_shaders.fingerprints.clear();
@@ -169,6 +170,7 @@ impl Cx {
             }
             IosEvent::Init=>{
                 get_ios_app_global().start_timer(0, 0.008, true);
+                self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
@@ -372,6 +374,10 @@ impl CxOsApi for Cx {
 
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {

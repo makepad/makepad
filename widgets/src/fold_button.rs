@@ -16,6 +16,7 @@ pub struct FoldButton {
     #[live] abs_size: DVec2,
     #[live] abs_offset: DVec2,
     #[walk] walk: Walk,
+    #[live] open: f64
 }
 
 #[derive(Clone, Debug, DefaultNone)]
@@ -80,11 +81,15 @@ impl Widget for FoldButton {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
-        if self.animator_handle_event(cx, event).is_animating() {
+        let res = self.animator_handle_event(cx, event);
+        if res.is_animating() {
             if self.animator.is_track_animating(cx, id!(open)) {
                 let mut value = [0.0];
                 self.draw_bg.get_instance(cx, id!(open),&mut value);
                 cx.widget_action(uid, &scope.path, FoldButtonAction::Animating(value[0] as f64))
+            }
+            if res.must_redraw(){
+                self.draw_bg.redraw(cx);
             }
         };
                 
@@ -156,6 +161,15 @@ impl FoldButtonRef {
             }
         }
         None
+    }
+    
+    pub fn open_float(&self) -> f64 {
+        if let Some(inner) = self.borrow(){
+            inner.open
+        }
+        else{
+            1.0
+        }
     }
 }
 

@@ -254,15 +254,9 @@ impl<'a> HtmlWalker<'a>{
              nodes:&self.nodes,
          }
      }
- }
- 
- #[derive(Clone, Copy)]
- pub enum KeepWhitespace{
-     Yes,
-     No
- }
- 
- pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>)->HtmlDoc{
+ } 
+
+ pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>, intern:InternLiveId)->HtmlDoc{
      enum State{
          Text(usize, usize, usize),
          ElementName(usize),
@@ -380,16 +374,16 @@ impl<'a> HtmlWalker<'a>{
                          State::Text(i+1, decoded.len(), decoded.len())
                      }
                      else{
-                        nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
+                        nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i],intern)});
                         State::ElementAttrs
                     }
                 }
                  else if c == '/'{
-                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
+                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
+                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
                      State::Text(i+1, decoded.len(), decoded.len())
                  }
                  else{
@@ -398,11 +392,11 @@ impl<'a> HtmlWalker<'a>{
              }
              State::ElementClose(start)=>{
                  if c == '>'{
-                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
+                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
                      State::Text(i+1, decoded.len(), decoded.len())
                  }
                  else if c.is_whitespace(){
-                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str(&body[start..i])});
+                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
                      State::ElementCloseScanSpaces
                  }
                  else{
@@ -447,17 +441,17 @@ impl<'a> HtmlWalker<'a>{
              }
              State::AttribName(start)=>{
                  if c.is_whitespace() {
-                     State::AttribValueEq(LiveId::from_str_lc(&body[start..i]),LiveId::from_str(&body[start..i]))
+                     State::AttribValueEq(LiveId::from_str_lc(&body[start..i]),LiveId::from_str_with_intern(&body[start..i], intern))
                  }
                  else if c == '='{
-                     State::AttribValueStart(LiveId::from_str_lc(&body[start..i]),LiveId::from_str_lc(&body[start..i]))
+                     State::AttribValueStart(LiveId::from_str_lc(&body[start..i]),LiveId::from_str_with_intern(&body[start..i], intern))
                  }
                  else if c == '/'{
-                     nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_lc(&body[start..i]),start:0,end:0});
+                     nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern),start:0,end:0});
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_lc(&body[start..i]),start:0,end:0});
+                     nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern),start:0,end:0});
                      State::Text(i+1, decoded.len(), decoded.len())
                  }
                  else{

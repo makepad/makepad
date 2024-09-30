@@ -70,18 +70,18 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("impl").stream(generic.clone());
             tb.add("AnimatorImpl for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
-            tb.add("    fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
+            tb.add("    fn animator_play_with_scope(&mut self, cx: &mut Cx, state: &[LiveId;2], scope:&mut Scope) {");
             tb.add("         self.").ident(&animator_field.name).add(".animate_to_live(cx, state);");
-            tb.add("         self.animator_apply_state(cx);");
+            tb.add("         self.animator_apply_state(cx, scope);");
             tb.add("    }");
             tb.add("    fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool{");
             tb.add("         self.").ident(&animator_field.name).add(".animator_in_state(cx, check_state_pair)");
             tb.add("    }");
-            tb.add("    fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
+            tb.add("    fn animator_cut_with_scope(&mut self, cx: &mut Cx, state: &[LiveId;2], scope:&mut Scope) {");
             tb.add("         self.").ident(&animator_field.name).add(".cut_to_live(cx, state);");
-            tb.add("         self.animator_apply_state(cx);");
+            tb.add("         self.animator_apply_state(cx, scope);");
             tb.add("    }");
-            
+                        
             tb.add("    fn animator_after_apply(&mut self, cx:&mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]){");
             tb.add("        let mut index = index + 1;");
             tb.add("        match apply.from{"); // if apply from is file, run defaults
@@ -89,7 +89,11 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                while !nodes[index].is_close() {");
             tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
             tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
-            tb.add("                            self.apply(cx, &mut ApplyFrom::AnimatorInit.into(), index, nodes);");
+            tb.add("                            apply.override_from(ApplyFrom::AnimatorInit,|apply|{");
+            tb.add("                                if !<Self as LiveHook>::skip_apply_animator(self, cx, apply, index, nodes){");
+            tb.add("                                    self.apply(cx, apply, index, nodes);");
+            tb.add("                                }");
+            tb.add("                             });");
             tb.add("                        }");
             tb.add("                    }");
             tb.add("                    index = nodes.skip_node(index);");
@@ -99,10 +103,18 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                while !nodes[index].is_close() {");
             tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]){");
             tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), live_id!(apply).as_field()]){");
-            tb.add("                            self.apply(cx, &mut ApplyFrom::AnimatorInit.into(), index, nodes);");
+            tb.add("                            apply.override_from(ApplyFrom::AnimatorInit,|apply|{");
+            tb.add("                                if !<Self as LiveHook>::skip_apply_animator(self, cx, apply, index, nodes){");
+            tb.add("                                    self.apply(cx, apply, index, nodes);");
+            tb.add("                                }");
+            tb.add("                            });");
             tb.add("                        }");
             tb.add("                    }");
-            tb.add("                    self.animator_apply_state(cx);");
+            tb.add("                    if let Some(scope) = &mut apply.scope{");
+            tb.add("                        self.animator_apply_state(cx, *scope);");
+            tb.add("                    } else {");
+            tb.add("                        self.animator_apply_state(cx, &mut Scope::empty());");
+            tb.add("                    }");
             tb.add("                    index = nodes.skip_node(index);");
             tb.add("                }"); 
             tb.add("            }");
@@ -115,8 +127,12 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                        while !nodes[index].is_close() {");
             tb.add("                            if let LiveValue::Id(state_id) = nodes[index].value{");
             tb.add("                               if let Some(orig_index) = orig_nodes.child_by_path(orig_index, &[nodes[index].id.as_instance(), state_id.as_instance(), live_id!(apply).as_field()]){");
-            tb.add("                                   self.apply(cx, &mut ApplyFrom::AnimatorInit.into(), orig_index, orig_nodes);");
-            tb.add("                               }");
+            tb.add("                                apply.override_from(ApplyFrom::AnimatorInit,|apply|{");
+            tb.add("                                      if !<Self as LiveHook>::skip_apply_animator(self, cx, apply, orig_index, nodes){");
+            tb.add("                                          self.apply(cx, apply, orig_index, orig_nodes);");
+            tb.add("                                      }");
+            tb.add("                                   });");
+            tb.add("                                }");
             tb.add("                            }");
             tb.add("                            index = nodes.skip_node(index);");
             tb.add("                        }");
@@ -137,18 +153,23 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("        }");
             tb.add("    }");
             
-            tb.add("    fn animator_apply_state(&mut self, cx: &mut Cx) {");
+            tb.add("    fn animator_apply_state(&mut self, cx: &mut Cx, scope:&mut Scope) {");
             tb.add("        if let Some(state) = self.").ident(&animator_field.name).add(".swap_out_state(){");
-            tb.add("            self.apply(cx, &mut ApplyFrom::Animate.into(), state.child_by_name(0,live_id!(state).as_field()).unwrap(), &state);");
+            tb.add("            let index = state.child_by_name(0,live_id!(state).as_field()).unwrap();");
+            tb.add("            let mut apply = ApplyFrom::Animate.with_scope(scope);");
+            tb.add("            if !<Self as LiveHook>::skip_apply_animator(self, cx, &mut apply, index, &state){");
+            tb.add("                 self.apply(cx, &mut apply, index, &state);");
+            tb.add("            }");
             tb.add("            self.").ident(&animator_field.name).add(".swap_in_state(state);");
             tb.add("        }");
             tb.add("    }");
             
-            tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &Event)->AnimatorAction{");
+            tb.add("    fn animator_handle_event_with_scope(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope)->AnimatorAction{");
             tb.add("        let ret = self.").ident(&animator_field.name).add(".handle_event(cx, event);");
-            tb.add("        if ret.is_animating(){self.animator_apply_state(cx);}");
+            tb.add("        if ret.is_animating(){self.animator_apply_state(cx, scope);}");
             tb.add("        ret");
             tb.add("    }");
+                        
             tb.add("}");
         }
         

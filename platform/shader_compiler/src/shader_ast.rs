@@ -1093,7 +1093,7 @@ impl Ty {
             }
         }
     }
-    
+    /*
     pub fn from_live_eval(live_eval: LiveEval) -> Option<Self> {
         match live_eval {
             LiveEval::Bool(_) => Some(Self::Float),
@@ -1104,27 +1104,13 @@ impl Ty {
             LiveEval::Vec4(_) => Some(Self::Vec4),
             _ => None
         }
-    }
+    }*/
     
-    pub fn from_live_node(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<Self,
+    pub fn from_live_value(value:&LiveValue, origin:LiveNodeOrigin) -> Result<Self,
     LiveError> {
-        Ok(match &nodes[index].value {
+        Ok(match value {
             LiveValue::Expr {..} => {
-                match live_eval(live_registry, index, &mut (index + 1), nodes) ? {
-                    LiveEval::Bool(_) => Self::Float,
-                    LiveEval::Int64(_) => Self::Int,
-                    LiveEval::Float64(_) => Self::Float,
-                    LiveEval::Vec2(_) => Self::Vec2,
-                    LiveEval::Vec3(_) => Self::Vec3,
-                    LiveEval::Vec4(_) => Self::Vec4,
-                    v => {
-                        return Err(LiveError {
-                            origin: live_error_origin!(),
-                            message: format!("Expression return type does not resolve to a shader {:?}", v),
-                            span: nodes[index].origin.token_id().unwrap().into()
-                        })
-                    }
-                }
+                panic!()
             }
             LiveValue::Id(id) => match id {
                 live_id!(bool) => Self::Bool,
@@ -1139,7 +1125,7 @@ impl Ty {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         message: format!("Id does not resolve to a shader type {}", id),
-                        span: nodes[index].origin.token_id().unwrap().into()
+                        span: origin.token_id().unwrap().into()
                     })
                 }
             }
@@ -1153,10 +1139,29 @@ impl Ty {
             LiveValue::Vec4(_) => Self::Vec4,
             _ => return Err(LiveError {
                 origin: live_error_origin!(),
-                message: format!("Live value {:?} does not resolve to a shader type", nodes[index].value),
-                span: nodes[index].origin.token_id().unwrap().into()
+                message: format!("Live value {:?} does not resolve to a shader type", value),
+                span: origin.token_id().unwrap().into()
             })
         })
+    }
+    
+    pub fn from_live_node(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<Self,
+    LiveError> {
+        match &nodes[index].value {
+            LiveValue::Expr {..} => {
+                match live_eval_value(live_registry, &mut (index + 1), nodes, nodes){
+                    Ok(v)=>{
+                        return Self::from_live_value(&v, nodes[index].origin)
+                    }
+                    Err(v)=>{
+                        return Err(v)
+                    }
+                }
+            }
+            v=>{
+                return Self::from_live_value(v, nodes[index].origin);
+            }
+        }
     }
 }
 

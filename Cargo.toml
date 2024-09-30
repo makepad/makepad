@@ -1,63 +1,76 @@
 workspace.members = [
-#    "code_editor",
-#    "experiments/websocket-tcpstream",
-#   "experiments/websocket-windows",
-#   "experiments/svgloader",
-#    "experiments/empty",
-    "experiments/dual-contouring",
-    "experiments/esp-peer-0",
-    "experiments/esp-peer-1",
-    "experiments/esp-peer-2",
-    "experiments/esp-peer-3",
-    "experiments/esp-peer-4",
-    "experiments/esp-term",
-    "experiments/esp_chat",
-    "experiments/esp_car",
+    # === experiments ===
+    # "experiments/dual-contouring",
+    # "experiments/emoji",
+    # "experiments/esp-peer-0",
+    # "experiments/esp-peer-1",
+    # "experiments/esp-peer-2",
+    # "experiments/esp-peer-3",
+    # "experiments/esp-peer-4",
+    # "experiments/windsim",
+    # "experiments/esp-term",
+    # "experiments/esp_chat",
+    # "experiments/esp_car",
     "experiments/homescreens",
     "experiments/html_experiment",
-    "examples/fractal_zoom", 
-    "examples/ui_zoo", 
-    "examples/news_feed", 
-    "examples/web_cam", 
-    "examples/ironfish",
-    "examples/simple",
-    "examples/text_flow",
-    "experiments/bigfish",
+    # "experiments/bigfish",
     "experiments/teamtalk",
     "experiments/huedmx",
     "experiments/sdxl_remote",
+    # === examples ===
+    # "examples/bare_text",
+    # "examples/fractal_zoom",
+    "examples/ui_zoo",
+    "examples/news_feed",
+    #"examples/floating_elements",
+    # "examples/bare_text",
+    "examples/hello_widgets",
+    "examples/web_cam",
+    "examples/ironfish",
+    "examples/simple",
+    "examples/text_flow",
     "examples/simple",
     "examples/simple_shader",
     "examples/chatgpt",
     "examples/sdxl",
     "examples/slides",
-    "examples/graph",
-    "examples/image_viewer",
-#    "libs/stitch",
-#    "libs/futures",
-#    "libs/wasm_bridge/test",
+    #"examples/graph",
+    #"examples/image_viewer",
     "studio",
-#    "tools/video_mixer",
+    # "makepad_wonderous",
+    # "complex_layout",
+    # "comp_demo",
     "tools/cargo_makepad",
-#    "tools/windows_strip",
-     "tools/auto_version",
-#    "tools/web_server", 
-#    "tools/file_router", 
-#    "tools/wasm_strip",
+    "tools/auto_version",
+]
+
+workspace.exclude = [
+    "code_editor",
+    "libs/stitch",
+    "libs/futures",
+    "libs/wasm_bridge/test",
+    "experiments/websocket-tcpstream",
+    "experiments/websocket-windows",
+    "experiments/svgloader",
+    "experiments/empty",
+    "tools/windows_strip",
+    "tools/video_mixer",
+    "tools/web_server",
+    "tools/file_router",
+    "tools/wasm_strip",
 ]
 
 workspace.resolver = "2"
-[profile.release]
 #debug = true
- 
+
 [profile.small]
-inherits = "release"  
+inherits = "release"
 #debug = true
-opt-level = 'z'     # Optimize for size
-lto = true          # Enable link-time optimization
-codegen-units = 1   # Reduce number of codegen units to increase optimizations
-panic = 'abort'     # Abort on panic
-strip = true   
+opt-level = 'z'   # Optimize for size
+lto = true        # Enable link-time optimization
+codegen-units = 1 # Reduce number of codegen units to increase optimizations
+panic = 'abort'   # Abort on panic
+strip = true
 
 
 #[profile.dev.package.makepad-live-tokenizer]

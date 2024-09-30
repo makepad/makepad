@@ -38,14 +38,16 @@ pub struct DrawSlider {
 }
 
 #[derive(Live, Widget)]
+#[designable]
 pub struct Slider {
-    #[redraw] #[live] draw_slider: DrawSlider,
+    #[area] #[redraw] #[live] draw_slider: DrawSlider,
     
     #[walk] walk: Walk,
     
     #[layout] layout: Layout,
     #[animator] animator: Animator,
     
+    #[rust] label_area: Area,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     #[live] draw_text: DrawText,
@@ -61,8 +63,13 @@ pub struct Slider {
     #[live] default: f64,
     
     #[live] bind: String,
+
+    // Indicates if the label of the slider responds to hover events
+    // The primary use case for this kind of emitted actions is for tooltips displaying
+    // and it is turned on by default, since this component already consumes finger events
+    #[live(true)] hover_actions_enabled: bool,
     
-    #[rust] pub value: f64,
+    #[rust] pub relative_value: f64,
     #[rust] pub dragging: Option<f64>,
 }
 
@@ -72,13 +79,15 @@ pub enum SliderAction {
     TextSlide(f64),
     Slide(f64),
     EndSlide,
+    LabelHoverIn(Rect),
+    LabelHoverOut,
     None
 }
 
 impl Slider {
     
     fn to_external(&self) -> f64 {
-        let val = self.value * (self.max - self.min) + self.min;
+        let val = self.relative_value * (self.max - self.min) + self.min;
         if self.step != 0.0{
             return (val / self.step).floor()* self.step
         }
@@ -88,9 +97,9 @@ impl Slider {
     }
     
     fn set_internal(&mut self, external: f64) -> bool {
-        let old = self.value;
-        self.value = (external - self.min) / (self.max - self.min);
-        old != self.value
+        let old = self.relative_value;
+        self.relative_value = (external - self.min) / (self.max - self.min);
+        old != self.relative_value
     }
     
     pub fn update_text_input(&mut self) {
@@ -115,26 +124,54 @@ impl Slider {
     }
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.value as f32;
+        self.draw_slider.slide_pos = self.relative_value as f32;
         self.draw_slider.begin(cx, walk, self.layout);
         
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             let walk = self.text_input.walk(cx);
-            self.text_input.draw_walk_text_input(cx, walk);
-            self.draw_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.text);
+            let mut scope = Scope::default();
+            let _ = self.text_input.draw_walk(cx, &mut scope, walk);
+
+            let label_walk = dw.resolve(cx);
+            cx.begin_turtle(label_walk, Layout::default());
+            self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
+            cx.end_turtle_with_area(&mut self.label_area);
         }
         
         self.draw_slider.end(cx);
     }
+
+    pub fn value(&self) -> f64 {
+        self.to_external()
+    }
+
+    pub fn set_value(&mut self, v: f64) {
+        let prev_value = self.value();
+        self.set_internal(v);
+        if v != prev_value {
+            self.update_text_input();
+        }
+    }
 }
 
+impl WidgetDesign for Slider{
+    
+}
 
 impl Widget for Slider {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        
+        // alright lets match our designer against the slider backgdrop
+        match event.hit_designer(cx, self.draw_slider.area()){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
         
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
@@ -157,6 +194,19 @@ impl Widget for Slider {
                 _ => ()
             }
         };
+
+        if self.hover_actions_enabled {
+            match event.hits_with_capture_overload(cx, self.label_area, true) {
+                Hit::FingerHoverIn(fh) => {
+                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
+                }
+                Hit::FingerHoverOut(_) => {
+                    cx.widget_action(uid, &scope.path, SliderAction::LabelHoverOut);
+                },
+                _ => ()
+            }
+        }
+
         match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
@@ -167,19 +217,19 @@ impl Widget for Slider {
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
-                self.text_input.read_only = true;
+                self.text_input.is_read_only = true;
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
                                 
                 self.animator_play(cx, id!(drag.on));
-                self.dragging = Some(self.value);
+                self.dragging = Some(self.relative_value);
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
-                self.text_input.read_only = false;
+                self.text_input.is_read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
-                self.text_input.create_external_undo();
+                self.text_input.force_new_edit_group();
                 self.animator_play(cx, id!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
                     self.animator_play(cx, id!(hover.on));
@@ -193,7 +243,7 @@ impl Widget for Slider {
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
-                    self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
+                    self.relative_value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input_and_redraw(cx);
@@ -244,11 +294,18 @@ impl Widget for Slider {
 }
 
 impl SliderRef{
-    pub fn value(&self)->Option<f64>{
+    pub fn value(&self)->Option<f64> {
         if let Some(inner) = self.borrow(){
-            return Some(inner.to_external())
+            return Some(inner.value())
         }
+
         return None
+    }
+
+    pub fn set_value(&self, v: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value(v)
+        }
     }
     
     pub fn slided(&self, actions:&Actions)->Option<f64>{
@@ -261,5 +318,27 @@ impl SliderRef{
             }
         }
         None
+    }
+
+    pub fn label_hover_in(&self, actions:&Actions)->Option<Rect>{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast(){
+                SliderAction::LabelHoverIn(rect) => Some(rect),
+                _=> None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn label_hover_out(&self, actions:&Actions)->bool{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast(){
+                SliderAction::LabelHoverOut => true,
+                _=> false
+            }
+        } else {
+            false
+        }
     }
 }

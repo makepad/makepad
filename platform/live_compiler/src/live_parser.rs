@@ -1,6 +1,6 @@
 use {
     std::{
-        rc::Rc,
+        sync::Arc,
         iter::Cloned,
         slice::Iter
     },
@@ -120,7 +120,7 @@ impl<'a> LiveParser<'a> {
         }
     }
     
-    fn expect_string(&mut self) -> Result<Rc<String>, LiveError> {
+    fn expect_string(&mut self) -> Result<Arc<String>, LiveError> {
         match self.peek_token() {
             LiveToken::String(v) => {
                 self.skip_token();
@@ -771,7 +771,7 @@ impl<'a> LiveParser<'a> {
                         ld.nodes.push(LiveNode {
                             origin,
                             id: prop_id,
-                            value: LiveValue::IdPath(Rc::new(id_path))
+                            value: LiveValue::IdPath(Arc::new(id_path))
                         })
                         // loop till not id or =>
                     }
@@ -997,7 +997,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             origin,
             id: prop_id,
-            value: LiveValue::Expr {expand_index: None}
+            value: LiveValue::Expr 
         });
         
         fn recur_walk(expr: Expr, ld: &mut LiveOriginal) {
