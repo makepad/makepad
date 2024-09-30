@@ -238,6 +238,7 @@ pub struct CodeEditor {
 
     #[rust] cell_size: DVec2,
     #[rust] gutter_rect: Rect,
+    #[rust] gutter_chars: usize,
     #[rust] viewport_rect: Rect,
     #[rust] unscrolled_rect: Rect,
     #[rust] line_start: usize,
@@ -437,15 +438,15 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, walk, Layout::default());
         
         let turtle_rect = cx.turtle().rect();
-        let gutter_width = (session
+        
+        self.gutter_chars =  (session
             .document()
             .as_text()
             .as_lines()
             .len()
             .to_string()
-            .column_count()
-            + 3) as f64
-            * self.cell_size.x;
+            .column_count()+1);
+        let gutter_width = self.gutter_chars as f64 * self.cell_size.x;    
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
             size: DVec2 {
@@ -453,6 +454,7 @@ impl CodeEditor {
                 y: if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
+        println!("WIDTH {}", gutter_width);
         self.viewport_rect = Rect {
             pos: DVec2 {
                 x: turtle_rect.pos.x + gutter_width,
@@ -996,7 +998,14 @@ impl CodeEditor {
                 BlockElement::Line { line, .. } => {
                     self.draw_gutter.font_scale = line.scale();
                     buf.clear();
-                    let _ = write!(buf, "{: >4}", line_index + 1);
+                    match self.gutter_chars{
+                        0|1=>write!(buf, "{: >0}", line_index + 1).unwrap(),
+                        2=>write!(buf, "{: >1}", line_index + 1).unwrap(),
+                        3=>write!(buf, "{: >2}", line_index + 1).unwrap(),
+                        4=>write!(buf, "{: >3}", line_index + 1).unwrap(),
+                        5=>write!(buf, "{: >4}", line_index + 1).unwrap(),
+                        _=>write!(buf, "{: >5}", line_index + 1).unwrap(),
+                    }
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {
