@@ -193,7 +193,8 @@ live_design!{
     LogList = {{LogList}}{
         height: Fill, width: Fill,
         list = <PortalList> {
-            grab_key_focus: true
+            capture_overload: false,
+            grab_key_focus: false
             auto_tail: true
             drag_scrolling: false
             height: Fill, width: Fill,
