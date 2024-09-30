@@ -33,7 +33,7 @@ use {
             WindowGeomChangeEvent
         },
         pass::CxPassParent,
-        cx_api::{CxOsApi, CxOsOp},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx},
     }
 };
@@ -589,7 +589,7 @@ impl CxOsApi for Cx {
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
-            
+            FromWasmOpenUrl::to_js_code(),
             FromWasmUseMidiInputs::to_js_code(),
             FromWasmSendMidiOutput::to_js_code(),
             FromWasmQueryAudioDevices::to_js_code(),
@@ -609,7 +609,12 @@ impl CxOsApi for Cx {
         self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32, timer:0});
     }
     
-        
+    fn open_url(&mut self, url:&str, in_place:OpenUrlInPlace){
+        self.os.from_wasm(FromWasmOpenUrl{
+            url:url.to_string(),
+            in_place: if let OpenUrlInPlace::Yes = in_place{true}else{false}
+        });
+    }
     /*
     fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
@@ -750,7 +755,7 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 
 #[export_name = "wasm_init_panic_hook"]
 pub unsafe extern "C" fn init_panic_hook() {
-    pub fn panic_hook(info: &panic::PanicInfo) {
+    pub fn panic_hook(info: &panic::PanicHookInfo) {
         crate::error!("{}", info)
     }
     panic::set_hook(Box::new(panic_hook));

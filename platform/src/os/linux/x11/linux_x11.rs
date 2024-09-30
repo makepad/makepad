@@ -14,7 +14,7 @@ use {
         linux_media::CxLinuxMedia
     },
     crate::{
-        cx_api::{CxOsOp, CxOsApi}, 
+        cx_api::{CxOsOp, CxOsApi, OpenUrlInPlace}, 
         makepad_math::dvec2,
         makepad_live_id::*,
         thread::SignalToUI,
@@ -204,6 +204,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    self.handle_action_receiver();
                 }
                 else{
                     self.call_event_handler(&Event::Timer(e))
@@ -361,6 +362,9 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+            self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        }
         self.live_expand();
         self.live_scan_dependencies();
         self.native_load_dependencies();
@@ -372,6 +376,10 @@ impl CxOsApi for Cx {
     
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
 }
 

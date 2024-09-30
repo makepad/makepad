@@ -46,7 +46,7 @@ public class MakepadWebSocket {
             mSocket = new Socket();
             mSocket.setSoTimeout(0);
             mSocket.connect(address, ONE_MIN);
-            Log.d("Makepad", "Socket connected " + uri.getScheme());
+            //Log.d("Makepad", "Socket connected " + uri.getScheme());
 
             mSocket.setKeepAlive(true);
 
@@ -56,7 +56,7 @@ public class MakepadWebSocket {
             doHandshake();
         } catch (Exception e) {
             MakepadNative.onWebSocketError(e.toString(), mCallback);
-            throw new RuntimeException(e);
+            // throw new RuntimeException(e);
         }
     }
 
@@ -65,7 +65,7 @@ public class MakepadWebSocket {
         sslContext.init(null, null, null);
         SSLSocketFactory factory = sslContext.getSocketFactory();
         mSocket = factory.createSocket(mSocket, host, port, true);
-        Log.d("Makepad", "SSL Socket connected");
+        //Log.d("Makepad", "SSL Socket connected");
     }
 
     private void doHandshake() throws IOException {
@@ -143,7 +143,7 @@ public class MakepadWebSocket {
             "Origin: localhost\r\n" +
             "\r\n";
 
-            Log.d("Makepad", "content: " + content);
+            //Log.d("Makepad", "content: " + content);
 
         return content;
     }

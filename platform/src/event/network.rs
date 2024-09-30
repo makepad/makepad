@@ -16,13 +16,16 @@ pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 pub enum NetworkResponse{
     HttpRequestError(String),
     HttpResponse(HttpResponse),
+    HttpStreamResponse(HttpResponse),
+    HttpStreamComplete,
     HttpProgress{loaded:u64, total:u64},
 }
-
+/*
 pub struct NetworkResponseIter<I> {
     iter: Option<I>,
 }
-
+*/
+/*
 impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
     type Item = I::Item;
     
@@ -32,7 +35,7 @@ impl<I> Iterator for NetworkResponseIter<I> where I: Iterator {
             Some(v)=>v.next()
         }
     }
-}
+}*/
 
 pub struct NetworkResponseChannel {
     pub receiver: Receiver<NetworkResponseItem>,
@@ -57,6 +60,7 @@ pub struct HttpRequest {
     pub method: HttpMethod,
     pub headers: BTreeMap<String, Vec<String>>,
     pub ignore_ssl_cert: bool,
+    pub is_streaming: bool,
     pub body: Option<Vec<u8>>,
 }
 
@@ -75,6 +79,7 @@ impl HttpRequest {
             metadata_id: LiveId(0),
             url,
             method,
+            is_streaming: false,
             ignore_ssl_cert: false,
             headers: BTreeMap::new(),
             body: None
@@ -107,6 +112,10 @@ impl HttpRequest {
     
     pub fn set_ignore_ssl_cert(&mut self){
         self.ignore_ssl_cert = true
+    }
+    
+    pub fn set_is_streaming(&mut self){
+        self.is_streaming = true
     }
     
     pub fn set_metadata_id(&mut self, id: LiveId){

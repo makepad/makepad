@@ -342,7 +342,7 @@ impl Cx {
                 let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                 let size = pass_rect.size * dpi_factor;
                 cxtexture.update_render_target(d3d11_cx, size.x as usize, size.y as usize);
-                let is_initial = cxtexture.check_initial();
+                let is_initial = cxtexture.take_initial();
                 let render_target = cxtexture.os.render_target_view.clone();
                 color_textures.push(Some(render_target.clone().unwrap()));
                 // possibly clear it
@@ -366,7 +366,7 @@ impl Cx {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
             let size = pass_rect.size * dpi_factor;
             cxtexture.update_depth_stencil(d3d11_cx, size.x as usize, size.y as usize);
-            let is_initial = cxtexture.check_initial();
+            let is_initial = cxtexture.take_initial();
                         
             match self.passes[pass_id].clear_depth {
                 PassClearDepth::InitWith(depth_clear) => {
@@ -805,7 +805,7 @@ impl CxTexture {
     ) {
         // TODO maybe we can update the data instead of making a new texture?
         if self.alloc_vec(){}
-        if self.check_updated(){
+        if !self.take_updated().is_empty() {
             fn get_descs(format: DXGI_FORMAT, width: usize, height: usize, bpp: usize, data: *const std::ffi::c_void)->(D3D11_SUBRESOURCE_DATA,D3D11_TEXTURE2D_DESC) {
                 let sub_data = D3D11_SUBRESOURCE_DATA {
                     pSysMem: data,
@@ -832,20 +832,20 @@ impl CxTexture {
             }
             
             let (sub_data, texture_desc) = match &self.format{
-                TextureFormat::VecBGRAu8_32{width, height, data}=>{
-                    get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, data.as_ptr() as *const _)
+                TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
+                    get_descs(DXGI_FORMAT_B8G8R8A8_UNORM, *width, *height, 4, data.as_ref().unwrap().as_ptr() as *const _)
                 }
-                TextureFormat::VecRGBAf32{width, height, data}=>{
-                    get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ptr() as *const _)
+                TextureFormat::VecRGBAf32{width, height, data, ..}=>{
+                    get_descs(DXGI_FORMAT_R32G32B32A32_FLOAT, *width, *height, 16, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 TextureFormat::VecRu8{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_R8_UNORM, *width, *height, 1, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 TextureFormat::VecRGu8{width, height, data, ..}=>{
-                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, data.as_ptr() as *const _)
+                    get_descs(DXGI_FORMAT_R8G8_UNORM, *width, *height, 1, data.as_ref().unwrap().as_ptr() as *const _)
                 }
-                TextureFormat::VecRf32{width, height, data}=>{
-                    get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ptr() as *const _)
+                TextureFormat::VecRf32{width, height, data, ..}=>{
+                    get_descs(DXGI_FORMAT_R32_FLOAT, *width, *height, 4, data.as_ref().unwrap().as_ptr() as *const _)
                 }
                 _=>panic!()
             };

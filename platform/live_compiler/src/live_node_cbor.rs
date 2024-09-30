@@ -1,5 +1,5 @@
 use {
-    std::rc::Rc,
+    std::sync::Arc,
     crate::{
         makepad_live_tokenizer::LiveId,
         live_node::*,
@@ -717,7 +717,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     LiveValue::InlineString(inline_str)
                 }
                 else {
-                    LiveValue::String(Rc::new(v.to_string()))
+                    LiveValue::String(Arc::new(v.to_string()))
                 };
                 self.push(LiveNode {id, origin, value});
             }

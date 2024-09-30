@@ -25,7 +25,9 @@ pub trait MatchEvent{
     fn handle_http_response(&mut self, _cx:&mut Cx, _request_id:LiveId, _response:&HttpResponse){}
     fn handle_http_request_error(&mut self, _cx:&mut Cx, _request_id:LiveId, _err:&str){}
     fn handle_http_progress(&mut self, _cx:&mut Cx, _request_id:LiveId, _loaded:u64, _total:u64){}
-
+    fn handle_http_stream(&mut self, _cx:&mut Cx, _request_id:LiveId, _data:&HttpResponse){}
+    fn handle_http_stream_complete(&mut self, _cx:&mut Cx, _request_id:LiveId){}
+    
     fn handle_network_responses(&mut self, cx: &mut Cx, e:&NetworkResponsesEvent ){
         for e in e{
             match &e.response{
@@ -37,6 +39,12 @@ pub trait MatchEvent{
                 }
                 NetworkResponse::HttpProgress{loaded, total}=>{
                     self.handle_http_progress(cx, e.request_id, *loaded, *total);
+                }
+                NetworkResponse::HttpStreamResponse(data)=>{
+                    self.handle_http_stream(cx, e.request_id, data);
+                }
+                NetworkResponse::HttpStreamComplete=>{
+                    self.handle_http_stream_complete(cx, e.request_id);
                 }
             }
         }

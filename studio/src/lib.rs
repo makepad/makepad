@@ -10,6 +10,9 @@ pub mod log_list;
 pub mod run_list;
 pub mod run_view;
 pub mod profiler;
+pub mod integration;
+pub mod code_view;
+
 //pub use makepad_code_editor;
 
 pub use makepad_widgets::makepad_draw;

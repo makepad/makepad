@@ -1,7 +1,7 @@
 use {
     std::{
         collections::HashMap,
-        rc::Rc,
+        sync::Arc,
         fmt,
         ops::{Deref, DerefMut},
     },
@@ -71,9 +71,9 @@ pub enum LiveValue {
     None,
     // string types
     Str(&'static str),
-    String(Rc<String>),
+    String(Arc<String>),
     InlineString(InlineString),
-    Dependency(Rc<String>),
+    Dependency(Arc<String>),
     Bool(bool),
     Int64(i64),
     Uint64(u64),
@@ -85,7 +85,7 @@ pub enum LiveValue {
     Vec4(Vec4),
 
     Id(LiveId),
-    IdPath(Rc<Vec<LiveId>>),
+    IdPath(Arc<Vec<LiveId>>),
 
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
@@ -96,7 +96,7 @@ pub enum LiveValue {
     // tree items
     Root{id_resolve:Box<HashMap<LiveId,LiveScopeTarget>>},
     Array,
-    Expr {expand_index: Option<u32>},
+    Expr,// {expand_index: Option<u32>},
     TupleEnum (LiveId),
     NamedEnum (LiveId),
     Object,
@@ -559,7 +559,7 @@ impl LiveValue {
             }
         }
     }
-    
+    /*
     pub fn set_expr_expand_index_if_none(&mut self, index: usize) {
         if let Self::Expr {expand_index, ..} = self {
             if expand_index.is_none() {
@@ -573,7 +573,7 @@ impl LiveValue {
             Self::Expr {expand_index, ..} => *expand_index,
             _ => None
         }
-    }
+    }*/
     
     pub fn is_id(&self) -> bool {
         matches!(self, Self::Id(_))

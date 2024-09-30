@@ -254,6 +254,7 @@ impl Cx {
                                         id: presentable_image.id,
                                         width: swapchain.alloc_width as usize,
                                         height: swapchain.alloc_height as usize,
+                                        initial: true,
                                     };
                                     let texture = Texture::new_with_format(self, format);
                                     if self.textures[texture.texture_id()].update_from_shared_handle(
@@ -271,7 +272,8 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    for event in self.os.stdin_timers.get_dispatch() {
+                    let events = self.os.stdin_timers.get_dispatch();
+                    for event in  events{
                         self.call_event_handler(&event);
                     }                    
                     if self.handle_live_edit() {

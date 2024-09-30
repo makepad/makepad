@@ -219,12 +219,12 @@ live_design!{
         text: "CutOff1"
         draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
         text_input: {
-            cursor_margin_bottom: (SSPACING_1),
-            cursor_margin_top: (SSPACING_1),
-            select_pad_edges: (SSPACING_1),
-            cursor_size: (SSPACING_1),
+            // cursor_margin_bottom: (SSPACING_1),
+            // cursor_margin_top: (SSPACING_1),
+            // select_pad_edges: (SSPACING_1),
+            // cursor_size: (SSPACING_1),
             empty_message: "0",
-            numeric_only: true,
+            is_numeric_only: true,
             draw_bg: {
                 color: (COLOR_DOWN_0)
             },
@@ -835,7 +835,7 @@ live_design!{
                         margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
                         text: "Positive"
                         draw_text: {
-                            text_style: <TEXT_MONO> {font_size: (TEXT_BIG)}
+                            text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
                         }
                         draw_bg: {
                             color: (COLOR_TEXT_INPUT)

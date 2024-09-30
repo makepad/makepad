@@ -77,7 +77,7 @@ impl Widget for TabBar{
         scope: &mut Scope
     ){
         let uid = self.widget_uid();
-        if self.scroll_bars.handle_event(cx, event).len()>0{
+        if self.scroll_bars.handle_event(cx, event, scope).len()>0{
             self.view_area.redraw(cx);
         };
                 

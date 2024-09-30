@@ -150,9 +150,10 @@ impl TileCache {
             empty.push(Tile::new(i));
             
             let texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
-                data: vec![],
+                data: Some(vec![]),
                 width: TILE_SIZE_X,
                 height: TILE_SIZE_Y,
+                updated: TextureUpdated::Full
             });
             textures.push(texture);
         }
@@ -172,7 +173,7 @@ impl TileCache {
     
     fn tile_completed(&mut self, cx: &mut Cx, mut tile: Tile) {
         self.tiles_in_flight -= 1;
-        self.textures[tile.texture_index].swap_vec_u32(cx, &mut tile.buffer);
+        self.textures[tile.texture_index].put_back_vec_u32(cx, &mut tile.buffer, None);
         self.next.push(tile)
     }
     

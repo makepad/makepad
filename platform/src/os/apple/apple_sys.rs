@@ -335,6 +335,8 @@ unsafe impl Encode for NSRect {
     }
 }
 
+pub const NSURLSessionResponseAllow: u64 = 1;
+
 #[repr(u64)] // NSUInteger
 pub enum NSEventModifierFlags {
     NSAlphaShiftKeyMask = 1 << 16,
@@ -347,7 +349,6 @@ pub enum NSEventModifierFlags {
     NSFunctionKeyMask = 1 << 23,
     NSDeviceIndependentModifierFlagsMask = 0xffff0000
 }
-
 pub const NSTrackignActiveAlways: u64 = 0x80;
 pub const NSTrackingInVisibleRect: u64 = 0x200;
 pub const NSTrackingMouseEnteredAndExited: u64 = 0x01;

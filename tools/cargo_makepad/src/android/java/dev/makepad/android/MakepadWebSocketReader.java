@@ -37,16 +37,16 @@ public class MakepadWebSocketReader implements Runnable {
         long callback = mWebSocket.getMakepadCallback();
         
         try {
-            byte[] rawbuffer = new byte[16384];
+            byte[] rawbuffer = new byte[1024*1024];
             int readBytes;
 
             while ((readBytes = mWebSocket.getInputStream().read(rawbuffer)) != -1) {
-                if (readBytes == 2 && rawbuffer[0] == PING[0] && rawbuffer[1] == PING[1]) {
+                /*if (readBytes == 2 && rawbuffer[0] == PING[0] && rawbuffer[1] == PING[1]) {
                     OutputStream ostream = mWebSocket.getOutputStream();
-                    ostream.write(PONG, 0, 1);
+                    ostream.write(PONG, 0, 2);
                     ostream.flush();
                     continue;
-                }
+                }*/
 
                 byte[] message = Arrays.copyOfRange(rawbuffer, 0, readBytes);
                 activity.runOnUiThread(() -> {

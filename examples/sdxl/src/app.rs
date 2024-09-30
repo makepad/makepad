@@ -25,10 +25,10 @@ live_design!{
                 hide_caption_on_fullscreen: true,
                 body = <AppUI>{}
             }
-            /*<Window> {
+            <Window> {
                 window: {inner_size: vec2(960, 540)},
                 body = <AppWindow>{}
-            }*/
+            }
         }
     }
 }
@@ -179,11 +179,6 @@ impl App {
         None
     }
     
-    #[cfg(target_os = "windows")]
-    fn send_camera_to_machine(&mut self, _cx: &mut Cx, _machine_id: LiveId, _prompt_state: PromptState){
-    }
-        
-    #[cfg(not(target_os = "windows"))]
     fn send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
         let jpeg = self.get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
@@ -194,7 +189,7 @@ impl App {
         let photo_name = format!("{}", LiveId::from_str(&format!("{:?}", Instant::now())).0);
         // alright lets write things
         let form_top = format!("--Boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", photo_name);
-        let form_bottom = format!("\r\n--Boundary--");
+        let form_bottom = format!("\r\n--Boundary--\r\n");
 
         request.set_metadata_id(machine.id);
         let mut body = Vec::new();
@@ -213,11 +208,6 @@ impl App {
         };
     }
     
-    #[cfg(target_os = "windows")]
-    fn send_prompt_to_machine(&mut self, _cx: &mut Cx, _machine_id: LiveId, _photo_name:String, _prompt_state: PromptState) {
-    }
-    
-    #[cfg(not(target_os = "windows"))]
     fn send_prompt_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, photo_name:String, prompt_state: PromptState) {
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
         let url = format!("http://{}/prompt", machine.ip);
@@ -246,11 +236,6 @@ impl App {
         };
     }
     
-    #[cfg(target_os = "windows")]
-    fn send_query_to_llm(&mut self, _cx: &mut Cx) {
-    }
-        
-    #[cfg(not(target_os = "windows"))]
     fn send_query_to_llm(&mut self, cx: &mut Cx) {
         // alright we have a query. now what
         let url = format!("http://127.0.0.1:8080/completion");
@@ -334,10 +319,6 @@ impl App {
         cx.http_request(live_id!(image), request);
     }
     
-    #[cfg(target_os = "windows")]
-    fn open_web_socket(&mut self) {
-    }
-    #[cfg(not(target_os = "windows"))]
     fn open_web_socket(&mut self) {
         for machine in &mut self.machines {
             let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
