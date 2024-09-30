@@ -1,6 +1,7 @@
 pub use {
     std::{
         rc::Rc,
+        sync::Arc,
         cell::RefCell,
         io::prelude::*,
         fs::File,
@@ -180,7 +181,7 @@ impl CxIconAtlas {
     }
    
 
-    pub fn get_icon_bounds(&mut self, cx: &Cx, path_str: &Rc<String>, svg_dep: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
+    pub fn get_icon_bounds(&mut self, cx: &Cx, path_str: &Arc<String>, svg_dep: &Arc<String>) -> Option<(CxIconPathHash, Rect)> {
         if svg_dep.len() != 0 {
             // alright so. lets see if we have a path hash
             if let Some(path_hash) = self.svg_deps.get(svg_dep.as_str()) {
@@ -201,7 +202,7 @@ impl CxIconAtlas {
 
                     let mut errors = Some(Vec::new());
                     let svg_string = std::str::from_utf8(&data).unwrap();
-                    let  doc = parse_html(svg_string, &mut errors);
+                    let  doc = parse_html(svg_string, &mut errors, InternLiveId::No);
 
                     if errors.as_ref().unwrap().len()>0{
                         log!("SVG parser returned errors {:?}", errors)
@@ -253,7 +254,7 @@ impl CxIconAtlas {
         if path_str.len() == 0 {
             return None
         }
-        let path_hash = CxIconPathHash(LiveId(Rc::as_ptr(path_str) as u64));
+        let path_hash = CxIconPathHash(LiveId(Arc::as_ptr(path_str) as u64));
         if let Some(path) = self.paths.get(&path_hash) {
             let mut bounds:Rect = path[0].bounds;
             for i in 1..path.len(){
@@ -386,7 +387,8 @@ impl CxDrawIconAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         
         let atlas_texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8{
-            size: TextureSize::Auto
+            size: TextureSize::Auto,
+            initial: true,
         });
         //cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
         
@@ -471,7 +473,7 @@ impl<'a> Cx2d<'a> {
     
 }
 
-fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
+pub fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
     #[derive(Debug)]
     enum Cmd {
         Unknown,

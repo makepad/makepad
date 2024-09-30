@@ -80,6 +80,7 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut device_identifier = None;
     let mut app = None;
     let mut org = None;
+    let mut stable = false;
     if args.len() < 1{
         return Err(format!("not enough args"))
     }
@@ -117,6 +118,9 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
         else if let Some(opt) = v.strip_prefix("--org=") {
             org = Some(opt.to_string());
         }
+        else if v == "--stable"{
+            stable = true;
+        }
         else {
             args = &args[i..];
             break
@@ -130,7 +134,8 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
         }
         "run-device" =>{
             compile::run_on_device(AppleArgs{
-                apple_os,
+                stable,
+                _apple_os:apple_os,
                 signing_identity, 
                 provisioning_profile, 
                 device_identifier, 
@@ -141,7 +146,8 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
         }
         "run-sim" =>{
             compile::run_on_sim(AppleArgs{
-                apple_os,
+                stable,
+                _apple_os:apple_os,
                 signing_identity, 
                 provisioning_profile, 
                 device_identifier, 

@@ -98,6 +98,12 @@ pub struct FromWasmTextCopyResponse {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmOpenUrl {
+    pub url: String,
+    pub in_place: bool
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmShowTextIME {
     pub x: f64,
     pub y: f64

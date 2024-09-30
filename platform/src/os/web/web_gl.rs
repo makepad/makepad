@@ -82,14 +82,14 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.format.is_vec(){
                         if cxtexture.alloc_vec(){}
-                        if cxtexture.check_updated(){
+                        if !cxtexture.take_updated().is_empty() {
                             match &cxtexture.format{
-                                TextureFormat::VecBGRAu8_32{width, height, data}=>{
+                                TextureFormat::VecBGRAu8_32{width, height, data, .. }=>{
                                     self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new(&data)
+                                        data: WasmPtrU32::new((*data).as_ref().unwrap())
                                     });
                                 }
                                 TextureFormat::VecRu8{width, height, data, ..}=>{
@@ -97,7 +97,7 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU8::new(&data)
+                                        data: WasmPtrU8::new((*data).as_ref().unwrap())
                                     });
                                 }
                                 x=>panic!("Texture format not implemented for webGL {:?}", x)

@@ -86,8 +86,6 @@ pub use {
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
-        live_eval,
-        LiveEval,
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
@@ -128,7 +126,7 @@ pub use {
     },
     crate::{
         os::*,
-        cx_api::CxOsApi,
+        cx_api::{CxOsApi,OpenUrlInPlace},
         media_api::CxMediaApi,
         scope::*,
         draw_list::{
@@ -205,6 +203,8 @@ pub use {
             HitOptions,
             DragHitEvent,
             DropHitEvent,
+            DesignerPickEvent,
+            HitDesigner,
         },
         action::{
             Action,
@@ -229,11 +229,12 @@ pub use {
             Texture,
             TextureId,
             TextureFormat,
-            TextureSize
+            TextureSize,
+            TextureUpdated,
         },
         live_prims::{
             LiveDependency,
-            RcStringMut,
+            ArcStringMut,
         },
         live_traits::{
             LiveHookDeref,

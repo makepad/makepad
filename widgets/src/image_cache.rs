@@ -73,7 +73,8 @@ impl ImageBuffer {
         let texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
             width: self.width,
             height: self.height,
-            data: self.data
+            data: Some(self.data),
+            updated: TextureUpdated::Full,
         });
         texture
     }

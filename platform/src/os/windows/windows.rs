@@ -21,7 +21,7 @@ use {
         },
         makepad_math::*,
         pass::CxPassParent,
-        cx_api::{CxOsApi, CxOsOp},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
     }
@@ -283,7 +283,14 @@ impl Cx {
         }
     }
     
-    pub (crate) fn handle_networking_events(&mut self) {
+    pub(crate) fn handle_networking_events(&mut self) {
+        let mut out = Vec::new();
+        while let Ok(event) = self.os.network_response.receiver.try_recv(){
+            out.push(event);
+        }
+        if out.len()>0{
+            self.call_event_handler(& Event::NetworkResponses(out))
+        }
     }
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx) -> EventFlow {
@@ -380,8 +387,11 @@ impl Cx {
                 },
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest {request_id: _, request: _} => {
-                    todo!("HttpRequest not implemented yet on windows, we'll get there");
+                CxOsOp::HttpRequest {request_id, request} => {
+                    use crate::os::windows::http::WindowsHttpSocket;
+                    WindowsHttpSocket::open(request_id, request, self.os.network_response.sender.clone());
+
+                    //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
@@ -404,6 +414,10 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+            self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        }
+        
         self.live_expand();
         if std::env::args().find( | v | v == "--stdin-loop").is_none() {
             self.start_disk_live_file_watcher(100);
@@ -419,6 +433,10 @@ impl CxOsApi for Cx {
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
     }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
+    }
 }
 
 #[derive(Default)]
@@ -426,5 +444,6 @@ pub struct CxOs {
     pub (crate) start_time: Option<Instant>,
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
-   //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
+    pub (crate) network_response: NetworkResponseChannel,
+    //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }

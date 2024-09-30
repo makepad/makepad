@@ -31,3 +31,4 @@ version = "0.48.3"
 [features]
 default = []
 implement = []
+windows_debugger_visualizer =[]

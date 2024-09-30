@@ -180,6 +180,7 @@ impl Widget for DiffuseThing{
                 cx,
                 TextureFormat::RenderBGRAu8   {
                     size: TextureSize::Auto,
+                    initial: true,
                 },
             ));
         }
@@ -189,6 +190,7 @@ impl Widget for DiffuseThing{
                 cx,
                 TextureFormat::RenderBGRAu8 {
                     size: TextureSize::Auto,
+                    initial: true,
                 },
             ));
         }
@@ -234,7 +236,7 @@ impl Widget for DiffuseThing{
 
             self.draw_reaction.draw_vars.set_texture(0, source);    
             
-            let mut rect:Rect = cx.walk_turtle_with_area(&mut self.area, walk);
+            let rect:Rect = cx.walk_turtle_with_area(&mut self.area, walk);
            // rect.pos.y = 0.;
             self.draw_reaction.draw_abs(cx, rect);
 

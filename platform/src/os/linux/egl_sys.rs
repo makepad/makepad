@@ -41,7 +41,9 @@ pub const EGL_DMA_BUF_PLANE0_OFFSET_EXT: u32 = 12915;
 pub const EGL_DMA_BUF_PLANE0_PITCH_EXT: u32 = 12916;
 pub const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: u32 = 13379;
 pub const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: u32 = 13380;
-
+pub const EGL_SWAP_BEHAVIOR: i32 = 0x3093;
+pub const EGL_BUFFER_PRESERVED: i32 = 0x3094;
+pub const EGL_BUFFER_DESTROYED: i32 = 0x3095;
 pub type NativeDisplayType = EGLNativeDisplayType;
 pub type NativePixmapType = EGLNativePixmapType;
 pub type NativeWindowType = EGLNativeWindowType;
@@ -239,9 +241,28 @@ unsafe extern "C" fn(
 ),
 >;
 
+type PFNEGLPRESENTATIONTIMEANDROID = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    surface: EGLSurface,
+    time: i64
+),
+>;
+
+type PFNEGLSURFACEATTRIB = ::std::option::Option<
+unsafe extern "C" fn(
+    dpy: EGLDisplay,
+    surface: EGLSurface,
+    attrib: EGLint,
+    value: EGLint
+)->EGLBoolean,
+>;
+
+
 struct Module(::std::ptr::NonNull<::std::os::raw::c_void>);
 
 pub struct LibEgl {
+    pub eglPresentationTimeANDROID: PFNEGLPRESENTATIONTIMEANDROID,
     pub eglBindAPI: PFNEGLBINDAPIPROC,
     pub eglChooseConfig: PFNEGLCHOOSECONFIGPROC,
     pub eglCopyBuffers: PFNEGLCOPYBUFFERSPROC,
@@ -336,6 +357,7 @@ impl LibEgl {
         }
 
         Some(LibEgl {
+            eglPresentationTimeANDROID: module.get_symbol("eglPresentationTimeANDROID").ok(),
             eglBindAPI: module.get_symbol("eglBindAPI").ok(),
             eglChooseConfig: module.get_symbol("eglChooseConfig").ok(),
             eglCopyBuffers: module.get_symbol("eglCopyBuffers").ok(),
@@ -384,6 +406,7 @@ pub enum EglError {
     NoDisplay,
     InitializeFailed,
     CreateContextFailed,
+    ChooseConfigFailed,
 }
 
 pub struct Egl {}
@@ -475,5 +498,62 @@ pub unsafe fn create_egl_context(
         return Err(EglError::CreateContextFailed);
     }
     
+    return Ok((context, config, display));
+}
+
+#[cfg(target_env="ohos")]
+pub unsafe  fn create_egl_context(
+    egl: &mut LibEgl
+) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
+    let display = (egl.eglGetDisplay.unwrap())(null_mut());
+    if display == null_mut() {
+        return Err(EglError::NoDisplay);
+    }
+
+    if (egl.eglInitialize.unwrap())(display,null_mut(),null_mut()) == 0 {
+        return Err(EglError::InitializeFailed);
+    }
+
+    #[rustfmt::skip]
+    let cfg_attributes = vec![
+        EGL_SURFACE_TYPE,
+        EGL_WINDOW_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_RENDERABLE_TYPE,
+        EGL_OPENGL_ES2_BIT,
+        EGL_DEPTH_SIZE, 0,
+        EGL_STENCIL_SIZE, 0,
+        EGL_NONE
+    ];
+    let available_cfgs: Vec<EGLConfig> = vec![null_mut(); 1];
+    let mut cfg_count = 0;
+
+    if (egl.eglChooseConfig.unwrap())(
+        display,
+        cfg_attributes.as_ptr() as _,
+        available_cfgs.as_ptr() as _,
+        1,&mut cfg_count as *mut _ as *mut _,
+    ) == 0 {
+        return Err(EglError::ChooseConfigFailed);
+    }
+
+    assert!(cfg_count > 0);
+
+    let config = available_cfgs[0];
+
+    let ctx_attributes = vec![EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE];
+    let context = (egl.eglCreateContext.unwrap())(
+        display,
+        config,
+        /* EGL_NO_CONTEXT */ null_mut(),
+        ctx_attributes.as_ptr() as _
+    );
+    if context.is_null(){
+        return Err(EglError::CreateContextFailed);
+    }
+    crate::log!("create elg context success");
     return Ok((context, config, display));
 }

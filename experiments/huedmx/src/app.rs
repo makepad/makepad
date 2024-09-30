@@ -54,13 +54,13 @@ app_main!(App);
 pub struct Store{
     #[live(0.5f64)] global_volume: f64a,
 }
-
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[live] store: Arc<Store>,
     #[rust] volume_changed_by_ui: SignalFromUI,
-    #[rust] volume_changed_by_network: SignalToUI,
+    //#[rust] volume_changed_by_network: SignalToUI,
     #[rust] hue_light_change: ToUIReceiver<(usize,HueLight)>,
     #[rust] hue_light_last: HashMap<usize, HueLight>,
     #[rust] hue_light_set: HashMap<usize, HueLight>,
@@ -115,9 +115,7 @@ impl MatchEvent for App{
         self.store_to_widgets(cx);
         self.start_artnet_client(cx);
         self.fetch_hue_lights(cx);
-        self.start_imu_forward(cx);
-        self.start_forza_forward(cx);
-        self.hue_poll = cx.start_interval(0.1);
+self.hue_poll = cx.start_interval(0.1);
     }
     
     fn handle_timer(&mut self, cx:&mut Cx, e:&TimerEvent){
@@ -153,7 +151,7 @@ impl MatchEvent for App{
         };
     }
     
-    fn handle_signal(&mut self, cx: &mut Cx){
+    fn handle_signal(&mut self, _cx: &mut Cx){
         // lets fetch the latest hue IDs
         while let Ok((id,data)) = self.hue_light_change.try_recv(){
             if self.hue_light_last.get(&id) != Some(&data){
@@ -317,44 +315,7 @@ struct ForzaTelemetryDash{
 }
 
 impl App {
-    pub fn start_imu_forward(&mut self, _cx:&mut Cx){
-        // open up port udp X and forward packets to both wind + platform
-        let imu_recv = UdpSocket::bind("0.0.0.0:44442").unwrap();
-        std::thread::spawn(move || {
-            let mut buffer = [0u8;25];
-            while let Ok((length, _addr)) = imu_recv.recv_from(&mut buffer){
-                 log!("IMU {:x?}",&buffer[0..length]);
-            } 
-        });
-    }
-    
-    pub fn start_forza_forward(&mut self, _cx:&mut Cx){
-        let wind_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let wind_send_addr = "10.0.0.202:44443";
-        let platform_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let platform_send_addr = "10.0.0.126:51010";
-                
-        // open up port udp X and forward packets to both wind + platform
-        let forca_recv = UdpSocket::bind("0.0.0.0:51010").unwrap();
-        let buf = [0 as u8,]; 
-        let _ = wind_socket.send_to(&buf, wind_send_addr);
-        std::thread::spawn(move || {
-            
-            let mut buffer = [0u8;1024];
-            while let Ok((length, _addr)) = forca_recv.recv_from(&mut buffer){
-                let forza = ForzaTelemetryDash::deserialize_bin(&buffer[0..length]).unwrap();
-                let speed = (forza.velocity_x*forza.velocity_x+forza.velocity_y*forza.velocity_y+forza.velocity_z*forza.velocity_z).sqrt();
-                // ok so speed is 20.0 at 40mph
-                // max fan is 127.0
-                // lets say 100mph = 60 = 127.
-                let buf = [(speed*2.2).min(255.0) as u8,];
-                let _ = wind_socket.send_to(&buf, wind_send_addr);
-                println!("SENDING TO {:?}", buf); 
-                let _ = platform_socket.send_to(&buffer[0..length], platform_send_addr);
-            }
-        });
-    }
-    
+
     pub fn handle_hue_lights(&mut self, _cx:&mut Cx, res:&HttpResponse){
         if let Some(data) = res.get_string_body() {
             let value = JsonValue::deserialize_json(&data).unwrap();
@@ -395,17 +356,30 @@ impl App {
         }
         #[derive(Debug,Clone,Default)]
         struct Buttons{
-            mute:[bool;9],
-            rec:[bool;9],
+            mute:[bool;8],
+            rec:[bool;8],
             solo:bool,
             bank_left:bool,
             bank_right:bool
         }
         impl Buttons{
+            fn preset_id(&self)->Option<usize>{
+                for i in 0..8{
+                    if self.mute[i]{
+                        return Some(i)
+                    }
+                }
+                for i in 0..8{
+                    if self.rec[i]{
+                        return Some(i+8)
+                    }
+                }
+                None
+            }
             fn delta(old:&Buttons, new:&Buttons)->Self{
-                let mut mute = [false;9];
-                let mut rec = [false;9];
-                for i in 0..9{
+                let mut mute = [false;8];
+                let mut rec = [false;8];
+                for i in 0..8{
                     mute[i] = !old.mute[i] && new.mute[i];
                     rec[i] = !old.rec[i] && new.rec[i];
                 }
@@ -552,10 +526,10 @@ impl App {
                         }
                         x=>log!("{:?}",x)
                     }
+                    //log!("{:?}",data.decode());
                 }
                 let buttons = Buttons::delta(&old_buttons,&new_buttons);
                 old_buttons = new_buttons.clone();
-                
                 universe[12] = counter as u8;
                 if counter > 255{ counter = 0}
                 clock += 1.0/44.0;
@@ -580,16 +554,41 @@ impl App {
                 // KITCHEN STRIP (C) - 38
                 // DESK (B)  - 39
                 // TABLE (B) - 40
-                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0]*state.fade[8], &[3, 19, 22, 29]);
-                hue_wargb(&mut hue_sender, state.dial_c[1], state.fade[1]*state.fade[8], &[8, 23, 34, 40, 39]);
-                hue_wargb(&mut hue_sender, state.dial_c[2], state.fade[2]*state.fade[8], &[24, 25, 32, 33, 38]);
-                if buttons.mute[7]{
-                    hue_switch(&mut hue_sender,true, &[41]);
-                }
-                else if buttons.rec[7]{
+                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0], &[3, 19, 22, 29]);
+                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0], &[8, 23, 34, 40, 39]);
+                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0], &[24, 25, 32, 33, 38]);
+                
+                // all these buttons become preset= slots
+                
+                
+                if buttons.bank_right{
                     hue_switch(&mut hue_sender,false, &[41]);
                 }
-                
+                else if buttons.solo{
+                    hue_switch(&mut hue_sender,true, &[41]);
+                }
+                if new_buttons.bank_left{ // write a preset
+                    if let Some(idx) = new_buttons.preset_id(){
+                        println!("{} {:?}", idx, new_buttons);
+                        std::fs::write(format!("dmx{}.ron", idx), state.serialize_ron().as_bytes()).unwrap();
+                    }
+                }
+                else{ // read a preset
+                    if let Some(idx) = new_buttons.preset_id(){
+                        println!("{} {:?}", idx, buttons);
+                        if let Ok(result) = std::fs::read_to_string(format!("dmx{}.ron", idx)){
+                            if let Ok(load) = State::deserialize_ron(&result){
+                                let ts = state;
+                                state = load;
+                                for i in 5..8{
+                                    state.dial_a[i] = ts.dial_a[i];
+                                    state.dial_b[i] = ts.dial_b[i];
+                                }
+                            }
+                        }
+                    }
+                }
+                /*
                 if buttons.mute[6]{
                     hue_wargb(&mut hue_sender,0.0, 1.0, &[12,13]);
                 }
@@ -603,13 +602,15 @@ impl App {
                 else if buttons.rec[5]{
                     hue_wargb(&mut hue_sender,0.0, 0.0, &[18]);
                 }                
+                */
                 
-                if buttons.mute[4]{
-                    hue_switch(&mut hue_sender,true,  &[16,21,26]);
+                if state.fade[6]>0.5{
+                    hue_switch(&mut hue_sender,true,  &[42]);
                 }
-                else if buttons.rec[4]{
-                    hue_switch(&mut hue_sender,false,  &[16,21,26]); 
-                }                 
+                else {
+                    hue_switch(&mut hue_sender,false,  &[42]); 
+                }
+                      
                  
                 map_wargb(state.dial_c[3], 1.0, dmx, &[110+2-1]); // RGB laser color
                 // lets set the laser mode with the slider
@@ -652,19 +653,24 @@ impl App {
                     }
                     _=>{} 
                 }
+                /*
                 let multi_fx_addr = 100;
                 dmx_f32((state.fade[3]-0.5).max(0.0)*2.0, dmx, &[multi_fx_addr], 3);
                 dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 1);
                 dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 2);
                 dmx_f32(state.dial_c[4], dmx, &[multi_fx_addr], 4);
+                */
                 let rgb_strobe = 120;
-                
-                map_wargb(state.dial_c[5], state.fade[5], dmx, &[rgb_strobe+3-1]); // Strobe RGB
+                map_wargb(state.dial_c[3], state.fade[3], dmx, &[rgb_strobe+3-1]); // Strobe RGB
                 dmx_f32(1.0, dmx, &[rgb_strobe], 1);
-                dmx_f32(1.0-(state.fade[5].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
+                dmx_f32(state.dial_a[6], dmx, &[rgb_strobe], 10);
+                //dmx_f32(1.0-(state.fade[3].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
                 
-                dmx_f32(state.fade[6]*10.0, dmx, &[rgb_strobe], 6);
-                dmx_f32(state.fade[6], dmx, &[rgb_strobe], 8);
+                // strobe
+                dmx_f32(state.fade[4], dmx, &[rgb_strobe], 6);
+                dmx_f32(state.dial_a[7], dmx, &[rgb_strobe], 8);
+                
+                
                 /*
                 dmx_f32(state.dial_b[0], dmx, &[rgb_strobe], 7);
                 dmx_f32(state.dial_b[1], dmx, &[rgb_strobe], 11);
@@ -675,26 +681,24 @@ impl App {
                 let spot1 = 200;
                 let spot2 = 250;
                 
-                dmx_f32(state.fade[7], dmx, &[spot1, spot2], 6);
+                dmx_f32(state.fade[2], dmx, &[spot1, spot2], 6);
                 dmx_f32(state.dial_a[0], dmx, &[spot1], 1);
                 dmx_f32(state.dial_a[0], dmx, &[spot2], 1);
                 dmx_f32(state.dial_a[1], dmx, &[spot1, spot2], 3);
-                dmx_f32(state.dial_a[2], dmx, &[spot1, spot2], 14); 
-                map_wargb(state.dial_a[3], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
+                
+                dmx_f32(state.fade[1], dmx, &[spot1, spot2], 14); 
+                
+                map_wargb(state.dial_c[1], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
+                dmx_f32(state.dial_c[2], dmx, &[spot1, spot2], 8);
                 dmx_f32(state.dial_a[4], dmx, &[spot1, spot2], 12);
-                dmx_f32(state.dial_a[5], dmx, &[spot1, spot2], 13);
-                
-
-                
-                dmx_f32(state.dial_a[6], dmx, &[spot1, spot2], 10);
-                                                
-                dmx_f32(state.dial_a[7], dmx, &[spot1, spot2], 8);
+                dmx_f32(state.dial_a[3], dmx, &[spot1, spot2], 13);
+                dmx_f32(state.dial_a[2], dmx, &[spot1, spot2], 10);
                 
                 // smoke machine
                 let smoke = 300;
                 // ok so depending on the state of c_[7] we do a percentage of a 
                 let slot = 101.0f64;
-                let needed = slot * state.dial_c[7] as f64;
+                let needed = slot * state.dial_b[5] as f64;
                 let t = clock.rem_euclid(slot);
                 if t < needed{
                     dmx_f32(1.0, dmx, &[smoke], 1);
@@ -711,18 +715,22 @@ impl App {
                 let laser1 = 400;
                 let laser2 = 420;
                 let laser3 = 440;
-                dmx_f32(state.dial_b[0], dmx, &[laser1,laser2,laser3], 1);
-                dmx_f32(state.dial_b[1], dmx, &[laser1,laser2,laser3], 2);
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 3);
-                dmx_f32(0.3, dmx, &[laser1,laser2,laser3], 4); 
-                dmx_f32(state.dial_b[2], dmx, &[laser1,laser2,laser3], 5);
-                dmx_f32(state.dial_b[3], dmx, &[laser1,laser2,laser3], 6);
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 7);
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 8); 
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 10); 
-                dmx_f32(0.5, dmx, &[laser1,laser2,laser3], 9); // y position
-                dmx_f32(state.dial_b[4], dmx, &[laser1,laser2,laser3], 11); 
-                dmx_f32(state.dial_b[5], dmx, &[laser1,laser2,laser3], 12); 
+                let laser4 = 460;
+                let laser5 = 480;
+                let lasers = [laser1,laser2,laser3,laser4,laser5];
+                                
+                dmx_f32(state.fade[5], dmx, &lasers, 1);
+                dmx_f32(state.dial_b[0], dmx, &lasers, 2);
+                dmx_f32(state.dial_b[1], dmx, &lasers, 11); 
+                dmx_f32(state.dial_b[2], dmx, &lasers, 12); 
+                dmx_f32(0.5, dmx, &lasers, 3);
+                dmx_f32(0.3, dmx, &lasers, 4); 
+                dmx_f32(state.dial_b[3], dmx, &lasers, 5);
+                dmx_f32(state.dial_b[4], dmx, &lasers, 6);
+                dmx_f32(0.5, dmx, &lasers, 7);
+                dmx_f32(0.5, dmx, &lasers, 8); 
+                dmx_f32(0.5, dmx, &lasers, 10); 
+                dmx_f32(0.5, dmx, &lasers, 9); // y position
                                                                                                 
                 
                 //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];

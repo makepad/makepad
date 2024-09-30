@@ -50,7 +50,7 @@ impl LiveComponentRegistries {
         Self (Rc::new(RefCell::new(HashMap::new())))
     }
     
-    pub fn get<T: 'static + LiveComponentRegistry>(&self) -> std::cell::Ref<'_, T> {
+    pub fn get<T: 'static + LiveComponentRegistry >(&self) -> std::cell::Ref<'_, T> {
         std::cell::Ref::map(
             self.0.borrow(),
             | v | v

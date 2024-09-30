@@ -43,7 +43,7 @@ use {
             NetworkResponseChannel
         },
         window::CxWindowPool,
-        cx_api::{CxOsApi, CxOsOp},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx, OsType},
     }
 };
@@ -262,6 +262,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    self.handle_action_receiver();
                     if self.handle_live_edit() {
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
@@ -569,6 +570,9 @@ impl CxOsApi for Cx {
     
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+            self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        }
         self.live_expand();
         if !Self::has_studio_web_socket() {
             self.start_disk_live_file_watcher(100);
@@ -587,6 +591,10 @@ impl CxOsApi for Cx {
     
     fn seconds_since_app_start(&self)->f64{
         Instant::now().duration_since(self.os.start_time.unwrap()).as_secs_f64()
+    }
+    
+    fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
+        crate::error!("open_url not implemented on this platform");
     }
     
     /*

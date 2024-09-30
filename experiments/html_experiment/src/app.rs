@@ -76,7 +76,7 @@ live_design!{
             
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return #fff
+                    return #999
                     // test
                     // return mix(#7, #3, self.pos.y);
                 }
@@ -123,9 +123,9 @@ live_design!{
                     draw_block:{ 
                         line_color: (MESSAGE_TEXT_COLOR)
                         sep_color: (MESSAGE_TEXT_COLOR)
+                        code_color: (#3)
                         quote_bg_color: (#4)
                         quote_fg_color: (#7)
-                        block_color: (#3)
                     }
                     list_item_layout: { line_spacing: 5.0, padding: {top: 1.0, bottom: 1.0}, }
 
@@ -136,15 +136,22 @@ live_design!{
                     img = <HtmlImage> {
                     }
 
-                    a = {
-                        draw_text: {
-                            text_style: { height_factor: (HTML_TEXT_HEIGHT_FACTOR), line_spacing: (HTML_LINE_SPACING), top_drop: 1.2}
-                        }
-                    }
-
                     body: "
-                        <a href=\"https://github.com/element-hq/element-web/releases/tag/v1.11.48\">https://github.com/element-hq/element-web/releases/tag/v1.11.48</a> I can find it? <b>text</b><br>
-                        
+                    Testing plaintext link: <a href=\"https://www.google.com\">Google multi-word link text here</a>
+                    
+                    <h2>Header 2 link to <a href=\"https://www.google.com\">Google link is long and might need to wrap</a> </h2>
+
+                    <b>Bold and <i>italic</i> link to <a href=\"https://www.google.com\">Google but the link is really really long and needs to be wrapped multiple times across so many lines that it's hard to handle this</a></b>
+
+                    <h4>Header 4 <b> bold link to <a href=\"https://www.google.com\">Google test1 test2 test3 test4 test5 test6 test7 test8 test9 test10 </a></b></h4>
+
+                    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed venenatis, lorem sodales lacinia ornare, nisi lorem congue urna, eget dictum urna lacus ut quam. Duis elementum vehicula tellus vel mollis. Vivamus ut orci sed lorem aliquet posuere. Ut sem augue, gravida vitae luctus placerat, vulputate at ligula. Ut sit amet commodo massa. Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere cubilia curae; Pellentesque sodales, eros id dictum bibendum, nisi neque iaculis augue, ac suscipit dolor nisi et velit. Integer dignissim interdum metus. Etiam ultricies nibh eu bibendum ultricies. Maecenas dictum maximus mollis.
+
+                    Morbi sit amet placerat metus. Vivamus eleifend elementum lectus, in dignissim elit pulvinar sed. Nam eleifend a dui condimentum vestibulum. Nam nec orci pretium, sodales orci quis, aliquam dolor. Maecenas id neque tempor, sollicitudin nisi at, bibendum turpis. Donec consectetur tellus a ornare dictum. Mauris mollis laoreet consequat. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Nunc in fermentum velit.
+                    
+                    Curabitur aliquam lectus id erat sagittis vulputate. Sed aliquet et nisl vel rutrum. Morbi imperdiet condimentum pellentesque. Sed tincidunt facilisis tortor a tincidunt. Nullam congue consequat finibus. Etiam placerat, ipsum vel faucibus commodo, metus velit efficitur felis, sit amet viverra neque sem quis neque. Vivamus convallis tellus aliquet, aliquet turpis non, hendrerit dolor. Mauris vestibulum dictum sem, vel rutrum metus pretium id. Praesent vehicula arcu gravida tortor interdum, mattis tincidunt ante ornare. Quisque sed magna convallis, pretium nisi a, mattis diam. Donec et arcu venenatis, dapibus eros eu, finibus quam. Nullam et luctus tellus, sit amet vehicula neque. Integer pulvinar vitae nunc in placerat. Aliquam sollicitudin sed tellus eu eleifend.
+                    
+                    Mauris vitae lobortis libero, sed euismod augue. Sed varius pulvinar consectetur. Sed blandit luctus dignissim. Fusce tortor neque, scelerisque ac elit at, scelerisque hendrerit odio. Nullam nec pulvinar nisi, id dignissim est. Fusce aliquet diam libero, eu malesuada nibh fermentum in. Integer tempor auctor magna, a varius quam placerat ut. Aenean sed ex sed velit elementum condimentum. Maecenas ac lobortis ipsum, fermentum auctor felis. Duis sollicitudin id felis ullamcorper euismod. Ut quis ante sed urna semper sodales. Donec sit amet est sagittis, auctor est elementum, consectetur augue. Mauris rhoncus mi a neque malesuada ultrices. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Quisque a erat vel orci rhoncus condimentum vitae vitae odio. Vestibulum facilisis nunc neque, ut porta quam commodo eu.
                     "
 
                 }
@@ -174,6 +181,12 @@ impl MatchEvent for App {
             self.counter += 1;
             let label = self.ui.label(id!(label1));
             label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+        }
+
+        for action in actions {
+            if let HtmlLinkAction::Clicked { url, .. } = action.as_widget_action().cast() {
+                log!("got HtmlLinkAction::Clicked: url: {:?}", url);
+            }
         }
     }
 }

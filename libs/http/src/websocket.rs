@@ -164,11 +164,11 @@ impl ServerWebSocket {
     {
         match &msg{
             ServerWebSocketMessage::Text(data)=>{
-                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, false);
                 ServerWebSocket::build_message(header, &data.to_string().into_bytes())
             }
             ServerWebSocketMessage::Binary(data)=>{
-                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Text, true);
+                let header = ServerWebSocketMessageHeader::from_len(data.len(), ServerWebSocketMessageFormat::Binary, false);
                 ServerWebSocket::build_message(header, &data)
             }
             _=>panic!()
@@ -243,6 +243,7 @@ impl ServerWebSocket {
                         break;
                     }
                     let opcode = self.head[0] & 15;
+                    
                     if opcode <= 2 {
                         self.is_partial = (self.head[0] & 128) != 0;
                         self.is_text = opcode == 1;
