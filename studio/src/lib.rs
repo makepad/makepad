@@ -11,6 +11,7 @@ pub mod run_list;
 pub mod run_view;
 pub mod profiler;
 pub mod integration;
+pub mod ai_chat;
 
 //pub use makepad_code_editor;
 

@@ -50,6 +50,7 @@ impl LiveRegister for App{
         crate::studio_editor::live_design(cx);
         crate::studio_file_tree::live_design(cx);
         crate::app_ui::live_design(cx);
+        crate::ai_chat::live_design(cx);
         // for macos
         cx.start_stdin_service();
     }
@@ -69,12 +70,19 @@ impl App {
         }
     }
     
+    pub fn open_ai_chat(&mut self, cx: &mut Cx) {
+        let dock = self.ui.dock(id!(dock));            
+        let tab_id = dock.unique_tab_id(0);//file_id.0);
+        //self.data.file_system.request_open_file(tab_id, file_id);
+        let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(ai_first)).unwrap();
+        dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(AiChat), "".to_string(), live_id!(CloseableTab), Some(pos));
+    }
+    
     pub fn load_state(&mut self, cx:&mut Cx){
         if let Ok(contents) = std::fs::read_to_string("makepad_state.ron") {
             match AppStateRon::deserialize_ron(&contents) {
-                Ok(state)=>{ 
+                Ok(state)=>{
                     // Now we need to apply the saved state
-                    
                     let dock = self.ui.dock(id!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         // lets load the code editors
@@ -357,7 +365,7 @@ impl MatchEvent for App{
             }
             FileSystemAction::LiveReloadNeeded(live_file_change) => {
                 self.data.build_manager.live_reload_needed(live_file_change);
-                //self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
+                self.data.build_manager.clear_log(cx, &dock, &mut self.data.file_system);
                 log_list.redraw(cx);
             }
             FileSystemAction::FileChangedOnDisk(_res)=>{
