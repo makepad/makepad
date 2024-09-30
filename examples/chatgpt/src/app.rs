@@ -1,6 +1,7 @@
 use crate::makepad_live_id::*;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
+use std::env;
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -73,6 +74,7 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
+    #[rust] conversation_history: Vec<Message>,
 }
 
 impl LiveRegister for App {
@@ -82,10 +84,22 @@ impl LiveRegister for App {
 }
 
 impl App {
-    // This performs and event-based http request: it has no relationship with the response.
+    fn update_message_label(&mut self, cx: &mut Cx) {
+        let label = self.ui.label(id!(message_label));
+        let mut conversation_text = String::new();
+
+        for message in &self.conversation_history {
+            let role_label = if message.role == "user" { "User:" } else { "Assistant:" };
+            conversation_text.push_str(&format!("{}\n{}\n\n", role_label, message.content));
+        }
+
+        label.set_text_and_redraw(cx, &conversation_text);
+    }
+
+    // This performs an event-based HTTP request: it has no relationship with the response.
     // The response will be received and processed by AppMain's handle_event.
+
     fn send_message(&self, cx: &mut Cx, message: String) {
-        let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
         let request_id = live_id!(SendChatMessage);
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         request.set_is_streaming();
@@ -99,6 +113,7 @@ impl App {
             model: "gpt-4o".to_string(),
             max_tokens: 1000,
             stream: true,
+
         });
         self.ui.label(id!(message_label)).set_text_and_redraw(cx, "Answering:..\n");
         cx.http_request(request_id, request);
@@ -106,16 +121,16 @@ impl App {
 }
 
 impl MatchEvent for App {
-
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(send_button)).clicked(&actions) || 
            self.ui.text_input(id!(message_input)).returned(&actions).is_some()
         {
             let user_prompt = self.ui.text_input(id!(message_input)).text();
             self.send_message(cx, user_prompt);
+
         }
     }
-    
+
     fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
        let label = self.ui.label(id!(message_label));
        for event in responses{
@@ -144,12 +159,13 @@ impl MatchEvent for App {
                    println!("Stream complete");
                }
                NetworkResponse::HttpResponse(response) => {
-                   
                    match event.request_id {
                        live_id!(SendChatMessage) => {
+                           let label = self.ui.label(id!(message_label));
                            if response.status_code == 200 {
                                let chat_response = response.get_json_body::<ChatResponse>().unwrap();
                                label.set_text_and_redraw(cx, &chat_response.choices[0].message.as_ref().unwrap().content.as_ref().unwrap());
+
                            } else {
                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
                            }
@@ -167,6 +183,7 @@ impl MatchEvent for App {
     }
 }
 
+
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
@@ -174,7 +191,7 @@ impl AppMain for App {
     }
 }
 
-#[derive(SerJson, DeJson)]
+#[derive(SerJson, DeJson, Clone)]
 struct ChatPrompt {
     pub messages: Vec<ChatMessage>,
     pub model: String,
@@ -224,6 +241,7 @@ struct ChatChoice {
     finish_reason: Option<String>,
     logprobs: JsonValue,
     index: i32,
+    logprobs: Option<String>,
 }
 
 
