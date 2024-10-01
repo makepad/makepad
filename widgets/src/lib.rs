@@ -94,6 +94,7 @@ pub use crate::{
     slider::*,
     root::*,
     text_flow::*,
+    markdown::*,
     html::*,
     check_box::*,
     drop_down::*,

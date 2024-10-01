@@ -15,6 +15,7 @@ live_design!{
         
     CodeView = {{CodeView}}{
         editor: <CodeEditor>{
+            pad_left_top: vec2(0.0,0.0)
             height:Fit
             read_only: true,
             show_gutter: false

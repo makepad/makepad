@@ -113,7 +113,7 @@ impl Html {
             some_id!(code) => {
                 const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
                 tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
-                tf.top_drop.push(1.2/FIXED_FONT_SIZE_SCALE); // to achieve a top_drop of 1.2
+                //tf.top_drop.push(1.2/FIXED_FONT_SIZE_SCALE); // to achieve a top_drop of 1.2
                 tf.combine_spaces.push(false);
                 tf.fixed.push();
                 tf.inline_code.push();
@@ -152,12 +152,12 @@ impl Html {
 
             some_id!(sub) => {
                 // Adjust the top drop to move the text slightly downwards.
-                let curr_top_drop = tf.top_drop.last()
-                    .unwrap_or(&1.2);
+                //let curr_top_drop = tf.top_drop.last()
+                 //   .unwrap_or(&1.2);
                 // A 55% increase in top_drop seems to look good for subscripts,
                 // which should be slightly below the halfway point in the line
-                let new_top_drop = curr_top_drop * 1.55;
-                tf.top_drop.push(new_top_drop);
+                //let new_top_drop = curr_top_drop * 1.55;
+                //tf.top_drop.push(new_top_drop);
                 tf.push_size_rel_scale(0.7);
             }
             some_id!(sup) => {
@@ -274,8 +274,9 @@ impl Html {
                 tf.end_quote(cx);
             }
             some_id!(code) => {
+                
                 tf.inline_code.pop();
-                tf.top_drop.pop();
+                //tf.top_drop.pop();
                 tf.font_sizes.pop();
                 tf.combine_spaces.pop();
                 tf.fixed.pop(); 
@@ -287,7 +288,7 @@ impl Html {
                 tf.end_code(cx);     
             }
             some_id!(sub)=>{
-                tf.top_drop.pop();
+                //tf.top_drop.pop();
                 tf.font_sizes.pop();
             }
             some_id!(sup) => {
