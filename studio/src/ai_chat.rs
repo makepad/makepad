@@ -15,7 +15,9 @@ live_design!{
     
     AiChat = {{AiChat}}{
         height: Fill, width: Fill,
-        md = <Markdown> {
+        md = <Markdown>{   
+            body:"
+            "
         }
     }
 } 

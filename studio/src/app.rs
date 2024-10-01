@@ -75,7 +75,7 @@ impl App {
         let tab_id = dock.unique_tab_id(0);//file_id.0);
         //self.data.file_system.request_open_file(tab_id, file_id);
         let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(ai_first)).unwrap();
-        dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(AiChat), "".to_string(), live_id!(CloseableTab), Some(pos));
+        dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(AiChat), "AI".to_string(), live_id!(CloseableTab), Some(pos));
     }
     
     pub fn load_state(&mut self, cx:&mut Cx){
@@ -142,7 +142,7 @@ impl MatchEvent for App{
         //self.data.build_manager.discover_external_ip(cx);
         self.data.build_manager.start_http_server();
         // lets load the tabs
-        
+        self.open_ai_chat(cx);
     }
     
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
