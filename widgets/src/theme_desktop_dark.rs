@@ -1043,6 +1043,9 @@ live_design! {
         width:Fill, height:Fit,
         flow: RightWrap,
         padding: <THEME_MSPACE_1> {}
+        
+        font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
 
         line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),

@@ -459,7 +459,6 @@ impl TextFlow{
             else{
                 &mut self.draw_normal
             };
-
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
