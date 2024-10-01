@@ -29,6 +29,10 @@ pub struct Markdown{
     #[deref] text_flow: TextFlow,
     #[live] body: ArcStringMut,
     #[live] paragraph_spacing: f64,
+    #[live] pre_code_spacing: f64,
+    #[live(false)] use_code_block_widget:bool,
+    #[rust] in_code_block: bool,
+    #[rust] code_block_string: String,
     #[rust] doc: MarkdownDoc
 }
 
@@ -69,7 +73,12 @@ impl Widget for Markdown {
                     cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 },
                 MarkdownNode::NewLine{paragraph: false}=>{
-                    cx.turtle_new_line();
+                    if self.in_code_block{
+                        self.code_block_string.push_str("\n");
+                    }
+                    else{
+                        cx.turtle_new_line();
+                    }
                 },
                 MarkdownNode::BeginNormal=>{
                     cx.turtle_new_line_with_spacing(self.paragraph_spacing);
@@ -122,29 +131,54 @@ impl Widget for Markdown {
                     tf.underline.pop();
                 },
                 MarkdownNode::BeginInlineCode=>{
+                    const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                    tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
                     tf.fixed.push();
                     tf.inline_code.push();     
                 },
                 MarkdownNode::EndInlineCode=>{
+                     tf.font_sizes.pop();
                     tf.fixed.pop();
                     tf.inline_code.pop();                 
                 },
-                MarkdownNode::BeginCode=>{
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
-                    tf.combine_spaces.push(false);
-                    tf.fixed.push();
-
-                    // This adjustment is necesary to do not add too much spacing
-                    // between lines inside the code block.
-                    tf.top_drop.push(0.2);
-
-                    tf.begin_code(cx);
+                MarkdownNode::BeginCode{lang_start:_, lang_end:_}=>{
+                    if self.use_code_block_widget{
+                        self.in_code_block = true;
+                        self.code_block_string.clear();
+                        cx.turtle_new_line_with_spacing(self.pre_code_spacing);
+                    }
+                    else{
+                        const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                        tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                        // alright lets check if we need to use a widget
+                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        tf.combine_spaces.push(false);
+                        tf.fixed.push();
+        
+                        // This adjustment is necesary to do not add too much spacing
+                        // between lines inside the code block.
+                       // tf.top_drop.push(0.2);
+        
+                        tf.begin_code(cx);
+                    }
                 },
                 MarkdownNode::EndCode=>{
-                    tf.top_drop.pop();
-                    tf.fixed.pop();
-                    tf.combine_spaces.pop();
-                    tf.end_code(cx);
+                    if self.in_code_block{
+                        self.in_code_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let cbs = &self.code_block_string;
+                        tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
+                            item.set_text(cbs);
+                            item.draw_all_unscoped(cx);
+                        });
+                    }
+                    else{
+                        tf.font_sizes.pop();
+                        //tf.top_drop.pop();
+                        tf.fixed.pop();
+                        tf.combine_spaces.pop();
+                        tf.end_code(cx);
+                    }
                 },
                 MarkdownNode::BeginBold=>{
                     tf.bold.push();
@@ -159,7 +193,12 @@ impl Widget for Markdown {
                     tf.italic.pop();
                 },
                 MarkdownNode::Text{start, end}=>{
-                    tf.draw_text(cx, &self.doc.decoded[*start..*end]);
+                    if self.in_code_block{
+                        self.code_block_string.push_str(&self.doc.decoded[*start..*end]);
+                    }
+                    else{
+                        tf.draw_text(cx, &self.doc.decoded[*start..*end]);
+                    }
                 }
             }
         }
@@ -173,8 +212,10 @@ impl Widget for Markdown {
     } 
     
     fn set_text(&mut self, v:&str){
-        self.body.set(v);
-        self.parse_text();
+        if self.body.as_ref() != v{
+            self.body.set(v);
+            self.parse_text();
+        }
     }
 }
 
@@ -183,7 +224,7 @@ impl Markdown {
         let new_doc = parse_markdown(self.body.as_ref());
         if new_doc != self.doc{
             self.doc = new_doc;
-            self.text_flow.clear_items();
+            //self.text_flow.clear_items();
         }
     }
 }

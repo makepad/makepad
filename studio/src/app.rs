@@ -14,6 +14,7 @@ use crate::{
     run_list::*,
     log_list::*,
     makepad_code_editor::text::{Position},
+    ai_chat::ai_chat_manager::AiChatManager,
     build_manager::{
         build_manager::{
             BuildManager,
@@ -50,7 +51,7 @@ impl LiveRegister for App{
         crate::studio_editor::live_design(cx);
         crate::studio_file_tree::live_design(cx);
         crate::app_ui::live_design(cx);
-        crate::ai_chat::live_design(cx);
+        crate::ai_chat::ai_chat_view::live_design(cx);
         // for macos
         cx.start_stdin_service();
     }
@@ -72,7 +73,7 @@ impl App {
     
     pub fn open_ai_chat(&mut self, cx: &mut Cx) {
         let dock = self.ui.dock(id!(dock));            
-        let tab_id = dock.unique_tab_id(0);//file_id.0);
+        let tab_id = dock.unique_tab_id(0129384);//file_id.0);
         //self.data.file_system.request_open_file(tab_id, file_id);
         let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(ai_first)).unwrap();
         dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(AiChat), "AI".to_string(), live_id!(CloseableTab), Some(pos));
@@ -106,6 +107,7 @@ impl App {
 pub struct AppData{ 
     pub build_manager: BuildManager,
     pub file_system: FileSystem,
+    pub ai_chat_manager: AiChatManager
 }
 
 // all global app commands coming in from keybindings, and UI components
@@ -516,7 +518,7 @@ impl AppMain for App {
         
         self.data.file_system.handle_event(cx, event, &self.ui);
         self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
-
+        self.data.ai_chat_manager.handle_event(cx, event, &self.ui);
         // process events on all run_views
         let dock = self.ui.dock(id!(dock));
         /*
