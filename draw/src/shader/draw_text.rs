@@ -154,7 +154,7 @@ pub struct TextStyle {
     //#[live(0.5)] pub curve: f32,
     #[live(0.88)] pub line_scale: f64,
     #[live(1.4)] pub line_spacing: f64,
-    #[live(1.1)] pub top_drop: f64,
+    //#[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
 }
 

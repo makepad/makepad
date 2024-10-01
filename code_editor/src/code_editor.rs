@@ -115,7 +115,7 @@ live_design! {
     CodeEditor = {{CodeEditor}} {
         height: Fill, width: Fill,
         margin: 0,
-
+        pad_left_top: vec2(10.0,10.0)
         scroll_bars: <ScrollBars> {}
         draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
         draw_gutter: {
@@ -235,7 +235,7 @@ pub struct CodeEditor {
     #[live] draw_bg: DrawColor,
     #[rust(KeepCursorInView::Off)] keep_cursor_in_view: KeepCursorInView,
     #[rust] last_cursor_screen_pos: Option<DVec2>,
-
+    #[live] pad_left_top: DVec2, 
     #[rust] cell_size: DVec2,
     #[rust] gutter_rect: Rect,
     #[rust] gutter_chars: usize,
@@ -473,11 +473,11 @@ impl CodeEditor {
             },
         };
 
-        let pad_left_top = dvec2(10., 10.);
-        self.gutter_rect.pos += pad_left_top;
-        self.gutter_rect.size -= pad_left_top;
-        self.viewport_rect.pos += pad_left_top;
-        self.viewport_rect.size -= pad_left_top;
+        //let pad_left_top = dvec2(10., 10.);
+        self.gutter_rect.pos += self.pad_left_top;
+        self.gutter_rect.size -= self.pad_left_top;
+        self.viewport_rect.pos += self.pad_left_top;
+        self.viewport_rect.size -= self.pad_left_top;
 
         session.set_wrap_column(if self.word_wrap {
             Some((self.viewport_rect.size.x / self.cell_size.x) as usize)
@@ -509,9 +509,9 @@ impl CodeEditor {
         // the cell size, then shift by the viewport origin.
         
         cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x +pad_left_top.x,
+            session.layout().width() * self.cell_size.x +self.pad_left_top.x,
             self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y}
-            +pad_left_top.y * self.height_scale
+            +self.pad_left_top.y * self.height_scale
         );
         
         //println!("{} {}", session.layout().height() * self.cell_size.y, (self.viewport_rect.size.y));
