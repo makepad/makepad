@@ -191,6 +191,17 @@ live_design!{
                         svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
                     }
                 }
+                AiFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 6.
+                        margin: { top: 3. }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_6)
+                        svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+                    }
+                }
                 DesignFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
@@ -335,7 +346,7 @@ live_design!{
             }
 
             run_tabs = Tabs {
-                tabs: [run_first],
+                tabs: [run_first,ai_first],
                 selected: 0
             }
             /*
@@ -357,25 +368,29 @@ live_design!{
             }
 
             run_first = Tab {
-                name: "App >"
+                name: ">"
                 template: RunFirstTab,
                 kind: RunFirst
             }
 
             design_first = Tab {
-                name: "Design >"
+                name: ">"
                 template: DesignFirstTab,
                 kind: DesignFirst
             }
 
             edit_first = Tab {
-                name: "Code >"
+                name: ">"
                 template: EditFirstTab,
                 kind: EditFirst
             }
-
+            ai_first = Tab {
+                name: ">"
+                template: AiFirstTab,
+                kind: AiFirst
+            }
             outline_first = Tab {
-                name: "Scene >"
+                name: ">"
                 template: OutlineFirstTab,
                 kind: OutlineFirst
             }
@@ -404,7 +419,11 @@ live_design!{
                 kind: Profiler
             }
 
-
+            AiChat = <View>{
+                flow: Down,
+                content = <AiChat>{
+                }                
+            }
             StudioEditor = <View> {
                 flow: Down,
                 <DockToolbar> {
@@ -436,6 +455,7 @@ live_design!{
                         align: { x: 0.5, y: 0.5 }
                         <Logo> {}
                     }
+                    
                     // <H3> {
                     //     width: Fit,
                     //     text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
@@ -457,6 +477,18 @@ live_design!{
                 }
             }
             DesignFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill
+                    flow: Down
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
+                }
+            }
+            AiFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill
                     flow: Down
