@@ -341,6 +341,12 @@ impl CodeEditor {
     
     pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet){
     }
+    
+    pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk:Walk) {
+        self.scroll_bars.begin(cx, walk, Layout::default());
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        self.scroll_bars.end(cx);
+    }
         
     pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut Session, walk:Walk) {
         // This needs to be called first to ensure the session is up to date.
