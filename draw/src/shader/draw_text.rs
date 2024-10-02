@@ -71,9 +71,9 @@ live_design!{
             let s = sample2d(self.tex, pos).x;
             let curve = 0.5; 
             //if (self.sdf_radius != 0.0) {
-                // HACK(eddyb) harcoded atlas size (see asserts below).
-                let texel_coords = pos.xy * 4096.0;
-                s = clamp((s - (1.0 - sdf_cutoff)) * sdf_radius / scale + 0.5, 0.0, 1.0);
+            // HACK(eddyb) harcoded atlas size (see asserts below).
+            let texel_coords = pos.xy * 4096.0;
+            s = clamp((s - (1.0 - sdf_cutoff)) * sdf_radius / scale + 0.5, 0.0, 1.0);
             //} else {
             //    s = pow(s, curve);
             //}

@@ -724,15 +724,20 @@ impl App {
                 dmx_f32(state.dial_b[1], dmx, &lasers, 11); 
                 dmx_f32(state.dial_b[2], dmx, &lasers, 12); 
                 dmx_f32(0.5, dmx, &lasers, 3);
-                dmx_f32(0.3, dmx, &lasers, 4); 
+                dmx_f32(0.3, dmx, &lasers, 4);
                 dmx_f32(state.dial_b[3], dmx, &lasers, 5);
                 dmx_f32(state.dial_b[4], dmx, &lasers, 6);
                 dmx_f32(0.5, dmx, &lasers, 7);
                 dmx_f32(0.5, dmx, &lasers, 8); 
                 dmx_f32(0.5, dmx, &lasers, 10); 
                 dmx_f32(0.5, dmx, &lasers, 9); // y position
-                                                                                                
                 
+                let uv1 = 500;
+                let uv2 = 502;
+                let uv3 = 504;        
+                let uv = [uv1, uv2, uv3];
+                dmx_f32(state.fade[7], dmx, &uv, 1);
+                dmx_f32(if state.dial_a[7]<0.1{0.0}else{state.dial_a[7]}, dmx, &uv, 2);
                 //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
                 //let _ = rc_car_socket.send_to(&buf, rc_car_send_addr);
                 
