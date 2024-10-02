@@ -46,7 +46,8 @@ live_design!{
              height:Fill
              padding: 3,
              md = <Markdown>{
-                code_block = <CodeView>{}
+                code_block = <CodeView>{
+                }
                 use_code_block_widget: true,
                 body:""
             }

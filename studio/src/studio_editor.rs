@@ -32,6 +32,9 @@ impl Widget for StudioEditor {
         if let Some(session) = app_scope.file_system.get_session_mut(session_id){
             self.editor.draw_walk_editor(cx, session, walk);
         }
+        else{
+            self.editor.draw_empty_editor(cx, walk);
+        }
         DrawStep::done()
     }
     
