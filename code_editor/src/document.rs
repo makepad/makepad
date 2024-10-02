@@ -25,9 +25,9 @@ use {
 };
 
 #[derive(Clone, Debug)]
-pub struct Document(Rc<DocumentInner>);
+pub struct CodeDocument(Rc<DocumentInner>);
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text, decorations: DecorationSet) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
