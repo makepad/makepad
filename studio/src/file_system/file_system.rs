@@ -2,7 +2,7 @@ use {
     std::collections::{HashMap, hash_map},
     std::path::Path,
     crate::{
-        makepad_code_editor::{Document, decoration::{Decoration, DecorationSet}, Session},
+        makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
@@ -28,13 +28,17 @@ pub struct FileSystem {
     pub file_nodes: LiveIdMap<LiveId, FileNode>,
     pub path_to_file_node_id: HashMap<String, LiveId>,
     pub tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
-    pub tab_id_to_session: HashMap<LiveId, Session>,
-    pub open_documents: HashMap<LiveId, OpenDoc>
+    pub tab_id_to_session: HashMap<LiveId, EditSession>,
+    pub open_documents: HashMap<LiveId, OpenDocument>
 }
 
-pub enum OpenDoc {
-    Decorations(DecorationSet),
-    Document(Document)
+pub enum EditSession {
+    Code(CodeSession),
+}
+
+pub enum OpenDocument {
+    CodeLoading(DecorationSet),
+    Code(CodeDocument)
 }
 
 
@@ -94,13 +98,13 @@ impl FileSystem {
         None
     }
     
-    pub fn get_session_mut(&mut self, tab_id: LiveId) -> Option<&mut Session> {
+    pub fn get_session_mut(&mut self, tab_id: LiveId) -> Option<&mut EditSession> {
         // lets see if we have a document yet
         if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
-            if let Some(OpenDoc::Document(document)) = self.open_documents.get(file_id) {
+            if let Some(OpenDocument::Code(document)) = self.open_documents.get(file_id) {
                 return Some(match self.tab_id_to_session.entry(tab_id) {
                     hash_map::Entry::Occupied(o) => o.into_mut(),
-                    hash_map::Entry::Vacant(v) => v.insert(Session::new(document.clone()))
+                    hash_map::Entry::Vacant(v) => v.insert(EditSession::Code(CodeSession::new(document.clone())))
                 })
             }
         }
@@ -128,10 +132,14 @@ impl FileSystem {
                                             dock.redraw_tab(cx, *tab_id);
                                         }
                                     }
-                                    if let Some(OpenDoc::Decorations(dec)) = self.open_documents.get(&file_id) {
-                                        let dec = dec.clone();
-                                        self.open_documents.insert(file_id, OpenDoc::Document(Document::new(response.data.into(), dec)));
-                                    }else {panic!()}
+                                    match self.open_documents.get(&file_id){
+                                        Some(OpenDocument::CodeLoading(dec))=>{
+                                            let dec = dec.clone();
+                                            self.open_documents.insert(file_id, OpenDocument::Code(CodeDocument::new(response.data.into(), dec)));
+                                        }
+                                        _=>panic!()
+                                    }
+                                    
                                     dock.redraw(cx);
                                 }
                                 Err(FileError::CannotOpen(_unix_path)) => {
@@ -158,13 +166,14 @@ impl FileSystem {
                                
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){
                                     
-                                    if let Some(OpenDoc::Document(doc)) = self.open_documents.get_mut(&file_id){
+                                    if let Some(OpenDocument::Code(doc)) = self.open_documents.get_mut(&file_id){
                                         if let Some(tab_id) = 
                                         // lets grab a session id for our first session
                                         self.tab_id_to_file_node_id.iter()
                                         .find_map(|(k, v)| if v == file_id { Some(k) } else { None }){
-                                            let session = self.tab_id_to_session.get(&tab_id).unwrap();
-                                            doc.replace(session.id(), response.new_data.clone().into());
+                                            if let Some(EditSession::Code(session)) = self.tab_id_to_session.get(&tab_id){
+                                                doc.replace(session.id(), response.new_data.clone().into());
+                                            }
                                         }
                                     }
                                     ui.redraw(cx);
@@ -217,7 +226,11 @@ impl FileSystem {
     
     pub fn handle_sessions(&mut self) {
         for session in self.tab_id_to_session.values_mut() {
-            session.handle_changes();
+            match session{
+                EditSession::Code(session)=>{
+                    session.handle_changes();
+                }
+            }
         }
     }
     
@@ -227,18 +240,18 @@ impl FileSystem {
         self.tab_id_to_file_node_id.insert(tab_id, file_id);
         // move decorations to doc
         let dec = match self.open_documents.get(&file_id){
-            Some(OpenDoc::Decorations(_))=> if let Some(OpenDoc::Decorations(dec)) = self.open_documents.remove(&file_id){
+            Some(OpenDocument::CodeLoading(_))=> if let Some(OpenDocument::CodeLoading(dec)) = self.open_documents.remove(&file_id){
                 dec
             }
             else{
                 panic!()
             },
-            Some(OpenDoc::Document(_))=>{
+            Some(OpenDocument::Code(_))=>{
                 return
             }
             None=>DecorationSet::new()
         };
-        self.open_documents.insert(file_id, OpenDoc::Decorations(dec));
+        self.open_documents.insert(file_id, OpenDocument::CodeLoading(dec));
         let path = self.file_node_path(file_id);
         self.file_client.send_request(FileRequest::OpenFile{path, id: file_id.0});
     }
@@ -252,15 +265,21 @@ impl FileSystem {
     }
     
     pub fn request_save_file_for_file_node_id(&mut self, file_id: LiveId, patch:bool) {
-        if let Some(OpenDoc::Document(doc)) = self.open_documents.get(&file_id) {
-            let text = doc.as_text().to_string();
-            let path = self.file_node_path(file_id);
-            self.file_client.send_request(FileRequest::SaveFile{
-                path: path.clone(), 
-                data: text, 
-                id: file_id.0,
-                patch
-            });
+        match self.open_documents.get(&file_id){
+            Some(OpenDocument::Code(doc))=>{
+                let text = doc.as_text().to_string();
+                let path = self.file_node_path(file_id);
+                self.file_client.send_request(FileRequest::SaveFile{
+                    path: path.clone(), 
+                    data: text, 
+                    id: file_id.0,
+                    patch
+                });
+            }
+            Some(OpenDocument::CodeLoading(_))=>{
+                
+            }
+            _=>()
         }
     }
     
@@ -268,8 +287,8 @@ impl FileSystem {
         // ok lets see if we have a document
         // ifnot, we create a new one
         match self.open_documents.get_mut(file_node_id) {
-            Some(OpenDoc::Decorations(dec)) => dec.clear(),
-            Some(OpenDoc::Document(doc)) => doc.clear_decorations(),
+            Some(OpenDocument::CodeLoading(dec)) => dec.clear(),
+            Some(OpenDocument::Code(doc)) => doc.clear_decorations(),
             None => ()
         };
     }
@@ -279,8 +298,8 @@ impl FileSystem {
         // ifnot, we create a new one
         for document in self.open_documents.values_mut() {
             match document {
-                OpenDoc::Decorations(dec) => dec.clear(),
-                OpenDoc::Document(doc) => doc.clear_decorations(),
+                OpenDocument::CodeLoading(dec) => dec.clear(),
+                OpenDocument::Code(doc) => doc.clear_decorations(),
             }
         }
     }
@@ -303,14 +322,14 @@ impl FileSystem {
         // ok lets see if we have a document
         // ifnot, we create a new one
         match self.open_documents.get_mut(&file_id) {
-            Some(OpenDoc::Decorations(decs)) => decs.add_decoration(dec),
-            Some(OpenDoc::Document(doc)) => {
+            Some(OpenDocument::CodeLoading(decs)) => decs.add_decoration(dec),
+            Some(OpenDocument::Code(doc)) => {
                 doc.add_decoration(dec);
             }
             None => {
                 let mut set = DecorationSet::new();
                 set.add_decoration(dec);
-                self.open_documents.insert(file_id, OpenDoc::Decorations(set));
+                self.open_documents.insert(file_id, OpenDocument::CodeLoading(set));
             }
         };
     }
