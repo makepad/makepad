@@ -3,7 +3,7 @@ use {
         decoration::{Decoration, DecorationType},
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
-        session::{SelectionMode, Session},
+        session::{SelectionMode, CodeSession},
         history::{NewGroup},
         settings::Settings,
         str::StrExt,
@@ -348,7 +348,7 @@ impl CodeEditor {
         self.scroll_bars.end(cx);
     }
         
-    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut Session, walk:Walk) {
+    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut CodeSession, walk:Walk) {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
@@ -538,7 +538,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         pos: Position,
-        session: &mut Session,
+        session: &mut CodeSession,
     ) {
         session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
@@ -589,7 +589,7 @@ impl CodeEditor {
         cx: &mut Cx,
         event: &Event,
         scope: &mut Scope,
-        session: &mut Session,
+        session: &mut CodeSession,
     ) -> Vec<CodeEditorAction> {
         let mut actions = Vec::new();
         
@@ -1000,7 +1000,7 @@ impl CodeEditor {
         actions
     }
 
-    fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_gutter(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
         let mut buf = String::new();
@@ -1044,7 +1044,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
@@ -1166,7 +1166,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
             .layout()
@@ -1204,7 +1204,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_decoration = None;
         let decorations = session.document().decorations();
         let mut decorations = decorations.iter();
@@ -1229,7 +1229,7 @@ impl CodeEditor {
         .draw_decoration_layer(cx, session)
     }
 
-    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -1254,7 +1254,7 @@ impl CodeEditor {
         .draw_selection_layer(cx, session)
     }
 
-    fn pick(&self, session: &Session, position: DVec2) -> ((Position, Affinity), bool) {
+    fn pick(&self, session: &CodeSession, position: DVec2) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
         
         if position.y < 0.0 {
@@ -1479,7 +1479,7 @@ struct DrawDecorationLayer<'a> {
 }
 
 impl<'a> DrawDecorationLayer<'a> {
-    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.code_editor.line_start;
         let mut origin_y = session.layout().line(line_index).y();
         for block in session
@@ -1673,7 +1673,7 @@ struct DrawSelectionLayer<'a> {
 }
 
 impl<'a> DrawSelectionLayer<'a> {
-    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.code_editor.line_start;
         let mut origin_y = session.layout().line(line_index).y();
         for block in session

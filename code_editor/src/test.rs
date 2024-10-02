@@ -1,7 +1,7 @@
 use {
     makepad_code_editor::{
         code_editor::*,
-        state::{Document, Session},
+        state::{CodeDocument, CodeSession},
     },
     makepad_widgets::*,
 st::{cell::RefCell, rc::Rc},
@@ -52,13 +52,13 @@ impl LiveHook for App {
 }
 
 struct State {
-    session: Session,
+    session: CodeSession,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            session: Session::new(Rc::new(RefCell::new(Document::new(
+            session: CodeSession::new(Rc::new(RefCell::new(CodeDocument::new(
                 include_str!("state.rs").into(),
             )))),
         }
@@ -133,7 +133,7 @@ use {
     crate::{
         line::Wrapped,
         selection::Affinity,
-        state::{Block, Session},
+        state::{Block, CodeSession},
         str::StrExt,
         token::TokenKind,
         Line, Point, Selection, Token,
@@ -293,7 +293,7 @@ impl Widget for CodeEditor {
 pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut CodeSession) {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
@@ -324,7 +324,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut CodeSession) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -460,7 +460,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut y = 0.0;
         session.blocks(
             0,
@@ -574,7 +574,7 @@ impl CodeEditor {
         );
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections
@@ -602,7 +602,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -714,7 +714,7 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line = self.code_editor.start;
         let mut y = session.line(line, |line| line.y());
         session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
@@ -1210,7 +1210,7 @@ pub use self::{
     range::Range,
     selection::Selection,
     settings::Settings,
-    state::{Document, Session},
+    state::{CodeDocument, CodeSession},
     text::Text,
     token::Token,
     tokenizer::Tokenizer,
@@ -1516,7 +1516,7 @@ mod app;
 fn main() {
     app::app_main();
 }
-use crate::{selection::Affinity, str::StrExt, Point, Session};
+use crate::{selection::Affinity, str::StrExt, Point, CodeSession};
 
 pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
@@ -1539,7 +1539,7 @@ pub fn move_right(lines: &[String], point: Point) -> Point {
 }
 
 pub fn move_up(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -1554,7 +1554,7 @@ pub fn move_up(
 }
 
 pub fn move_down(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -1584,7 +1584,7 @@ fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
     point.byte == lines[point.line].len()
 }
 
-fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_first_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -1595,7 +1595,7 @@ fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) 
     })
 }
 
-fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_last_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -1645,7 +1645,7 @@ fn move_to_start_of_next_line(point: Point) -> Point {
 }
 
 fn move_to_prev_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -1676,7 +1676,7 @@ fn move_to_prev_row_of_line(
 }
 
 fn move_to_next_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -1707,7 +1707,7 @@ fn move_to_next_row_of_line(
 }
 
 fn move_to_last_row_of_prev_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -1740,7 +1740,7 @@ fn move_to_last_row_of_prev_line(
 }
 
 fn move_to_first_row_of_next_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -2079,10 +2079,10 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Session {
+pub struct CodeSession {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Rc<RefCell<Document>>,
+    document: Rc<RefCell<CodeDocument>>,
     wrap_column: Option<usize>,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -2097,8 +2097,8 @@ pub struct Session {
     change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
 }
 
-impl Session {
-    pub fn new(document: Rc<RefCell<Document>>) -> Self {
+impl CodeSession {
+    pub fn new(document: Rc<RefCell<CodeDocument>>) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (change_sender, change_receiver) = mpsc::channel();
@@ -2168,7 +2168,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Rc<RefCell<Document>> {
+    pub fn document(&self) -> &Rc<RefCell<CodeDocument>> {
         &self.document
     }
 
@@ -2658,7 +2658,7 @@ impl Session {
     fn modify_selections(
         &mut self,
         reset_anchor: bool,
-        mut f: impl FnMut(&Session, Selection) -> Selection,
+        mut f: impl FnMut(&CodeSession, Selection) -> Selection,
     ) {
         let mut selections = mem::take(&mut self.selections);
         for selection in &mut selections {
@@ -2743,7 +2743,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for CodeSession {
     fn drop(&mut self) {
         self.document.borrow_mut().change_senders.remove(&self.id);
     }
@@ -2820,7 +2820,7 @@ pub enum Block<'a> {
 pub struct SessionId(usize);
 
 #[derive(Debug)]
-pub struct Document {
+pub struct CodeDocument {
     text: Text,
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
@@ -2830,7 +2830,7 @@ pub struct Document {
     change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
 }
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
@@ -4019,7 +4019,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
 use {
     makepad_code_editor::{
         code_editor::*,
-        state::{Document, Session},
+        state::{CodeDocument, CodeSession},
     },
     makepad_widgets::*,
     std::{cell::RefCell, rc::Rc},
@@ -4070,13 +4070,13 @@ impl LiveHook for App {
 }
 
 struct State {
-    session: Session,
+    session: CodeSession,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            session: Session::new(Rc::new(RefCell::new(Document::new(
+            session: CodeSession::new(Rc::new(RefCell::new(CodeDocument::new(
                 include_str!("state.rs").into(),
             )))),
         }
@@ -4151,7 +4151,7 @@ use {
     crate::{
         line::Wrapped,
         selection::Affinity,
-        state::{Block, Session},
+        state::{Block, CodeSession},
         str::StrExt,
         token::TokenKind,
         Line, Point, Selection, Token,
@@ -4311,7 +4311,7 @@ impl Widget for CodeEditor {
 pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut CodeSession) {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
@@ -4342,7 +4342,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut CodeSession) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -4478,7 +4478,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut y = 0.0;
         session.blocks(
             0,
@@ -4592,7 +4592,7 @@ impl CodeEditor {
         );
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections
@@ -4620,7 +4620,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -4732,7 +4732,7 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line = self.code_editor.start;
         let mut y = session.line(line, |line| line.y());
         session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
@@ -5228,7 +5228,7 @@ pub use self::{
     range::Range,
     selection::Selection,
     settings::Settings,
-    state::{Document, Session},
+    state::{CodeDocument, CodeSession},
     text::Text,
     token::Token,
     tokenizer::Tokenizer,
@@ -5534,7 +5534,7 @@ mod app;
 fn main() {
     app::app_main();
 }
-use crate::{selection::Affinity, str::StrExt, Point, Session};
+use crate::{selection::Affinity, str::StrExt, Point, CodeSession};
 
 pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
@@ -5557,7 +5557,7 @@ pub fn move_right(lines: &[String], point: Point) -> Point {
 }
 
 pub fn move_up(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -5572,7 +5572,7 @@ pub fn move_up(
 }
 
 pub fn move_down(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -5602,7 +5602,7 @@ fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
     point.byte == lines[point.line].len()
 }
 
-fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_first_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -5613,7 +5613,7 @@ fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) 
     })
 }
 
-fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_last_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -5663,7 +5663,7 @@ fn move_to_start_of_next_line(point: Point) -> Point {
 }
 
 fn move_to_prev_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -5694,7 +5694,7 @@ fn move_to_prev_row_of_line(
 }
 
 fn move_to_next_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -5725,7 +5725,7 @@ fn move_to_next_row_of_line(
 }
 
 fn move_to_last_row_of_prev_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -5758,7 +5758,7 @@ fn move_to_last_row_of_prev_line(
 }
 
 fn move_to_first_row_of_next_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -6097,10 +6097,10 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Session {
+pub struct CodeSession {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Rc<RefCell<Document>>,
+    document: Rc<RefCell<CodeDocument>>,
     wrap_column: Option<usize>,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -6115,8 +6115,8 @@ pub struct Session {
     change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
 }
 
-impl Session {
-    pub fn new(document: Rc<RefCell<Document>>) -> Self {
+impl CodeSession {
+    pub fn new(document: Rc<RefCell<CodeDocument>>) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (change_sender, change_receiver) = mpsc::channel();
@@ -6186,7 +6186,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Rc<RefCell<Document>> {
+    pub fn document(&self) -> &Rc<RefCell<CodeDocument>> {
         &self.document
     }
 
@@ -6676,7 +6676,7 @@ impl Session {
     fn modify_selections(
         &mut self,
         reset_anchor: bool,
-        mut f: impl FnMut(&Session, Selection) -> Selection,
+        mut f: impl FnMut(&CodeSession, Selection) -> Selection,
     ) {
         let mut selections = mem::take(&mut self.selections);
         for selection in &mut selections {
@@ -6761,7 +6761,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for CodeSession {
     fn drop(&mut self) {
         self.document.borrow_mut().change_senders.remove(&self.id);
     }
@@ -6838,7 +6838,7 @@ pub enum Block<'a> {
 pub struct SessionId(usize);
 
 #[derive(Debug)]
-pub struct Document {
+pub struct CodeDocument {
     text: Text,
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
@@ -6848,7 +6848,7 @@ pub struct Document {
     change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
 }
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
@@ -8037,7 +8037,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
 use {
     makepad_code_editor::{
         code_editor::*,
-        state::{Document, Session},
+        state::{CodeDocument, CodeSession},
     },
     makepad_widgets::*,
     std::{cell::RefCell, rc::Rc},
@@ -8088,13 +8088,13 @@ impl LiveHook for App {
 }
 
 struct State {
-    session: Session,
+    session: CodeSession,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            session: Session::new(Rc::new(RefCell::new(Document::new(
+            session: CodeSession::new(Rc::new(RefCell::new(CodeDocument::new(
                 include_str!("state.rs").into(),
             )))),
         }
@@ -8169,7 +8169,7 @@ use {
     crate::{
         line::Wrapped,
         selection::Affinity,
-        state::{Block, Session},
+        state::{Block, CodeSession},
         str::StrExt,
         token::TokenKind,
         Line, Point, Selection, Token,
@@ -8329,7 +8329,7 @@ impl Widget for CodeEditor {
 pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut CodeSession) {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
@@ -8360,7 +8360,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut CodeSession) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -8496,7 +8496,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut y = 0.0;
         session.blocks(
             0,
@@ -8610,7 +8610,7 @@ impl CodeEditor {
         );
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections
@@ -8638,7 +8638,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -8750,7 +8750,7 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line = self.code_editor.start;
         let mut y = session.line(line, |line| line.y());
         session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
@@ -9246,7 +9246,7 @@ pub use self::{
     range::Range,
     selection::Selection,
     settings::Settings,
-    state::{Document, Session},
+    state::{CodeDocument, CodeSession},
     text::Text,
     token::Token,
     tokenizer::Tokenizer,
@@ -9552,7 +9552,7 @@ mod app;
 fn main() {
     app::app_main();
 }
-use crate::{selection::Affinity, str::StrExt, Point, Session};
+use crate::{selection::Affinity, str::StrExt, Point, CodeSession};
 
 pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
@@ -9575,7 +9575,7 @@ pub fn move_right(lines: &[String], point: Point) -> Point {
 }
 
 pub fn move_up(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -9590,7 +9590,7 @@ pub fn move_up(
 }
 
 pub fn move_down(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -9620,7 +9620,7 @@ fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
     point.byte == lines[point.line].len()
 }
 
-fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_first_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -9631,7 +9631,7 @@ fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) 
     })
 }
 
-fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_last_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -9681,7 +9681,7 @@ fn move_to_start_of_next_line(point: Point) -> Point {
 }
 
 fn move_to_prev_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -9712,7 +9712,7 @@ fn move_to_prev_row_of_line(
 }
 
 fn move_to_next_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -9743,7 +9743,7 @@ fn move_to_next_row_of_line(
 }
 
 fn move_to_last_row_of_prev_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -9776,7 +9776,7 @@ fn move_to_last_row_of_prev_line(
 }
 
 fn move_to_first_row_of_next_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -10115,10 +10115,10 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Session {
+pub struct CodeSession {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Rc<RefCell<Document>>,
+    document: Rc<RefCell<CodeDocument>>,
     wrap_column: Option<usize>,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -10133,8 +10133,8 @@ pub struct Session {
     change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
 }
 
-impl Session {
-    pub fn new(document: Rc<RefCell<Document>>) -> Self {
+impl CodeSession {
+    pub fn new(document: Rc<RefCell<CodeDocument>>) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (change_sender, change_receiver) = mpsc::channel();
@@ -10204,7 +10204,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Rc<RefCell<Document>> {
+    pub fn document(&self) -> &Rc<RefCell<CodeDocument>> {
         &self.document
     }
 
@@ -10694,7 +10694,7 @@ impl Session {
     fn modify_selections(
         &mut self,
         reset_anchor: bool,
-        mut f: impl FnMut(&Session, Selection) -> Selection,
+        mut f: impl FnMut(&CodeSession, Selection) -> Selection,
     ) {
         let mut selections = mem::take(&mut self.selections);
         for selection in &mut selections {
@@ -10779,7 +10779,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for CodeSession {
     fn drop(&mut self) {
         self.document.borrow_mut().change_senders.remove(&self.id);
     }
@@ -10856,7 +10856,7 @@ pub enum Block<'a> {
 pub struct SessionId(usize);
 
 #[derive(Debug)]
-pub struct Document {
+pub struct CodeDocument {
     text: Text,
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
@@ -10866,7 +10866,7 @@ pub struct Document {
     change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
 }
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
@@ -12055,7 +12055,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
 use {
     makepad_code_editor::{
         code_editor::*,
-        state::{Document, Session},
+        state::{CodeDocument, CodeSession},
     },
     makepad_widgets::*,
     std::{cell::RefCell, rc::Rc},
@@ -12106,13 +12106,13 @@ impl LiveHook for App {
 }
 
 struct State {
-    session: Session,
+    session: CodeSession,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            session: Session::new(Rc::new(RefCell::new(Document::new(
+            session: CodeSession::new(Rc::new(RefCell::new(CodeDocument::new(
                 include_str!("state.rs").into(),
             )))),
         }
@@ -12187,7 +12187,7 @@ use {
     crate::{
         line::Wrapped,
         selection::Affinity,
-        state::{Block, Session},
+        state::{Block, CodeSession},
         str::StrExt,
         token::TokenKind,
         Line, Point, Selection, Token,
@@ -12347,7 +12347,7 @@ impl Widget for CodeEditor {
 pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut CodeSession) {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
@@ -12378,7 +12378,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut CodeSession) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -12514,7 +12514,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut y = 0.0;
         session.blocks(
             0,
@@ -12628,7 +12628,7 @@ impl CodeEditor {
         );
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections
@@ -12656,7 +12656,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -12768,7 +12768,7 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line = self.code_editor.start;
         let mut y = session.line(line, |line| line.y());
         session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
@@ -13264,7 +13264,7 @@ pub use self::{
     range::Range,
     selection::Selection,
     settings::Settings,
-    state::{Document, Session},
+    state::{CodeDocument, CodeSession},
     text::Text,
     token::Token,
     tokenizer::Tokenizer,
@@ -13570,7 +13570,7 @@ mod app;
 fn main() {
     app::app_main();
 }
-use crate::{selection::Affinity, str::StrExt, Point, Session};
+use crate::{selection::Affinity, str::StrExt, Point, CodeSession};
 
 pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
@@ -13593,7 +13593,7 @@ pub fn move_right(lines: &[String], point: Point) -> Point {
 }
 
 pub fn move_up(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -13608,7 +13608,7 @@ pub fn move_up(
 }
 
 pub fn move_down(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -13638,7 +13638,7 @@ fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
     point.byte == lines[point.line].len()
 }
 
-fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_first_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -13649,7 +13649,7 @@ fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) 
     })
 }
 
-fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_last_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -13699,7 +13699,7 @@ fn move_to_start_of_next_line(point: Point) -> Point {
 }
 
 fn move_to_prev_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -13730,7 +13730,7 @@ fn move_to_prev_row_of_line(
 }
 
 fn move_to_next_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -13761,7 +13761,7 @@ fn move_to_next_row_of_line(
 }
 
 fn move_to_last_row_of_prev_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -13794,7 +13794,7 @@ fn move_to_last_row_of_prev_line(
 }
 
 fn move_to_first_row_of_next_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -14133,10 +14133,10 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Session {
+pub struct CodeSession {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Rc<RefCell<Document>>,
+    document: Rc<RefCell<CodeDocument>>,
     wrap_column: Option<usize>,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -14151,8 +14151,8 @@ pub struct Session {
     change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
 }
 
-impl Session {
-    pub fn new(document: Rc<RefCell<Document>>) -> Self {
+impl CodeSession {
+    pub fn new(document: Rc<RefCell<CodeDocument>>) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (change_sender, change_receiver) = mpsc::channel();
@@ -14222,7 +14222,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Rc<RefCell<Document>> {
+    pub fn document(&self) -> &Rc<RefCell<CodeDocument>> {
         &self.document
     }
 
@@ -14712,7 +14712,7 @@ impl Session {
     fn modify_selections(
         &mut self,
         reset_anchor: bool,
-        mut f: impl FnMut(&Session, Selection) -> Selection,
+        mut f: impl FnMut(&CodeSession, Selection) -> Selection,
     ) {
         let mut selections = mem::take(&mut self.selections);
         for selection in &mut selections {
@@ -14797,7 +14797,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for CodeSession {
     fn drop(&mut self) {
         self.document.borrow_mut().change_senders.remove(&self.id);
     }
@@ -14874,7 +14874,7 @@ pub enum Block<'a> {
 pub struct SessionId(usize);
 
 #[derive(Debug)]
-pub struct Document {
+pub struct CodeDocument {
     text: Text,
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
@@ -14884,7 +14884,7 @@ pub struct Document {
     change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
 }
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
@@ -16073,7 +16073,7 @@ pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: u
 use {
     makepad_code_editor::{
         code_editor::*,
-        state::{Document, Session},
+        state::{CodeDocument, CodeSession},
     },
     makepad_widgets::*,
     std::{cell::RefCell, rc::Rc},
@@ -16124,13 +16124,13 @@ impl LiveHook for App {
 }
 
 struct State {
-    session: Session,
+    session: CodeSession,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            session: Session::new(Rc::new(RefCell::new(Document::new(
+            session: CodeSession::new(Rc::new(RefCell::new(CodeDocument::new(
                 include_str!("state.rs").into(),
             )))),
         }
@@ -16205,7 +16205,7 @@ use {
     crate::{
         line::Wrapped,
         selection::Affinity,
-        state::{Block, Session},
+        state::{Block, CodeSession},
         str::StrExt,
         token::TokenKind,
         Line, Point, Selection, Token,
@@ -16365,7 +16365,7 @@ impl Widget for CodeEditor {
 pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut CodeSession) {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
@@ -16396,7 +16396,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut CodeSession) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -16532,7 +16532,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut y = 0.0;
         session.blocks(
             0,
@@ -16646,7 +16646,7 @@ impl CodeEditor {
         );
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let mut selections = session.selections().iter();
         while selections
@@ -16674,7 +16674,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -16786,7 +16786,7 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line = self.code_editor.start;
         let mut y = session.line(line, |line| line.y());
         session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
@@ -17282,7 +17282,7 @@ pub use self::{
     range::Range,
     selection::Selection,
     settings::Settings,
-    state::{Document, Session},
+    state::{CodeDocument, CodeSession},
     text::Text,
     token::Token,
     tokenizer::Tokenizer,
@@ -17588,7 +17588,7 @@ mod app;
 fn main() {
     app::app_main();
 }
-use crate::{selection::Affinity, str::StrExt, Point, Session};
+use crate::{selection::Affinity, str::StrExt, Point, CodeSession};
 
 pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
@@ -17611,7 +17611,7 @@ pub fn move_right(lines: &[String], point: Point) -> Point {
 }
 
 pub fn move_up(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -17626,7 +17626,7 @@ pub fn move_up(
 }
 
 pub fn move_down(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -17656,7 +17656,7 @@ fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
     point.byte == lines[point.line].len()
 }
 
-fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_first_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -17667,7 +17667,7 @@ fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) 
     })
 }
 
-fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+fn is_at_last_row_of_line(session: &CodeSession, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -17717,7 +17717,7 @@ fn move_to_start_of_next_line(point: Point) -> Point {
 }
 
 fn move_to_prev_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -17748,7 +17748,7 @@ fn move_to_prev_row_of_line(
 }
 
 fn move_to_next_row_of_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -17779,7 +17779,7 @@ fn move_to_next_row_of_line(
 }
 
 fn move_to_last_row_of_prev_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -17812,7 +17812,7 @@ fn move_to_last_row_of_prev_line(
 }
 
 fn move_to_first_row_of_next_line(
-    session: &Session,
+    session: &CodeSession,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
@@ -18151,10 +18151,10 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Session {
+pub struct CodeSession {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Rc<RefCell<Document>>,
+    document: Rc<RefCell<CodeDocument>>,
     wrap_column: Option<usize>,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -18169,8 +18169,8 @@ pub struct Session {
     change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
 }
 
-impl Session {
-    pub fn new(document: Rc<RefCell<Document>>) -> Self {
+impl CodeSession {
+    pub fn new(document: Rc<RefCell<CodeDocument>>) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (change_sender, change_receiver) = mpsc::channel();
@@ -18240,7 +18240,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Rc<RefCell<Document>> {
+    pub fn document(&self) -> &Rc<RefCell<CodeDocument>> {
         &self.document
     }
 
@@ -18730,7 +18730,7 @@ impl Session {
     fn modify_selections(
         &mut self,
         reset_anchor: bool,
-        mut f: impl FnMut(&Session, Selection) -> Selection,
+        mut f: impl FnMut(&CodeSession, Selection) -> Selection,
     ) {
         let mut selections = mem::take(&mut self.selections);
         for selection in &mut selections {
@@ -18815,7 +18815,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for CodeSession {
     fn drop(&mut self) {
         self.document.borrow_mut().change_senders.remove(&self.id);
     }
@@ -18892,7 +18892,7 @@ pub enum Block<'a> {
 pub struct SessionId(usize);
 
 #[derive(Debug)]
-pub struct Document {
+pub struct CodeDocument {
     text: Text,
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
@@ -18902,7 +18902,7 @@ pub struct Document {
     change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
 }
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
