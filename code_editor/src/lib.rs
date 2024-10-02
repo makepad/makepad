@@ -21,8 +21,8 @@ pub mod wrap;
 pub mod code_view;
 
 pub use self::{
-    code_editor::CodeEditor, document::Document, history::History, layout::Line,
-    selection::Selection, session::Session, settings::Settings, token::Token, tokenizer::Tokenizer,
+    code_editor::CodeEditor, document::CodeDocument, history::History, layout::Line,
+    selection::Selection, session::CodeSession, settings::Settings, token::Token, tokenizer::Tokenizer,
 };
 
 pub fn live_design(cx: &mut Cx) {

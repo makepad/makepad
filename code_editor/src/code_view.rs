@@ -1,7 +1,7 @@
 
 use {
     crate::{
-        {Document, decoration::{DecorationSet}, Session},
+        {CodeDocument, decoration::{DecorationSet}, CodeSession},
         makepad_widgets::*,
         CodeEditor,
     },
@@ -28,7 +28,7 @@ live_design!{
 pub struct CodeView{
     #[wrap] #[live] pub editor: CodeEditor,
     // alright we have to have a session and a document.
-    #[rust] session: Option<Session>,
+    #[rust] session: Option<CodeSession>,
     #[live] text: ArcStringMut,
 }
 
@@ -36,8 +36,8 @@ impl CodeView{
     fn lazy_init_session(&mut self){
         if self.session.is_none(){
             let dec = DecorationSet::new();
-            let doc = Document::new(self.text.as_ref().into(), dec);
-            self.session = Some(Session::new(doc));
+            let doc = CodeDocument::new(self.text.as_ref().into(), dec);
+            self.session = Some(CodeSession::new(doc));
             self.session.as_mut().unwrap().handle_changes();
         }
     }

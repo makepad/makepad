@@ -1,7 +1,7 @@
 use {
     makepad_code_editor::{
         code_editor::*,
-        session::{Document, Session},
+        session::{CodeDocument, CodeSession},
     },
     makepad_widgets::*,
     std::{cell::RefCell, rc::Rc},
@@ -52,13 +52,13 @@ impl LiveHook for App {
 }
 
 struct State {
-    session: Session,
+    session: CodeSession,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            session: Session::new(Rc::new(RefCell::new(Document::new(
+            session: CodeSession::new(Rc::new(RefCell::new(CodeDocument::new(
                 include_str!("test.rs").into(),
             )))),
         }

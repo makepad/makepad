@@ -161,7 +161,7 @@ impl MatchEvent for App{
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
-                            if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
+                            if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 editor.editor.set_cursor_and_scroll(cx, pos, session);
                                 editor.editor.set_key_focus(cx);
                             }
@@ -187,7 +187,7 @@ impl MatchEvent for App{
                         //dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
-                            if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
+                            if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do 
                                 session.set_selection(
                                     start,
@@ -217,7 +217,7 @@ impl MatchEvent for App{
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
                         if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
-                            if let Some(session) = self.data.file_system.get_session_mut(tab_id) {
+                            if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do 
                                 session.set_selection(
                                     start,
