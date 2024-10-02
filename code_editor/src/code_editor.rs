@@ -494,7 +494,16 @@ impl CodeEditor {
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+
+        let bg_rect = Rect {
+            pos: self.unscrolled_rect.pos,
+            size: DVec2 {
+                x: self.unscrolled_rect.size.x,
+                y:if height_is_fit{MAX_HEIGHT}else{self.unscrolled_rect.size.y},
+            },
+        };
+        self.draw_bg.draw_abs(cx, bg_rect);
+
         if self.show_gutter{
             self.draw_gutter(cx, session);
         }
