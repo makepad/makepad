@@ -1,159 +1,230 @@
 use {
-    std::collections::{HashMap},
     self::super::open_ai_data::*,
     crate::{
+        file_system::file_system::{FileSystem,OpenDocument},
         makepad_widgets::*,
         makepad_micro_serde::*
     },
 };
 
-#[derive(Default)]
-pub struct AiChatData{
-    pub chat: String,
-}
-
-#[derive(Default)]
 pub struct AiChatManager{
-    pub open_chats: HashMap<LiveId, AiChatData>
+    pub backends: Vec<(String, AiBackend)>,
+}
+const OPENAI_DEFAULT_URL: &'static str = "https://api.openai.com/v1/chat/completions";
+
+impl Default for AiChatManager{
+    fn default()->Self{
+        Self{
+            backends: vec![
+                (
+                    "OpenAI gpt-4o".to_string(),
+                    AiBackend::OpenAI{
+                        url: OPENAI_DEFAULT_URL.to_string(),
+                        model: "gpt-4o".to_string(),
+                        key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
+                    }
+                ),
+                (
+                    "Llama CPP Local".to_string(),
+                    AiBackend::OpenAI{
+                        url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
+                        model:"".to_string(),
+                        key:"".to_string()
+                    }
+                ),
+            ]
+        }
+    }
 }
 
-const USE_OPEN_AI: bool = false;
-const LLAMA_CPP_BASE_URL: &str = "http://127.0.0.1:8080";
-const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+#[derive(Debug, SerRon, DeRon)]
+pub enum AiBackend{
+    OpenAI{
+        url:String, 
+        model:String,
+        key: String,
+    }
+}
 
-impl AiChatManager{
-    fn handle_network_response(&mut self, cx: &mut Cx, e:&NetworkResponse, ui: &WidgetRef){
-        match &e{
-            NetworkResponse::HttpRequestError(_err)=>{
-            }
-            NetworkResponse::HttpStreamResponse(res)=>{
-                // alright we have a http stream response for a certain request id
-                let chat_id = res.metadata_id;
-                let data = res.get_string_body().unwrap();
-                for data in data.split("\n\n"){
-                    if let Some(data) = data.strip_prefix("data: "){
-                        if data != "[DONE]"{
-                            if USE_OPEN_AI{
-                                match ChatResponse::deserialize_json(data){
-                                    Ok(chat_response)=>{
-                                        if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
-                                            if let Some(chat_data) = self.open_chats.get_mut(&chat_id){
-                                                chat_data.chat.push_str(&content);
-                                                // alright lets redraw the UI
-                                                self.redraw_ai_chat_by_id(cx, chat_id, ui)
-                                            }
-                                        }
-                                    }
-                                    Err(e)=>{
-                                        println!("JSon parse error {:?} {}", e, data);
-                                    }
-                                }
-                            }
-                            else{
-                                match LLamaCppStream::deserialize_json(data){
-                                    Ok(chat_response)=>{
-                                        if let Some(chat_data) = self.open_chats.get_mut(&chat_id){
-                                            chat_data.chat.push_str(&chat_response.content);
-                                            // alright lets redraw the UI
-                                            self.redraw_ai_chat_by_id(cx, chat_id, ui)
-                                        }
-                                    }
-                                    Err(e)=>{
-                                        println!("JSon parse error {:?} {}", e, data);
-                                    }
-                                }
-                            }
-                        }
-                    }
+#[derive(Debug, SerRon, DeRon)]
+pub struct AiContextFile{
+    pub file_id: LiveId,
+    pub name: String,
+    pub contents: String,
+}
+
+#[derive(Debug, SerRon, DeRon)]
+pub struct AiUserMessage{
+    pub context: Vec<AiContextFile>,
+    pub message:String
+}
+
+#[derive(Debug, SerRon, DeRon)]
+pub enum AiChatMessage{
+    User(AiUserMessage),
+    Assistant(String)
+}
+
+#[derive(Debug, Default, SerRon, DeRon)]
+pub struct AiChatFile{
+    pub messages: Vec<AiChatMessage>,
+}
+
+#[derive(Debug, SerRon, DeRon)]
+pub struct AiChatDocument{
+    in_flight: bool,
+    pub file: AiChatFile
+}
+
+impl AiChatDocument{
+    pub fn load_or_empty(data: &str)->AiChatDocument{
+        match AiChatFile::deserialize_ron(data).map_err(|e| format!("{:?}", e)){
+            Err(e)=>{
+                error!("Error parsing AiChatDocument {e}");
+                Self{
+                    in_flight: false,
+                    file: AiChatFile::default()
                 }
             }
-            NetworkResponse::HttpStreamComplete=>{
+            Ok(file)=>{
+                Self{
+                    in_flight: false,
+                    file
+                }
             }
-            _=>{}
         }
-    }    
+    }
+}
+
+impl AiChatFile{
+    pub fn new()->Self{
+        Self{
+            messages: vec![]
+        }
+    }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef) {
+    pub fn load(data: &str)->Result<AiChatFile,String>{
+        AiChatFile::deserialize_ron(data).map_err(|e| format!("{:?}", e))
+    }
+    
+    pub fn to_string(&self)->String{
+        self.serialize_ron()
+    }
+}
+
+
+impl AiChatManager{
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, fs:&mut FileSystem) {
         // alright. lets see if we have any incoming Http things
         match event{
             Event::NetworkResponses(e)=>for e in e{
-                if e.request_id == live_id!(AiChatMessagae){
-                    self.handle_network_response(cx, &e.response, ui)
+                if e.request_id == live_id!(OpenAIChatMessage){
+                    match &e.response{
+                        NetworkResponse::HttpRequestError(_err)=>{
+                        }
+                        NetworkResponse::HttpStreamResponse(res)=>{
+                            // alright we have a http stream response for a certain request id
+                            let chat_id = res.metadata_id;
+                            // alright lets fetch the chat object
+                            if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+                                let data = res.get_string_body().unwrap();
+                                let mut changed = false;
+                                for data in data.split("\n\n"){
+                                    if let Some(data) = data.strip_prefix("data: "){
+                                        if data != "[DONE]"{
+                                            match ChatResponse::deserialize_json(data){
+                                                Ok(chat_response)=>{
+                                                    if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
+                                                        if let Some(AiChatMessage::Assistant(s)) = doc.file.messages.last_mut(){
+                                                            s.push_str(&content);
+                                                        }
+                                                        else{
+                                                            doc.file.messages.push(AiChatMessage::Assistant(content.clone()))
+                                                        }
+                                                        changed = true;
+                                                    }
+                                                }
+                                                Err(e)=>{
+                                                    println!("JSon parse error {:?} {}", e, data);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if changed{
+                                    self.redraw_ai_chat_by_id(cx, chat_id, ui);
+                                    fs.request_save_file_for_file_node_id(chat_id, false);
+                                }
+                            }
+                        }
+                        NetworkResponse::HttpStreamComplete(res)=>{
+                            // done?..
+                        }
+                        _=>{}
+                    }
                 }
             }
             _=>()
         }
     }
     
-    pub fn send_message(&mut self, cx: &mut Cx, chat_id:LiveId, message: String) {
-        if self.open_chats.get(&chat_id).is_none(){
-            self.open_chats.insert(chat_id, AiChatData::default());
+    pub fn clear_messages(&mut self, chat_id:LiveId,  fs:&mut FileSystem) {
+        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+            doc.file.messages.clear();
         }
-        
-        let completion_url = if USE_OPEN_AI{
-            format!("{}/chat/completions", OPENAI_BASE_URL)
-        }
-        else{
-            format!("{}/completion", LLAMA_CPP_BASE_URL)
-        };
-        let request_id = live_id!(AiChatMessagae);
-        let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
-        request.set_is_streaming();
-        
-        let ai_key = std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string());
-        request.set_header("Authorization".to_string(), format!("Bearer {ai_key}"));
-        request.set_header("Content-Type".to_string(), "application/json".to_string());
-        request.set_metadata_id(chat_id); 
-        if USE_OPEN_AI{
-            request.set_json_body(ChatPrompt {
-                messages: vec![ChatMessage {content: Some(message), role: Some("user".to_string()), refusal: Some(JsonValue::Null)}],
-                model: "gpt-4o".to_string(),
-                max_tokens: 1000,
-                stream: true,
-            });
-        }
-        else{
-            request.set_json_body(LLamaCppQuery{
-                stream: true,
-                n_predict:400,
-                temperature:0.7,
-                stop:vec![],
-                repeat_last_n:256,
-                repeat_penalty:1.18,
-                top_k:40.0,
-                top_p:0.95,
-                min_p:0.05,
-                tfs_z:1.0,
-                typical_p:1.0,
-                presence_penalty:0.0,
-                frequency_penalty:0.0,
-                mirostat:0.0,
-                mirostat_tau:5.0,
-                mirostat_eta:0.1,
-                grammar:"".to_string(),
-                n_probs:0,
-                min_keep:0.0,
-                image_data:vec![],
-                cache_prompt:true,
-                api_key:"".to_string(),
-                slot_id:-1,
-                prompt: message.to_string()
-            })
-        }
-        //self.ui.label(id!(message_label)).set_text_and_redraw(cx, "Answering:..\n");
-        cx.http_request(request_id, request);
     }
-    
-    pub fn clear_chat(&mut self, chat_id:LiveId) {
-        if let Some(chat) = self.open_chats.get_mut(&chat_id){
-            chat.chat.clear();
+    pub fn add_user_message(&mut self, chat_id:LiveId, message:AiUserMessage, fs:&mut FileSystem) {
+        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+            doc.file.messages.push(AiChatMessage::User(message));
+        }
+    }
+            
+    pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, backend_index:usize, fs:&mut FileSystem) {
+        // alright so what hapepns here
+        // per backend we have a path
+        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+            if doc.in_flight{ // we should cancel the http request
+                cx.cancel_http_request(live_id!(OpenAIChatMessage));
+                doc.in_flight = false;
+            }
+            // alright. lets append the user message
+            /*doc.messages.push(AiChatMessage::User{
+                message
+            });*/
+            match &self.backends[backend_index].1{
+                AiBackend::OpenAI{url, model, key}=>{
+                    let request_id = live_id!(OpenAIChatMessage);
+                    let mut request = HttpRequest::new(url.clone(), HttpMethod::POST);
+                    request.set_is_streaming();
+                    request.set_header("Authorization".to_string(), format!("Bearer {key}"));
+                    request.set_header("Content-Type".to_string(), "application/json".to_string());
+                    request.set_metadata_id(chat_id); 
+                    let mut messages = Vec::new();
+                    for msg in &doc.file.messages{
+                        match msg{
+                            AiChatMessage::User(v)=>{
+                                messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                            }
+                            AiChatMessage::Assistant(v)=>{
+                                messages.push(ChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})
+                            }
+                        }
+                    }
+                    request.set_json_body(ChatPrompt {
+                        messages,
+                        model: model.to_string(),
+                        max_tokens: 1000,
+                        stream: true,
+                    });
+                    doc.in_flight = true;
+                    cx.http_request(request_id, request);
+                }
+            }
         }
     }
     
     pub fn redraw_ai_chat_by_id(&mut self, cx: &mut Cx, chat_id: LiveId, ui: &WidgetRef) {
-                
         let dock = ui.dock(id!(dock));
         dock.item(chat_id).redraw(cx)
     }
 }
-        
