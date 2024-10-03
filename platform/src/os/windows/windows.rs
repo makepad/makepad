@@ -393,6 +393,9 @@ impl Cx {
 
                     //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
+                CxOsOp::CancelHttpRequest {request_id:_} => {
+                    todo!();
+                }
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),

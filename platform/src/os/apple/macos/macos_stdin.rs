@@ -19,7 +19,6 @@ use {
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         os::{
-            url_session::{make_http_request},
             apple_sys::*,
             metal_xpc::{
                 xpc_service_proxy,
@@ -414,7 +413,7 @@ impl Cx {
                     self.os.stdin_timers.timers.remove(&timer_id);
                 },
                 CxOsOp::HttpRequest {request_id, request} => {
-                    make_http_request(request_id, request, self.os.network_response.sender.clone());
+                    self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
                 _ => ()
                 /*

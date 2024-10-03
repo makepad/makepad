@@ -51,7 +51,7 @@ pub struct ChatChoice {
     pub logprobs: JsonValue,
     pub index: i32,
 }
-
+/*
 #[derive(SerJson, DeJson)]
 pub struct LLamaCppQuery {
     pub stream: bool,
@@ -88,3 +88,78 @@ pub struct LLamaCppStream {
     pub multimodal: bool,
     pub index: i32,
 }
+AiBackend::LlamaLocal=>{
+    for data in data.split("\n\n"){
+        if let Some(data) = data.strip_prefix("data: "){
+            if data != "[DONE]"{
+                match LLamaCppStream::deserialize_json(data){
+                    Ok(chat_response)=>{
+                        if let Some(AiChatMessage::Ai(s)) = self.chat.last_mut(){
+                            s.push_str(&chat_response.content);
+                        }
+                        else{
+                            self.chat.push(AiChatMessage::Ai(chat_response.content))
+                        }
+                        // triggre a save to disk as well
+                        changed = true;
+                    }
+                    Err(e)=>{
+                        println!("JSon parse error {:?} {}", e, data);
+                    }
+                }
+            }
+        }
+    }
+}
+AiBackend::LlamaLocal=>{
+    let url = format!("{}/completion", self.config.llama_url);
+    let mut request = HttpRequest::new(url, HttpMethod::POST);
+    request.set_is_streaming();
+    request.set_header("Content-Type".to_string(), "application/json".to_string());
+    request.set_metadata_id(chat_id); 
+    let mut prompt = String::new();
+    prompt.push_str("<|begin_of_text|>\n");
+    prompt.push_str("<|start_header_id|>system<|stop_header_id|>");
+    prompt.push_str("You are a helpful programming assitant<|eot_id|>");
+    for msg in &doc.chat{
+        match msg{
+            AiChatMessage::User(v)=>{
+                prompt.push_str("<|start_header_id|>user<|end_header_id|>");
+                prompt.push_str(v);
+                prompt.push_str("<|eot_id|>");
+            }
+            AiChatMessage::Ai(v)=>{
+                prompt.push_str("<|start_header_id|>assistant<|end_header_id|>");
+                prompt.push_str(v);
+                prompt.push_str("<|eot_id|>");
+            }
+        }
+    }
+    request.set_json_body(LLamaCppQuery{
+        stream: true,
+        n_predict:400,
+        temperature:0.7,
+        stop:vec![],
+        repeat_last_n:256,
+        repeat_penalty:1.18,
+        top_k:40.0,
+        top_p:0.95,
+        min_p:0.05,
+        tfs_z:1.0,
+        typical_p:1.0,
+        presence_penalty:0.0,
+        frequency_penalty:0.0,
+        mirostat:0.0,
+        mirostat_tau:5.0,
+        mirostat_eta:0.1,
+        grammar:"".to_string(),
+        n_probs:0,
+        min_keep:0.0,
+        image_data:vec![],
+        cache_prompt:true,
+        api_key:"".to_string(),
+        slot_id:-1,
+        prompt: message.to_string()
+    })
+    cx.http_request(request_id, request);
+}*/
