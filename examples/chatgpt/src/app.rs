@@ -138,7 +138,7 @@ impl MatchEvent for App {
                         }
                     }
                 }
-                NetworkResponse::HttpStreamComplete=>{
+                NetworkResponse::HttpStreamComplete(_res)=>{
                     println!("Stream complete");
                 }
                 NetworkResponse::HttpResponse(response) => {

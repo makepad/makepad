@@ -80,6 +80,9 @@ pub enum CxOsOp {
         request_id: LiveId,
         request: HttpRequest,
     },
+    CancelHttpRequest{
+        request_id: LiveId,
+    },
 
     PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
     BeginVideoPlayback(LiveId),
@@ -497,6 +500,12 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HttpRequest {
             request_id,
             request,
+        });
+    }
+    
+    pub fn cancel_http_request(&mut self, request_id: LiveId) {
+        self.platform_ops.push(CxOsOp::CancelHttpRequest {
+            request_id,
         });
     }
     /*

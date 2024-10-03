@@ -4,7 +4,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    import makepad_studio::studio_editor::StudioEditor;
+    import makepad_studio::studio_editor::StudioCodeEditor;
     import makepad_studio::ai_chat::ai_chat_view::AiChatView;
     import makepad_studio::studio_file_tree::StudioFileTree;
     import makepad_studio::run_view::RunView;
@@ -400,13 +400,7 @@ live_design!{
                 template: RunListTab,
                 kind: RunList
             }
-
-            file1 = Tab {
-                name: "app.rs",
-                template: PermanentTab,
-                kind: StudioEditor
-            }
-
+            
             log_list_tab = Tab {
                 name: "Log",
                 template: LogTab,
@@ -419,9 +413,7 @@ live_design!{
                 kind: Profiler
             }
 
-            AiChat = <AiChatView>{
-            }
-            StudioEditor = <View> {
+            CodeEditor = <View> {
                 flow: Down,
                 <DockToolbar> {
                     content = {
@@ -439,8 +431,13 @@ live_design!{
                         <ButtonFlat> { width: Fit, text: "Docs"}
                     }
                 }
-                editor = <StudioEditor> {} 
+                editor = <StudioCodeEditor> {} 
             }
+            
+            AiChat = <AiChatView> {
+                flow: Down,
+            }
+            
             EditFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,

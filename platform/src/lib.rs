@@ -157,6 +157,8 @@ pub use {
             HttpRequest,
             HttpResponse,
             HttpMethod,
+            HttpProgress,
+            HttpError,
             NetworkResponse,
             NetworkResponsesEvent,
             Margin,
