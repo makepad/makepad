@@ -18,7 +18,7 @@ use {
                     ios_event::IosEvent,
                     ios_app::{IosApp, init_ios_app_global,get_ios_app_global}
                 },
-                url_session::{make_http_request},
+                url_session::{AppleHttpRequests},
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -90,8 +90,9 @@ impl Cx {
 
     pub(crate) fn handle_networking_events(&mut self) {
         let mut out = Vec::new();
-        while let Ok(event) = self.os.network_response.receiver.try_recv(){
-            out.push(event);
+        while let Ok(item) = self.os.network_response.receiver.try_recv(){
+            self.os.http_requests.handle_response_item(&item);
+            out.push(item);
         }
         if out.len()>0{
             self.call_event_handler(& Event::NetworkResponses(out))
@@ -309,8 +310,11 @@ impl Cx {
                 }
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{request_id, request} => {
-                    make_http_request(request_id, request, self.os.network_response.sender.clone());
+                CxOsOp::HttpRequest {request_id, request} => {
+                    self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
+                },
+                CxOsOp::CancelHttpRequest {request_id} => {
+                    self.os.http_requests.cancel_http_request(request_id);
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
@@ -397,5 +401,6 @@ pub struct CxOs {
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
+    pub (crate) http_requests: AppleHttpRequests,
 }
 

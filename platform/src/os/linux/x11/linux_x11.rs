@@ -340,6 +340,9 @@ impl Cx {
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
+                CxOsOp::CancelHttpRequest {request_id:_} => {
+                    todo!();
+                }
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),

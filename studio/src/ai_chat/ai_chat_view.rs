@@ -2,6 +2,8 @@
 use {
     crate::{
         app::{AppData},
+        ai_chat::ai_chat_manager::*,
+        file_system::file_system::{EditSession,OpenDocument},
         makepad_widgets::*,
     },
     std::{
@@ -65,15 +67,22 @@ impl WidgetMatchEvent for AiChatView{
         let data = scope.data.get_mut::<AppData>().unwrap();
         let chat_id = scope.path.from_end(0);
         // someone pressed send / return
+        // alright what do we do when we have a request running?
+        // we should cancel it first
         if self.button(id!(send_button)).clicked(actions) || 
         self.text_input(id!(message_input)).returned(actions).is_some()
         {
-            let user_prompt = self.text_input(id!(message_input)).text();
-            // alright we got a user prompt. lets send it
-             data.ai_chat_manager.send_message(cx, chat_id, user_prompt);
+            let message = self.text_input(id!(message_input)).text();
+            // alright so. what happens
+            // we can 
+            // alright we got a user prompt. lets set it as the first message and send it
+            
+            data.ai_chat_manager.clear_messages(chat_id, &mut data.file_system);
+            data.ai_chat_manager.add_user_message(chat_id, AiUserMessage{message, context:vec![]}, &mut data.file_system);
+            data.ai_chat_manager.send_chat_to_backend(cx, chat_id, 0, &mut data.file_system);
         }
         if self.button(id!(clear_button)).clicked(actions){
-            data.ai_chat_manager.clear_chat(chat_id);
+            data.ai_chat_manager.clear_messages(chat_id, &mut data.file_system);
             self.redraw(cx);
         }
     }
@@ -83,12 +92,18 @@ impl Widget for AiChatView {
         // alright we have a scope, and an id, so now we can properly draw the editor.
         // alright lets fetch the chat-id from the scope
         let data = scope.data.get_mut::<AppData>().unwrap();
-        let chat_id = scope.path.from_end(0);
-        if let Some(chat_data) = data.ai_chat_manager.open_chats.get(&chat_id){
-            // alright we have a chat_data.. now what.
-            // now we need to update the text on the markdown object
-            self.markdown(id!(md)).set_text(&chat_data.chat);
+        let session_id = scope.path.from_end(0);
+        // lets fetch the document id from our session id
+        
+        if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
+            let chat_id = *chat_id;
+            if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
+                if let Some(AiChatMessage::Assistant(val)) = doc.file.messages.get(1){
+                    self.markdown(id!(md)).set_text(&val);
+                }
+            }
         }
+        
         
         self.view.draw_all_unscoped(cx);
         /*
@@ -104,13 +119,12 @@ impl Widget for AiChatView {
         self.widget_match_event(cx, event, scope);
         self.view.handle_event(cx, event, scope);
         // we have an AI connection running on AppData
-        let data = scope.data.get_mut::<AppData>().unwrap();
+       /* let data = scope.data.get_mut::<AppData>().unwrap();
         // alright we can now access our AiChatManager object
         let chat_id = scope.path.from_end(1);
         if let Some(_chat_data) = data.ai_chat_manager.open_chats.get(&chat_id){
             // alright we have a chat_data..
-            
-        }
+        }*/
         /*
         if let Some(session) = data.file_system.get_session_mut(session_id){
             for action in self.editor.handle_event(cx, event, &mut Scope::empty(), session){
