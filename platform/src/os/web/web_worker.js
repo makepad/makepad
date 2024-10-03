@@ -57,7 +57,7 @@ onmessage = async function(e) {
             
             web_socket.onclose = e => {
                 wasm.exports.wasm_web_socket_closed(id);
-                delete websockets[id];
+                delete web_sockets[id];
             }
             web_socket.onerror = e => {
                 let err = string_to_u8("" + e);
