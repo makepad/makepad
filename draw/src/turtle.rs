@@ -15,7 +15,7 @@ pub struct Layout {
     #[live] pub align: Align,
     #[live] pub flow: Flow,
     #[live] pub spacing: f64,
-    #[live] pub line_spacing: f64
+    //#[live] pub line_spacing: f64
 }
 
 impl Default for Layout{
@@ -28,7 +28,7 @@ impl Default for Layout{
             align: Align{x:0.0,y:0.0},
             flow: Flow::Right,
             spacing: 0.0,
-            line_spacing: 0.0
+            //line_spacing: 0.0
         }
     }
 }
@@ -123,6 +123,7 @@ pub struct TurtleWalk {
 pub struct Turtle {
     walk: Walk,
     layout: Layout,
+    wrap_spacing: f64,
     align_start: usize,
     turtle_walks_start: usize,
     defer_count: usize,
@@ -216,6 +217,7 @@ impl<'a> Cx2d<'a> {
                 x: layout.padding.left,
                 y: layout.padding.top
             },
+            wrap_spacing: 0.0,
             origin: dvec2(0.0, 0.0),
             width: pass_size.x,
             height: pass_size.y,
@@ -308,6 +310,7 @@ impl<'a> Cx2d<'a> {
             align_start: self.align_list.len()-1,
             turtle_walks_start: self.turtle_walks.len(),
             defer_count: 0,
+            wrap_spacing: 0.0,
             pos: DVec2 {
                 x: origin.x + layout.padding.left,
                 y: origin.y + layout.padding.top
@@ -477,6 +480,10 @@ impl<'a> Cx2d<'a> {
         self.walk_turtle_move(walk, self.align_list.len())
     }
     
+    pub fn set_turtle_wrap_spacing(&mut self, spacing: f64){
+        self.turtle_mut().wrap_spacing = spacing;
+    }
+
     pub fn walk_turtle_with_area(&mut self, area: &mut Area, walk: Walk) -> Rect {
         let rect = self.walk_turtle_move(walk, self.align_list.len());
         self.add_aligned_rect_area(area, rect);
@@ -568,7 +575,7 @@ impl<'a> Cx2d<'a> {
                         let dx = pos.x - turtle.pos.x;                        
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                         
-                        pos.y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
+                        pos.y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;//turtle.layout.line_spacing;
                         let dy = pos.y - turtle.pos.y;
                         turtle.pos.y = pos.y;
                         
@@ -639,9 +646,9 @@ impl<'a> Cx2d<'a> {
     pub fn turtle_new_line(&mut self){
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.height_used + turtle.origin.y + turtle.layout.line_spacing;
+        let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;
         if turtle.pos.y == next_y{
-            turtle.pos.y += turtle.layout.line_spacing;
+            turtle.pos.y += turtle.wrap_spacing;
         }
         else{
             turtle.pos.y = next_y;

@@ -189,7 +189,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApplyReset for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         let walk_fields = ["abs_pos","margin","width","height"];
-        let layout_fields = ["scroll","clip_x","clip_y","padding","align","flow","spacing","line_spacing"];
+        let layout_fields = ["scroll","clip_x","clip_y","padding","align","flow","spacing"];
                 
         tb.add("    fn apply_reset(&mut self, cx: &mut Cx, apply:&mut Apply, start_index:usize, nodes:&[LiveNode]) {");
         
