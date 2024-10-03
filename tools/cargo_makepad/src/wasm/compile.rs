@@ -22,10 +22,35 @@ pub struct WasmConfig{
     pub lan:bool,
     pub port:Option<u16>,
     pub small_fonts: bool,
-    pub brotli: bool
+    pub brotli: bool,
+    pub bindgen: bool,
 }
 
-pub fn generate_html(wasm:&str)->String{
+pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
+    let init = if config.bindgen {
+        format!("
+            import {{init_env}} from './makepad_wasm_bridge/wasm_bridge.js'
+            import init from './bindgen.js';
+    
+            let env = {{}};
+            let set_wasm = init_env(env);
+            let module = await WebAssembly.compileStreaming(fetch('./{wasm}.wasm'))
+            let wasm = await init({{module_or_path: module}}, env);
+            set_wasm(wasm);
+
+            wasm._has_thread_support = true;
+            wasm._memory = wasm.exports.memory;
+            wasm._module = module;
+            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
+            ")
+    } else {
+        format!("
+            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
+            const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
+                './{wasm}.wasm'
+            );
+            ")
+    };
     format!("
     <!DOCTYPE html>
     <html>
@@ -34,12 +59,7 @@ pub fn generate_html(wasm:&str)->String{
         <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
         <title>{wasm}</title>
         <script type='module'>
-            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
-                            
-            const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-                './{wasm}.wasm'
-            );
-                            
+            {init}
             class MyWasmApp {{
                 constructor(wasm) {{
                     let canvas = document.getElementsByClassName('full_canvas')[0];
@@ -48,7 +68,6 @@ pub fn generate_html(wasm:&str)->String{
             }}
             let app = new MyWasmApp(wasm);
         </script>
-        <script type='module' src='./makepad_platform/auto_reload.js'></script>
         <link rel='stylesheet' type='text/css' href='./makepad_platform/full_canvas.css'>
     </head> 
     <body>
@@ -151,7 +170,16 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
             
             cp_brotli(&dep_dir.join("src/os/web/web_gl.js"), &app_dir.join("makepad_platform/web_gl.js"), false, config.brotli)?;
             
-            cp_brotli(&dep_dir.join("src/os/web/web_worker.js"), &app_dir.join("makepad_platform/web_worker.js"), false, config.brotli)?;
+            if config.bindgen {
+                let jsfile = dep_dir.join("src/os/web/web_worker.js");
+                let js = std::fs::read_to_string(&jsfile).map_err(|e| format!("Unable to find web.js {e:?}"))?;
+                let tmp = build_dir.join("web_worker.js");
+                let mut file = std::fs::OpenOptions::new().write(true).truncate(true).create(true).open(&tmp ).unwrap();
+                file.write(format!("import init from '../bindgen.js';\n{js}").as_bytes()).unwrap();
+                cp_brotli(&tmp, &app_dir.join("makepad_platform/web_worker.js"), false, config.brotli)?;
+            } else {
+                cp_brotli(&dep_dir.join("src/os/web/web_worker.js"), &app_dir.join("makepad_platform/web_worker.js"), false, config.brotli)?;
+            }
             
             cp_brotli(&dep_dir.join("src/os/web/web.js"), &app_dir.join("makepad_platform/web.js"), false, config.brotli)?;
             
@@ -192,8 +220,23 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
             }) ?;
         }            
     }
+    let wasm_source = if config.bindgen {
+        shell(build_dir.as_path(), "wasm-bindgen", &[&format!("{build_crate}.wasm"), "--out-dir=.", "--out-name=bindgen", "--target=web", "--no-typescript", ])?;
+        let jsfile = build_dir.join("bindgen.js");
+        let patched = std::fs::read_to_string(&jsfile).map_err(|e| format!("Unable to find wasm-bidngen generated file {e:?}"))?
+            .replace("import * as __wbg_star0 from 'env';", "")
+            .replace("imports['env'] = __wbg_star0;", "")
+            .replace("return wasm;\n}", "return instance;\n}")
+            .replace("__wbg_init(module_or_path, memory) {", "__wbg_init(module_or_path, env) {let memory;")
+            .replace("imports = __wbg_get_imports();", "imports = __wbg_get_imports(); imports.env = env;");
+        std::fs::OpenOptions::new().write(true).truncate(true).open(&jsfile).unwrap().write(patched.as_bytes()).unwrap();
+        cp_brotli(&jsfile, &app_dir.join("bindgen.js"), false, config.brotli)?;
 
-    let wasm_source = build_dir.join(format!("{}.wasm", build_crate));
+        build_dir.join("bindgen_bg.wasm")
+    } else {
+        build_dir.join(format!("{}.wasm", build_crate))
+    };
+
     let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
     if config.strip{
         if let Ok(data) = fs::read(&wasm_source) {
@@ -216,7 +259,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     }
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(build_crate);
+    let html = generate_html(build_crate, &config);
     fs::write(&index_path, &html.as_bytes()).map_err( | e | format!("Can't write {:?} {:?} ", index_path, e)) ?;
     if config.brotli{
         brotli_compress(&index_path);
