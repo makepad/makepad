@@ -971,6 +971,7 @@ impl DrawText {
                         glyph_infos,
                         ..
                     } => {
+                        cx.set_turtle_wrap_spacing(line_spacing - line_height);
                         let rect = cx.walk_turtle(Walk {
                             abs_pos: None,
                             margin: Margin::default(),
