@@ -69,7 +69,7 @@ pub struct Cx {
     
     pub draw_shaders: CxDrawShaders,
     
-    pub (crate) new_draw_event: DrawEvent,
+    pub new_draw_event: DrawEvent,
     
     pub redraw_id: u64,
     
