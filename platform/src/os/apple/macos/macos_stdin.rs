@@ -415,6 +415,9 @@ impl Cx {
                 CxOsOp::HttpRequest {request_id, request} => {
                     self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
+                CxOsOp::CancelHttpRequest {request_id} => {
+                    self.os.http_requests.cancel_http_request(request_id);
+                },
                 _ => ()
                 /*
                 CxOsOp::CloseWindow(_window_id) => {},

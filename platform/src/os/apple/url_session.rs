@@ -360,14 +360,12 @@ impl AppleHttpRequests{
     
     pub fn handle_response_item(&mut self, item:&NetworkResponseItem){
         match &item.response{
-            NetworkResponse::HttpRequestError(_err)=>{
-            }
-            NetworkResponse::HttpResponse(_res)=>{
-            }
-            NetworkResponse::HttpStreamComplete(_res)=>{
+            NetworkResponse::HttpRequestError(_) |
+            NetworkResponse::HttpResponse(_) |
+            NetworkResponse::HttpStreamComplete(_) => {
+                self.requests.retain(|v| v.request_id != item.request_id);
             }
             _=>{
-                self.requests.retain(|v| v.request_id != item.request_id);
             }
         }
     }
@@ -401,6 +399,10 @@ impl AppleHttpRequests{
                 let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request];
                 let () = msg_send![data_task, setDelegate: url_session_data_delegate_instance];
                 let () = msg_send![data_task, resume];
+                self.requests.push(HttpReq{
+                    request_id,
+                    data_task: RcObjcId::from_owned(NonNull::new(data_task).unwrap())
+                })
             }
             else{ // its using the completion handler
                 let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {

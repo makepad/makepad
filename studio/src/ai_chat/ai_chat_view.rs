@@ -16,8 +16,10 @@ live_design!{
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
     
-    User = <View>{
+    User = <RoundedView>{
         height: Fit
+        draw_bg:{color:#5}
+        padding: 10,
         message_input = <TextInput> {
             text: ""
             empty_message:"Chat here"
@@ -38,7 +40,8 @@ live_design!{
         }
     }
     
-    Assistant = <View>{
+    Assistant = <RoundedView>{
+        draw_bg:{color:#4}
         md = <Markdown>{
             code_block = <CodeView>{
                 editor:{
@@ -80,20 +83,26 @@ impl WidgetMatchEvent for AiChatView{
                 
                 let list = self.view.portal_list(id!(list));
                 for (item_id,item) in list.items_with_actions(actions){
-                    if let Some(text) = item.text_input(id!(message_input)).changed(actions){
+                    let message_input = item.text_input(id!(message_input));
+                    if let Some(text) = message_input.changed(actions){
                         // lets write the text to the chat index
                         if let Some(AiChatMessage::User(val)) = doc.file.messages.get_mut(item_id){
                             // update it
                             val.message = text;
                         }
                     }
-                    
-                    if item.button(id!(send_button)).clicked(actions) || 
+                    if message_input.escape(actions){
+                        cx.action(AppAction::CancelAiGeneration{chat_id});
+                    }
+                                        
+                    if item.button(id!(send_button)).pressed(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
-                        cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:0})
+                        cx.action(AppAction::SetAiChatLen{chat_id, new_len:item_id+1});
+                        cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:0});
+                        self.redraw(cx);
                     }
                     // lets clear the messages
-                    if item.button(id!(clear_button)).clicked(actions){
+                    if item.button(id!(clear_button)).pressed(actions){
                         cx.action(AppAction::SetAiChatLen{chat_id, new_len:item_id+1});
                         item.text_input(id!(message_input)).set_text_and_redraw(cx,"");
                         if let Some(AiChatMessage::User(val)) = doc.file.messages.get_mut(item_id){

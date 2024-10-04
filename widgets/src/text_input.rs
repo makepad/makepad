@@ -660,6 +660,13 @@ impl TextInputRef {
         None
     }
     
+    pub fn escape(&self, actions: &Actions) -> bool {
+        if let TextInputAction::Escape = actions.find_widget_action_cast(self.widget_uid()) {
+            return true;
+        }
+        false
+    }
+    
     pub fn set_cursor(&self, head: usize, tail: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_cursor(Cursor {
