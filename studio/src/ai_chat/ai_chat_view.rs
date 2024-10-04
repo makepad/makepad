@@ -14,6 +14,8 @@ use {
 live_design!{
     import makepad_code_editor::code_view::CodeView;
     import makepad_widgets::base::*;
+    import makepad_draw::shader::std::*;
+        
     import makepad_widgets::theme_desktop_dark::*;
     
     User = <RoundedView>{
@@ -22,7 +24,7 @@ live_design!{
         padding: 10,
         message_input = <TextInput> {
             text: ""
-            empty_message:"Chat here"
+            empty_message:"..."
             width: Fill,
             height: Fit,
             draw_bg: {
@@ -32,7 +34,7 @@ live_design!{
                                                                                                             
         send_button = <Button> {
             icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-            text: "send"
+            text: ">"
         }
         clear_button = <Button> {
             icon_walk: {margin: {left: 10}, width: 16, height: Fit}
@@ -42,6 +44,7 @@ live_design!{
     
     Assistant = <RoundedView>{
         draw_bg:{color:#4}
+        flow: Down
         md = <Markdown>{
             code_block = <CodeView>{
                 editor:{
@@ -50,6 +53,24 @@ live_design!{
             }
             use_code_block_widget: true,
             body:""
+        }
+        busy = <View>{
+            margin:{top:5, bottom:5}
+            width: 50,
+            height: 10
+            show_bg: true,
+            draw_bg:{
+                fn pixel(self)->vec4{
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let x = 5.0;
+                    for i in 0..4{
+                        x = x + 8.0;
+                        sdf.circle(x,5.,3.);
+                        sdf.fill(#f);
+                    }
+                    return sdf.result
+                }
+            }
         }
     }
     
@@ -133,6 +154,7 @@ impl Widget for AiChatView {
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff
                                     item.widget(id!(md)).set_text(&val);
+                                    item.view(id!(busy)).set_visible(doc.in_flight_request_id.is_some());
                                     item.draw_all_unscoped(cx);
                                 }
                                 Some(AiChatMessage::User(val))=>{
