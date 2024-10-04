@@ -49,6 +49,9 @@ live_design!{
              padding: 3,
              md = <Markdown>{
                 code_block = <CodeView>{
+                    editor:{
+                        draw_bg: { color: (#3) }
+                    }
                 }
                 use_code_block_widget: true,
                 body:""
@@ -95,6 +98,14 @@ impl Widget for AiChatView {
         let session_id = scope.path.from_end(0);
         // lets fetch the document id from our session id
         
+        // lets use a custom draw flow on the markdown widget
+        // we have our 'input' widget which gets cloned everywhere there is a 'user' field
+        // this thing is a combination of a context-selector and a text input
+        // i think maybe what we need is a flat list
+        
+        // it is a direct translation of the chat datastructure. Markdown instances for the AI answer
+        // and 'input' instances with a context editor for the user input
+        
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
@@ -103,7 +114,7 @@ impl Widget for AiChatView {
                 }
             }
         }
-        
+        // we should hook the markdown flow to be 'custom drawn'
         
         self.view.draw_all_unscoped(cx);
         /*

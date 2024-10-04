@@ -647,10 +647,14 @@ impl Cx{
         let context_ptr = Box::into_raw(Box::new(closure_box));
         self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32, timer});
     }
+    
+    pub fn time_now()->f64{
+        unsafe{js_time_now()}
+    }
 }
 
 extern "C" {
-    pub fn js_post_signal(signal_hi: u32, signal_lo: u32);
+    pub fn js_time_now()->f64;
 }
 
 #[export_name = "wasm_thread_entrypoint"]
@@ -665,7 +669,7 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
 pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
     closure();
-    Box::into_raw(closure);
+    let _ = Box::into_raw(closure);
 } 
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
