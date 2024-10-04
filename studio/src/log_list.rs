@@ -311,6 +311,7 @@ impl Widget for LogList {
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
+            
             if log_list.any_items_with_actions(&actions) {
                 // alright lets figure out if someone clicked a link
                 // alright so how do we now filter which link was clicked
