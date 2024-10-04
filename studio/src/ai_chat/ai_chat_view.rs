@@ -95,7 +95,6 @@ pub struct AiChatView{
 }
 impl WidgetMatchEvent for AiChatView{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions, scope: &mut Scope){
-        let uid = self.widget_uid();
         let data = scope.data.get_mut::<AppData>().unwrap();
         let session_id = scope.path.from_end(0);
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){

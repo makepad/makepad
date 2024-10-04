@@ -181,28 +181,29 @@ impl FileServerConnection {
         thread::spawn(move || {
             let stop = *stop_observation.lock().unwrap();
             while !stop{
-                let mut files = open_files.lock().unwrap();
-                for (path, file_id, last_content) in files.iter_mut() {
-                    let full_path = {
-                        let shared = shared.read().unwrap();
-                        shared.root_path.join(&path)
-                    };
-                    if let Ok(bytes) = fs::read(&full_path) {
-                        if bytes.len() > 0 && bytes != *last_content {
-                            let new_data = String::from_utf8_lossy(&bytes);
-                            let old_data = String::from_utf8_lossy(&last_content);
-                            // Send notification of external file change.
-                            notification_sender
-                            .send_notification(FileNotification::FileChangedOnDisk(
-                                SaveFileResponse{
-                                    path: path.to_string(),
-                                    new_data: new_data.to_string(),
-                                    old_data: old_data.to_string(),
-                                    kind: SaveKind::Observation,
-                                    id: *file_id
-                                }
-                            ));
-                            *last_content = bytes;
+                if let Ok(mut files) = open_files.lock(){
+                    for (path, file_id, last_content) in files.iter_mut() {
+                        let full_path = {
+                            let shared = shared.read().unwrap();
+                            shared.root_path.join(&path)
+                        };
+                        if let Ok(bytes) = fs::read(&full_path) {
+                            if bytes.len() > 0 && bytes != *last_content {
+                                let new_data = String::from_utf8_lossy(&bytes);
+                                let old_data = String::from_utf8_lossy(&last_content);
+                                // Send notification of external file change.
+                                notification_sender
+                                .send_notification(FileNotification::FileChangedOnDisk(
+                                    SaveFileResponse{
+                                        path: path.to_string(),
+                                        new_data: new_data.to_string(),
+                                        old_data: old_data.to_string(),
+                                        kind: SaveKind::Observation,
+                                        id: *file_id
+                                    }
+                                ));
+                                *last_content = bytes;
+                            }
                         }
                     }
                 }
