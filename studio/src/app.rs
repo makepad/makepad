@@ -149,6 +149,7 @@ impl MatchEvent for App{
         let log_list = self.ui.log_list(id!(log_list));
         let run_list = self.ui.view(id!(run_list));
         let profiler = self.ui.view(id!(profiler));
+        
         match action.cast(){
             AppAction::JumpTo(jt)=>{
                 let pos = Position{line_index: jt.line as usize, byte_index:jt.column as usize};

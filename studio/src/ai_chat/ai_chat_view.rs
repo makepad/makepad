@@ -90,12 +90,15 @@ impl WidgetMatchEvent for AiChatView{
                     
                     if item.button(id!(send_button)).clicked(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
-                        println!("SEND TO BACKEND");
-                        cx.widget_action(uid, &scope.path, AppAction::SendAiChatToBackend{chat_id, backend_index:0})
+                        cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:0})
                     }
                     // lets clear the messages
                     if item.button(id!(clear_button)).clicked(actions){
-                        cx.widget_action(uid, &scope.path, AppAction::SetAiChatLen{chat_id, new_len:item_id+1});
+                        cx.action(AppAction::SetAiChatLen{chat_id, new_len:item_id+1});
+                        item.text_input(id!(message_input)).set_text_and_redraw(cx,"");
+                        if let Some(AiChatMessage::User(val)) = doc.file.messages.get_mut(item_id){
+                            val.message.clear();
+                        }
                         self.redraw(cx);
                     }
                 }
