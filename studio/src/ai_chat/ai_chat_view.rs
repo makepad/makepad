@@ -66,7 +66,7 @@ live_design!{
                     for i in 0..4{
                         x = x + 8.0;
                         sdf.circle(x,5.,3.);
-                        sdf.fill(#f);
+                        sdf.fill(#a);
                     }
                     return sdf.result
                 }
