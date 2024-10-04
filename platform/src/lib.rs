@@ -218,7 +218,7 @@ pub use {
         cursor::MouseCursor,
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
-        window::WindowHandle,
+        window::{WindowHandle,CxWindowPool},
         pass::{
             PassId,
             CxPassParent,
