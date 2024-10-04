@@ -88,7 +88,7 @@ impl MatchEvent for App{
             self.counter += 1;
             //let () = actions;
             let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
+            label.set_text_and_redraw(cx, &format!("Counter: {} Time:{}", self.counter, Cx::time_now()));
             //log!("TOTAL : {}",TrackingHeap.total());
         }
     }

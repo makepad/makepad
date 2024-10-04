@@ -33,7 +33,8 @@ pub struct Markdown{
     #[live(false)] use_code_block_widget:bool,
     #[rust] in_code_block: bool,
     #[rust] code_block_string: String,
-    #[rust] doc: MarkdownDoc
+    #[rust] doc: MarkdownDoc,
+    #[rust] auto_id: u64
 }
 
 // alright lets parse the HTML
@@ -49,11 +50,41 @@ impl Widget for Markdown {
     } 
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
+        self.auto_id = 0;
+        self.begin(cx, walk);
+        let mut doc = MarkdownDoc::default();
+        std::mem::swap(&mut doc, &mut self.doc);
+        self.process_markdown_doc(&mut doc, cx);
+        std::mem::swap(&mut doc, &mut self.doc);
+        self.end(cx);
+        DrawStep::done()
+    }
+     
+    fn text(&self)->String{
+        self.body.as_ref().to_string()
+    } 
+    
+    fn set_text(&mut self, v:&str){
+        if self.body.as_ref() != v{
+            self.body.set(v);
+            self.parse_text();
+        }
+    }
+}
+
+impl Markdown {
+    
+    fn parse_text(&mut self) {
+        let new_doc = parse_markdown(self.body.as_ref());
+        if new_doc != self.doc{
+            self.doc = new_doc;
+            //self.text_flow.clear_items();
+        }
+    }
+    
+    fn process_markdown_doc(&mut self, doc:&MarkdownDoc, cx: &mut Cx2d){
         let tf = &mut self.text_flow;
-        tf.begin(cx, walk);
-        // alright lets walk the markdown
-        let mut auto_id = 0u64;
-        for node in &self.doc.nodes{
+        for node in &doc.nodes{
             match node{
                 MarkdownNode::BeginHead{level}=>{
                     cx.turtle_new_line_with_spacing(self.paragraph_spacing);
@@ -84,7 +115,7 @@ impl Widget for Markdown {
                     cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 },
                 MarkdownNode::EndNormal=>{
-                    
+                                        
                 },
                 MarkdownNode::BeginListItem{label}=>{
                     cx.turtle_new_line();
@@ -93,9 +124,9 @@ impl Widget for Markdown {
                         MarkdownListLabel::Minus=>"-",
                         MarkdownListLabel::Star=>"*",
                         MarkdownListLabel::Number{start,end,..}=>{
-                            &self.doc.decoded[*start..*end]
+                            &doc.decoded[*start..*end]
                         }
-                                                
+                                                                        
                     };
                     tf.begin_list_item(cx, str, 1.5);
                 },
@@ -103,18 +134,18 @@ impl Widget for Markdown {
                     tf.end_list_item(cx);
                 },
                 MarkdownNode::Link{start, url_start, end}=>{
-                    auto_id += 1;
-                    let item = tf.item(cx, LiveId(auto_id), live_id!(link));
-                    item.set_text(&self.doc.decoded[*start..*url_start]);
+                    self.auto_id += 1;
+                    let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
+                    item.set_text(&doc.decoded[*start..*url_start]);
                     item.as_markdown_link()
-                        .set_href(&self.doc.decoded[*url_start..*end]);
+                    .set_href(&doc.decoded[*url_start..*end]);
                     item.draw_all_unscoped(cx);
                 },
                 MarkdownNode::Image{start, url_start, end}=>{
                     tf.draw_text(cx, "Image[name:");
-                    tf.draw_text(cx, &self.doc.decoded[*start..*url_start]);
+                    tf.draw_text(cx, &doc.decoded[*start..*url_start]);
                     tf.draw_text(cx, ", url:");
-                    tf.draw_text(cx, &self.doc.decoded[*url_start..*end]);
+                    tf.draw_text(cx, &doc.decoded[*url_start..*end]);
                     tf.draw_text(cx, " ]");
                 },
                 MarkdownNode::BeginQuote=>{
@@ -137,7 +168,7 @@ impl Widget for Markdown {
                     tf.inline_code.push();     
                 },
                 MarkdownNode::EndInlineCode=>{
-                     tf.font_sizes.pop();
+                    tf.font_sizes.pop();
                     tf.fixed.pop();
                     tf.inline_code.pop();                 
                 },
@@ -154,11 +185,11 @@ impl Widget for Markdown {
                         cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                         tf.combine_spaces.push(false);
                         tf.fixed.push();
-        
+                                
                         // This adjustment is necesary to do not add too much spacing
                         // between lines inside the code block.
-                       // tf.top_drop.push(0.2);
-        
+                        // tf.top_drop.push(0.2);
+                                
                         tf.begin_code(cx);
                     }
                 },
@@ -194,37 +225,13 @@ impl Widget for Markdown {
                 },
                 MarkdownNode::Text{start, end}=>{
                     if self.in_code_block{
-                        self.code_block_string.push_str(&self.doc.decoded[*start..*end]);
+                        self.code_block_string.push_str(&doc.decoded[*start..*end]);
                     }
                     else{
-                        tf.draw_text(cx, &self.doc.decoded[*start..*end]);
+                        tf.draw_text(cx, &doc.decoded[*start..*end]);
                     }
                 }
             }
-        }
-        
-        tf.end(cx);
-        DrawStep::done()
-    }
-     
-    fn text(&self)->String{
-        self.body.as_ref().to_string()
-    } 
-    
-    fn set_text(&mut self, v:&str){
-        if self.body.as_ref() != v{
-            self.body.set(v);
-            self.parse_text();
-        }
-    }
-}
-
-impl Markdown {
-    fn parse_text(&mut self) {
-        let new_doc = parse_markdown(self.body.as_ref());
-        if new_doc != self.doc{
-            self.doc = new_doc;
-            //self.text_flow.clear_items();
         }
     }
 }
