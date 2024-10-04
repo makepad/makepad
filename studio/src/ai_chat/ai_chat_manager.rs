@@ -53,7 +53,7 @@ pub struct AiContextFile{
     pub contents: String,
 }
 
-#[derive(Debug, SerRon, DeRon)]
+#[derive(Default, Debug, SerRon, DeRon)]
 pub struct AiUserMessage{
     pub context: Vec<AiContextFile>,
     pub message:String
@@ -161,6 +161,13 @@ impl AiChatManager{
                         }
                         NetworkResponse::HttpStreamComplete(res)=>{
                             // done?..
+                            let chat_id = res.metadata_id;
+                            // alright lets fetch the chat object
+                            if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+                                doc.file.messages.push(AiChatMessage::User(AiUserMessage::default()));
+                                self.redraw_ai_chat_by_id(cx, chat_id, ui);
+                                fs.request_save_file_for_file_node_id(chat_id, false);
+                            }
                         }
                         _=>{}
                     }
@@ -172,6 +179,7 @@ impl AiChatManager{
     
     pub fn set_chat_len(&mut self, chat_id:LiveId, new_len:usize, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+            
             doc.file.messages.truncate(new_len);
         }
     }
