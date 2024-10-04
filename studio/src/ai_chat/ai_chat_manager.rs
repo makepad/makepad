@@ -72,7 +72,7 @@ pub struct AiChatFile{
 
 #[derive(Debug, SerRon, DeRon)]
 pub struct AiChatDocument{
-    in_flight_request_id: Option<LiveId>,
+    pub in_flight_request_id: Option<LiveId>,
     pub file: AiChatFile
 }
 
@@ -228,6 +228,7 @@ impl AiChatManager{
                         max_tokens: 1000,
                         stream: true,
                     });
+                    doc.file.messages.push(AiChatMessage::Assistant("".to_string()));
                     doc.in_flight_request_id = Some(request_id);
                     cx.http_request(request_id, request);
                 }
