@@ -198,7 +198,8 @@ impl CxTexture{
             _ => panic!(),
         }
     }
-
+    
+    #[allow(unused)]
     pub(crate) fn initial(&mut self) -> bool {
         match self.format {
             TextureFormat::DepthD32{ initial, .. } => initial,
@@ -238,7 +239,7 @@ impl CxTexture{
         self.set_updated(TextureUpdated::Empty);
         updated
     }
-    
+    #[allow(unused)]
     pub(crate) fn take_initial(&mut self) -> bool {
         let initial = self.initial();
         self.set_initial(false);

@@ -193,6 +193,8 @@ impl FileSystem {
                                         Some(OpenDocument::AiChatLoading)=>{
                                              self.open_documents.insert(file_id, OpenDocument::AiChat(AiChatDocument::load_or_empty(&response.data)));
                                         }
+                                        Some(OpenDocument::AiChat(_))=>{
+                                        }
                                         _=>panic!()
                                     }
                                     

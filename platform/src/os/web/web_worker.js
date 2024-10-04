@@ -35,7 +35,7 @@ onmessage = async function(e) {
                 }
             }
         },
-
+        
         js_web_socket_send_binary(id, bin_ptr, bin_len){
             let bin = u8_to_array(bin_ptr, bin_len);
             let web_socket = web_sockets[id];
@@ -48,7 +48,11 @@ onmessage = async function(e) {
                 }
             }
         },
-
+        
+        js_time_now(){
+            return Date.now()/ 1000.0;
+        },
+        
         js_open_web_socket:(id, url_ptr, url_len)=>{
             let url = u8_to_string(url_ptr, url_len);
             let web_socket = new WebSocket(url);
