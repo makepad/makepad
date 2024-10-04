@@ -72,7 +72,7 @@ pub struct AiChatFile{
 
 #[derive(Debug, SerRon, DeRon)]
 pub struct AiChatDocument{
-    in_flight: bool,
+    in_flight_request_id: Option<LiveId>,
     pub file: AiChatFile
 }
 
@@ -82,13 +82,13 @@ impl AiChatDocument{
             Err(e)=>{
                 error!("Error parsing AiChatDocument {e}");
                 Self{
-                    in_flight: false,
+                    in_flight_request_id: None,
                     file: AiChatFile::default()
                 }
             }
             Ok(file)=>{
                 Self{
-                    in_flight: false,
+                    in_flight_request_id: None,
                     file
                 }
             }
@@ -120,7 +120,8 @@ impl AiChatManager{
         // alright. lets see if we have any incoming Http things
         match event{
             Event::NetworkResponses(e)=>for e in e{
-                if e.request_id == live_id!(OpenAIChatMessage){
+                // lets check our in flight queries
+                if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.values_mut().find(|v| if let OpenDocument::AiChat(v) = v {v.in_flight_request_id == Some(e.request_id)} else{false}){
                     match &e.response{
                         NetworkResponse::HttpRequestError(_err)=>{
                         }
@@ -128,35 +129,33 @@ impl AiChatManager{
                             // alright we have a http stream response for a certain request id
                             let chat_id = res.metadata_id;
                             // alright lets fetch the chat object
-                            if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-                                let data = res.get_string_body().unwrap();
-                                let mut changed = false;
-                                for data in data.split("\n\n"){
-                                    if let Some(data) = data.strip_prefix("data: "){
-                                        if data != "[DONE]"{
-                                            match ChatResponse::deserialize_json(data){
-                                                Ok(chat_response)=>{
-                                                    if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
-                                                        if let Some(AiChatMessage::Assistant(s)) = doc.file.messages.last_mut(){
-                                                            s.push_str(&content);
-                                                        }
-                                                        else{
-                                                            doc.file.messages.push(AiChatMessage::Assistant(content.clone()))
-                                                        }
-                                                        changed = true;
+                            let data = res.get_string_body().unwrap();
+                            let mut changed = false;
+                            for data in data.split("\n\n"){
+                                if let Some(data) = data.strip_prefix("data: "){
+                                    if data != "[DONE]"{
+                                        match ChatResponse::deserialize_json(data){
+                                            Ok(chat_response)=>{
+                                                if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
+                                                    if let Some(AiChatMessage::Assistant(s)) = doc.file.messages.last_mut(){
+                                                        s.push_str(&content);
                                                     }
+                                                    else{
+                                                        doc.file.messages.push(AiChatMessage::Assistant(content.clone()))
+                                                    }
+                                                    changed = true;
                                                 }
-                                                Err(e)=>{
-                                                    println!("JSon parse error {:?} {}", e, data);
-                                                }
+                                            }
+                                            Err(e)=>{
+                                                println!("JSon parse error {:?} {}", e, data);
                                             }
                                         }
                                     }
                                 }
-                                if changed{
-                                    self.redraw_ai_chat_by_id(cx, chat_id, ui);
-                                    fs.request_save_file_for_file_node_id(chat_id, false);
-                                }
+                            }
+                            if changed{
+                                self.redraw_ai_chat_by_id(cx, chat_id, ui);
+                                fs.request_save_file_for_file_node_id(chat_id, false);
                             }
                         }
                         NetworkResponse::HttpStreamComplete(res)=>{
@@ -164,6 +163,7 @@ impl AiChatManager{
                             let chat_id = res.metadata_id;
                             // alright lets fetch the chat object
                             if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+                                doc.in_flight_request_id = None;
                                 doc.file.messages.push(AiChatMessage::User(AiUserMessage::default()));
                                 self.redraw_ai_chat_by_id(cx, chat_id, ui);
                                 fs.request_save_file_for_file_node_id(chat_id, false);
@@ -183,9 +183,12 @@ impl AiChatManager{
             doc.file.messages.truncate(new_len);
         }
     }
-    pub fn add_user_message(&mut self, chat_id:LiveId, message:AiUserMessage, fs:&mut FileSystem) {
+    
+    pub fn cancel_chat_generation(&mut self, cx:&mut Cx, chat_id:LiveId, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            doc.file.messages.push(AiChatMessage::User(message));
+            if let Some(in_flight) = doc.in_flight_request_id{
+                cx.cancel_http_request(in_flight);
+            }
         }
     }
             
@@ -193,9 +196,8 @@ impl AiChatManager{
         // alright so what hapepns here
         // per backend we have a path
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            if doc.in_flight{ // we should cancel the http request
-                cx.cancel_http_request(live_id!(OpenAIChatMessage));
-                doc.in_flight = false;
+            if let Some(in_flight) = doc.in_flight_request_id.take(){
+                cx.cancel_http_request(in_flight);
             }
             // alright. lets append the user message
             /*doc.messages.push(AiChatMessage::User{
@@ -203,7 +205,7 @@ impl AiChatManager{
             });*/
             match &self.backends[backend_index].1{
                 AiBackend::OpenAI{url, model, key}=>{
-                    let request_id = live_id!(OpenAIChatMessage);
+                    let request_id = LiveId::unique();
                     let mut request = HttpRequest::new(url.clone(), HttpMethod::POST);
                     request.set_is_streaming();
                     request.set_header("Authorization".to_string(), format!("Bearer {key}"));
@@ -226,7 +228,7 @@ impl AiChatManager{
                         max_tokens: 1000,
                         stream: true,
                     });
-                    doc.in_flight = true;
+                    doc.in_flight_request_id = Some(request_id);
                     cx.http_request(request_id, request);
                 }
             }

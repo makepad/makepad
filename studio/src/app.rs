@@ -122,6 +122,7 @@ pub enum AppAction{
     ClearLog, 
     SendAiChatToBackend{chat_id:LiveId, backend_index:usize},
     SetAiChatLen{chat_id:LiveId, new_len:usize},
+    CancelAiGeneration{chat_id:LiveId},
     None
 }
 
@@ -295,6 +296,10 @@ impl MatchEvent for App{
             AppAction::SetAiChatLen{chat_id, new_len}=>{
                 self.data.ai_chat_manager.set_chat_len(chat_id, new_len, &mut self.data.file_system);
             }
+            AppAction::CancelAiGeneration{chat_id}=>{
+                self.data.ai_chat_manager.cancel_chat_generation(cx, chat_id,  &mut self.data.file_system);
+            }
+            
         }
                 
         match action.cast(){
