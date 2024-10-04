@@ -115,6 +115,8 @@ impl AiChatFile{
 
 impl AiChatManager{
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, fs:&mut FileSystem) {
+        // lets handle the 
+        
         // alright. lets see if we have any incoming Http things
         match event{
             Event::NetworkResponses(e)=>for e in e{
@@ -168,9 +170,9 @@ impl AiChatManager{
         }
     }
     
-    pub fn clear_messages(&mut self, chat_id:LiveId,  fs:&mut FileSystem) {
+    pub fn set_chat_len(&mut self, chat_id:LiveId, new_len:usize, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            doc.file.messages.clear();
+            doc.file.messages.truncate(new_len);
         }
     }
     pub fn add_user_message(&mut self, chat_id:LiveId, message:AiUserMessage, fs:&mut FileSystem) {
