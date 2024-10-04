@@ -294,10 +294,10 @@ impl MatchEvent for App{
                 self.data.ai_chat_manager.send_chat_to_backend(cx, chat_id, backend_index, &mut self.data.file_system);
             }
             AppAction::SetAiChatLen{chat_id, new_len}=>{
-                self.data.ai_chat_manager.set_chat_len(chat_id, new_len, &mut self.data.file_system);
+                self.data.ai_chat_manager.set_chat_len(cx, &self.ui, chat_id, new_len, &mut self.data.file_system);
             }
             AppAction::CancelAiGeneration{chat_id}=>{
-                self.data.ai_chat_manager.cancel_chat_generation(cx, chat_id,  &mut self.data.file_system);
+                self.data.ai_chat_manager.cancel_chat_generation(cx, &self.ui, chat_id,  &mut self.data.file_system);
             }
             
         }

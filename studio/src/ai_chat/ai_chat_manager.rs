@@ -154,7 +154,7 @@ impl AiChatManager{
                                 }
                             }
                             if changed{
-                                self.redraw_ai_chat_by_id(cx, chat_id, ui);
+                                self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
                                 fs.request_save_file_for_file_node_id(chat_id, false);
                             }
                         }
@@ -165,7 +165,7 @@ impl AiChatManager{
                             if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
                                 doc.in_flight_request_id = None;
                                 doc.file.messages.push(AiChatMessage::User(AiUserMessage::default()));
-                                self.redraw_ai_chat_by_id(cx, chat_id, ui);
+                                self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
                                 fs.request_save_file_for_file_node_id(chat_id, false);
                             }
                         }
@@ -177,17 +177,19 @@ impl AiChatManager{
         }
     }
     
-    pub fn set_chat_len(&mut self, chat_id:LiveId, new_len:usize, fs:&mut FileSystem) {
+    pub fn set_chat_len(&mut self, cx:&mut Cx, ui: &WidgetRef, chat_id:LiveId, new_len:usize, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            
             doc.file.messages.truncate(new_len);
+            self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
         }
     }
     
-    pub fn cancel_chat_generation(&mut self, cx:&mut Cx, chat_id:LiveId, fs:&mut FileSystem) {
+    pub fn cancel_chat_generation(&mut self, cx:&mut Cx, ui: &WidgetRef, chat_id:LiveId, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            if let Some(in_flight) = doc.in_flight_request_id{
+            if let Some(in_flight) = doc.in_flight_request_id.take(){
                 cx.cancel_http_request(in_flight);
+                doc.file.messages.push(AiChatMessage::User(AiUserMessage::default()));
+                self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
             }
         }
     }
@@ -236,8 +238,13 @@ impl AiChatManager{
         }
     }
     
-    pub fn redraw_ai_chat_by_id(&mut self, cx: &mut Cx, chat_id: LiveId, ui: &WidgetRef) {
+    pub fn redraw_ai_chat_by_id(&mut self, cx: &mut Cx, chat_id: LiveId, ui: &WidgetRef, fs:&mut FileSystem) {
+        // lets fetch all the sessions
         let dock = ui.dock(id!(dock));
-        dock.item(chat_id).redraw(cx)
+        for (tab_id, file_node_id) in &fs.tab_id_to_file_node_id{
+            if *file_node_id == chat_id{
+                dock.item(*tab_id).redraw(cx);
+            }
+        }
     }
 }
