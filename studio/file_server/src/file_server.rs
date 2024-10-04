@@ -178,7 +178,6 @@ impl FileServerConnection {
         let shared = self.shared.clone();
         let notification_sender = self._notification_sender.clone();
         let stop_observation = self.stop_observation.clone();
-        
         thread::spawn(move || {
             let stop = *stop_observation.lock().unwrap();
             while !stop{
@@ -207,10 +206,9 @@ impl FileServerConnection {
                         }
                     }
                 }
+                // Sleep for 500ms.
+                thread::sleep(Duration::from_millis(100));
             }
-                
-            // Sleep for 500ms.
-            thread::sleep(Duration::from_millis(100));
         });
     }
     
