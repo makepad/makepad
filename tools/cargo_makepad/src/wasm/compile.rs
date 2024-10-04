@@ -48,7 +48,6 @@ pub fn generate_html(wasm:&str)->String{
             }}
             let app = new MyWasmApp(wasm);
         </script>
-        <script type='module' src='./makepad_platform/auto_reload.js'></script>
         <link rel='stylesheet' type='text/css' href='./makepad_platform/full_canvas.css'>
     </head> 
     <body>
