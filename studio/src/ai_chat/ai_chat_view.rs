@@ -90,6 +90,7 @@ live_design!{
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                 history_left = <ButtonFlat> { width: Fit, text: "<"}
                 history_right = <ButtonFlat> { width: Fit, text: ">"}
+                slot = <Label> { width: Fit, text: "0"}
                 <View>{width:Fill}
                 model_dropdown = <DropDown>{ width: Fit,}
                 history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
@@ -131,7 +132,7 @@ impl WidgetMatchEvent for AiChatView{
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
                 if self.view.button(id!(history_right)).pressed(actions){
-                    self.history_slot = (self.history_slot+ 1).min(doc.file.history.len());
+                    self.history_slot = (self.history_slot+ 1).min(doc.file.history.len().saturating_sub(1));
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
                 if self.view.button(id!(history_delete)).pressed(actions){
@@ -186,10 +187,13 @@ impl Widget for AiChatView {
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
+                let history_len = doc.file.history.len();
+                self.view.label(id!(slot)).set_text(&format!("{}/{}", self.history_slot+1, history_len));
                 while let Some(item) =  self.view.draw_walk(cx, &mut Scope::empty(), walk).step(){
+                    
                     if let Some(mut list) = item.as_portal_list().borrow_mut() {
                         doc.file.clamp_slot(&mut self.history_slot);
-                        list.set_item_range(cx, 0, doc.file.history[self.history_slot].messages.len());
+                        list.set_item_range(cx, 0,doc.file.history[self.history_slot].messages.len());
                         while let Some(item_id) = list.next_visible_item(cx) {
                             match doc.file.history[self.history_slot].messages.get(item_id){
                                 Some(AiChatMessage::Assistant(val))=>{
