@@ -181,11 +181,11 @@ impl WindowHandle {
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
     
-    pub fn get_inner_size(&mut self, cx: &mut Cx) -> DVec2 {
+    pub fn get_inner_size(&self, cx: &Cx) -> DVec2 {
         cx.windows[self.window_id()].get_inner_size()
     }
     
-    pub fn get_position(&mut self, cx: &mut Cx) -> DVec2 {
+    pub fn get_position(&self, cx: &Cx) -> DVec2 {
         cx.windows[self.window_id()].get_position()
     }
     
@@ -252,7 +252,7 @@ pub struct CxWindow {
 
 impl CxWindow {
     
-    pub fn get_inner_size(&mut self) -> DVec2 {
+    pub fn get_inner_size(&self) -> DVec2 {
         if !self.is_created {
             Default::default()
             //panic!();
@@ -262,7 +262,7 @@ impl CxWindow {
         }
     }
     
-    pub fn get_position(&mut self) -> DVec2 {
+    pub fn get_position(&self) -> DVec2 {
         if !self.is_created {
             panic!();
         }
