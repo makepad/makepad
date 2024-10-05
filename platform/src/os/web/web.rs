@@ -9,6 +9,7 @@ use {
         to_wasm::*,
     },
     crate::{
+        DVec2,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         thread::SignalToUI,
@@ -626,6 +627,7 @@ impl CxOsApi for Cx {
             in_place: if let OpenUrlInPlace::Yes = in_place{true}else{false}
         });
     }
+    fn default_window_size(&self)->DVec2{self.os.window_geom.inner_size}
     /*
     fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
