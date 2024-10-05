@@ -120,9 +120,10 @@ pub enum AppAction{
     ReloadFileTree,
     RecompileStarted,
     ClearLog, 
-    SendAiChatToBackend{chat_id:LiveId, backend_index:usize},
-    SetAiChatLen{chat_id:LiveId, new_len:usize},
+    SendAiChatToBackend{chat_id:LiveId, backend_index:usize, history_slot:usize},
     CancelAiGeneration{chat_id:LiveId},
+    SaveAiChat{chat_id:LiveId},
+    RedrawAiChat{chat_id:LiveId},
     None
 }
 
@@ -290,16 +291,18 @@ impl MatchEvent for App{
                 }
             }
             AppAction::None=>(),
-            AppAction::SendAiChatToBackend{chat_id, backend_index}=>{
-                self.data.ai_chat_manager.send_chat_to_backend(cx, chat_id, backend_index, &mut self.data.file_system);
-            }
-            AppAction::SetAiChatLen{chat_id, new_len}=>{
-                self.data.ai_chat_manager.set_chat_len(cx, &self.ui, chat_id, new_len, &mut self.data.file_system);
+            AppAction::SendAiChatToBackend{chat_id, backend_index, history_slot}=>{
+                self.data.ai_chat_manager.send_chat_to_backend(cx, chat_id, backend_index, history_slot, &mut self.data.file_system);
             }
             AppAction::CancelAiGeneration{chat_id}=>{
                 self.data.ai_chat_manager.cancel_chat_generation(cx, &self.ui, chat_id,  &mut self.data.file_system);
             }
-            
+            AppAction::SaveAiChat{chat_id}=>{
+                self.data.file_system.request_save_file_for_file_node_id(chat_id, false);
+            }
+            AppAction::RedrawAiChat{chat_id}=>{
+                self.data.ai_chat_manager.redraw_ai_chat_by_id(cx, chat_id,&self.ui,  &mut self.data.file_system);
+            }
         }
                 
         match action.cast(){
@@ -532,7 +535,7 @@ impl AppMain for App {
         
         self.data.file_system.handle_event(cx, event, &self.ui);
         self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
-        self.data.ai_chat_manager.handle_event(cx, event, &self.ui, &mut self.data.file_system);
+        self.data.ai_chat_manager.handle_event(cx, event, &mut self.data.file_system);
         // process events on all run_views
         let dock = self.ui.dock(id!(dock));
         /*
@@ -565,6 +568,8 @@ impl AppMain for App {
         }
     }
 }
+
+// we should store probably also scroll position / which chat slot we're visiting
 use std::collections::HashMap;
 #[derive(SerRon, DeRon)]
 pub struct AppStateRon{
