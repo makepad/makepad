@@ -26,7 +26,15 @@ impl Default for AiChatManager{
                     }
                 ),
                 (
-                    "Llama CPP Local".to_string(),
+                    "OpenAI gpt-4o-mini".to_string(),
+                    AiBackend::OpenAI{
+                        url: OPENAI_DEFAULT_URL.to_string(),
+                        model: "gpt-4o-mini".to_string(),
+                        key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
+                    }
+                ),
+                (
+                    "Llama Local".to_string(),
                     AiBackend::OpenAI{
                         url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
                         model:"".to_string(),
@@ -35,6 +43,16 @@ impl Default for AiChatManager{
                 ),
             ]
         }
+    }
+}
+
+impl AiChatManager{
+    pub fn model_strings(&self)->Vec<String>{
+        let mut out = Vec::new();
+        for backend in &self.backends{
+            out.push(backend.0.clone())    
+        }
+        out
     }
 }
 

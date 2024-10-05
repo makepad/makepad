@@ -91,6 +91,7 @@ live_design!{
                 history_left = <ButtonFlat> { width: Fit, text: "<"}
                 history_right = <ButtonFlat> { width: Fit, text: ">"}
                 <View>{width:Fill}
+                model_dropdown = <DropDown>{ width: Fit,}
                 history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
             }
         }
@@ -107,7 +108,8 @@ live_design!{
 #[derive(Live, LiveHook, Widget)] 
 pub struct AiChatView{
     #[deref] view:View,
-    #[rust] history_slot: usize
+    #[rust] history_slot: usize,
+    #[rust] backend_index: usize
 }
 
 impl WidgetMatchEvent for AiChatView{
@@ -118,6 +120,9 @@ impl WidgetMatchEvent for AiChatView{
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get_mut(&chat_id){
+                if let Some(index) = self.view.drop_down(id!(model_dropdown)).selected(actions){
+                    self.backend_index = index;
+                };
                 
                 if self.view.button(id!(history_left)).pressed(actions){
                     // first we check if our messages are the same as 'slot'.
@@ -148,12 +153,14 @@ impl WidgetMatchEvent for AiChatView{
                     if item.button(id!(send_button)).pressed(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
                         // we'd already be forked
+                        let text = message_input.text();
+                        doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
                         
                         // alright so we press send/enter now what
                         // we now call 'setaichatlen' this will 'fork' our current index
                         // what if our chat is empty? then we dont fork
                         doc.file.clamp_slot(&mut self.history_slot);
-                        cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:0, history_slot: self.history_slot});
+                        cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:self.backend_index, history_slot: self.history_slot});
                         self.redraw(cx);
                     }
                     // lets clear the messages
@@ -171,12 +178,16 @@ impl Widget for AiChatView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         let data = scope.data.get_mut::<AppData>().unwrap();
         let session_id = scope.path.from_end(0);
-                
+        
+        let dd = self.view.drop_down(id!(model_dropdown));
+        dd.set_labels(data.ai_chat_manager.model_strings());
+        dd.set_selected_item(self.backend_index);
+        
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
-                while let Some(list) =  self.view.draw_walk(cx, &mut Scope::empty(), walk).step(){
-                    if let Some(mut list) = list.as_portal_list().borrow_mut() {
+                while let Some(item) =  self.view.draw_walk(cx, &mut Scope::empty(), walk).step(){
+                    if let Some(mut list) = item.as_portal_list().borrow_mut() {
                         doc.file.clamp_slot(&mut self.history_slot);
                         list.set_item_range(cx, 0, doc.file.history[self.history_slot].messages.len());
                         while let Some(item_id) = list.next_visible_item(cx) {
