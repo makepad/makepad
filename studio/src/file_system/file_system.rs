@@ -252,7 +252,7 @@ impl FileSystem {
     pub fn process_save_response(&mut self, cx:&mut Cx, response:SaveFileResponse){
         // alright file has been saved
         // now we need to check if a live_design!{} changed or something outside it
-        if self.get_editor_template_from_path(&response.path) != live_id!(CodeEditor){
+        if Self::get_editor_template_from_path(&response.path) != live_id!(CodeEditor){
             return
         }
         
