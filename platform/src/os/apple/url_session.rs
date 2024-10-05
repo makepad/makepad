@@ -401,7 +401,7 @@ impl AppleHttpRequests{
                 let () = msg_send![data_task, resume];
                 self.requests.push(HttpReq{
                     request_id,
-                    data_task: RcObjcId::from_owned(NonNull::new(data_task).unwrap())
+                    data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap())
                 })
             }
             else{ // its using the completion handler
@@ -453,7 +453,7 @@ impl AppleHttpRequests{
                 let () = msg_send![data_task, resume];
                 self.requests.push(HttpReq{
                     request_id,
-                    data_task: RcObjcId::from_owned(NonNull::new(data_task).unwrap())
+                    data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap())
                 })
             }
         }
