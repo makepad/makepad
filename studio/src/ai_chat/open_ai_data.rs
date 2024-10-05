@@ -22,7 +22,7 @@ pub struct ChatResponse {
     pub object: String,
     pub created: i32,
     pub model: String,
-    pub system_fingerprint: JsonValue,
+    pub system_fingerprint: Option<JsonValue>,
     pub usage: Option<ChatUsage>,
     pub choices: Vec<ChatChoice>,
 }
@@ -48,7 +48,7 @@ pub struct ChatChoice {
     pub message: Option<ChatMessage>,
     pub delta: Option<ChatMessage>,
     pub finish_reason: Option<String>,
-    pub logprobs: JsonValue,
+    pub logprobs: Option<JsonValue>,
     pub index: i32,
 }
 /*
