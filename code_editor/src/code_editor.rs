@@ -926,8 +926,8 @@ impl CodeEditor {
                         match tap_count {
                             1 => SelectionMode::Simple,
                             2 => SelectionMode::Word,
-                            3 => SelectionMode::Line,
-                            _ => SelectionMode::All,
+                            _ => SelectionMode::Line,
+                            //_ => SelectionMode::All,
                         }
                     },
                     NewGroup::Yes
