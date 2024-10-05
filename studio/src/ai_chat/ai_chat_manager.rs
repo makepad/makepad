@@ -1,6 +1,7 @@
 use {
     self::super::open_ai_data::*,
     crate::{
+        app::AppAction,
         file_system::file_system::{FileSystem,OpenDocument},
         makepad_widgets::*,
         makepad_micro_serde::*
@@ -46,33 +47,53 @@ pub enum AiBackend{
     }
 }
 
-#[derive(Debug, SerRon, DeRon)]
+#[derive(Debug, SerRon, DeRon, Clone)]
 pub struct AiContextFile{
     pub file_id: LiveId,
     pub name: String,
     pub contents: String,
 }
 
-#[derive(Default, Debug, SerRon, DeRon)]
+#[derive(Default, Debug, SerRon, DeRon, Clone)]
 pub struct AiUserMessage{
     pub context: Vec<AiContextFile>,
     pub message:String
 }
 
-#[derive(Debug, SerRon, DeRon)]
+#[derive(Debug, SerRon, DeRon, Clone)]
 pub enum AiChatMessage{
     User(AiUserMessage),
     Assistant(String)
 }
 
-#[derive(Debug, Default, SerRon, DeRon)]
-pub struct AiChatFile{
-    pub messages: Vec<AiChatMessage>,
+
+#[derive(Debug, SerRon, DeRon, Clone)]
+pub struct AiChatMessages{
+    pub messages: Vec<AiChatMessage>
+}
+
+impl AiChatMessages{
+    fn new()->Self{
+        AiChatMessages{
+            messages: vec![AiChatMessage::User(AiUserMessage::default())],
+        }
+    }
 }
 
 #[derive(Debug, SerRon, DeRon)]
+pub struct AiChatFile{
+    pub history: Vec<AiChatMessages>,
+}
+
+#[derive(Debug)]
+pub struct AiInFlight{
+    request_id: LiveId,
+    history_slot: usize
+}
+
+#[derive(Debug)]
 pub struct AiChatDocument{
-    pub in_flight_request_id: Option<LiveId>,
+    pub in_flight: Option<AiInFlight>,
     pub file: AiChatFile
 }
 
@@ -82,13 +103,13 @@ impl AiChatDocument{
             Err(e)=>{
                 error!("Error parsing AiChatDocument {e}");
                 Self{
-                    in_flight_request_id: None,
-                    file: AiChatFile::default()
+                    in_flight: None,
+                    file: AiChatFile::new()
                 }
             }
             Ok(file)=>{
                 Self{
-                    in_flight_request_id: None,
+                    in_flight: None,
                     file
                 }
             }
@@ -96,13 +117,16 @@ impl AiChatDocument{
     }
 }
 
+
+
 impl AiChatFile{
     pub fn new()->Self{
         Self{
-            messages: vec![]
+            history:vec![
+                AiChatMessages::new()
+            ],
         }
     }
-    
     pub fn load(data: &str)->Result<AiChatFile,String>{
         AiChatFile::deserialize_ron(data).map_err(|e| format!("{:?}", e))
     }
@@ -110,25 +134,56 @@ impl AiChatFile{
     pub fn to_string(&self)->String{
         self.serialize_ron()
     }
+    
+    pub fn clamp_slot(&self, slot:&mut usize){
+        *slot = self.history.len().saturating_sub(1).min(*slot);
+    }
+    
+    pub fn remove_slot(&mut self,  _cx:&mut Cx, history_slot:&mut usize){
+        self.clamp_slot(history_slot);
+        self.history.remove(*history_slot);
+        self.clamp_slot(history_slot);
+        if self.history.len() == 0{
+            self.history.push(AiChatMessages::new());
+        }
+    }
+        // ok what happens. 
+    pub fn fork_chat_at(&mut self, _cx:&mut Cx, history_slot:&mut usize, at:usize, data:String ) {
+        // alriught so first we clamp the history slot
+        self.clamp_slot(history_slot);
+        if at + 1 != self.history[*history_slot].messages.len() { // fork it first
+            let mut clone = self.history[*history_slot].clone();
+            clone.messages.truncate(at + 1);
+            *history_slot += 1;
+            self.history.insert(*history_slot, clone);
+        }
+        if let AiChatMessage::User(s) = &mut self.history[*history_slot].messages[at]{
+            s.message = data
+        }
+        else{
+            error!("fork_chat_at: last message is not user")
+        }
+        // 
+    }
 }
 
 
 impl AiChatManager{
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, ui: &WidgetRef, fs:&mut FileSystem) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, fs:&mut FileSystem) {
         // lets handle the 
         
         // alright. lets see if we have any incoming Http things
         match event{
             Event::NetworkResponses(e)=>for e in e{
                 // lets check our in flight queries
-                if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.values_mut().find(|v| if let OpenDocument::AiChat(v) = v {v.in_flight_request_id == Some(e.request_id)} else{false}){
+                if let Some((chat_id,OpenDocument::AiChat(doc))) = fs.open_documents.iter_mut().find(
+                    |(_,v)| if let OpenDocument::AiChat(v) = v {if let Some(v) = &v.in_flight{v.request_id == e.request_id}else{false}} else{false}){
+                    let chat_id = *chat_id;
+                    let in_flight = doc.in_flight.as_ref().unwrap();
                     match &e.response{
                         NetworkResponse::HttpRequestError(_err)=>{
                         }
                         NetworkResponse::HttpStreamResponse(res)=>{
-                            // alright we have a http stream response for a certain request id
-                            let chat_id = res.metadata_id;
-                            // alright lets fetch the chat object
                             let data = res.get_string_body().unwrap();
                             let mut changed = false;
                             for data in data.split("\n\n"){
@@ -137,11 +192,13 @@ impl AiChatManager{
                                         match ChatResponse::deserialize_json(data){
                                             Ok(chat_response)=>{
                                                 if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
-                                                    if let Some(AiChatMessage::Assistant(s)) = doc.file.messages.last_mut(){
-                                                        s.push_str(&content);
-                                                    }
-                                                    else{
-                                                        doc.file.messages.push(AiChatMessage::Assistant(content.clone()))
+                                                    if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
+                                                        if let Some(AiChatMessage::Assistant(s)) = msg.messages.last_mut(){
+                                                            s.push_str(&content);
+                                                        }
+                                                        else{
+                                                            msg.messages.push(AiChatMessage::Assistant(content.clone()))
+                                                        }
                                                     }
                                                     changed = true;
                                                 }
@@ -154,19 +211,23 @@ impl AiChatManager{
                                 }
                             }
                             if changed{
-                                self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
-                                fs.request_save_file_for_file_node_id(chat_id, false);
+                                cx.action(AppAction::RedrawAiChat{chat_id});
+                                //fs.request_save_file_for_file_node_id(chat_id, false);
                             }
                         }
-                        NetworkResponse::HttpStreamComplete(res)=>{
+                        NetworkResponse::HttpStreamComplete(_res)=>{
                             // done?..
-                            let chat_id = res.metadata_id;
+                           //let chat_id = res.metadata_id;
                             // alright lets fetch the chat object
                             if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-                                doc.in_flight_request_id = None;
-                                doc.file.messages.push(AiChatMessage::User(AiUserMessage::default()));
-                                self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
-                                fs.request_save_file_for_file_node_id(chat_id, false);
+                                if let Some(in_flight) = doc.in_flight.take(){
+                                    doc.in_flight = None;
+                                    doc.file.history[in_flight.history_slot].messages.push(AiChatMessage::User(AiUserMessage::default()));
+                                    cx.action(AppAction::RedrawAiChat{chat_id});
+                                    cx.action(AppAction::SaveAiChat{chat_id});
+                                    //self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
+                                    //fs.request_save_file_for_file_node_id(chat_id, false);
+                                }
                             }
                         }
                         _=>{}
@@ -177,29 +238,24 @@ impl AiChatManager{
         }
     }
     
-    pub fn set_chat_len(&mut self, cx:&mut Cx, ui: &WidgetRef, chat_id:LiveId, new_len:usize, fs:&mut FileSystem) {
-        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            doc.file.messages.truncate(new_len);
-            self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
-        }
-    }
-    
     pub fn cancel_chat_generation(&mut self, cx:&mut Cx, ui: &WidgetRef, chat_id:LiveId, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            if let Some(in_flight) = doc.in_flight_request_id.take(){
-                cx.cancel_http_request(in_flight);
-                doc.file.messages.push(AiChatMessage::User(AiUserMessage::default()));
-                self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
+            if let Some(in_flight) = doc.in_flight.take(){
+                cx.cancel_http_request(in_flight.request_id);
+                if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
+                    msg.messages.push(AiChatMessage::User(AiUserMessage::default()));
+                    self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
+                }
             }
         }
     }
             
-    pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, backend_index:usize, fs:&mut FileSystem) {
+    pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, backend_index:usize, history_slot:usize, fs:&mut FileSystem) {
         // alright so what hapepns here
         // per backend we have a path
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            if let Some(in_flight) = doc.in_flight_request_id.take(){
-                cx.cancel_http_request(in_flight);
+            if let Some(in_flight) = doc.in_flight.take(){
+                cx.cancel_http_request(in_flight.request_id);
             }
             // alright. lets append the user message
             /*doc.messages.push(AiChatMessage::User{
@@ -214,7 +270,7 @@ impl AiChatManager{
                     request.set_header("Content-Type".to_string(), "application/json".to_string());
                     request.set_metadata_id(chat_id); 
                     let mut messages = Vec::new();
-                    for msg in &doc.file.messages{
+                    for msg in &doc.file.history[history_slot].messages{
                         match msg{
                             AiChatMessage::User(v)=>{
                                 messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
@@ -230,8 +286,11 @@ impl AiChatManager{
                         max_tokens: 1000,
                         stream: true,
                     });
-                    doc.file.messages.push(AiChatMessage::Assistant("".to_string()));
-                    doc.in_flight_request_id = Some(request_id);
+                    doc.file.history[history_slot].messages.push(AiChatMessage::Assistant("".to_string()));
+                    doc.in_flight = Some(AiInFlight{
+                        history_slot,
+                        request_id
+                    });
                     cx.http_request(request_id, request);
                 }
             }
