@@ -183,7 +183,7 @@ impl Window {
 }
 
 impl WindowRef{
-    fn get_inner_size(&self, cx:&Cx)->DVec2{
+    pub fn get_inner_size(&self, cx:&Cx)->DVec2{
         if let Some(inner) = self.borrow(){
             inner.window.get_inner_size(cx)
         }
