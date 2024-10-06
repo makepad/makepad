@@ -187,8 +187,8 @@ impl Widget for AiChatView {
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
-                let history_len = doc.file.history.len();
-                self.view.label(id!(slot)).set_text(&format!("{}/{}", self.history_slot+1, history_len));
+                let history_len = doc.file.history.len(); 
+                self.view.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
                 while let Some(item) =  self.view.draw_walk(cx, &mut Scope::empty(), walk).step(){
                     
                     if let Some(mut list) = item.as_portal_list().borrow_mut() {

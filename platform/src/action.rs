@@ -25,13 +25,13 @@ impl<T: 'static + Debug + ?Sized + Send > ActionTrait for T {
 
 generate_any_send_trait_api!(ActionTrait);
 
-impl Debug for dyn ActionTrait + Send{
+impl Debug for dyn ActionTrait + Send + Sync{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
         self.debug_fmt(f)
     }
 }
 
-pub type Action = Box<dyn ActionTrait+Send>;
+pub type Action = Box<dyn ActionTrait+Send+Sync>;
 pub type ActionsBuf = Vec<Action>;
 pub type Actions = [Action];
 
@@ -47,7 +47,7 @@ pub trait ActionCastRef<T> {
     fn cast_ref(&self) -> &T;
 }
 
-impl<T: ActionTrait + Default + Clone + Send> ActionCast<T> for Box<dyn ActionTrait + Send>{
+impl<T: ActionTrait + Default + Clone + Send + Sync> ActionCast<T> for Box<dyn ActionTrait + Send+ Sync>{
     fn cast(&self) -> T{
         if let Some(item) = (*self).downcast_ref::<T>() {
             item.clone()
@@ -59,7 +59,7 @@ impl<T: ActionTrait + Default + Clone + Send> ActionCast<T> for Box<dyn ActionTr
 }
 
 
-impl<T: ActionTrait + ActionDefaultRef + Send> ActionCastRef<T> for Box<dyn ActionTrait + Send>{
+impl<T: ActionTrait + ActionDefaultRef + Send + Sync> ActionCastRef<T> for Box<dyn ActionTrait + Send+ Sync>{
     fn cast_ref(&self) -> &T{
         if let Some(item) = (*self).downcast_ref::<T>() {
             item
@@ -79,11 +79,11 @@ impl Cx{
         self.handle_actions();
     }
     
-    pub fn post_action(action:impl ActionTrait){
+    pub fn post_action(action:impl ActionTrait + Send + Sync){
         ACTION_SENDER_GLOBAL.lock().unwrap().as_mut().unwrap().send(Box::new(action)).unwrap();
     }
     
-    pub fn action(&mut self, action: impl ActionTrait){
+    pub fn action(&mut self, action: impl ActionTrait+ Send + Sync){
         self.new_actions.push(Box::new(action));
     }
     
