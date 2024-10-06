@@ -160,6 +160,18 @@ pub fn derive_default_none_impl(input: TokenStream) -> TokenStream {
         if let Some(enum_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
+            tb.add("impl").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
+            tb.add("{");
+            tb.add("   const DEFAULT_NONE_REF:Self = Self::None;");
+            tb.add("}");
+            
+            tb.add("impl ActionDefaultRef for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
+            tb.add("{");
+            tb.add("   fn default_ref()->&'static Self{");
+            tb.add("      return &Self::DEFAULT_NONE_REF;");
+            tb.add("   }");
+            tb.add("}");
+                        
             /*
             tb.add("impl Into<Box<dyn WidgetAction>> for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
             tb.add("{");

@@ -744,6 +744,10 @@ pub trait WidgetActionTrait: 'static + Send {
     fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
 }
 
+pub trait ActionDefault{
+    fn default_ref(&self) -> Box<dyn WidgetActionTrait>;
+}
+
 impl<T: 'static + ?Sized + Clone + Debug + Send> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
@@ -790,6 +794,7 @@ impl WidgetActionData{
         self.data.clone()
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
@@ -902,6 +907,7 @@ pub trait WidgetActionOptionApi {
     fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
     where
         T: Default + Clone;
+    fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction> {
@@ -924,6 +930,16 @@ impl WidgetActionOptionApi for Option<&WidgetAction> {
             }
         }
         T::default()
+    }
+    
+    fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T
+    {
+        if let Some(item) = self {
+            if let Some(item) = item.action.downcast_ref::<T>() {
+                return item;
+            }
+        }
+        T::default_ref()
     }
 }
 
@@ -1077,6 +1093,19 @@ impl WidgetAction {
             return item.clone();
         }
         T::default()
+    }
+    
+    pub fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T
+    {
+        if let Some(item) = self.action.downcast_ref::<T>() {
+            return item
+        }
+        T::default_ref()
+    }
+    
+    pub fn downcast_ref<T: WidgetActionTrait + Send + ActionDefaultRef>(&self) -> Option<&T>
+    {
+        self.action.downcast_ref::<T>()
     }
 }
 
