@@ -35,12 +35,20 @@ pub type Action = Box<dyn ActionTrait+Send>;
 pub type ActionsBuf = Vec<Action>;
 pub type Actions = [Action];
 
+pub trait ActionDefaultRef{
+    fn default_ref()->&'static Self;
+}
+
 pub trait ActionCast<T> {
     fn cast(&self) -> T;
 }
 
+pub trait ActionCastRef<T> {
+    fn cast_ref(&self) -> &T;
+}
+
 impl<T: ActionTrait + Default + Clone + Send> ActionCast<T> for Box<dyn ActionTrait + Send>{
-    fn cast(&self) -> T where T: Default + Clone{
+    fn cast(&self) -> T{
         if let Some(item) = (*self).downcast_ref::<T>() {
             item.clone()
         }
@@ -49,6 +57,19 @@ impl<T: ActionTrait + Default + Clone + Send> ActionCast<T> for Box<dyn ActionTr
         }
     }
 }
+
+
+impl<T: ActionTrait + ActionDefaultRef + Send> ActionCastRef<T> for Box<dyn ActionTrait + Send>{
+    fn cast_ref(&self) -> &T{
+        if let Some(item) = (*self).downcast_ref::<T>() {
+            item
+        }
+        else {
+            T::default_ref()
+        }
+    }
+}
+
 
 impl Cx{
     pub fn handle_action_receiver(&mut self){

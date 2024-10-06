@@ -173,8 +173,8 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
+        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+            Some(*m)
         } else {
             None
         }
@@ -184,8 +184,8 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
+        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+            Some(*m)
         } else {
             None
         }
@@ -196,8 +196,8 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
+        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+            Some(*m)
         } else {
             None
         }
