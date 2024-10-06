@@ -210,6 +210,7 @@ impl Widget for TextFlow {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for (id,(entry,_)) in self.items.as_mut().unwrap().iter_mut(){
+            
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });

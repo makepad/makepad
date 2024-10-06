@@ -11,7 +11,7 @@ use {
         cell::RefCell,
     },
     crate::{
-        action::{Action,ACTION_SENDER_GLOBAL},
+        action::{ActionSendSync,ACTION_SENDER_GLOBAL},
         makepad_live_compiler::{
             LiveRegistry,
             LiveFileChange
@@ -87,7 +87,7 @@ pub struct Cx {
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
     
-    pub (crate) new_actions: ActionsBuf,
+    pub new_actions: ActionsBuf,
     
     pub (crate) dependencies: HashMap<String, CxDependency>,
     
@@ -98,7 +98,7 @@ pub struct Cx {
     pub (crate) live_file_change_receiver: std::sync::mpsc::Receiver<Vec<LiveFileChange>>,
     pub (crate) live_file_change_sender: std::sync::mpsc::Sender<Vec<LiveFileChange >>,
     
-    pub (crate) action_receiver: std::sync::mpsc::Receiver<Action>,
+    pub (crate) action_receiver: std::sync::mpsc::Receiver<ActionSendSync>,
     
     pub shader_registry: ShaderRegistry,
     

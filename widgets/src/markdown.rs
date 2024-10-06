@@ -199,7 +199,7 @@ impl Markdown {
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
                         tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
-                            item.set_text(cbs);
+                            item.widget(id!(code_view)).set_text(cbs);
                             item.draw_all_unscoped(cx);
                         });
                     }
