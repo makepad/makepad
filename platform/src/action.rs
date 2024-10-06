@@ -1,4 +1,4 @@
-use crate::generate_any_send_trait_api;
+use crate::generate_any_trait_api;
 use crate::cx::Cx;
 use std::any::{TypeId};
 use std::fmt::Debug;
@@ -10,28 +10,28 @@ use std::sync::{
 };
 
 
-pub (crate) static ACTION_SENDER_GLOBAL: Mutex<Option<Sender<Action>>> = Mutex::new(None);
+pub (crate) static ACTION_SENDER_GLOBAL: Mutex<Option<Sender<ActionSendSync>>> = Mutex::new(None);
 
-pub trait ActionTrait: 'static + Send{
+pub trait ActionTrait: 'static {
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn ref_cast_type_id(&self) -> TypeId where Self: 'static {TypeId::of::<Self>()}
 }
 
-impl<T: 'static + Debug + ?Sized + Send > ActionTrait for T {
+impl<T: 'static + Debug + ?Sized > ActionTrait for T {
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
         self.fmt(f)
     }
 }
 
-generate_any_send_trait_api!(ActionTrait);
+generate_any_trait_api!(ActionTrait);
 
-impl Debug for dyn ActionTrait + Send + Sync{
+impl Debug for dyn ActionTrait {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
         self.debug_fmt(f)
     }
 }
-
-pub type Action = Box<dyn ActionTrait+Send+Sync>;
+pub type ActionSendSync = Box<dyn ActionTrait + Send + Sync>;
+pub type Action = Box<dyn ActionTrait>;
 pub type ActionsBuf = Vec<Action>;
 pub type Actions = [Action];
 
@@ -47,7 +47,7 @@ pub trait ActionCastRef<T> {
     fn cast_ref(&self) -> &T;
 }
 
-impl<T: ActionTrait + Default + Clone + Send + Sync> ActionCast<T> for Box<dyn ActionTrait + Send+ Sync>{
+impl<T: ActionTrait + Default + Clone> ActionCast<T> for Box<dyn ActionTrait>{
     fn cast(&self) -> T{
         if let Some(item) = (*self).downcast_ref::<T>() {
             item.clone()
@@ -59,7 +59,7 @@ impl<T: ActionTrait + Default + Clone + Send + Sync> ActionCast<T> for Box<dyn A
 }
 
 
-impl<T: ActionTrait + ActionDefaultRef + Send + Sync> ActionCastRef<T> for Box<dyn ActionTrait + Send+ Sync>{
+impl<T: ActionTrait + ActionDefaultRef> ActionCastRef<T> for Box<dyn ActionTrait>{
     fn cast_ref(&self) -> &T{
         if let Some(item) = (*self).downcast_ref::<T>() {
             item
@@ -83,7 +83,7 @@ impl Cx{
         ACTION_SENDER_GLOBAL.lock().unwrap().as_mut().unwrap().send(Box::new(action)).unwrap();
     }
     
-    pub fn action(&mut self, action: impl ActionTrait+ Send + Sync){
+    pub fn action(&mut self, action: impl ActionTrait){
         self.new_actions.push(Box::new(action));
     }
     
@@ -102,6 +102,19 @@ impl Cx{
             let buf = self.new_actions.drain(start..end).collect();
             let buf = g(self, buf);
             self.new_actions.extend(buf);
+        }
+        r
+    }
+    
+    pub fn mutate_actions<F, G, R>(&mut self, f: F, g:G) -> R where
+    F: FnOnce(&mut Cx) -> R,
+    G: FnOnce(&mut [Action]),
+    {
+        let start = self.new_actions.len();
+        let r = f(self);
+        let end = self.new_actions.len();
+        if start != end{
+            g(&mut self.new_actions[start..end]);
         }
         r
     }
