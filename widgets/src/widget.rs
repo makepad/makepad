@@ -6,6 +6,7 @@ use {
     std::cell::RefCell,
     std::collections::BTreeMap,
     std::fmt,
+    std::sync::Arc,
     std::fmt::{Debug, Error, Formatter},
     std::rc::Rc,
 };
@@ -37,8 +38,8 @@ pub trait WidgetNode: LiveApply {
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
-    fn set_action_data(&mut self, _data:Box<dyn WidgetActionTrait>){}
-    fn action_data(&mut self)->Option<Box<dyn WidgetActionTrait>>{None}
+    fn set_action_data(&mut self, _data:Arc<dyn WidgetActionTrait>){}
+    fn action_data(&mut self)->Option<Arc<dyn WidgetActionTrait>>{None}
 }
 
 pub trait Widget: WidgetNode {
@@ -509,9 +510,18 @@ impl WidgetRef {
         false
     }
     
-    pub fn set_action_data(&self, data:impl WidgetActionTrait){
+    pub fn set_action_data<T:WidgetActionTrait + PartialEq>(&self, data:T){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.set_action_data(Box::new(data));
+            if let Some(v) = inner.widget.action_data(){
+                if let Some(v) = v.downcast_ref::<T>(){
+                    if v.ne(&data){
+                        inner.widget.set_action_data(Arc::new(data));
+                    }
+                }
+            }
+            else{
+                inner.widget.set_action_data(Arc::new(data));
+            }
         }
     }
 
@@ -738,7 +748,7 @@ impl LiveNew for WidgetRef {
     }
 }
 
-pub trait WidgetActionTrait: 'static + Send {
+pub trait WidgetActionTrait: 'static + Send+ Sync {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
@@ -748,7 +758,7 @@ pub trait ActionDefault{
     fn default_ref(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-impl<T: 'static + ?Sized + Clone + Debug + Send> WidgetActionTrait for T {
+impl<T: 'static + ?Sized + Clone + Debug + Send+ Sync> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -778,19 +788,19 @@ impl Clone for Box<dyn WidgetActionTrait> {
 
 #[derive(Default)]
 pub struct WidgetActionData{
-    data: Option<Box<dyn WidgetActionTrait>>
+    data: Option<Arc<dyn WidgetActionTrait>>
 }
 
 impl WidgetActionData{
     pub fn set(&mut self,  data:impl WidgetActionTrait){
-        self.data = Some(Box::new(data));
+        self.data = Some(Arc::new(data));
     }
     
-    pub fn set_box(&mut self,  data:Box<dyn  WidgetActionTrait>){
+    pub fn set_box(&mut self,  data:Arc<dyn  WidgetActionTrait>){
         self.data = Some(data);
     }
     
-    pub fn clone_data(&self)->Option<Box<dyn WidgetActionTrait>>{
+    pub fn clone_data(&self)->Option<Arc<dyn WidgetActionTrait>>{
         self.data.clone()
     }
 }
@@ -799,7 +809,7 @@ impl WidgetActionData{
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
     action: Box<dyn WidgetActionTrait>,
-    data: Option< Box<dyn WidgetActionTrait>>,
+    data: Option< Arc<dyn WidgetActionTrait>>,
     pub widget_uid: WidgetUid,
     pub path: HeapLiveIdPath,
     pub group: Option<WidgetActionGroup>,
@@ -826,7 +836,7 @@ pub trait WidgetActionCxExt {
 }
 
 pub trait WidgetActionsApi {
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
         &self,
         widget_uid: WidgetUid,
     ) -> T
@@ -888,14 +898,14 @@ pub trait WidgetActionsApi {
     ///     })
     /// });
     /// ```
-    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send>(
+    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
     where
         T: Default + Clone;
         
-    fn filter_actions_data<T: WidgetActionTrait + 'static + Send>(
+    fn filter_actions_data<T: WidgetActionTrait + 'static + Send+ Sync>(
             &self,
         ) -> impl Iterator<Item = T>
         where
@@ -988,7 +998,7 @@ impl WidgetActionsApi for Actions {
         })
     }
 
-    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send>(
+    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send + Sync>(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
