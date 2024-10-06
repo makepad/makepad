@@ -5,7 +5,7 @@ use smallvec::*;
 
 #[derive(Default, Clone)]
 pub struct HeapLiveIdPath{
-    data: SmallVec<[LiveId;16]>, 
+    pub data: SmallVec<[LiveId;16]>, 
 }
 
 impl HeapLiveIdPath{

@@ -436,18 +436,6 @@ live_design!{
             
             AiChat = <AiChatView> {
                 flow: Down,
-                <DockToolbar> {
-                    content = {
-                        align: { x: 0., y: 0.5}
-                        height: Fit, width: Fill,
-                        spacing: (THEME_SPACE_1)
-                        flow: Right,
-                        margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
-                        
-                        <ButtonFlat> { width: Fit, text: "<"}
-                        <ButtonFlat> { width: Fit, text: ">"}
-                    }
-                }
             }
             
             EditFirst = <RectView> {
