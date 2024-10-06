@@ -123,7 +123,6 @@ pub use crate::{
     toggle_panel::*,
     widget::{
         WidgetSet,
-        WidgetSetIterator,
         WidgetUid,
         DrawStep,
         DrawStepApi,
@@ -141,6 +140,7 @@ pub use crate::{
         WidgetNode,
         WidgetRegistry,
         WidgetFactory,
+        WidgetSetIterator,
         DrawStateWrap,
     }
 };
