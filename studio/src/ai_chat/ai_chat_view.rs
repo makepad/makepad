@@ -2,6 +2,7 @@
 use {
     crate::{
         app::{AppData, AppAction},
+        makepad_code_editor::code_view::*,
         ai_chat::ai_chat_manager::*,
         file_system::file_system::{EditSession,OpenDocument},
         makepad_widgets::*,
@@ -46,10 +47,31 @@ live_design!{
         draw_bg:{color:#4}
         flow: Down
         md = <Markdown>{
-            code_block = <CodeView>{
-                editor:{
-                    draw_bg: { color: (#3) }
+            code_block = <View>{
+                width:Fill,
+                height:Fit,
+                flow: Overlay
+                code_view = <CodeView>{
+                    editor:{
+                        draw_bg: { color: (#3) }
+                    }
                 }
+                <View>{
+                    //show_bg: true,
+                    //draw_bg:{color:#7}
+                    width:Fill,
+                    height:Fit,
+                    align:{x:1.0}
+                    copy_button = <Button> {
+                        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                        text: "Copy"
+                    }
+                    run_button = <Button> {
+                        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                        text: "Run"
+                    }
+                }
+                
             }
             use_code_block_widget: true,
             body:""
@@ -113,46 +135,52 @@ pub struct AiChatView{
     #[rust] backend_index: usize
 }
 
-impl WidgetMatchEvent for AiChatView{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions, scope: &mut Scope){
+impl AiChatView{
+    fn handle_own_actions(&mut self, cx: &mut Cx, ac:&Actions, scope: &mut Scope){
         let data = scope.data.get_mut::<AppData>().unwrap();
         let session_id = scope.path.from_end(0);
         
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get_mut(&chat_id){
-                if let Some(index) = self.view.drop_down(id!(model_dropdown)).selected(actions){
+                if let Some(wa) = ac.widget_action(id!(copy_button)){
+                    if wa.widget().as_button().pressed(ac){
+                        let code_view = wa.widget_nth(2).widget(id!(code_view));
+                        println!("COPY! {}", code_view.text());
+                    }
+                }
+                if let Some(index) = self.view.drop_down(id!(model_dropdown)).selected(ac){
                     self.backend_index = index;
                 };
                 
-                if self.view.button(id!(history_left)).pressed(actions){
+                if self.view.button(id!(history_left)).pressed(ac){
                     // first we check if our messages are the same as 'slot'.
                     // if not, we should create an undo item first
                     self.history_slot = self.history_slot.saturating_sub(1);
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
-                if self.view.button(id!(history_right)).pressed(actions){
+                if self.view.button(id!(history_right)).pressed(ac){
                     self.history_slot = (self.history_slot+ 1).min(doc.file.history.len().saturating_sub(1));
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
-                if self.view.button(id!(history_delete)).pressed(actions){
+                if self.view.button(id!(history_delete)).pressed(ac){
                     doc.file.remove_slot(cx, &mut self.history_slot);
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
                                 
                 let list = self.view.portal_list(id!(list));
-                for (item_id,item) in list.items_with_actions(actions){
+                for (item_id,item) in list.items_with_actions(ac){
                     let message_input = item.text_input(id!(message_input));
-                    if let Some(text) = message_input.changed(actions){
+                    if let Some(text) = message_input.changed(ac){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
                         cx.action(AppAction::RedrawAiChat{chat_id});
                     }
-                    if message_input.escape(actions){
+                    if message_input.escape(ac){
                         cx.action(AppAction::CancelAiGeneration{chat_id});
                     }
                                         
-                    if item.button(id!(send_button)).pressed(actions) || 
-                    item.text_input(id!(message_input)).returned(actions).is_some(){
+                    if item.button(id!(send_button)).pressed(ac) || 
+                    item.text_input(id!(message_input)).returned(ac).is_some(){
                         // we'd already be forked
                         let text = message_input.text();
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
@@ -165,7 +193,7 @@ impl WidgetMatchEvent for AiChatView{
                         self.redraw(cx);
                     }
                     // lets clear the messages
-                    if item.button(id!(clear_button)).pressed(actions){
+                    if item.button(id!(clear_button)).pressed(ac){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, "".to_string());
                         self.redraw(cx);
                     }
@@ -223,8 +251,12 @@ impl Widget for AiChatView {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        self.widget_match_event(cx, event, scope);
-        self.view.handle_event(cx, event, scope);
+        let ac = cx.capture_actions(|cx|{
+            self.view.handle_event(cx, event, scope);
+        });
+        if ac.len()>0{
+            self.handle_own_actions(cx, &ac, scope)
+        }
         // we have an AI connection running on AppData
        /* let data = scope.data.get_mut::<AppData>().unwrap();
         // alright we can now access our AiChatManager object

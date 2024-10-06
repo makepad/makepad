@@ -338,6 +338,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
+            let actions_ext = format!("{}WidgetActionsExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
             let get_fn = snake_name.to_string();
             let as_fn = format!("as_{}", snake_name);
@@ -346,13 +347,23 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add(";");
             tb.add("}");
-
+            
+            tb.add("pub trait").ident(&actions_ext).add("{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
+            tb.add("}");
+            
             tb.add("impl ").ident(&widget_ref_ext).add(" for WidgetRef{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.clone())");
+            tb.add("    }");
+            tb.add("}");
+            
+            tb.add("impl ").ident(&actions_ext).add(" for Actions{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
+            tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("}");
             

@@ -401,14 +401,24 @@ impl WidgetRef {
             inner.widget.handle_event_with(cx, event, scope, sweep_area)
         }
     }
+    
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let start = cx.new_actions.len();
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
             if let Event::Draw(e) = event {
                 let cx = &mut Cx2d::new(cx, e);
                 return inner.widget.draw_all(cx, scope);
             }
-            return inner.widget.handle_event(cx, event, scope);
+            inner.widget.handle_event(cx, event, scope); 
+        }
+        let end = cx.new_actions.len();
+        if start != end{
+            for action in &mut cx.new_actions[start..end]{
+                if let Some(action) = action.downcast_mut::<WidgetAction>() {
+                    action.widgets.push(self.clone());
+                }
+            }
         }
     }
 
@@ -743,8 +753,9 @@ impl WidgetActionData{
 
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
-    action: Box<dyn WidgetActionTrait>,
-    data: Option< Arc<dyn WidgetActionTrait>>,
+    pub action: Box<dyn WidgetActionTrait>,
+    pub data: Option< Arc<dyn WidgetActionTrait>>,
+    pub widgets: SmallVec<[WidgetRef;4]>,
     pub widget_uid: WidgetUid,
     pub path: HeapLiveIdPath,
     pub group: Option<WidgetActionGroup>,
@@ -770,7 +781,13 @@ pub trait WidgetActionCxExt {
         F: FnOnce(&mut Cx) -> R;
 }
 
+
 pub trait WidgetActionsApi {
+    
+    fn widget(&self, path:&[LiveId])->WidgetRef;
+    
+    fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>;
+        
     fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
         &self,
         widget_uid: WidgetUid,
@@ -899,6 +916,62 @@ impl WidgetActionCast for Action {
 }
 
 impl WidgetActionsApi for Actions {
+    fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>{
+        for action in self {
+            if let Some(action) = action.downcast_ref::<WidgetAction>() {
+                let mut i = path.len() - 1;
+                let mut found = false;
+                for j in (0..action.path.data.len()).rev(){
+                    if action.path.data[j] == path[i]{
+                        if !found{
+                            found = true;
+                        }
+                        if i > 0{
+                            i -= 1;
+                        }
+                        else{
+                            break;
+                        }
+                    }
+                }
+                if i == 0{
+                    if found{
+                        return Some(action)
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    fn widget(&self, path:&[LiveId])->WidgetRef{
+        for action in self {
+            if let Some(action) = action.downcast_ref::<WidgetAction>() {
+                let mut i = path.len() - 1;
+                let mut ret = None;
+                for j in (0..action.path.data.len()).rev(){
+                    if action.path.data[j] == path[i]{
+                        if ret.is_none(){
+                            ret = action.widgets.get(i);
+                        }
+                        if i > 0{
+                            i -= 1;
+                        }
+                        else{
+                            break;
+                        }
+                    }
+                }
+                if i == 0{
+                    if let Some(ret) = ret{
+                        return ret.clone()
+                    }
+                }
+            }
+        }
+        WidgetRef::empty()
+    }
+    
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction> {
         for action in self {
             if let Some(action) = action.downcast_ref::<WidgetAction>() {
@@ -985,6 +1058,7 @@ impl WidgetActionCxExt for Cx {
             widget_uid,
             data: None,
             path: path.clone(),
+            widgets: Default::default(),
             action: Box::new(t),
             group: None,
         })
@@ -1001,6 +1075,7 @@ impl WidgetActionCxExt for Cx {
             widget_uid,
             data: action_data.clone_data(),
             path: path.clone(),
+            widgets: Default::default(),
             action: Box::new(t),
             group: None,
         })
@@ -1010,10 +1085,10 @@ impl WidgetActionCxExt for Cx {
     where
         F: FnOnce(&mut Cx) -> R,
     {
-        self.map_actions(
+        self.mutate_actions(
             |cx| f(cx),
-            |_cx, mut actions| {
-                for action in &mut actions {
+            |actions| {
+                for action in actions {
                     if let Some(action) = action.downcast_mut::<WidgetAction>() {
                         if action.group.is_none() {
                             action.group = Some(WidgetActionGroup {
@@ -1023,13 +1098,21 @@ impl WidgetActionCxExt for Cx {
                         }
                     }
                 }
-                actions
             },
         )
     }
+    
 }
 
 impl WidgetAction {
+    pub fn widget(&self)->&WidgetRef{
+        self.widgets.first().unwrap()
+    }
+    
+    pub fn widget_nth(&self, n:usize)->&WidgetRef{
+        self.widgets.iter().nth(n).unwrap()
+    }
+    
     pub fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
     where
         T: Default + Clone,
