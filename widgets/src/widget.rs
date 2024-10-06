@@ -212,92 +212,34 @@ impl Debug for WidgetRef {
     }
 }
 
-#[derive(Clone)]
-pub enum WidgetSet {
-    Inline {
-        set: [Option<WidgetRef>; 4],
-        len: usize,
-    },
-    Vec(Vec<WidgetRef>),
-    Empty,
-}
-
-impl std::fmt::Debug for WidgetSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Inline { len, .. } => {
-                let _ = write!(f, "WidgetSet::Inline: {}", len);
-            }
-            Self::Vec(vec) => {
-                let _ = write!(f, "WidgetSet::Vec: {}", vec.len());
-            }
-            Self::Empty => {
-                let _ = write!(f, "WidgetSet::Empty");
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Default for WidgetSet {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
+#[derive(Default, Clone, Debug)]
+pub struct WidgetSet(SmallVec<[WidgetRef;2]>);
 
 impl WidgetSet {
     pub fn is_empty(&mut self) -> bool {
-        if let Self::Empty = self {
-            true
-        } else {
-            false
-        }
+        self.0.len() == 0
     }
 
     pub fn push(&mut self, item: WidgetRef) {
-        match self {
-            Self::Empty => {
-                *self = Self::Inline {
-                    set: [Some(item), None, None, None],
-                    len: 1,
-                }
-            }
-            Self::Inline { len, set } => {
-                if *len == set.len() {
-                    let mut vec = Vec::new();
-                    for item in set {
-                        vec.push(item.clone().unwrap());
-                    }
-                    vec.push(item);
-                    *self = Self::Vec(vec);
-                } else {
-                    set[*len] = Some(item);
-                    *len += 1;
-                }
-            }
-            Self::Vec(vec) => {
-                vec.push(item);
-            }
-        }
+        self.0.push(item);
     }
 
     pub fn extend_from_set(&mut self, other: &WidgetSet) {
-        for item in other.iter() {
-            self.push(item);
+        for item in other.iter(){
+            self.0.push(item.clone())
         }
     }
 
     pub fn into_first(self) -> WidgetRef {
-        match self {
-            Self::Empty => WidgetRef::empty(),
-            Self::Inline { len: _, mut set } => set[0].take().unwrap(),
-            Self::Vec(mut vec) => vec.remove(0),
+        for item in self.0{
+            return item
         }
+        WidgetRef::empty()
     }
 
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
-        for widget in self.iter() {
+        for widget in &self.0 {
             if let Some(inner) = widget.0.borrow().as_ref() {
                 for path in paths {
                     inner
@@ -310,8 +252,8 @@ impl WidgetSet {
     }
 
     pub fn contains(&self, widget: &WidgetRef) -> bool {
-        for item in self.iter() {
-            if item == *widget {
+        for item in &self.0 {
+            if *item == *widget {
                 return true;
             }
         }
@@ -322,7 +264,7 @@ impl WidgetSet {
 impl LiveHook for WidgetSet {}
 impl LiveApply for WidgetSet {
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        for inner in self.iter() {
+        for inner in &self.0 {
             let mut inner = inner.0.borrow_mut();
             if let Some(component) = &mut *inner {
                 return component.widget.apply(cx, apply, index, nodes);
@@ -334,27 +276,29 @@ impl LiveApply for WidgetSet {
 
 impl WidgetSet {
     pub fn empty() -> Self {
-        Self::Empty
+        Self::default()
     }
-    pub fn iter(&self) -> WidgetSetIterator {
-        WidgetSetIterator {
-            widget_set: self,
-            index: 0,
-        }
-    }
-
+    
     pub fn set_text(&self, v: &str) {
-        for item in self.iter() {
+        for item in &self.0 {
             item.set_text(v)
         }
     }
 
     pub fn set_text_and_redraw(&self, cx: &mut Cx, v: &str) {
-        for item in self.iter() {
+        for item in &self.0 {
             item.set_text_and_redraw(cx, v)
         }
     }
+    
+    pub fn iter(&self)->WidgetSetIterator{
+        return WidgetSetIterator{
+            widget_set: self,
+            index: 0
+        }
+    }
 }
+
 
 pub struct WidgetSetIterator<'a> {
     widget_set: &'a WidgetSet,
@@ -363,29 +307,14 @@ pub struct WidgetSetIterator<'a> {
 
 impl<'a> Iterator for WidgetSetIterator<'a> {
     // We can refer to this type using Self::Item
-    type Item = WidgetRef;
+    type Item = &'a WidgetRef;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.widget_set {
-            WidgetSet::Empty => {
-                return None;
-            }
-            WidgetSet::Inline { set, len } => {
-                if self.index >= *len {
-                    return None;
-                }
-                let ret = set[self.index].as_ref().unwrap();
-                self.index += 1;
-                return Some(ret.clone());
-            }
-            WidgetSet::Vec(vec) => {
-                if self.index >= vec.len() {
-                    return None;
-                }
-                let ret = &vec[self.index];
-                self.index += 1;
-                return Some(ret.clone());
-            }
+        if self.index < self.widget_set.0.len(){
+            let idx = self.index;
+            self.index += 1;
+            return Some(&self.widget_set.0[idx])
         }
+        None
     }
 }
 
@@ -522,6 +451,12 @@ impl WidgetRef {
             else{
                 inner.widget.set_action_data(Arc::new(data));
             }
+        }
+    }
+    
+    pub fn set_action_data_always<T:WidgetActionTrait>(&self, data:T){
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.set_action_data(Arc::new(data));
         }
     }
 

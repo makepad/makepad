@@ -481,7 +481,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("    type Item = ").ident(&ref_name).add(";");
             tb.add("    fn next(&mut self)->Option<Self::Item>{");
             tb.add("        if let Some(next) = self.iter.next(){");
-            tb.add("            return Some(").ident(&ref_name).add("(next))");
+            tb.add("            return Some(").ident(&ref_name).add("(next.clone()))");
             tb.add("        }");
             tb.add("        None");
             tb.add("    }");
