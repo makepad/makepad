@@ -77,7 +77,7 @@ fn brotli_compress(dest_path:&PathBuf){
     let mut brotli_file = File::create(dest_path_br).unwrap();
     brotli_file.write_all(&brotli_data).unwrap();
 }
-1`
+
 pub fn cp_brotli(source_path: &PathBuf, dest_path: &PathBuf, exec: bool, compress:bool) -> Result<(), String> {
     cp(source_path, dest_path, exec)?;
     if compress{

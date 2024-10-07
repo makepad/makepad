@@ -952,7 +952,7 @@ impl WidgetActionsApi for Actions {
                 for j in (0..action.path.data.len()).rev(){
                     if action.path.data[j] == path[i]{
                         if ret.is_none(){
-                            ret = action.widgets.get(i);
+                            ret = action.widgets.get(path.len() - i - 1);
                         }
                         if i > 0{
                             i -= 1;
