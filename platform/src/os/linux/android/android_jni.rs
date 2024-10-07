@@ -157,6 +157,7 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
+#[cfg(not(no_android_choreographer))]
 static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
 
 /// Initializes the render loop which used the Android Choreographer when available to ensure proper vsync.
@@ -197,12 +198,15 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
         });
         return;
     }
-    
-    // Otherwise use the actual Choreographer
-    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
-    post_vsync_callback();
+    #[cfg(not(no_android_choreographer))]
+    {
+        // Otherwise use the actual Choreographer
+        CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+        post_vsync_callback();
+    }
 }
 
+#[cfg(not(no_android_choreographer))]
 unsafe extern "C" fn vsync_callback(
     _data: *mut ndk_sys::AChoreographerFrameCallbackData,
     _user_data: *mut std::ffi::c_void,
@@ -211,6 +215,7 @@ unsafe extern "C" fn vsync_callback(
     post_vsync_callback();
 }
 
+#[cfg(not(no_android_choreographer))]
 pub unsafe fn post_vsync_callback() {
     if !CHOREOGRAPHER.is_null() {
         ndk_sys::AChoreographer_postVsyncCallback(

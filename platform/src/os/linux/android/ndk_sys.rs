@@ -61,9 +61,9 @@ pub type AChoreographer_vsyncCallback = unsafe extern "C" fn(
     data: *mut c_void,
 );
 
+#[cfg(not(no_android_choreographer))]
 extern "C" {
     pub fn AChoreographer_getInstance() -> *mut AChoreographer;
-
     pub fn AChoreographer_postVsyncCallback(
         choreographer: *mut AChoreographer,
         callback: Option<AChoreographer_vsyncCallback>,

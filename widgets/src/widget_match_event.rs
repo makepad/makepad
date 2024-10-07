@@ -10,12 +10,12 @@ pub trait WidgetMatchEvent{
     fn handle_video_inputs(&mut self, _cx: &mut Cx, _e:&VideoInputsEvent, _scope: &mut Scope){}
     
     fn handle_http_response(&mut self, _cx:&mut Cx, _request_id:LiveId, _response:&HttpResponse, _scope: &mut Scope){}
-    fn handle_http_request_error(&mut self, _cx:&mut Cx, _request_id:LiveId, _err:&str, _scope: &mut Scope){}
-    fn handle_http_progress(&mut self, _cx:&mut Cx, _request_id:LiveId, _loaded:u64, _total:u64, _scope: &mut Scope){}
+    fn handle_http_request_error(&mut self, _cx:&mut Cx, _request_id:LiveId, _err:&HttpError, _scope: &mut Scope){}
+    fn handle_http_progress(&mut self, _cx:&mut Cx, _request_id:LiveId, _progress:&HttpProgress, _scope: &mut Scope){}
     fn handle_http_stream(&mut self, _cx:&mut Cx, _request_id:LiveId, _data:&HttpResponse, _scope: &mut Scope){}
-    fn handle_http_stream_complete(&mut self, _cx:&mut Cx, _request_id:LiveId, _scope: &mut Scope){}
+    fn handle_http_stream_complete(&mut self, _cx:&mut Cx, _request_id:LiveId, _data:&HttpResponse, _scope: &mut Scope){}
         
-    fn handle_network_responses(&mut self, cx: &mut Cx, e:&NetworkResponsesEvent, scope: &mut Scope ){
+    fn handle_network_responses(&mut self, cx: &mut Cx, e:&NetworkResponsesEvent, scope: &mut Scope){
         for e in e{
             match &e.response{
                 NetworkResponse::HttpRequestError(err)=>{
@@ -24,18 +24,18 @@ pub trait WidgetMatchEvent{
                 NetworkResponse::HttpResponse(res)=>{
                     self.handle_http_response(cx, e.request_id, res, scope);
                 }
-                NetworkResponse::HttpProgress{loaded, total}=>{
-                    self.handle_http_progress(cx, e.request_id, *loaded, *total, scope);
+                NetworkResponse::HttpProgress(progress)=>{
+                    self.handle_http_progress(cx, e.request_id, progress, scope);
                 }
                 NetworkResponse::HttpStreamResponse(data)=>{
                     self.handle_http_stream(cx, e.request_id, data, scope);
                 }
-                NetworkResponse::HttpStreamComplete=>{
-                    self.handle_http_stream_complete(cx, e.request_id, scope);
+                NetworkResponse::HttpStreamComplete(res)=>{
+                    self.handle_http_stream_complete(cx, e.request_id, res, scope);
                 }
             }
         }
-    }    
+    }
     
     fn widget_match_event(&mut self, cx:&mut Cx, event:&Event, scope: &mut Scope){
         match event{
