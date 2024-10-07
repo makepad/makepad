@@ -157,6 +157,8 @@ pub use {
             HttpRequest,
             HttpResponse,
             HttpMethod,
+            HttpProgress,
+            HttpError,
             NetworkResponse,
             NetworkResponsesEvent,
             Margin,
@@ -211,12 +213,13 @@ pub use {
             Actions,
             ActionsBuf, 
             ActionCast,
-            ActionTrait
+            ActionTrait,
+            ActionDefaultRef
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
-        window::WindowHandle,
+        window::{WindowHandle,CxWindowPool},
         pass::{
             PassId,
             CxPassParent,

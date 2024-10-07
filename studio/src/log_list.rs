@@ -11,7 +11,6 @@ use {
         makepad_code_editor::code_view::*,
     },
     std::{
-        fmt::Write,
         env,
     },
 };
@@ -224,7 +223,7 @@ pub struct LogList{
     #[deref] view:View
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JumpToFileLink{item_id:usize}
 
 impl LogList{
@@ -268,7 +267,7 @@ impl LogList{
                                 else{
                                     Default::default()
                                 };
-                                format_reuse!(location, "{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1);
+                                fmt_over!(location, "{}: {}:{}", msg.file_name, msg.start.line_index + 1, msg.start.byte_index + 1);
                                 tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id}, &location);
                                 
                                 tf.draw_text(cx, &msg.message);
@@ -311,6 +310,7 @@ impl Widget for LogList {
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
+            
             if log_list.any_items_with_actions(&actions) {
                 // alright lets figure out if someone clicked a link
                 // alright so how do we now filter which link was clicked

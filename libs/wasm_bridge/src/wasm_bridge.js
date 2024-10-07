@@ -145,6 +145,10 @@ export class WasmBridge {
         console.error(this.u8_to_string(u8_ptr, len), '');
     }
     
+    js_time_now(){
+        return Date.now() / 1000.0;
+    }
+            
     static create_shared_memory() {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
@@ -165,7 +169,7 @@ export class WasmBridge {
 
     static instantiate_wasm(module, memory, env) {
         let set_wasm = init_env(env);
-    
+
         if (memory !== undefined) {
             env.memory = memory;
         }

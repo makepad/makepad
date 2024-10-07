@@ -6,6 +6,7 @@ use {
     std::cell::RefCell,
     std::collections::BTreeMap,
     std::fmt,
+    std::sync::Arc,
     std::fmt::{Debug, Error, Formatter},
     std::rc::Rc,
 };
@@ -37,8 +38,8 @@ pub trait WidgetNode: LiveApply {
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
-    fn set_action_data(&mut self, _data:Box<dyn WidgetActionTrait>){}
-    fn action_data(&mut self)->Option<Box<dyn WidgetActionTrait>>{None}
+    fn set_action_data(&mut self, _data:Arc<dyn WidgetActionTrait>){}
+    fn action_data(&mut self)->Option<Arc<dyn WidgetActionTrait>>{None}
 }
 
 pub trait Widget: WidgetNode {
@@ -211,92 +212,34 @@ impl Debug for WidgetRef {
     }
 }
 
-#[derive(Clone)]
-pub enum WidgetSet {
-    Inline {
-        set: [Option<WidgetRef>; 4],
-        len: usize,
-    },
-    Vec(Vec<WidgetRef>),
-    Empty,
-}
-
-impl std::fmt::Debug for WidgetSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Inline { len, .. } => {
-                let _ = write!(f, "WidgetSet::Inline: {}", len);
-            }
-            Self::Vec(vec) => {
-                let _ = write!(f, "WidgetSet::Vec: {}", vec.len());
-            }
-            Self::Empty => {
-                let _ = write!(f, "WidgetSet::Empty");
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Default for WidgetSet {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
+#[derive(Default, Clone, Debug)]
+pub struct WidgetSet(SmallVec<[WidgetRef;2]>);
 
 impl WidgetSet {
     pub fn is_empty(&mut self) -> bool {
-        if let Self::Empty = self {
-            true
-        } else {
-            false
-        }
+        self.0.len() == 0
     }
 
     pub fn push(&mut self, item: WidgetRef) {
-        match self {
-            Self::Empty => {
-                *self = Self::Inline {
-                    set: [Some(item), None, None, None],
-                    len: 1,
-                }
-            }
-            Self::Inline { len, set } => {
-                if *len == set.len() {
-                    let mut vec = Vec::new();
-                    for item in set {
-                        vec.push(item.clone().unwrap());
-                    }
-                    vec.push(item);
-                    *self = Self::Vec(vec);
-                } else {
-                    set[*len] = Some(item);
-                    *len += 1;
-                }
-            }
-            Self::Vec(vec) => {
-                vec.push(item);
-            }
-        }
+        self.0.push(item);
     }
 
     pub fn extend_from_set(&mut self, other: &WidgetSet) {
-        for item in other.iter() {
-            self.push(item);
+        for item in other.iter(){
+            self.0.push(item.clone())
         }
     }
 
     pub fn into_first(self) -> WidgetRef {
-        match self {
-            Self::Empty => WidgetRef::empty(),
-            Self::Inline { len: _, mut set } => set[0].take().unwrap(),
-            Self::Vec(mut vec) => vec.remove(0),
+        for item in self.0{
+            return item
         }
+        WidgetRef::empty()
     }
 
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         let mut results = WidgetSet::default();
-        for widget in self.iter() {
+        for widget in &self.0 {
             if let Some(inner) = widget.0.borrow().as_ref() {
                 for path in paths {
                     inner
@@ -309,8 +252,8 @@ impl WidgetSet {
     }
 
     pub fn contains(&self, widget: &WidgetRef) -> bool {
-        for item in self.iter() {
-            if item == *widget {
+        for item in &self.0 {
+            if *item == *widget {
                 return true;
             }
         }
@@ -321,7 +264,7 @@ impl WidgetSet {
 impl LiveHook for WidgetSet {}
 impl LiveApply for WidgetSet {
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
-        for inner in self.iter() {
+        for inner in &self.0 {
             let mut inner = inner.0.borrow_mut();
             if let Some(component) = &mut *inner {
                 return component.widget.apply(cx, apply, index, nodes);
@@ -333,27 +276,29 @@ impl LiveApply for WidgetSet {
 
 impl WidgetSet {
     pub fn empty() -> Self {
-        Self::Empty
+        Self::default()
     }
-    pub fn iter(&self) -> WidgetSetIterator {
-        WidgetSetIterator {
-            widget_set: self,
-            index: 0,
-        }
-    }
-
+    
     pub fn set_text(&self, v: &str) {
-        for item in self.iter() {
+        for item in &self.0 {
             item.set_text(v)
         }
     }
 
     pub fn set_text_and_redraw(&self, cx: &mut Cx, v: &str) {
-        for item in self.iter() {
+        for item in &self.0 {
             item.set_text_and_redraw(cx, v)
         }
     }
+    
+    pub fn iter(&self)->WidgetSetIterator{
+        return WidgetSetIterator{
+            widget_set: self,
+            index: 0
+        }
+    }
 }
+
 
 pub struct WidgetSetIterator<'a> {
     widget_set: &'a WidgetSet,
@@ -362,29 +307,14 @@ pub struct WidgetSetIterator<'a> {
 
 impl<'a> Iterator for WidgetSetIterator<'a> {
     // We can refer to this type using Self::Item
-    type Item = WidgetRef;
+    type Item = &'a WidgetRef;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.widget_set {
-            WidgetSet::Empty => {
-                return None;
-            }
-            WidgetSet::Inline { set, len } => {
-                if self.index >= *len {
-                    return None;
-                }
-                let ret = set[self.index].as_ref().unwrap();
-                self.index += 1;
-                return Some(ret.clone());
-            }
-            WidgetSet::Vec(vec) => {
-                if self.index >= vec.len() {
-                    return None;
-                }
-                let ret = &vec[self.index];
-                self.index += 1;
-                return Some(ret.clone());
-            }
+        if self.index < self.widget_set.0.len(){
+            let idx = self.index;
+            self.index += 1;
+            return Some(&self.widget_set.0[idx])
         }
+        None
     }
 }
 
@@ -471,14 +401,24 @@ impl WidgetRef {
             inner.widget.handle_event_with(cx, event, scope, sweep_area)
         }
     }
+    
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let start = cx.new_actions.len();
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
             if let Event::Draw(e) = event {
                 let cx = &mut Cx2d::new(cx, e);
                 return inner.widget.draw_all(cx, scope);
             }
-            return inner.widget.handle_event(cx, event, scope);
+            inner.widget.handle_event(cx, event, scope); 
+        }
+        let end = cx.new_actions.len();
+        if start != end{
+            for action in &mut cx.new_actions[start..end]{
+                if let Some(action) = action.downcast_mut::<WidgetAction>() {
+                    action.widgets.push(self.clone());
+                }
+            }
         }
     }
 
@@ -509,9 +449,24 @@ impl WidgetRef {
         false
     }
     
-    pub fn set_action_data(&self, data:impl WidgetActionTrait){
+    pub fn set_action_data<T:WidgetActionTrait + PartialEq>(&self, data:T){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.set_action_data(Box::new(data));
+            if let Some(v) = inner.widget.action_data(){
+                if let Some(v) = v.downcast_ref::<T>(){
+                    if v.ne(&data){
+                        inner.widget.set_action_data(Arc::new(data));
+                    }
+                }
+            }
+            else{
+                inner.widget.set_action_data(Arc::new(data));
+            }
+        }
+    }
+    
+    pub fn set_action_data_always<T:WidgetActionTrait>(&self, data:T){
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.set_action_data(Arc::new(data));
         }
     }
 
@@ -738,13 +693,17 @@ impl LiveNew for WidgetRef {
     }
 }
 
-pub trait WidgetActionTrait: 'static + Send {
+pub trait WidgetActionTrait: 'static + Send+ Sync {
     fn ref_cast_type_id(&self) -> TypeId;
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
     fn box_clone(&self) -> Box<dyn WidgetActionTrait>;
 }
 
-impl<T: 'static + ?Sized + Clone + Debug + Send> WidgetActionTrait for T {
+pub trait ActionDefault{
+    fn default_ref(&self) -> Box<dyn WidgetActionTrait>;
+}
+
+impl<T: 'static + ?Sized + Clone + Debug + Send+ Sync> WidgetActionTrait for T {
     fn ref_cast_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -774,27 +733,29 @@ impl Clone for Box<dyn WidgetActionTrait> {
 
 #[derive(Default)]
 pub struct WidgetActionData{
-    data: Option<Box<dyn WidgetActionTrait>>
+    data: Option<Arc<dyn WidgetActionTrait>>
 }
 
 impl WidgetActionData{
     pub fn set(&mut self,  data:impl WidgetActionTrait){
-        self.data = Some(Box::new(data));
+        self.data = Some(Arc::new(data));
     }
     
-    pub fn set_box(&mut self,  data:Box<dyn  WidgetActionTrait>){
+    pub fn set_box(&mut self,  data:Arc<dyn  WidgetActionTrait>){
         self.data = Some(data);
     }
     
-    pub fn clone_data(&self)->Option<Box<dyn WidgetActionTrait>>{
+    pub fn clone_data(&self)->Option<Arc<dyn WidgetActionTrait>>{
         self.data.clone()
     }
 }
 
+
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
-    action: Box<dyn WidgetActionTrait>,
-    data: Option< Box<dyn WidgetActionTrait>>,
+    pub action: Box<dyn WidgetActionTrait>,
+    pub data: Option< Arc<dyn WidgetActionTrait>>,
+    pub widgets: SmallVec<[WidgetRef;4]>,
     pub widget_uid: WidgetUid,
     pub path: HeapLiveIdPath,
     pub group: Option<WidgetActionGroup>,
@@ -820,8 +781,14 @@ pub trait WidgetActionCxExt {
         F: FnOnce(&mut Cx) -> R;
 }
 
+
 pub trait WidgetActionsApi {
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(
+    
+    fn widget(&self, path:&[LiveId])->WidgetRef;
+    
+    fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>;
+        
+    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
         &self,
         widget_uid: WidgetUid,
     ) -> T
@@ -883,14 +850,14 @@ pub trait WidgetActionsApi {
     ///     })
     /// });
     /// ```
-    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send>(
+    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
     where
         T: Default + Clone;
         
-    fn filter_actions_data<T: WidgetActionTrait + 'static + Send>(
+    fn filter_actions_data<T: WidgetActionTrait + 'static + Send+ Sync>(
             &self,
         ) -> impl Iterator<Item = T>
         where
@@ -902,6 +869,7 @@ pub trait WidgetActionOptionApi {
     fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
     where
         T: Default + Clone;
+    fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction> {
@@ -925,6 +893,16 @@ impl WidgetActionOptionApi for Option<&WidgetAction> {
         }
         T::default()
     }
+    
+    fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T
+    {
+        if let Some(item) = self {
+            if let Some(item) = item.action.downcast_ref::<T>() {
+                return item;
+            }
+        }
+        T::default_ref()
+    }
 }
 
 pub trait WidgetActionCast {
@@ -938,6 +916,62 @@ impl WidgetActionCast for Action {
 }
 
 impl WidgetActionsApi for Actions {
+    fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>{
+        for action in self {
+            if let Some(action) = action.downcast_ref::<WidgetAction>() {
+                let mut i = path.len() - 1;
+                let mut found = false;
+                for j in (0..action.path.data.len()).rev(){
+                    if action.path.data[j] == path[i]{
+                        if !found{
+                            found = true;
+                        }
+                        if i > 0{
+                            i -= 1;
+                        }
+                        else{
+                            break;
+                        }
+                    }
+                }
+                if i == 0{
+                    if found{
+                        return Some(action)
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    fn widget(&self, path:&[LiveId])->WidgetRef{
+        for action in self {
+            if let Some(action) = action.downcast_ref::<WidgetAction>() {
+                let mut i = path.len() - 1;
+                let mut ret = None;
+                for j in (0..action.path.data.len()).rev(){
+                    if action.path.data[j] == path[i]{
+                        if ret.is_none(){
+                            ret = action.widgets.get(i);
+                        }
+                        if i > 0{
+                            i -= 1;
+                        }
+                        else{
+                            break;
+                        }
+                    }
+                }
+                if i == 0{
+                    if let Some(ret) = ret{
+                        return ret.clone()
+                    }
+                }
+            }
+        }
+        WidgetRef::empty()
+    }
+    
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction> {
         for action in self {
             if let Some(action) = action.downcast_ref::<WidgetAction>() {
@@ -972,7 +1006,7 @@ impl WidgetActionsApi for Actions {
         })
     }
 
-    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send>(
+    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send + Sync>(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
@@ -1024,6 +1058,7 @@ impl WidgetActionCxExt for Cx {
             widget_uid,
             data: None,
             path: path.clone(),
+            widgets: Default::default(),
             action: Box::new(t),
             group: None,
         })
@@ -1040,6 +1075,7 @@ impl WidgetActionCxExt for Cx {
             widget_uid,
             data: action_data.clone_data(),
             path: path.clone(),
+            widgets: Default::default(),
             action: Box::new(t),
             group: None,
         })
@@ -1049,10 +1085,10 @@ impl WidgetActionCxExt for Cx {
     where
         F: FnOnce(&mut Cx) -> R,
     {
-        self.map_actions(
+        self.mutate_actions(
             |cx| f(cx),
-            |_cx, mut actions| {
-                for action in &mut actions {
+            |actions| {
+                for action in actions {
                     if let Some(action) = action.downcast_mut::<WidgetAction>() {
                         if action.group.is_none() {
                             action.group = Some(WidgetActionGroup {
@@ -1062,13 +1098,21 @@ impl WidgetActionCxExt for Cx {
                         }
                     }
                 }
-                actions
             },
         )
     }
+    
 }
 
 impl WidgetAction {
+    pub fn widget(&self)->&WidgetRef{
+        self.widgets.first().unwrap()
+    }
+    
+    pub fn widget_nth(&self, n:usize)->&WidgetRef{
+        self.widgets.iter().nth(n).unwrap()
+    }
+    
     pub fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
     where
         T: Default + Clone,
@@ -1077,6 +1121,19 @@ impl WidgetAction {
             return item.clone();
         }
         T::default()
+    }
+    
+    pub fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T
+    {
+        if let Some(item) = self.action.downcast_ref::<T>() {
+            return item
+        }
+        T::default_ref()
+    }
+    
+    pub fn downcast_ref<T: WidgetActionTrait + Send + ActionDefaultRef>(&self) -> Option<&T>
+    {
+        self.action.downcast_ref::<T>()
     }
 }
 

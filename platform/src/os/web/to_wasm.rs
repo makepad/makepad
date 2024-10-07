@@ -617,6 +617,8 @@ pub struct ToWasmHTTPResponse {
 pub struct ToWasmHttpRequestError {
     pub request_id_lo: u32,
     pub request_id_hi: u32,
+    pub metadata_id_hi: u32,
+    pub metadata_id_lo: u32,
     pub error: String
 }
 
@@ -624,6 +626,8 @@ pub struct ToWasmHttpRequestError {
 pub struct ToWasmHttpResponseProgress {
     pub request_id_lo: u32,
     pub request_id_hi: u32,
+    pub metadata_id_hi: u32,
+    pub metadata_id_lo: u32,
     pub loaded: u32,
     pub total: u32
 }

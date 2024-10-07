@@ -91,4 +91,10 @@ impl LabelRef {
             false
         }
     }
+    
+    pub fn set_text_with<F:FnOnce(&mut String)>(&self, f:F) {
+        if let Some(mut inner) = self.borrow_mut(){
+            f(inner.text.as_mut())
+        }
+    }
 }

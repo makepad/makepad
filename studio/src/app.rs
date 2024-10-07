@@ -25,7 +25,6 @@ use crate::{
 use std::fs::File;
 use std::io::Write;
 use std::env;
-  
 live_design!{
     import crate::app_ui::*;
 
@@ -60,23 +59,19 @@ impl LiveRegister for App{
 app_main!(App);
 
 impl App {
+     
+    
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(id!(dock));            
             let tab_id = dock.unique_tab_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
             let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
-            dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(CodeEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
+            // lets pick the template
+            let template = FileSystem::get_editor_template_from_path(path);
+            dock.create_and_select_tab(cx, tab_bar, tab_id, template, "".to_string(), live_id!(CloseableTab), Some(pos));
             self.data.file_system.ensure_unique_tab_names(cx, &dock)
         }
-    }
-    
-    pub fn open_ai_chat(&mut self, cx: &mut Cx) {
-        let dock = self.ui.dock(id!(dock));            
-        let tab_id = dock.unique_tab_id(0129384);//file_id.0);
-        //self.data.file_system.request_open_file(tab_id, file_id);
-        let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(ai_first)).unwrap();
-        dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(AiChat), "AI".to_string(), live_id!(CloseableTab), Some(pos));
     }
     
     pub fn load_state(&mut self, cx:&mut Cx){
@@ -125,6 +120,10 @@ pub enum AppAction{
     ReloadFileTree,
     RecompileStarted,
     ClearLog, 
+    SendAiChatToBackend{chat_id:LiveId, backend_index:usize, history_slot:usize},
+    CancelAiGeneration{chat_id:LiveId},
+    SaveAiChat{chat_id:LiveId},
+    RedrawAiChat{chat_id:LiveId},
     None
 }
 
@@ -144,7 +143,6 @@ impl MatchEvent for App{
         //self.data.build_manager.discover_external_ip(cx);
         self.data.build_manager.start_http_server();
         // lets load the tabs
-        self.open_ai_chat(cx);
     }
     
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
@@ -153,6 +151,7 @@ impl MatchEvent for App{
         let log_list = self.ui.log_list(id!(log_list));
         let run_list = self.ui.view(id!(run_list));
         let profiler = self.ui.view(id!(profiler));
+        
         match action.cast(){
             AppAction::JumpTo(jt)=>{
                 let pos = Position{line_index: jt.line as usize, byte_index:jt.column as usize};
@@ -160,7 +159,7 @@ impl MatchEvent for App{
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(id!(editor)).borrow_mut() {
                             if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 editor.editor.set_cursor_and_scroll(cx, pos, session);
                                 editor.editor.set_key_focus(cx);
@@ -173,7 +172,8 @@ impl MatchEvent for App{
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
                         let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
-                        dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
+                        let template = FileSystem::get_editor_template_from_path(&jt.file_name);
+                        dock.create_and_select_tab(cx, tab_bar, tab_id, template, "".to_string(), live_id!(CloseableTab), Some(pos));
                         // lets scan the entire doc for duplicates
                         self.data.file_system.ensure_unique_tab_names(cx, &dock)
                     }
@@ -186,7 +186,7 @@ impl MatchEvent for App{
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         //dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(id!(editor)).borrow_mut() {
                             if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do 
                                 session.set_selection(
@@ -216,7 +216,7 @@ impl MatchEvent for App{
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
                         dock.select_tab(cx, tab_id);
                         // ok lets scroll into view
-                        if let Some(mut editor) = dock.item(tab_id).studio_editor(id!(editor)).borrow_mut() {
+                        if let Some(mut editor) = dock.item(tab_id).studio_code_editor(id!(editor)).borrow_mut() {
                             if let Some(EditSession::Code(session)) = self.data.file_system.get_session_mut(tab_id) {
                                 // alright lets do 
                                 session.set_selection(
@@ -290,7 +290,19 @@ impl MatchEvent for App{
                     }
                 }
             }
-            AppAction::None=>()
+            AppAction::None=>(),
+            AppAction::SendAiChatToBackend{chat_id, backend_index, history_slot}=>{
+                self.data.ai_chat_manager.send_chat_to_backend(cx, chat_id, backend_index, history_slot, &mut self.data.file_system);
+            }
+            AppAction::CancelAiGeneration{chat_id}=>{
+                self.data.ai_chat_manager.cancel_chat_generation(cx, &self.ui, chat_id,  &mut self.data.file_system);
+            }
+            AppAction::SaveAiChat{chat_id}=>{
+                self.data.file_system.request_save_file_for_file_node_id(chat_id, false);
+            }
+            AppAction::RedrawAiChat{chat_id}=>{
+                self.data.ai_chat_manager.redraw_ai_chat_by_id(cx, chat_id,&self.ui,  &mut self.data.file_system);
+            }
         }
                 
         match action.cast(){
@@ -441,7 +453,8 @@ impl MatchEvent for App{
                             if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
                                 let tab_id = dock.unique_tab_id(file_id.0);
                                 self.data.file_system.request_open_file(tab_id, file_id);
-                                dock.drop_create(cx, drop_event.abs, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab));
+                                let template = FileSystem::get_editor_template_from_path(&path);
+                                dock.drop_create(cx, drop_event.abs, tab_id, template, "".to_string(), live_id!(CloseableTab));
                                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
                             }
                         }
@@ -495,9 +508,13 @@ impl MatchEvent for App{
             } else {
                 let tab_id = dock.unique_tab_id(file_id.0);
                 self.data.file_system.request_open_file(tab_id, file_id);
+                self.data.file_system.request_open_file(tab_id, file_id);
+                                
                 // lets add a file tab 'some
                 let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
-                dock.create_and_select_tab(cx, tab_bar, tab_id, live_id!(StudioEditor), "".to_string(), live_id!(CloseableTab), Some(pos));
+                let path = self.data.file_system.file_node_id_to_path(file_id).unwrap();
+                let template = FileSystem::get_editor_template_from_path(path);
+                dock.create_and_select_tab(cx, tab_bar, tab_id, template, "".to_string(), live_id!(CloseableTab), Some(pos));
                                             
                 // lets scan the entire doc for duplicates
                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
@@ -518,7 +535,7 @@ impl AppMain for App {
         
         self.data.file_system.handle_event(cx, event, &self.ui);
         self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
-        self.data.ai_chat_manager.handle_event(cx, event, &self.ui);
+        self.data.ai_chat_manager.handle_event(cx, event, &mut self.data.file_system);
         // process events on all run_views
         let dock = self.ui.dock(id!(dock));
         /*
@@ -551,6 +568,8 @@ impl AppMain for App {
         }
     }
 }
+
+// we should store probably also scroll position / which chat slot we're visiting
 use std::collections::HashMap;
 #[derive(SerRon, DeRon)]
 pub struct AppStateRon{
