@@ -145,7 +145,7 @@ impl AiChatView{
                 if let Some(wa) = actions.widget_action(id!(copy_button)){
                     if wa.widget().as_button().pressed(actions){
                         let code_view = wa.widget_nth(2).widget(id!(code_view));
-                        println!("COPY! {}", code_view.text());
+                        log!("COPY! {}", code_view.text());
                     }
                 }
                 if let Some(index) = self.view.drop_down(id!(model_dropdown)).selected(actions){
@@ -208,6 +208,7 @@ impl Widget for AiChatView {
         let session_id = scope.path.from_end(0);
         
         let dd = self.view.drop_down(id!(model_dropdown));
+        // ok how do we set these dropdown labels without causing memory changes
         dd.set_labels(data.ai_chat_manager.model_strings());
         dd.set_selected_item(self.backend_index);
         

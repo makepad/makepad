@@ -10,6 +10,7 @@ use {
 
 pub struct AiChatManager{
     pub backends: Vec<(String, AiBackend)>,
+    pub contexts: Vec<(String, Vec<String>)>,
 }
 const OPENAI_DEFAULT_URL: &'static str = "https://api.openai.com/v1/chat/completions";
 
@@ -41,6 +42,21 @@ impl Default for AiChatManager{
                         key:"".to_string()
                     }
                 ),
+            ],
+            contexts: vec![
+                (
+                    "Empty".to_string(),
+                    vec![
+                    ]
+                ),
+                (
+                    "Makepad UI".to_string(),
+                    vec![
+                        "/widgets/button.rs".to_string(),
+                        "/widgets/slider.rs".to_string(),
+                        "/examples/simple/src/app.rs".to_string(),
+                    ]
+                )
             ]
         }
     }
