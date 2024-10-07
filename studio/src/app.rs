@@ -561,7 +561,7 @@ impl AppMain for App {
             }); 
             for item in dock_items.values_mut(){
                  if let DockItem::Tabs{tabs,..} = item{
-                     tabs.retain(|id| run_views.contains(id));
+                     tabs.retain(|id| !run_views.contains(id));
                  }
             }
             // alright lets save it to disk
