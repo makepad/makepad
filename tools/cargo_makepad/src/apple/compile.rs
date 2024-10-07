@@ -27,7 +27,7 @@ impl ParsedProfiles{
         None
     }
     
-    fn cert<'a>(&'a self, v:&'a str)->Option<&str>{
+    fn cert<'a>(&'a self, v:&'a str)->Option<&'a str>{
         for cert in &self.certs{
             if cert.0.starts_with(v){
                 return Some(&cert.0)
@@ -36,7 +36,7 @@ impl ParsedProfiles{
         Some(v)
     }
     
-    fn device<'a>(&'a self, v:&'a str)->Option<&str>{
+    fn device<'a>(&'a self, v:&'a str)->Option<&'a str>{
         for device in &self.devices{
             if device.0 == v{
                 return Some(&device.1)

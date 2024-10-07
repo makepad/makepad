@@ -19,6 +19,7 @@ use std::{
     }
 };
      
+#[derive(Debug)]
 pub enum WebSocketThreadMsg{
     Open{
         socket_id: u64,
@@ -42,6 +43,7 @@ pub struct WebSocket{
     pub rx_receiver: Receiver<WebSocketMessage>,
 }
 
+#[derive(Debug)]
 pub enum WebSocketMessage{
     Error(String),
     Binary(Vec<u8>),
