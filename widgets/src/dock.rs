@@ -243,11 +243,16 @@ impl LiveHook for Dock {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id,..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     if nodes[index].value.is_enum() {
-                        let mut dock_item = DockItem::new(cx);
-                        let index = dock_item.apply(cx, apply, index, nodes);
-                        self.dock_items.insert(id, dock_item);
-                        
-                        return index;
+                        // only do this in newfromdoc
+                        if apply.from.is_new_from_doc(){
+                            let mut dock_item = DockItem::new(cx);
+                            let index = dock_item.apply(cx, apply, index, nodes);
+                            self.dock_items.insert(id, dock_item);
+                            return index;
+                        }
+                        else{
+                            return nodes.skip_node(index)
+                        }
                     }
                     else {
                         let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
