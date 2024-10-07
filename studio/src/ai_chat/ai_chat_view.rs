@@ -33,7 +33,7 @@ live_design!{
             }
         }
                                                                                                                   
-        context_dropdown = <DropDown>{ width: Fit,}
+        context_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
         send_button = <Button> {
             icon_walk: {margin: {left: 10}, width: 16, height: Fit}
             text: ">"
@@ -104,7 +104,6 @@ live_design!{
         height: Fill, width: Fill,
         flow: Down
         spacing: 3
-        padding:{top:4}
         
         tb = <DockToolbar> {
             
@@ -118,7 +117,7 @@ live_design!{
                 history_right = <ButtonFlat> { width: Fit, text: ">"}
                 slot = <Label> { width: Fit, text: "0"}
                 <View>{width:Fill}
-                model_dropdown = <DropDown>{ width: Fit,}
+                model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
                 history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
             }
         }
@@ -184,20 +183,25 @@ impl AiChatView{
                     if message_input.escape(actions){
                         cx.action(AppAction::CancelAiGeneration{chat_id});
                     }
-                                        
+                    
+                    if let Some(ctx_id) = item.drop_down(id!(context_dropdown)).selected(actions){
+                        let ctx_name = &data.ai_chat_manager.contexts[ctx_id].name;
+                        doc.file.set_base_context(self.history_slot, item_id, ctx_name);
+                    }
+                         
                     if item.button(id!(send_button)).pressed(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
                         // we'd already be forked
                         let text = message_input.text();
+                        
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
                         // alright so we press send/enter now what
                         // we now call 'setaichatlen' this will 'fork' our current index
                         // what if our chat is empty? then we dont fork
                         doc.file.clamp_slot(&mut self.history_slot);
                         // lets fetch the context
-                        let dd = item.drop_down(id!(context_dropdown));
-                        //println!("{}", dd.selected_item());
-                        
+                        // println!("{}", dd.selected_item());
+                        // alright lets collect the context
                         cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:self.backend_index, history_slot: self.history_slot});
                         cx.action(AppAction::SaveAiChat{chat_id});
                         cx.action(AppAction::RedrawAiChat{chat_id});
@@ -255,9 +259,13 @@ impl Widget for AiChatView {
                                     let dd = item.drop_down(id!(context_dropdown));
                                     let mut i = data.ai_chat_manager.contexts.iter();
                                     dd.set_labels_with(|label|{
-                                        i.next().map(|m| label.push_str(&m.0));
+                                        i.next().map(|m| label.push_str(&m.name));
                                     });
-                                                                        
+                                    // lets find the context
+                                    
+                                    if let Some(pos) = data.ai_chat_manager.contexts.iter().position(|ctx| ctx.name == val.base_context){
+                                        dd.set_selected_item(pos);
+                                    }
                                     item.widget(id!(message_input)).set_text(&val.message);
                                     item.draw_all_unscoped(cx);
                                 }

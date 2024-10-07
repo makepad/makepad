@@ -10,7 +10,7 @@ use {
 
 pub struct AiChatManager{
     pub backends: Vec<(String, AiBackend)>,
-    pub contexts: Vec<(String, Vec<String>)>,
+    pub contexts: Vec<BaseContext>,
 }
 const OPENAI_DEFAULT_URL: &'static str = "https://api.openai.com/v1/chat/completions";
 
@@ -44,19 +44,20 @@ impl Default for AiChatManager{
                 ),
             ],
             contexts: vec![
-                (
-                    "Empty".to_string(),
-                    vec![
+                BaseContext{
+                    name: "Empty".to_string(),
+                    system: "You are a Rust programming assistant. Please answer with code examples only and very little explanation".to_string(),
+                    files: vec![]
+                },
+                BaseContext{
+                    name: "Makepad UI".to_string(),
+                    system: "You are a Rust programming assistant for writing Makepad applications. You have been given 2 components and one example application. Please answer with code only and don't give explanations".to_string(),
+                    files: vec![
+                        "widgets/src/button.rs".to_string(),
+                        "widgets/src/slider.rs".to_string(),
+                        "examples/simple/src/app.rs".to_string(),
                     ]
-                ),
-                (
-                    "Makepad UI".to_string(),
-                    vec![
-                        "/widgets/button.rs".to_string(),
-                        "/widgets/slider.rs".to_string(),
-                        "/examples/simple/src/app.rs".to_string(),
-                    ]
-                )
+                }
             ]
         }
     }
@@ -81,16 +82,22 @@ pub enum AiBackend{
     }
 }
 
-#[derive(Debug, SerRon, DeRon, Clone)]
-pub struct AiContextFile{
-    pub file_id: LiveId,
+pub struct BaseContext{
     pub name: String,
-    pub contents: String,
+    pub system: String,
+    pub files: Vec<String>
+}
+
+#[derive(Debug, SerRon, DeRon, Clone)]
+pub enum AiContext{
+    Snippet{name:String, language:String, content:String},
+    File{file_id:LiveId}
 }
 
 #[derive(Default, Debug, SerRon, DeRon, Clone)]
 pub struct AiUserMessage{
-    pub context: Vec<AiContextFile>,
+    pub base_context: String,
+    pub context: Vec<AiContext>,
     pub message:String
 }
 
@@ -199,10 +206,32 @@ impl AiChatFile{
         }
         // 
     }
+    
+    pub fn set_base_context(&mut self, history_slot:usize, at:usize, base_context:&str){ 
+        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
+            s.base_context = base_context.to_string()
+        }
+        else{panic!()}
+    }
 }
 
 
 impl AiChatManager{
+    pub fn init(&mut self, fs:&mut FileSystem) {
+        // lets load up all our context files
+        for ctx in &self.contexts{
+            for file in &ctx.files{
+                if let Some(file_id) = fs.path_to_file_node_id(&file){
+                    fs.request_open_file(LiveId(0), file_id);
+                }
+                else{
+                    println!("Cant find {} in context {}",file,ctx.name);
+                }
+            }
+        }
+    }
+    
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, fs:&mut FileSystem) {
         // lets handle the 
         
@@ -285,19 +314,11 @@ impl AiChatManager{
     }
             
     pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, backend_index:usize, history_slot:usize, fs:&mut FileSystem) {
-        // alright so what hapepns here
-        // per backend we have a path
-        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
-            if let Some(in_flight) = doc.in_flight.take(){
-                cx.cancel_http_request(in_flight.request_id);
-            }
-            // alright. lets append the user message
-            /*doc.messages.push(AiChatMessage::User{
-                message
-            });*/
+        // build the request
+        let request = if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
             match &self.backends[backend_index].1{
                 AiBackend::OpenAI{url, model, key}=>{
-                    let request_id = LiveId::unique();
+                    
                     let mut request = HttpRequest::new(url.clone(), HttpMethod::POST);
                     request.set_is_streaming();
                     request.set_header("Authorization".to_string(), format!("Bearer {key}"));
@@ -307,6 +328,27 @@ impl AiChatManager{
                     for msg in &doc.file.history[history_slot].messages{
                         match msg{
                             AiChatMessage::User(v)=>{
+                                // alright. we have to now collect our base context files
+                                // ok lets find these files
+                                if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
+                                    messages.push(ChatMessage {content: Some(ctx.system.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                    for file in &ctx.files{
+                                        if let Some(file_id) = fs.path_to_file_node_id(file){
+                                            if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
+                                                let mut content = String::new();
+                                                let text = doc.as_text().to_string();
+                                                content.push_str("\n File:");
+                                                content.push_str(file);
+                                                content.push_str("\n```rust\n");
+                                                content.push_str(&text);
+                                                content.push_str("```\n");
+                                                 messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                                            }
+                                        }
+                                    }
+                                }
+                                //content.push_str(&v.message);
+                                //println!("{:?}", content);
                                 messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
                             }
                             AiChatMessage::Assistant(v)=>{
@@ -320,14 +362,25 @@ impl AiChatManager{
                         max_tokens: 1000,
                         stream: true,
                     });
-                    doc.file.history[history_slot].messages.push(AiChatMessage::Assistant("".to_string()));
-                    doc.in_flight = Some(AiInFlight{
-                        history_slot,
-                        request_id
-                    });
-                    cx.http_request(request_id, request);
+                    request
                 }
             }
+        }
+        else{
+            panic!()
+        };
+        
+        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
+            let request_id = LiveId::unique();
+            if let Some(in_flight) = doc.in_flight.take(){
+                cx.cancel_http_request(in_flight.request_id);
+            }
+            doc.file.history[history_slot].messages.push(AiChatMessage::Assistant("".to_string()));
+            doc.in_flight = Some(AiInFlight{
+                history_slot,
+                request_id
+            });
+            cx.http_request(request_id, request);
         }
     }
     

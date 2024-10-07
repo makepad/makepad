@@ -300,8 +300,10 @@ impl FileSystem {
     pub fn request_open_file(&mut self, tab_id: LiveId, file_id: LiveId) {
         // ok lets see if we have a document
         // ifnot, we create a new one
-        self.tab_id_to_file_node_id.insert(tab_id, file_id);
-        
+        if tab_id != LiveId(0){
+            self.tab_id_to_file_node_id.insert(tab_id, file_id);
+        }
+            
         // fetch decoration set
         let dec = match self.open_documents.get(&file_id){
             Some(OpenDocument::CodeLoading(_))=> if let Some(OpenDocument::CodeLoading(dec)) = self.open_documents.remove(&file_id){

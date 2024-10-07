@@ -693,10 +693,19 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    //session.select_all();
+                    let ((cursor, affinity), _is_in_gutter) = self.pick(session, dvec2(0.0,0.0));
+                    session.set_selection(
+                        cursor,
+                        affinity,
+                        SelectionMode::All,
+                        NewGroup::Yes
+                    );
+                    self.reset_cursor_blinker(cx);
+                    self.keep_cursor_in_view = KeepCursorInView::Off;
                     self.redraw(cx);
                 }
             }
+            
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers:
@@ -887,6 +896,8 @@ impl CodeEditor {
                     keyboard_moved_cursor = true;
                 }
             }
+            
+            
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers:
