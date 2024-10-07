@@ -13,12 +13,25 @@ pub struct NetworkResponseItem{
 pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
 #[derive(Clone, Debug)]
+pub struct HttpError{
+    pub message: String,
+    pub metadata_id: LiveId
+}
+
+
+#[derive(Clone, Debug)]
+pub struct HttpProgress{
+    pub loaded:u64, 
+    pub total:u64,
+}
+
+#[derive(Clone, Debug)]
 pub enum NetworkResponse{
-    HttpRequestError(String),
+    HttpRequestError(HttpError),
     HttpResponse(HttpResponse),
     HttpStreamResponse(HttpResponse),
-    HttpStreamComplete,
-    HttpProgress{loaded:u64, total:u64},
+    HttpStreamComplete(HttpResponse),
+    HttpProgress(HttpProgress),
 }
 /*
 pub struct NetworkResponseIter<I> {

@@ -2,7 +2,6 @@ use {
     crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
     std::{
         cell::RefCell,
-        collections::HashMap,
     },
 };
 
@@ -158,7 +157,7 @@ pub struct View {
     design_mode: bool,
 
     #[rust]
-    find_cache: RefCell<HashMap<u64, WidgetSet>>,
+    find_cache: RefCell<SmallVec<[(u64, WidgetSet);3]>>,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
@@ -548,7 +547,7 @@ impl WidgetNode for View {
                 for i in 0..path.len() {
                     hash ^= path[i].0
                 }
-                if let Some(widget_set) = self.find_cache.borrow().get(&hash) {
+                if let Some((_,widget_set)) = self.find_cache.borrow().iter().find(|(h,_v)| h == &hash) {
                     results.extend_from_set(widget_set);
                     return;
                 }
@@ -566,7 +565,7 @@ impl WidgetNode for View {
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-                self.find_cache.borrow_mut().insert(hash, local_results);
+                self.find_cache.borrow_mut().push((hash, local_results));
             }
             WidgetCache::No => {
                  if let Some((_,child)) = self.children.iter().find(|(id,_)| *id == path[0]) {

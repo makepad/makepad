@@ -192,6 +192,7 @@ impl CodeSession {
     }
 
     pub fn set_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode, new_group:NewGroup) {
+        let position = self.clamp_position(position);
         let selection = grow_selection(
             Selection::from(Cursor {
                 position,
@@ -212,6 +213,21 @@ impl CodeSession {
         if let NewGroup::Yes = new_group{
             self.document().force_new_group();
         }
+    }
+    
+    fn clamp_position(&self, mut position: Position) -> Position {
+        let text = self.document().as_text();
+        let lines = text.as_lines();
+        if position.line_index >= lines.len() {
+            position.line_index = lines.len().saturating_sub(1);
+            position.byte_index = lines[position.line_index].len();
+        } else {
+            let line_len = lines[position.line_index].len();
+            if position.byte_index > line_len {
+                position.byte_index = line_len;
+            }
+        }
+        position
     }
 
     pub fn add_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode) {

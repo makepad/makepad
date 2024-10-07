@@ -34,6 +34,7 @@ use {
             NetworkResponseItem,
             NetworkResponse,
             HttpResponse,
+            HttpError,
             //TouchPoint,
             TouchUpdateEvent,
             WindowGeomChangeEvent,
@@ -302,11 +303,14 @@ impl Cx {
                 ]);
                 self.call_event_handler(&e);
             }
-            FromJavaMessage::HttpRequestError {request_id, error, ..} => {
+            FromJavaMessage::HttpRequestError {request_id, metadata_id, error, ..} => {
                 let e = Event::NetworkResponses(vec![
                     NetworkResponseItem {
                         request_id: LiveId(request_id),
-                        response: NetworkResponse::HttpRequestError(error)
+                        response: NetworkResponse::HttpRequestError(HttpError{
+                            message: error,
+                            metadata_id: LiveId(metadata_id)
+                        })
                     }
                 ]);
                 self.call_event_handler(&e);

@@ -31,12 +31,25 @@ macro_rules!error {
 }
 
 #[macro_export]
-macro_rules! format_reuse {
+macro_rules! fmt_over {
     ($dst:expr, $($arg:tt)*) => {
-        $dst.clear();
-        $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
-        #[allow(unused_must_use)]
-        &$dst
+        {
+            $dst.clear();
+            use std::fmt::Write;
+            $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! fmt_over_ref {
+    ($dst:expr, $($arg:tt)*) => {
+        {
+            $dst.clear();
+            use std::fmt::Write;
+            $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
+            &$dst
+        }
     };
 }
 
