@@ -14,18 +14,18 @@ use {
 live_design!{
     import makepad_code_editor::code_editor::CodeEditor;
     
-    StudioEditor = {{StudioEditor}}{
+    StudioCodeEditor = {{StudioCodeEditor}}{
         editor: <CodeEditor>{
         }
     }
 } 
  
 #[derive(Live, LiveHook, Widget)] 
-pub struct StudioEditor{
+pub struct StudioCodeEditor{
     #[wrap] #[live] pub editor: CodeEditor
 }
 
-impl Widget for StudioEditor {
+impl Widget for StudioCodeEditor {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         // alright we have a scope, and an id, so now we can properly draw the editor.
         let session_id = scope.path.from_end(1);

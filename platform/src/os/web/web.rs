@@ -9,6 +9,7 @@ use {
         to_wasm::*,
     },
     crate::{
+        DVec2,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         thread::SignalToUI,
@@ -19,6 +20,8 @@ use {
             ToWasmMsgEvent,
             NetworkResponseItem,
             HttpResponse,
+            HttpProgress,
+            HttpError,
             NetworkResponse,
             Event,
             XRInput,
@@ -237,7 +240,10 @@ impl Cx {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpRequestError(tw.error)
+                        response: NetworkResponse::HttpRequestError(HttpError{
+                            metadata_id:LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi), 
+                            message:tw.error
+                        })
                     });
                 }
 
@@ -245,7 +251,7 @@ impl Cx {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
+                        response: NetworkResponse::HttpProgress(HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64})
                     });
                 }
 
@@ -253,7 +259,7 @@ impl Cx {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponseItem{
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64}
+                        response: NetworkResponse::HttpProgress(HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64})
                     });
                 }
                 /*
@@ -472,6 +478,12 @@ impl Cx {
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                     });
                 },
+                CxOsOp::CancelHttpRequest{request_id,} => {
+                    self.os.from_wasm(FromWasmCancelHTTPRequest {
+                        request_id_lo: request_id.lo(),
+                        request_id_hi: request_id.hi(),
+                    });
+                },
                 /*
                 CxOsOp::WebSocketOpen{request_id, request}=>{
                     let headers = request.get_headers_string();
@@ -615,6 +627,7 @@ impl CxOsApi for Cx {
             in_place: if let OpenUrlInPlace::Yes = in_place{true}else{false}
         });
     }
+    fn default_window_size(&self)->DVec2{self.os.window_geom.inner_size}
     /*
     fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
@@ -636,10 +649,14 @@ impl Cx{
         let context_ptr = Box::into_raw(Box::new(closure_box));
         self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32, timer});
     }
+    
+    pub fn time_now()->f64{
+        unsafe{js_time_now()}
+    }
 }
 
 extern "C" {
-    pub fn js_post_signal(signal_hi: u32, signal_lo: u32);
+    pub fn js_time_now()->f64;
 }
 
 #[export_name = "wasm_thread_entrypoint"]
@@ -654,7 +671,7 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
 pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
     closure();
-    Box::into_raw(closure);
+    let _ = Box::into_raw(closure);
 } 
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]

@@ -62,9 +62,9 @@ impl Widget for Modal {
             event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area())
         {
             if !content_rec.contains(fe.abs) {
+                self.close(cx);
                 let widget_uid = self.content.widget_uid();
                 cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
-                self.close(cx);
             }
         }
     }
@@ -99,6 +99,12 @@ impl Modal {
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
+        // Inform the inner modal content that its modal is being dismissed.
+        self.content.handle_event(
+            cx,
+            &Event::Actions(vec![Box::new(ModalAction::Dismissed)]),
+            &mut Scope::empty(),
+        );
         self.opened = false;
         self.draw_bg.redraw(cx);
         cx.sweep_unlock(self.draw_bg.area())

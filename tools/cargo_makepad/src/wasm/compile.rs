@@ -51,6 +51,7 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
             );
             ")
     };
+
     format!("
     <!DOCTYPE html>
     <html>
@@ -84,12 +85,12 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
 
 fn brotli_compress(dest_path:&PathBuf){
     let source_file_name = dest_path.file_name().unwrap().to_string_lossy().to_string();
-    let dest_path_br = dest_path.parent().unwrap().join(&format!("{}.br",source_file_name));
+    let dest_path_br = dest_path.parent().unwrap().join(&format!("{}.br", source_file_name));
     println!("Compressing {:?}", dest_path);
     // lets read the dest_path
     // lets brotli compress dest_path
     let mut brotli_data = Vec::new();
-    let data = fs::read(&dest_path).expect("Can't read file"); 
+    let data = fs::read(&dest_path).expect("Can't read file");
     {
         let mut writer = brotli::CompressorWriter::new(&mut brotli_data, 4096 /* buffer size */, 12, 22);
         writer.write_all(&data).expect("Can't write data");
@@ -97,7 +98,7 @@ fn brotli_compress(dest_path:&PathBuf){
     let mut brotli_file = File::create(dest_path_br).unwrap();
     brotli_file.write_all(&brotli_data).unwrap();
 }
-
+1`
 pub fn cp_brotli(source_path: &PathBuf, dest_path: &PathBuf, exec: bool, compress:bool) -> Result<(), String> {
     cp(source_path, dest_path, exec)?;
     if compress{

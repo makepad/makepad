@@ -15,6 +15,7 @@ use {
         pass::{CxPassParent, CxPassRect, PassId},
         texture::Texture,
         window::WindowId,
+        dvec2,
     },
     std::{
         any::{Any, TypeId},
@@ -40,7 +41,9 @@ pub trait CxOsApi {
     fn open_url(&mut self, url:&str, in_place:OpenUrlInPlace);
     
     fn seconds_since_app_start(&self)->f64;
-
+    
+    fn default_window_size(&self)->DVec2{dvec2(800.,600.)}
+    
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -79,6 +82,9 @@ pub enum CxOsOp {
     HttpRequest {
         request_id: LiveId,
         request: HttpRequest,
+    },
+    CancelHttpRequest{
+        request_id: LiveId,
     },
 
     PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
@@ -497,6 +503,12 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HttpRequest {
             request_id,
             request,
+        });
+    }
+    
+    pub fn cancel_http_request(&mut self, request_id: LiveId) {
+        self.platform_ops.push(CxOsOp::CancelHttpRequest {
+            request_id,
         });
     }
     /*

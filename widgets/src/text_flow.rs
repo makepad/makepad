@@ -210,6 +210,7 @@ impl Widget for TextFlow {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for (id,(entry,_)) in self.items.as_mut().unwrap().iter_mut(){
+            
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
@@ -520,7 +521,7 @@ impl TextFlow{
         })
     }
     
-    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl WidgetActionTrait, label:&str){
+    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl WidgetActionTrait + PartialEq, label:&str){
         let entry_id = self.new_counted_id();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
             item.set_text(label);

@@ -22,6 +22,7 @@ use {
         event::{
             NetworkResponseItem,
             NetworkResponse,
+            HttpError,
             HttpRequest,
             HttpResponse
         },
@@ -127,14 +128,24 @@ pub fn define_url_session_data_delegate() -> *const Class {
                 let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                 let message = NetworkResponseItem {
                     request_id: context_box.request_id,
-                    response: NetworkResponse::HttpRequestError(error_str),
+                    response: NetworkResponse::HttpRequestError(
+                        HttpError{
+                            metadata_id: context_box.metadata_id, 
+                            message: error_str
+                        }
+                    ),
                 };
                 context_box.sender.send(message).unwrap();
             } else {
                 // Indicate that streaming is complete
                 let message = NetworkResponseItem {
                     request_id: context_box.request_id,
-                    response: NetworkResponse::HttpStreamComplete,
+                    response: NetworkResponse::HttpStreamComplete(HttpResponse{
+                        headers: Default::default(),
+                        metadata_id: context_box.metadata_id,
+                        status_code: 0,
+                        body:None
+                    }),
                 };
                 context_box.sender.send(message).unwrap();
             }
@@ -321,81 +332,130 @@ impl OsWebSocket{
         
 }
 
+struct HttpReq{
+    request_id: LiveId,
+    data_task: RcObjcId
+}
 
-pub fn make_http_request(request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseItem>) {
-    unsafe {
-        let ignore_ssl_cert = request.ignore_ssl_cert;
-        let is_streaming = request.is_streaming;
+#[derive(Default)]
+pub struct AppleHttpRequests{
+    requests: Vec<HttpReq>
+}
+
+impl AppleHttpRequests{
+    pub fn cancel_http_request(&mut self, request_id: LiveId){
+        self.requests.retain(|v|{
+            if v.request_id == request_id{
+                unsafe{
+                    let () = msg_send![v.data_task.as_id(), cancel];
+                }
+                false
+            }
+            else{
+                true
+            }
+        })
         
-        let ns_request = make_ns_request(&request);
-        
-        let session: ObjcId = if ignore_ssl_cert{
-            let config: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
-            let deleg: ObjcId = msg_send![get_apple_class_global().url_session_delegate, new];
-            msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
+    }
+    
+    pub fn handle_response_item(&mut self, item:&NetworkResponseItem){
+        match &item.response{
+            NetworkResponse::HttpRequestError(_) |
+            NetworkResponse::HttpResponse(_) |
+            NetworkResponse::HttpStreamComplete(_) => {
+                self.requests.retain(|v| v.request_id != item.request_id);
+            }
+            _=>{
+            }
         }
-        else{
-            msg_send![class!(NSURLSession), sharedSession]
-        };
-                
-        if is_streaming{ // its using the streaming delegate
-            let context_box = Box::into_raw(Box::new(UrlSessionDataDelegateContext{
-                request_id,
-                metadata_id: request.metadata_id,
-                sender: networking_sender
-            })) as u64;
-            let url_session_data_delegate_instance: ObjcId = msg_send![get_apple_class_global().url_session_data_delegate, new];
-                    
-            (*url_session_data_delegate_instance).set_ivar("context_box", context_box);
+    }
+    
+    pub fn make_http_request(&mut self, request_id: LiveId, request: HttpRequest, networking_sender: Sender<NetworkResponseItem>) {
+        unsafe {
+            let ignore_ssl_cert = request.ignore_ssl_cert;
+            let is_streaming = request.is_streaming;
+            let metadata_id = request.metadata_id;
+            let ns_request = make_ns_request(&request);
             
-            let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request];
-            let () = msg_send![data_task, setDelegate: url_session_data_delegate_instance];
-            let () = msg_send![data_task, resume];
-        }
-        else{ // its using the completion handler
-            let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
-                if error != ptr::null_mut() {
-                    let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+            let session: ObjcId = if ignore_ssl_cert{
+                let config: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
+                let deleg: ObjcId = msg_send![get_apple_class_global().url_session_delegate, new];
+                msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
+            }
+            else{
+                msg_send![class!(NSURLSession), sharedSession]
+            };
+                    
+            if is_streaming{ // its using the streaming delegate
+                let context_box = Box::into_raw(Box::new(UrlSessionDataDelegateContext{
+                    request_id,
+                    metadata_id: request.metadata_id,
+                    sender: networking_sender
+                })) as u64;
+                let url_session_data_delegate_instance: ObjcId = msg_send![get_apple_class_global().url_session_data_delegate, new];
+                        
+                (*url_session_data_delegate_instance).set_ivar("context_box", context_box);
+                
+                let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request];
+                let () = msg_send![data_task, setDelegate: url_session_data_delegate_instance];
+                let () = msg_send![data_task, resume];
+                self.requests.push(HttpReq{
+                    request_id,
+                    data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap())
+                })
+            }
+            else{ // its using the completion handler
+                let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
+                    if error != ptr::null_mut() {
+                        let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+                        let message = NetworkResponseItem {
+                            request_id,
+                            response: NetworkResponse::HttpRequestError(HttpError{
+                                metadata_id: metadata_id, 
+                                message: error_str
+                            })
+                        };
+                        networking_sender.send(message).unwrap();
+                        return;
+                    }
+                                            
+                    let bytes: *const u8 = msg_send![data, bytes];
+                    let length: usize = msg_send![data, length];
+                    let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                    let response_code: u16 = msg_send![response, statusCode];
+                    let headers: ObjcId = msg_send![response, allHeaderFields];
+                    let mut response = HttpResponse::new(
+                        request.metadata_id,
+                        response_code,
+                        "".to_string(),
+                        Some(data_bytes.to_vec()),
+                    );
+                                            
+                    let key_enumerator: ObjcId = msg_send![headers, keyEnumerator];
+                    let mut key: ObjcId = msg_send![key_enumerator, nextObject];
+                    while key != ptr::null_mut() {
+                        let value: ObjcId = msg_send![headers, objectForKey: key];
+                        let key_str = nsstring_to_string(key);
+                        let value_str = nsstring_to_string(value);
+                        response.set_header(key_str, value_str);
+                                                        
+                        key = msg_send![key_enumerator, nextObject];
+                    }
+                                
                     let message = NetworkResponseItem {
                         request_id,
-                        response: NetworkResponse::HttpRequestError(error_str)
+                        response: NetworkResponse::HttpResponse(response)
                     };
                     networking_sender.send(message).unwrap();
-                    return;
-                }
-                                        
-                let bytes: *const u8 = msg_send![data, bytes];
-                let length: usize = msg_send![data, length];
-                let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
-                let response_code: u16 = msg_send![response, statusCode];
-                let headers: ObjcId = msg_send![response, allHeaderFields];
-                let mut response = HttpResponse::new(
-                    request.metadata_id,
-                    response_code,
-                    "".to_string(),
-                    Some(data_bytes.to_vec()),
-                );
-                                        
-                let key_enumerator: ObjcId = msg_send![headers, keyEnumerator];
-                let mut key: ObjcId = msg_send![key_enumerator, nextObject];
-                while key != ptr::null_mut() {
-                    let value: ObjcId = msg_send![headers, objectForKey: key];
-                    let key_str = nsstring_to_string(key);
-                    let value_str = nsstring_to_string(value);
-                    response.set_header(key_str, value_str);
-                                                    
-                    key = msg_send![key_enumerator, nextObject];
-                }
-                            
-                let message = NetworkResponseItem {
+                });
+                
+                let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request completionHandler: &response_handler];
+                let () = msg_send![data_task, resume];
+                self.requests.push(HttpReq{
                     request_id,
-                    response: NetworkResponse::HttpResponse(response)
-                };
-                networking_sender.send(message).unwrap();
-            });
-            
-            let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request completionHandler: &response_handler];
-            let () = msg_send![data_task, resume];
+                    data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap())
+                })
+            }
         }
     }
 }

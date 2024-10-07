@@ -72,8 +72,8 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         }
         
         if let Some(action_data_field) = &action_data_field{
-            tb.add("    fn set_action_data(&mut self, action_data:Box<dyn WidgetActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
-            tb.add("    fn action_data(&mut self)->Option<Box<dyn WidgetActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
+            tb.add("    fn set_action_data(&mut self, action_data:std::sync::Arc<dyn WidgetActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
+            tb.add("    fn action_data(&mut self)->Option<std::sync::Arc<dyn WidgetActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
         }
         
         if let Some(wrap_field) = &wrap_field{
@@ -160,6 +160,19 @@ pub fn derive_default_none_impl(input: TokenStream) -> TokenStream {
         if let Some(enum_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
+            
+            tb.add("impl").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
+            tb.add("{");
+            tb.add("   const DEFAULT_NONE_REF:Self = Self::None;");
+            tb.add("}");
+            
+            tb.add("impl ActionDefaultRef for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
+            tb.add("{");
+            tb.add("   fn default_ref()->&'static Self{");
+            tb.add("      return &Self::DEFAULT_NONE_REF;");
+            tb.add("   }");
+            tb.add("}");
+                        
             /*
             tb.add("impl Into<Box<dyn WidgetAction>> for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
             tb.add("{");
@@ -325,6 +338,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
+            let actions_ext = format!("{}WidgetActionsExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
             let get_fn = snake_name.to_string();
             let as_fn = format!("as_{}", snake_name);
@@ -333,13 +347,23 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add(";");
             tb.add("}");
-
+            
+            tb.add("pub trait").ident(&actions_ext).add("{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
+            tb.add("}");
+            
             tb.add("impl ").ident(&widget_ref_ext).add(" for WidgetRef{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.clone())");
+            tb.add("    }");
+            tb.add("}");
+            
+            tb.add("impl ").ident(&actions_ext).add(" for Actions{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
+            tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("}");
             
@@ -468,7 +492,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("    type Item = ").ident(&ref_name).add(";");
             tb.add("    fn next(&mut self)->Option<Self::Item>{");
             tb.add("        if let Some(next) = self.iter.next(){");
-            tb.add("            return Some(").ident(&ref_name).add("(next))");
+            tb.add("            return Some(").ident(&ref_name).add("(next.clone()))");
             tb.add("        }");
             tb.add("        None");
             tb.add("    }");
