@@ -177,6 +177,8 @@ pub struct View {
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
     children: SmallVec<[(LiveId, WidgetRef);2]>,
+    #[rust]
+    live_update_order: SmallVec<[LiveId;1]>,
     //#[rust]
     //draw_order: Vec<LiveId>,
 
@@ -200,6 +202,7 @@ impl LiveHook for View {
     ) {
         if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             //self.draw_order.clear();
+            self.live_update_order.clear();
             self.find_cache.get_mut().clear();
         }
     }
@@ -207,10 +210,22 @@ impl LiveHook for View {
     fn after_apply(
         &mut self,
         cx: &mut Cx,
-        _applyl: &mut Apply,
+        apply: &mut Apply,
         _index: usize,
         _nodes: &[LiveNode],
     ) {
+        if apply.from.is_update_from_doc(){//livecoding
+            // update/delete children list
+            for (idx, id) in self.live_update_order.iter().enumerate(){
+                // lets remove this id from the childlist
+                if let Some(pos) = self.children.iter().position(|(i,_v)| *i == *id){
+                    // alright so we have the position its in now, and the position it should be in
+                    self.children.swap(idx, pos);
+                }
+            }
+            // if we had more truncate
+            self.children.truncate(self.live_update_order.len());
+        }
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -242,6 +257,9 @@ impl LiveHook for View {
             }
             ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
                 if nodes[index].is_instance_prop() {
+                    if apply.from.is_update_from_doc(){//livecoding
+                        self.live_update_order.push(id);
+                    }
                     //self.draw_order.push(id);
                     if let Some((_,node)) = self.children.iter_mut().find(|(id2,_)| *id2 == id){
                         node.apply(cx, apply, index, nodes)
