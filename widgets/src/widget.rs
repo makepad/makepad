@@ -919,25 +919,9 @@ impl WidgetActionsApi for Actions {
     fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>{
         for action in self {
             if let Some(action) = action.downcast_ref::<WidgetAction>() {
-                let mut i = path.len() - 1;
-                let mut found = false;
-                for j in (0..action.path.data.len()).rev(){
-                    if action.path.data[j] == path[i]{
-                        if !found{
-                            found = true;
-                        }
-                        if i > 0{
-                            i -= 1;
-                        }
-                        else{
-                            break;
-                        }
-                    }
-                }
-                if i == 0{
-                    if found{
-                        return Some(action)
-                    }
+                let mut ap = action.path.data.iter().rev();
+                if path.iter().rev().all(|p| ap.find(|&ap| p == ap).is_some()){
+                    return Some(action)
                 }
             }
         }
@@ -945,31 +929,19 @@ impl WidgetActionsApi for Actions {
     }
     
     fn widget(&self, path:&[LiveId])->WidgetRef{
-        for action in self {
-            if let Some(action) = action.downcast_ref::<WidgetAction>() {
-                let mut i = path.len() - 1;
+        self.iter().find_map(|action| {
+            action.downcast_ref::<WidgetAction>().and_then(|action| {
                 let mut ret = None;
-                for j in (0..action.path.data.len()).rev(){
-                    if action.path.data[j] == path[i]{
-                        if ret.is_none(){
-                            ret = action.widgets.get(path.len() - i - 1);
-                        }
-                        if i > 0{
-                            i -= 1;
-                        }
-                        else{
-                            break;
-                        }
+                let mut ap = action.path.data.iter().rev();
+                path.iter().enumerate().rev().all(|(i, p)| {
+                    let found = ap.find(|&ap| p == ap).is_some(); 
+                    if found && ret.is_none() {
+                        ret = action.widgets.get(i);
                     }
-                }
-                if i == 0{
-                    if let Some(ret) = ret{
-                        return ret.clone()
-                    }
-                }
-            }
-        }
-        WidgetRef::empty()
+                    found
+                }).then_some(ret).flatten()
+            })
+        }).map_or_else(|| WidgetRef::empty(), |ret| ret.clone())
     }
     
     fn find_widget_action(&self, widget_uid: WidgetUid) -> Option<&WidgetAction> {
