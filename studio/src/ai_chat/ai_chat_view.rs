@@ -257,19 +257,5 @@ impl Widget for AiChatView {
         if ac.len()>0{
             self.handle_own_actions(cx, &ac, scope)
         }
-        // we have an AI connection running on AppData
-       /* let data = scope.data.get_mut::<AppData>().unwrap();
-        // alright we can now access our AiChatManager object
-        let chat_id = scope.path.from_end(1);
-        if let Some(_chat_data) = data.ai_chat_manager.open_chats.get(&chat_id){
-            // alright we have a chat_data..
-        }*/
-        /*
-        if let Some(session) = data.file_system.get_session_mut(session_id){
-            for action in self.editor.handle_event(cx, event, &mut Scope::empty(), session){
-                cx.widget_action(uid, &scope.path, action);
-            }
-            data.file_system.handle_sessions();
-        }*/
     }
 }
