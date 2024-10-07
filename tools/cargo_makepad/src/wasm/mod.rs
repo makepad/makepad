@@ -8,7 +8,8 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         lan: false,
         brotli: false,
         port: None,
-        small_fonts: false
+        small_fonts: false,
+        bindgen: false,
     };
     
     // pull out options
@@ -28,6 +29,9 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         }
         else if let Some(_) = v.strip_prefix("--lan") {
             config.lan = true;
+        }
+        else if let Some(_) = v.strip_prefix("--bindgen") {
+            config.bindgen = true;
         }
         else {
             args = &args[i..];

@@ -451,21 +451,27 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     alloc_thread_stack(context_ptr, timer) {
-        let tls_size = this.exports.__tls_size.value;
-        tls_size += 8 - (tls_size & 7); // align it to 8 bytes
-        let stack_size = this.thread_stack_size; // 8mb
-        if ((tls_size + stack_size) & 7 != 0) throw new Error("stack size not 8 byte aligned");
-        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
-        this.update_array_buffer_refs();
-        let stack_ptr = tls_ptr + tls_size + stack_size - 8;
-        return {
-            tls_ptr,
-            stack_ptr,
+        var ret = {
             timer,
             module: this.wasm._module,
             memory: this.wasm._memory,
             context_ptr
+        };
+        if (typeof this.exports.__wbindgen_start !== 'undefined') {
+            // ret.tls_ptr = this.exports.__stack_alloc.value;
+            ret.stack_ptr = this.exports.__stack_pointer.value;
+            ret.wasm_bindgen = true;
+        } else {
+            let tls_size = this.exports.__tls_size.value;
+            tls_size += 8 - (tls_size & 7); // align it to 8 bytes
+            let stack_size = this.thread_stack_size; // 8mb
+            if ((tls_size + stack_size) & 7 != 0) throw new Error("stack size not 8 byte aligned");
+            ret.tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
+            this.update_array_buffer_refs();
+            ret.stack_ptr = ret.tls_ptr + tls_size + stack_size - 8;
+            ret.wasm_bindgen = false;
         }
+        return ret;
     }
     
     // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
