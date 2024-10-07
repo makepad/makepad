@@ -22,6 +22,7 @@ live_design!{
         height: Fit
         draw_bg:{color:#5}
         padding: 10,
+        
         message_input = <TextInput> {
             text: ""
             empty_message:"..."
@@ -31,15 +32,19 @@ live_design!{
                 color: #1
             }
         }
-                                                                                                            
+                
+                                                                                                                            
+        context_dropdown = <DropDown>{ width: Fit,}
         send_button = <Button> {
             icon_walk: {margin: {left: 10}, width: 16, height: Fit}
             text: ">"
         }
+        
         clear_button = <Button> {
             icon_walk: {margin: {left: 10}, width: 16, height: Fit}
             text: "X"
         }
+        
     }
     
     Assistant = <RoundedView>{
