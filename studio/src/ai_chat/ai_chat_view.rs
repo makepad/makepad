@@ -32,8 +32,7 @@ live_design!{
                 color: #1
             }
         }
-                
-                                                                                                                            
+                                                                                                                  
         context_dropdown = <DropDown>{ width: Fit,}
         send_button = <Button> {
             icon_walk: {margin: {left: 10}, width: 16, height: Fit}
@@ -52,6 +51,7 @@ live_design!{
         flow: Down
         md = <Markdown>{
             code_block = <View>{
+                
                 width:Fill,
                 height:Fit,
                 flow: Overlay
@@ -125,7 +125,7 @@ live_design!{
         // lets make portal list with User and Assistant components
         // and lets fix the portal lists scroll
         list = <PortalList>{
-            auto_tail: true
+            //auto_tail: true
             User = <User>{}
             Assistant = <Assistant>{}
         }
@@ -170,6 +170,7 @@ impl AiChatView{
                 if self.view.button(id!(history_delete)).pressed(actions){
                     doc.file.remove_slot(cx, &mut self.history_slot);
                     cx.action(AppAction::RedrawAiChat{chat_id});
+                    cx.action(AppAction::SaveAiChat{chat_id});
                 }
                                 
                 let list = self.view.portal_list(id!(list));
@@ -178,6 +179,7 @@ impl AiChatView{
                     if let Some(text) = message_input.changed(actions){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
                         cx.action(AppAction::RedrawAiChat{chat_id});
+                        cx.action(AppAction::SaveAiChat{chat_id});
                     }
                     if message_input.escape(actions){
                         cx.action(AppAction::CancelAiGeneration{chat_id});
@@ -188,18 +190,23 @@ impl AiChatView{
                         // we'd already be forked
                         let text = message_input.text();
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
-                        
                         // alright so we press send/enter now what
                         // we now call 'setaichatlen' this will 'fork' our current index
                         // what if our chat is empty? then we dont fork
                         doc.file.clamp_slot(&mut self.history_slot);
+                        // lets fetch the context
+                        let dd = item.drop_down(id!(context_dropdown));
+                        //println!("{}", dd.selected_item());
+                        
                         cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:self.backend_index, history_slot: self.history_slot});
-                        self.redraw(cx);
+                        cx.action(AppAction::SaveAiChat{chat_id});
+                        cx.action(AppAction::RedrawAiChat{chat_id});
                     }
                     // lets clear the messages
                     if item.button(id!(clear_button)).pressed(actions){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, "".to_string());
-                        self.redraw(cx);
+                        cx.action(AppAction::SaveAiChat{chat_id});
+                        cx.action(AppAction::RedrawAiChat{chat_id});
                     }
                 }
             }
@@ -214,7 +221,10 @@ impl Widget for AiChatView {
         
         let dd = self.view.drop_down(id!(model_dropdown));
         // ok how do we set these dropdown labels without causing memory changes
-        dd.set_labels(data.ai_chat_manager.model_strings());
+        let mut i = data.ai_chat_manager.backends.iter();
+        dd.set_labels_with(|label|{
+            i.next().map(|m| label.push_str(&m.0));
+        });
         dd.set_selected_item(self.backend_index);
         
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
@@ -242,6 +252,12 @@ impl Widget for AiChatView {
                                 Some(AiChatMessage::User(val))=>{
                                    // lets set the value to the text input
                                     let item = list.item(cx, item_id, live_id!(User));
+                                    let dd = item.drop_down(id!(context_dropdown));
+                                    let mut i = data.ai_chat_manager.contexts.iter();
+                                    dd.set_labels_with(|label|{
+                                        i.next().map(|m| label.push_str(&m.0));
+                                    });
+                                                                        
                                     item.widget(id!(message_input)).set_text(&val.message);
                                     item.draw_all_unscoped(cx);
                                 }
