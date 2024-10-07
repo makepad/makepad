@@ -1,3 +1,16 @@
+export function init_env(env) {
+    let _wasm = null;
+    
+    env.js_console_log = (u8_ptr, len) => _wasm._bridge.js_console_log(u8_ptr, len);
+    env.js_console_error = (u8_ptr, len) => _wasm._bridge.js_console_error(u8_ptr, len);
+    env.js_time_now = () => _wasm._bridge.js_time_now();
+    env.js_open_web_socket = (id, url_ptr, url_len) => console.error("js_open_web_socket out of context");
+    env.js_web_socket_send_string = (id, str_ptr, url_len) => console.error("js_web_socket_send_string out of context");
+    env.js_web_socket_send_binary = (id, bin_ptr, bin_len) => console.error("js_web_socket_send_binary out of context");
+
+    return (wasm) => { _wasm = wasm };
+}
+
 export class WasmBridge {
     constructor(wasm, dispatch) {
         this.wasm = wasm;
@@ -153,23 +166,16 @@ export class WasmBridge {
             return false
         })
     }
-    
-    static instantiate_wasm(module, memory, env) {
-        let _wasm = null;
 
-        env.js_console_log = (u8_ptr, len) => _wasm._bridge.js_console_log(u8_ptr, len);
-        env.js_console_error = (u8_ptr, len) => _wasm._bridge.js_console_error(u8_ptr, len);
-        env.js_time_now = () => _wasm._bridge.js_time_now();
-        env.js_open_web_socket = (id, url_ptr, url_len) => console.error("js_open_web_socket out of context");
-        env.js_web_socket_send_string = (id, str_ptr, url_len)=> console.error("js_web_socket_send_string out of context");
-        env.js_web_socket_send_binary = (id, bin_ptr, bin_len)=> console.error("js_web_socket_send_binary out of context");
-        
+    static instantiate_wasm(module, memory, env) {
+        let set_wasm = init_env(env);
+
         if (memory !== undefined) {
             env.memory = memory;
         }
         
         return WebAssembly.instantiate(module, {env}).then(wasm => {
-            _wasm = wasm;
+            set_wasm(wasm);
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.exports.memory;
             wasm._module = module;
@@ -178,7 +184,7 @@ export class WasmBridge {
             if (error.name == "LinkError") { // retry as multithreaded
                 env.memory = this.create_shared_memory();
                 return WebAssembly.instantiate(module, {env}).then(wasm => {
-                    _wasm = wasm;
+                    set_wasm(wasm);
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
                     wasm._module = module;
