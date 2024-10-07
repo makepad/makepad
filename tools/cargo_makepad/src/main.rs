@@ -31,6 +31,8 @@ println!("    wasm [options] run <cargo args>              Build and run a wasm 
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
     println!("       --strip                                   Strip the wasm file of debug symbols");
+    println!("       --brotli                                  Use brotli to compress the wasm file");
+    println!("       --bindgen                                 Enable wasm-bindgen compatibility");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
