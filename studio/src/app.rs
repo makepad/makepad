@@ -140,6 +140,8 @@ impl MatchEvent for App{
                 
         self.data.file_system.init(cx, &root_path);
         self.data.build_manager.init(cx, &root_path);
+        
+                
         //self.data.build_manager.discover_external_ip(cx);
         self.data.build_manager.start_http_server();
         // lets load the tabs
@@ -372,6 +374,7 @@ impl MatchEvent for App{
             FileSystemAction::TreeLoaded => {
                 file_tree.redraw(cx);
                 self.load_state(cx);
+                self.data.ai_chat_manager.init(&mut self.data.file_system);
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
             FileSystemAction::RecompileNeeded => {
