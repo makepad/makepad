@@ -306,6 +306,25 @@ impl DropDownRef {
         }
     }
     
+    pub fn set_labels_with<F:FnMut(&mut String)>(&self, mut f:F) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let mut i = 0;
+            loop {
+                if i>=inner.labels.len(){
+                    inner.labels.push(String::new());
+                }
+                let s = &mut inner.labels[i];
+                s.clear();
+                f(s);
+                if s.len()==0{
+                    break;
+                }
+                i+=1;
+            }
+            inner.labels.truncate(i);
+        }
+    }
+    
     pub fn set_labels_and_redraw(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;
