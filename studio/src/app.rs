@@ -549,14 +549,21 @@ impl AppMain for App {
          
         if let Some(mut dock_items) = dock.needs_save(){
             // remove the runviews
-            dock_items.retain(|_id, di| {
+            let mut run_views = Vec::new();
+            dock_items.retain(|id, di| {
                 if let DockItem::Tab{kind,..} = di{
                     if *kind == live_id!(RunView){
+                        run_views.push(*id);
                         return false
                     }
                 }
                 true 
             }); 
+            for item in dock_items.values_mut(){
+                 if let DockItem::Tabs{tabs,..} = item{
+                     tabs.retain(|id| run_views.contains(id));
+                 }
+            }
             // alright lets save it to disk
             let state = AppStateRon{
                 dock_items,
