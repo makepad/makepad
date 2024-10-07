@@ -172,11 +172,11 @@ pub struct View {
     #[rust]
     texture_cache: Option<ViewTextureCache>,
     #[rust]
-    defer_walks: Vec<(LiveId, DeferWalk)>,
+    defer_walks: SmallVec<[(LiveId, DeferWalk);1]>,
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
-    children: Vec<(LiveId, WidgetRef)>,
+    children: SmallVec<[(LiveId, WidgetRef);2]>,
     //#[rust]
     //draw_order: Vec<LiveId>,
 
