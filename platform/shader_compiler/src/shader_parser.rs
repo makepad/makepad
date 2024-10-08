@@ -713,7 +713,9 @@ impl<'a> ShaderParser<'a> {
     fn expect_let_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         self.expect_token(LiveToken::Ident(live_id!(let))) ?;
+        self.accept_token(LiveToken::Ident(live_id!(mut)));
         let ident = self.expect_ident(live_error_origin!()) ?;
+            
         let ty_expr = if self.accept_token(LiveToken::Punct(live_id!(:))) {
             Some(self.expect_ty_expr() ?)
         } else {
