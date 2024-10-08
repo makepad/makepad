@@ -20,6 +20,14 @@ impl Default for AiChatManager{
         Self{
             models: vec![
                 AiModel{
+                    name: "local".to_string(),
+                    backend: AiBackend::OpenAI{
+                        url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
+                        model:"".to_string(),
+                        key:"".to_string()
+                    }
+                },
+                AiModel{
                     name:"gpt-4o".to_string(),
                     backend: AiBackend::OpenAI{
                         url: OPENAI_DEFAULT_URL.to_string(),
@@ -35,14 +43,6 @@ impl Default for AiChatManager{
                         key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
                     },
                 },
-                AiModel{
-                    name: "local".to_string(),
-                    backend: AiBackend::OpenAI{
-                        url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
-                        model:"".to_string(),
-                        key:"".to_string()
-                    }
-                }
             ],
             contexts: vec![
                 BaseContext{
@@ -52,23 +52,19 @@ impl Default for AiChatManager{
                     files: vec![]
                 },
                 BaseContext{
-                    name: "Makepad Rust".to_string(),
-                    system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project. Please answer with code only and don't give explanations.".to_string(),
-                    system_post:"Rewrite the main app to rewrite completely and don't omit any code".to_string(),
+                    name: "Makepad All".to_string(),
+                    system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
+                    system_post: "Please answer with code only and don't give explanations. Generate the whole file including the Rust logic. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods".to_string(),
                     files: vec![
-                        AiContextFile::new("Button component","widgets/src/button.rs"),
-                        AiContextFile::new("Slider component","widgets/src/slider.rs"),
-                        AiContextFile::new("Example code","examples/simple/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
                     ]
                 },
                 BaseContext{
                     name: "Makepad UI".to_string(),
                     system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
-                    system_post: "Please answer with code only and don't give explanations. Only rewrite the live_design block and only output that code not the rest of the file.".to_string(),
+                    system_post: "Please answer with code only and don't give explanations. Only rewrite the live_design block and only output that code not the rest of the file. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods. Don't use ````iTime```` but use ````self.time````. Types in shader code are inferenced, and written as ````let variable = value````".to_string(),
                     files: vec![
-                        AiContextFile::new("Button component","widgets/src/button.rs"),
-                        AiContextFile::new("Slider component","widgets/src/slider.rs"),
-                        AiContextFile::new("Example code","examples/simple/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
                     ]
                 }
             ],
@@ -441,7 +437,7 @@ impl AiChatManager{
                     request.set_json_body(ChatPrompt {
                         messages,
                         model: model.to_string(),
-                        max_tokens: 1000,
+                        max_tokens: 10000,
                         stream: true,
                     });
                     request
