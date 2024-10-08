@@ -17,91 +17,47 @@ live_design!{
     import makepad_draw::shader::std::*;
         
     import makepad_widgets::theme_desktop_dark::*;
-
+    
     User = <RoundedView>{
         height: Fit
-
+        draw_bg:{color:#5}
+        padding: {left:5,top:5,right:5},
         flow:Down
-        margin: <THEME_MSPACE_2> {}
-        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) } 
-        draw_bg: { color: (THEME_COLOR_U_1) }
-
-        <View> {
-            height: Fit, width: Fill,
-            align: { x: 0.0, y: 1.0 },
-            spacing: (THEME_SPACE_3),
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-                align: { x: 0.0, y: 0.8 }
-            spacing: (THEME_SPACE_1)
-
-                <Pbold> { width: Fit, text: "Project" }
-                project_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
-            }
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-                align: { x: 0.0, y: 0.8 }
-                spacing: (THEME_SPACE_1)
-
-                <Pbold> { width: Fit, text: "Context" }
-                context_dropdown = <DropDown>{ width: Fit, popup_menu_position: BelowInput }
-            }
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-                align: { x: 0.0, y: 0.8 }
-                spacing: (THEME_SPACE_1)
-
-                <Pbold> { width: Fit, text: "Model"}
-                model_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
-            }
-
-            <View> { width: Fill }
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-
-                auto_run = <CheckBox> { text: "Autorun", width: Fit }
-            }
-
-            run_button = <ButtonFlat> {
+        <View>{
+            height:Fit
+            width:Fill
+            <Label>{margin:{top:4.5},text:"Project:"}
+            project_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
+            <Label>{margin:{top:4.5,left:20},text:"Context:"}
+            context_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
+            <Label>{margin:{top:4.5, left:20},text:"Model:"}
+            model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
+            auto_run = <CheckBox>{ margin:{left:20}, text:"Autorun", width: Fit}
+            run_button = <Button> {
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: "Run"
             }
         }
-
         <View>{
-            height:Fit,
-            width:Fill,
-
+            height:Fit
+            width:Fill
             message_input = <TextInput> {
+                text: ""
+                empty_message:"..."
                 width: Fill,
                 height: Fit,
-
-                text: ""
-                empty_message: "Enter prompt"
+                draw_bg: {
+                    color: #1
+                }
             }
-
-            send_button = <ButtonFlatter> {
-                margin: { left: -55.}
-                icon_walk: { width: 16, height: Fit}
+            send_button = <Button> {
+                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: ">"
             }
                     
-            clear_button = <ButtonFlatter> {
-                padding: { right: 5. }
-                icon_walk: {width: 16, height: Fit}
-                text: "×"
+            clear_button = <Button> {
+                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                text: "X"
             }
         }
         
@@ -109,13 +65,7 @@ live_design!{
     }
     
     Assistant = <RoundedView>{
-        flow:Down
-        margin: <THEME_MSPACE_H_2>{}
-        padding: <THEME_MSPACE_H_2>{}
-
-        draw_bg: {
-            color: (THEME_COLOR_D_2)
-        }
+        draw_bg:{color:#4}
         flow: Down
         md = <Markdown>{
             code_block = <View>{
@@ -125,7 +75,7 @@ live_design!{
                 flow: Overlay
                 code_view = <CodeView>{
                     editor:{
-                        draw_bg: { color: ((THEME_COLOR_D_HIDDEN)) }
+                        draw_bg: { color: (#3) }
                     }
                 }
                 <View>{
@@ -146,7 +96,7 @@ live_design!{
             body:""
         }
         busy = <View>{
-            margin:{top: 5, bottom: 5}
+            margin:{top:5, bottom:5}
             width: 50,
             height: 10
             show_bg: true,
@@ -166,28 +116,25 @@ live_design!{
     }
     
     AiChatView = {{AiChatView}}{
-        flow: Down,
         height: Fill, width: Fill,
-        spacing: (THEME_SPACE_1),
-        show_bg: true,
-        draw_bg: { color: (THEME_COLOR_D_1) },
+        flow: Down
+        spacing: 3
         
         tb = <DockToolbar> {
+            
             content = {
+                align: { x: 0., y: 0.5}
                 height: Fit, width: Fill,
+                spacing: (THEME_SPACE_1)
                 flow: Right,
-
-                align: { x: 0.0, y: 0.5},
-                spacing: (THEME_SPACE_1),
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                 history_left = <ButtonFlat> { width: Fit, text: "<"}
                 history_right = <ButtonFlat> { width: Fit, text: ">"}
                 slot = <Label> { width: Fit, text: "0"}
-                <View> { width: Fill }
+                <View>{width:Fill}
                 history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
             }
         }
-
         // lets make portal list with User and Assistant components
         // and lets fix the portal lists scroll
         list = <PortalList>{
@@ -263,7 +210,14 @@ impl AiChatView{
                         let model = &data.ai_chat_manager.projects[project_id].name;
                         doc.file.set_project(self.history_slot, item_id, model);
                     }
-                         
+                    if let Some(value) = item.check_box(id!(auto_run)).changed(actions){
+                        doc.file.set_auto_run(self.history_slot, item_id, value);
+                    }
+                    
+                    if item.button(id!(run_button)).pressed(actions){
+                        cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
+                    }
+                    
                     if item.button(id!(send_button)).pressed(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
                         // we'd already be forked
@@ -333,6 +287,10 @@ impl Widget for AiChatView {
                                 Some(AiChatMessage::User(val))=>{
                                     // lets set the value to the text input
                                     let item = list.item(cx, item_id, live_id!(User));
+                                    
+                                    // model dropdown
+                                    let cb = item.check_box(id!(auto_run));
+                                    cb.set_selected(cx, val.auto_run);
                                     
                                     // model dropdown
                                     let dd = item.drop_down(id!(model_dropdown));
