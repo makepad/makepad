@@ -378,7 +378,8 @@ impl AiChatManager{
                                     doc.file.history[in_flight.history_slot].follow_up();
                                     cx.action(AppAction::RedrawAiChat{chat_id});
                                     cx.action(AppAction::SaveAiChat{chat_id});
-                                    let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(1);
+                                    
+                                    let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(3);
                                     cx.action(AppAction::RunAiChat{chat_id, history_slot:in_flight.history_slot, item_id});
                                     // alright so we're done.. check if we have run-when-done
                                     doc.file.history[in_flight.history_slot].follow_up();
