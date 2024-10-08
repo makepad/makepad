@@ -124,6 +124,7 @@ pub enum AppAction{
     CancelAiGeneration{chat_id:LiveId},
     SaveAiChat{chat_id:LiveId},
     RedrawAiChat{chat_id:LiveId},
+    RunAiChat{chat_id:LiveId, history_slot:usize, item_id:usize},
     None
 }
 
@@ -304,6 +305,9 @@ impl MatchEvent for App{
             }
             AppAction::RedrawAiChat{chat_id}=>{
                 self.data.ai_chat_manager.redraw_ai_chat_by_id(cx, chat_id,&self.ui,  &mut self.data.file_system);
+            }
+            AppAction::RunAiChat{chat_id, history_slot, item_id}=>{
+                self.data.ai_chat_manager.run_ai_chat(cx, chat_id, history_slot, item_id, &mut self.data.file_system);
             }
         }
                 

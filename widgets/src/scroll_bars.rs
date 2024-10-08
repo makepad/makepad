@@ -250,7 +250,8 @@ impl ScrollBars {
     
     pub fn end_nav_area(&mut self, cx: &mut Cx2d) {
         if !self.area.is_valid(cx) {
-            panic!("Call set area before end_nav_area")
+            error!("Call set area before end_nav_area");
+            return
         }
         cx.add_end_scroll(self.nav_scroll_index.take().unwrap(), self.area);
     }

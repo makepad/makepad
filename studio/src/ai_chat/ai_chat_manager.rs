@@ -52,6 +52,12 @@ impl Default for AiChatManager{
                     files: vec![]
                 },
                 BaseContext{
+                    name: "Follow up".to_string(),
+                    system_pre: "".to_string(),
+                    system_post: "".to_string(),
+                    files: vec![]
+                },
+                BaseContext{
                     name: "Makepad All".to_string(),
                     system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
                     system_post: "Please answer with code only and don't give explanations. Generate the whole file including the Rust logic. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods".to_string(),
@@ -62,7 +68,7 @@ impl Default for AiChatManager{
                 BaseContext{
                     name: "Makepad UI".to_string(),
                     system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
-                    system_post: "Please answer with code only and don't give explanations. Only rewrite the live_design block and only output that code not the rest of the file. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods. Don't use ````iTime```` but use ````self.time````. Types in shader code are inferenced, and written as ````let variable = value````".to_string(),
+                    system_post: "Please answer with code only and don't give explanations. Only rewrite the live_design block and only output that code not the rest of the file. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods. Don't use ````iTime```` but use ````self.time````. Types in shader code are inferenced, and written as ````let variable = value````\nMake sure that the ````pixel()``` function has an explicit ````return```` call\n".to_string(),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
                     ]
@@ -129,6 +135,7 @@ pub enum AiContext{
 
 #[derive(Default, Debug, SerRon, DeRon, Clone)]
 pub struct AiUserMessage{
+    pub auto_run: bool,
     pub model: String,
     pub project: String,
     pub base_context: String,
@@ -154,6 +161,19 @@ impl AiChatMessages{
         AiChatMessages{
             last_time: 0.0,
             messages: vec![AiChatMessage::User(AiUserMessage::default())],
+        }
+    }
+    
+    fn follow_up(&mut self){
+        if let Some(AiChatMessage::User(usr)) = self.messages.iter().rev().nth(1).cloned(){
+            self.messages.push(AiChatMessage::User(AiUserMessage{
+                auto_run: usr.auto_run,
+                model: usr.model.clone(),
+                project: "None".to_string(),
+                base_context: "Follow up".to_string(),
+                context: vec![],
+                message:"".to_string()
+            }));
         }
     }
 }
@@ -264,6 +284,14 @@ impl AiChatFile{
         }
         else{panic!()}
     }
+    
+    pub fn set_auto_run(&mut self, history_slot:usize, at:usize, auto_run:bool){ 
+        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
+            s.auto_run = auto_run
+        }
+        else{panic!()}
+    }
+        
 }
 
 
@@ -277,6 +305,16 @@ impl AiChatManager{
                 }
                 else{
                     println!("Cant find {} in context {}",file.path,ctx.name);
+                }
+            }
+        }
+        for prj in &self.projects{
+            for file in &prj.files{
+                if let Some(file_id) = fs.path_to_file_node_id(&file.path){
+                    fs.request_open_file(LiveId(0), file_id);
+                }
+                else{
+                    println!("Cant find {} in context {}",file.path,prj.name);
                 }
             }
         }
@@ -337,9 +375,14 @@ impl AiChatManager{
                             if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
                                 if let Some(in_flight) = doc.in_flight.take(){
                                     doc.in_flight = None;
-                                    doc.file.history[in_flight.history_slot].messages.push(AiChatMessage::User(AiUserMessage::default()));
+                                    doc.file.history[in_flight.history_slot].follow_up();
                                     cx.action(AppAction::RedrawAiChat{chat_id});
                                     cx.action(AppAction::SaveAiChat{chat_id});
+                                    let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(1);
+                                    cx.action(AppAction::RunAiChat{chat_id, history_slot:in_flight.history_slot, item_id});
+                                    // alright so we're done.. check if we have run-when-done
+                                    doc.file.history[in_flight.history_slot].follow_up();
+                                                                       
                                     //self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
                                     //fs.request_save_file_for_file_node_id(chat_id, false);
                                 }
@@ -353,18 +396,47 @@ impl AiChatManager{
         }
     }
     
+    pub fn run_ai_chat(&self, cx:&mut Cx, chat_id:LiveId, history_slot:usize, item_id:usize, fs:&mut FileSystem){
+        if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
+            let usr = doc.file.history[history_slot].messages.iter().nth(item_id);
+            let ast = doc.file.history[history_slot].messages.iter().nth(item_id+1);
+            if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
+                if let Some(AiChatMessage::User(usr)) = usr.cloned(){
+                    if usr.auto_run{
+                        let file_path =  "examples/simple/src/app.rs";
+                        let file_id = fs.path_to_file_node_id(file_path).unwrap();
+                        let old_data = fs.file_id_as_string(file_id).unwrap();
+                        if let Some(new_data) = ast.strip_prefix("```rust"){
+                            if let Some(new_data) = new_data.strip_suffix("```"){
+                                fs.process_possible_live_reload(
+                                    cx,
+                                    file_path,
+                                    &old_data,
+                                    &new_data,
+                                    false
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     pub fn cancel_chat_generation(&mut self, cx:&mut Cx, ui: &WidgetRef, chat_id:LiveId, fs:&mut FileSystem) {
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get_mut(&chat_id){
             if let Some(in_flight) = doc.in_flight.take(){
                 cx.cancel_http_request(in_flight.request_id);
                 if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
-                    msg.messages.push(AiChatMessage::User(AiUserMessage::default()));
+                    msg.follow_up();
                     self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
                     cx.action(AppAction::SaveAiChat{chat_id});
                 }
             }
         }
     }
+    
+    
             
     pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, history_slot:usize, fs:&mut FileSystem) {
         // build the request
