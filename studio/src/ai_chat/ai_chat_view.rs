@@ -138,6 +138,7 @@ live_design!{
         // lets make portal list with User and Assistant components
         // and lets fix the portal lists scroll
         list = <PortalList>{
+            drag_scrolling: false
             //auto_tail: true
             User = <User>{}
             Assistant = <Assistant>{}
@@ -148,6 +149,7 @@ live_design!{
 #[derive(Live, LiveHook, Widget)] 
 pub struct AiChatView{
     #[deref] view:View,
+    #[rust] initialised: bool,
     #[rust] history_slot: usize,
 }
 
@@ -246,6 +248,14 @@ impl Widget for AiChatView {
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
+                if !self.initialised{
+                    self.initialised = true;
+                    self.history_slot = doc.file.history.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.last_time.total_cmp(&b.last_time))
+                    .map(|(index, _)| index).unwrap_or(0);
+                }
+                                
                 
                 let history_len = doc.file.history.len(); 
                 self.view.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
