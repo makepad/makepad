@@ -32,7 +32,7 @@ live_design!{
             context_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
             <Label>{margin:{top:4.5, left:20},text:"Model:"}
             model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
-            auto_run = <CheckBox>{ margin:{left:20}, text:"Run", width: Fit}
+            auto_run = <CheckBox>{ margin:{left:20}, text:"Run when done", width: Fit}
         }
         <View>{
             height:Fit
