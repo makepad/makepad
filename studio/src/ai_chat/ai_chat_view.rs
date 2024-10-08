@@ -32,7 +32,7 @@ live_design!{
             context_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
             <Label>{margin:{top:4.5, left:20},text:"Model:"}
             model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
-            auto_run = <CheckBox>{ margin:{left:20}, text:"Run when done", width: Fit}
+            auto_run = <CheckBox>{ margin:{left:20}, text:"Autorun", width: Fit}
             run_button = <Button> {
                 icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                 text: "Run"
@@ -210,7 +210,14 @@ impl AiChatView{
                         let model = &data.ai_chat_manager.projects[project_id].name;
                         doc.file.set_project(self.history_slot, item_id, model);
                     }
-                         
+                    if let Some(value) = item.check_box(id!(auto_run)).changed(actions){
+                        doc.file.set_auto_run(self.history_slot, item_id, value);
+                    }
+                    
+                    if item.button(id!(run_button)).pressed(actions){
+                        cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
+                    }
+                    
                     if item.button(id!(send_button)).pressed(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
                         // we'd already be forked
@@ -280,6 +287,10 @@ impl Widget for AiChatView {
                                 Some(AiChatMessage::User(val))=>{
                                     // lets set the value to the text input
                                     let item = list.item(cx, item_id, live_id!(User));
+                                    
+                                    // model dropdown
+                                    let cb = item.check_box(id!(auto_run));
+                                    cb.set_selected(cx, val.auto_run);
                                     
                                     // model dropdown
                                     let dd = item.drop_down(id!(model_dropdown));
