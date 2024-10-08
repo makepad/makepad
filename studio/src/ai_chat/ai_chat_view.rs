@@ -33,6 +33,10 @@ live_design!{
             <Label>{margin:{top:4.5, left:20},text:"Model:"}
             model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
             auto_run = <CheckBox>{ margin:{left:20}, text:"Run when done", width: Fit}
+            run_button = <Button> {
+                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                text: "Run"
+            }
         }
         <View>{
             height:Fit
@@ -84,10 +88,7 @@ live_design!{
                         icon_walk: {margin: {left: 10}, width: 16, height: Fit}
                         text: "Copy"
                     }
-                    run_button = <Button> {
-                        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                        text: "Run"
-                    }
+                    
                 }
                 
             }
