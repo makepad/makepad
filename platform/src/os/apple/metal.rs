@@ -93,6 +93,11 @@ impl Cx {
                 }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 
+                if sh.mapping.uses_time{
+                    self.demo_time_repaint = true;
+                }
+                
+                
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
