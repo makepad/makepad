@@ -145,12 +145,14 @@ pub enum AiChatMessage{
 
 #[derive(Debug, SerRon, DeRon, Clone)]
 pub struct AiChatMessages{
+    pub last_time: f64,
     pub messages: Vec<AiChatMessage>
 }
 
 impl AiChatMessages{
     fn new()->Self{
         AiChatMessages{
+            last_time: 0.0,
             messages: vec![AiChatMessage::User(AiUserMessage::default())],
         }
     }
@@ -324,6 +326,7 @@ impl AiChatManager{
                             }
                             if changed{
                                 cx.action(AppAction::RedrawAiChat{chat_id});
+                                cx.action(AppAction::SaveAiChat{chat_id});
                                 //fs.request_save_file_for_file_node_id(chat_id, false);
                             }
                         }
@@ -357,6 +360,7 @@ impl AiChatManager{
                 if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
                     msg.messages.push(AiChatMessage::User(AiUserMessage::default()));
                     self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
+                    cx.action(AppAction::SaveAiChat{chat_id});
                 }
             }
         }
@@ -453,6 +457,7 @@ impl AiChatManager{
             if let Some(in_flight) = doc.in_flight.take(){
                 cx.cancel_http_request(in_flight.request_id);
             }
+            doc.file.history[history_slot].last_time = Cx::time_now();
             doc.file.history[history_slot].messages.push(AiChatMessage::Assistant("".to_string()));
             doc.in_flight = Some(AiInFlight{
                 history_slot,
