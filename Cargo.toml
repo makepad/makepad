@@ -21,6 +21,7 @@ workspace.members = [
     # "examples/bare_text",
     # "examples/fractal_zoom",
     "examples/ui_zoo",
+    "examples/ai_docs",
     "examples/news_feed",
     #"examples/floating_elements",
     # "examples/bare_text",

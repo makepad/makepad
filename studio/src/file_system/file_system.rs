@@ -221,7 +221,7 @@ impl FileSystem {
                     FileClientMessage::Notification(notification) => {
                         match notification{
                             FileNotification::FileChangedOnDisk(response)=>{
-                               
+                               println!("FILE CHANGED ON DISK {}", response.path);
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){
                                     
                                     if let Some(OpenDocument::Code(doc)) = self.open_documents.get_mut(&file_id){
