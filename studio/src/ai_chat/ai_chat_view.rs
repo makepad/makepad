@@ -21,28 +21,41 @@ live_design!{
     User = <RoundedView>{
         height: Fit
         draw_bg:{color:#5}
-        padding: 10,
-        
-        message_input = <TextInput> {
-            text: ""
-            empty_message:"..."
-            width: Fill,
-            height: Fit,
-            draw_bg: {
-                color: #1
+        padding: {left:5,top:5,right:5},
+        flow:Down
+        <View>{
+            height:Fit
+            width:Fill
+            <Label>{margin:{top:4.5},text:"Project:"}
+            project_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
+            <Label>{margin:{top:4.5,left:20},text:"Context:"}
+            context_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
+            <Label>{margin:{top:4.5, left:20},text:"Model:"}
+            model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
+        }
+        <View>{
+            height:Fit
+            width:Fill
+            message_input = <TextInput> {
+                text: ""
+                empty_message:"..."
+                width: Fill,
+                height: Fit,
+                draw_bg: {
+                    color: #1
+                }
+            }
+            send_button = <Button> {
+                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                text: ">"
+            }
+                    
+            clear_button = <Button> {
+                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+                text: "X"
             }
         }
-                                                                                                                  
-        context_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
-        send_button = <Button> {
-            icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-            text: ">"
-        }
         
-        clear_button = <Button> {
-            icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-            text: "X"
-        }
         
     }
     
@@ -117,7 +130,6 @@ live_design!{
                 history_right = <ButtonFlat> { width: Fit, text: ">"}
                 slot = <Label> { width: Fit, text: "0"}
                 <View>{width:Fill}
-                model_dropdown = <DropDown>{ width: Fit,popup_menu_position:BelowInput}
                 history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
             }
         }
@@ -135,7 +147,6 @@ live_design!{
 pub struct AiChatView{
     #[deref] view:View,
     #[rust] history_slot: usize,
-    #[rust] backend_index: usize
 }
 
 impl AiChatView{
@@ -152,9 +163,6 @@ impl AiChatView{
                         log!("COPY! {}", code_view.text());
                     }
                 }
-                if let Some(index) = self.view.drop_down(id!(model_dropdown)).selected(actions){
-                    self.backend_index = index;
-                };
                 
                 if self.view.button(id!(history_left)).pressed(actions){
                     // first we check if our messages are the same as 'slot'.
@@ -188,6 +196,16 @@ impl AiChatView{
                         let ctx_name = &data.ai_chat_manager.contexts[ctx_id].name;
                         doc.file.set_base_context(self.history_slot, item_id, ctx_name);
                     }
+                    
+                    if let Some(model_id) = item.drop_down(id!(model_dropdown)).selected(actions){
+                        let model = &data.ai_chat_manager.models[model_id].name;
+                        doc.file.set_model(self.history_slot, item_id, model);
+                    }
+                    
+                    if let Some(project_id) = item.drop_down(id!(project_dropdown)).selected(actions){
+                        let model = &data.ai_chat_manager.projects[project_id].name;
+                        doc.file.set_project(self.history_slot, item_id, model);
+                    }
                          
                     if item.button(id!(send_button)).pressed(actions) || 
                     item.text_input(id!(message_input)).returned(actions).is_some(){
@@ -202,7 +220,7 @@ impl AiChatView{
                         // lets fetch the context
                         // println!("{}", dd.selected_item());
                         // alright lets collect the context
-                        cx.action(AppAction::SendAiChatToBackend{chat_id, backend_index:self.backend_index, history_slot: self.history_slot});
+                        cx.action(AppAction::SendAiChatToBackend{chat_id, history_slot: self.history_slot});
                         cx.action(AppAction::SaveAiChat{chat_id});
                         cx.action(AppAction::RedrawAiChat{chat_id});
                     }
@@ -223,19 +241,13 @@ impl Widget for AiChatView {
         let data = scope.data.get_mut::<AppData>().unwrap();
         let session_id = scope.path.from_end(0);
         
-        let dd = self.view.drop_down(id!(model_dropdown));
-        // ok how do we set these dropdown labels without causing memory changes
-        let mut i = data.ai_chat_manager.backends.iter();
-        dd.set_labels_with(|label|{
-            i.next().map(|m| label.push_str(&m.0));
-        });
-        dd.set_selected_item(self.backend_index);
-        
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
+                
                 let history_len = doc.file.history.len(); 
                 self.view.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
+                
                 while let Some(item) =  self.view.draw_walk(cx, &mut Scope::empty(), walk).step(){
                     
                     if let Some(mut list) = item.as_portal_list().borrow_mut() {
@@ -254,18 +266,35 @@ impl Widget for AiChatView {
                                     item.draw_all_unscoped(cx);
                                 }
                                 Some(AiChatMessage::User(val))=>{
-                                   // lets set the value to the text input
+                                    // lets set the value to the text input
                                     let item = list.item(cx, item_id, live_id!(User));
+                                    
+                                    // model dropdown
+                                    let dd = item.drop_down(id!(model_dropdown));
+                                    // ok how do we set these dropdown labels without causing memory changes
+                                    let mut i = data.ai_chat_manager.models.iter();
+                                    dd.set_labels_with(|label|{i.next().map(|m| label.push_str(&m.name));});
+                                    if let Some(pos) = data.ai_chat_manager.models.iter().position(|b| b.name == val.model){
+                                        dd.set_selected_item(pos);
+                                    }
+                                    
+                                    
                                     let dd = item.drop_down(id!(context_dropdown));
                                     let mut i = data.ai_chat_manager.contexts.iter();
-                                    dd.set_labels_with(|label|{
-                                        i.next().map(|m| label.push_str(&m.name));
-                                    });
-                                    // lets find the context
+                                    dd.set_labels_with(|label|{i.next().map(|m| label.push_str(&m.name));});
                                     
                                     if let Some(pos) = data.ai_chat_manager.contexts.iter().position(|ctx| ctx.name == val.base_context){
                                         dd.set_selected_item(pos);
                                     }
+                                    
+                                    let dd = item.drop_down(id!(project_dropdown));
+                                    let mut i = data.ai_chat_manager.projects.iter();
+                                    dd.set_labels_with(|label|{i.next().map(|m| label.push_str(&m.name));});
+                                                                        
+                                    if let Some(pos) = data.ai_chat_manager.projects.iter().position(|ctx| ctx.name == val.base_context){
+                                        dd.set_selected_item(pos);
+                                    }
+                                    
                                     item.widget(id!(message_input)).set_text(&val.message);
                                     item.draw_all_unscoped(cx);
                                 }

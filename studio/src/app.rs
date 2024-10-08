@@ -120,7 +120,7 @@ pub enum AppAction{
     ReloadFileTree,
     RecompileStarted,
     ClearLog, 
-    SendAiChatToBackend{chat_id:LiveId, backend_index:usize, history_slot:usize},
+    SendAiChatToBackend{chat_id:LiveId, history_slot:usize},
     CancelAiGeneration{chat_id:LiveId},
     SaveAiChat{chat_id:LiveId},
     RedrawAiChat{chat_id:LiveId},
@@ -293,8 +293,8 @@ impl MatchEvent for App{
                 }
             }
             AppAction::None=>(),
-            AppAction::SendAiChatToBackend{chat_id, backend_index, history_slot}=>{
-                self.data.ai_chat_manager.send_chat_to_backend(cx, chat_id, backend_index, history_slot, &mut self.data.file_system);
+            AppAction::SendAiChatToBackend{chat_id, history_slot}=>{
+                self.data.ai_chat_manager.send_chat_to_backend(cx, chat_id, history_slot, &mut self.data.file_system);
             }
             AppAction::CancelAiGeneration{chat_id}=>{
                 self.data.ai_chat_manager.cancel_chat_generation(cx, &self.ui, chat_id,  &mut self.data.file_system);
