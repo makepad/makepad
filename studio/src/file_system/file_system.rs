@@ -125,7 +125,6 @@ impl FileSystem {
         }
         None
     }
-        
     
     pub fn file_node_id_to_tab_id(&self, file_node: LiveId) -> Option<LiveId> {
         for (tab, id) in &self.tab_id_to_file_node_id {
@@ -249,6 +248,35 @@ impl FileSystem {
         }
     }
     
+    pub fn process_possible_live_reload(&mut self, cx:&mut Cx, path:&str, old_data:&str, new_data:&str, recompile:bool){
+        let mut old_neg = Vec::new();
+        let mut new_neg = Vec::new();
+        match LiveRegistry::tokenize_from_str_live_design(old_data, Default::default(), Default::default(), Some(&mut old_neg)) {
+            Err(e) => {
+                log!("Cannot tokenize old file {}", e)
+            }
+            Ok(old_tokens) => match LiveRegistry::tokenize_from_str_live_design(new_data, Default::default(), Default::default(), Some(&mut new_neg)) {
+                Err(e) => {
+                    log!("Cannot tokenize new file {}", e);
+                }
+                Ok(new_tokens) => {
+                    // we need the space 'outside' of these tokens
+                    if recompile && old_neg != new_neg {
+                        //cx.action(FileSystemAction::RecompileNeeded)
+                    }
+                    if old_tokens != new_tokens{
+                        // design code changed, hotreload it
+                        cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                            file_name: path.to_string(),
+                            content: new_data.to_string(),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    
+    
     pub fn process_save_response(&mut self, cx:&mut Cx, response:SaveFileResponse){
         // alright file has been saved
         // now we need to check if a live_design!{} changed or something outside it
@@ -257,31 +285,7 @@ impl FileSystem {
         }
         
         if response.old_data != response.new_data && response.kind != SaveKind::Patch {
-            let mut old_neg = Vec::new();
-            let mut new_neg = Vec::new();
-            match LiveRegistry::tokenize_from_str_live_design(&response.old_data, Default::default(), Default::default(), Some(&mut old_neg)) {
-                Err(e) => {
-                    log!("Cannot tokenize old file {}", e)
-                }
-                Ok(old_tokens) => match LiveRegistry::tokenize_from_str_live_design(&response.new_data, Default::default(), Default::default(), Some(&mut new_neg)) {
-                    Err(e) => {
-                        log!("Cannot tokenize new file {}", e);
-                    }
-                    Ok(new_tokens) => {
-                        // we need the space 'outside' of these tokens
-                        if old_neg != new_neg {
-                            cx.action(FileSystemAction::RecompileNeeded)
-                        }
-                        if old_tokens != new_tokens{
-                            // design code changed, hotreload it
-                            cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
-                                file_name: response.path,
-                                content: response.new_data
-                            }));
-                        }
-                    }
-                }
-            }
+            self.process_possible_live_reload(cx, &response.path, &response.old_data, &response.new_data, true);
         }
     }
     
@@ -342,31 +346,30 @@ impl FileSystem {
         };
     }
     
-    pub fn request_save_file_for_file_node_id(&mut self, file_id: LiveId, patch:bool) {
+    pub fn file_id_as_string(&mut self, file_id: LiveId)->Option<String>{
         match self.open_documents.get(&file_id){
             Some(OpenDocument::Code(doc))=>{
-                let text = doc.as_text().to_string();
-                let path = self.file_node_path(file_id);
-                self.file_client.send_request(FileRequest::SaveFile{
-                    path: path.clone(), 
-                    data: text, 
-                    id: file_id.0,
-                    patch
-                });
+                Some(doc.as_text().to_string())
             }
             Some(OpenDocument::CodeLoading(_))=>{
+                None
             }
             Some(OpenDocument::AiChat(doc))=>{
-                let text = doc.file.to_string();
-                let path = self.file_node_path(file_id);
-                self.file_client.send_request(FileRequest::SaveFile{
-                    path: path.clone(), 
-                    data: text, 
-                    id: file_id.0,
-                    patch
-                });
+                Some(doc.file.to_string())
             }
-            _=>()
+            _=>None
+        }
+    }
+    
+    pub fn request_save_file_for_file_node_id(&mut self, file_id: LiveId, patch:bool) {
+        if let Some(text) = self.file_id_as_string(file_id){
+            let path = self.file_node_path(file_id);
+            self.file_client.send_request(FileRequest::SaveFile{
+                path: path.clone(), 
+                data: text, 
+                id: file_id.0,
+                patch
+            });
         }
     }
     
