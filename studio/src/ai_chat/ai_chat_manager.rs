@@ -9,7 +9,8 @@ use {
 };
 
 pub struct AiChatManager{
-    pub backends: Vec<(String, AiBackend)>,
+    pub projects: Vec<AiProject>,
+    pub models: Vec<AiModel>,
     pub contexts: Vec<BaseContext>,
 }
 const OPENAI_DEFAULT_URL: &'static str = "https://api.openai.com/v1/chat/completions";
@@ -17,45 +18,57 @@ const OPENAI_DEFAULT_URL: &'static str = "https://api.openai.com/v1/chat/complet
 impl Default for AiChatManager{
     fn default()->Self{
         Self{
-            backends: vec![
-                (
-                    "OpenAI gpt-4o".to_string(),
-                    AiBackend::OpenAI{
+            models: vec![
+                AiModel{
+                    name:"gpt-4o".to_string(),
+                    backend: AiBackend::OpenAI{
                         url: OPENAI_DEFAULT_URL.to_string(),
                         model: "gpt-4o".to_string(),
                         key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
-                    }
-                ),
-                (
-                    "OpenAI gpt-4o-mini".to_string(),
-                    AiBackend::OpenAI{
+                    },
+                },
+                AiModel{
+                    name: "gpt-4o-mini".to_string(),
+                    backend: AiBackend::OpenAI{
                         url: OPENAI_DEFAULT_URL.to_string(),
                         model: "gpt-4o-mini".to_string(),
                         key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
-                    }
-                ),
-                (
-                    "Llama Local".to_string(),
-                    AiBackend::OpenAI{
+                    },
+                },
+                AiModel{
+                    name: "local".to_string(),
+                    backend: AiBackend::OpenAI{
                         url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
                         model:"".to_string(),
                         key:"".to_string()
                     }
-                ),
+                }
             ],
             contexts: vec![
                 BaseContext{
-                    name: "Empty".to_string(),
+                    name: "Rust".to_string(),
                     system: "You are a Rust programming assistant. Please answer with code examples only and very little explanation".to_string(),
                     files: vec![]
                 },
                 BaseContext{
                     name: "Makepad UI".to_string(),
-                    system: "You are a Rust programming assistant for writing Makepad applications. You have been given 2 components and one example application. Please answer with code only and don't give explanations".to_string(),
+                    system: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project. Please answer with code only and don't give explanations".to_string(),
                     files: vec![
-                        "widgets/src/button.rs".to_string(),
-                        "widgets/src/slider.rs".to_string(),
-                        "examples/simple/src/app.rs".to_string(),
+                        AiContextFile::new("Button component","widgets/src/button.rs"),
+                        AiContextFile::new("Slider component","widgets/src/slider.rs"),
+                        AiContextFile::new("Example code","examples/simple/src/app.rs"),
+                    ]
+                }
+            ],
+            projects: vec![
+                AiProject{
+                    name:"None".to_string(),
+                    files:vec![]
+                },
+                AiProject{
+                    name:"makepad-example-simple".to_string(),
+                    files:vec![
+                        AiContextFile::new("Main app to rewrite","examples/simple/src/app.rs")
                     ]
                 }
             ]
@@ -63,14 +76,15 @@ impl Default for AiChatManager{
     }
 }
 
-impl AiChatManager{
-    pub fn model_strings(&self)->Vec<String>{
-        let mut out = Vec::new();
-        for backend in &self.backends{
-            out.push(backend.0.clone())    
-        }
-        out
-    }
+pub struct AiProject{
+    pub name:String,
+    pub files: Vec<AiContextFile>
+}
+
+#[derive(Debug, SerRon, DeRon)]
+pub struct AiModel{
+    pub name: String,
+    pub backend: AiBackend
 }
 
 #[derive(Debug, SerRon, DeRon)]
@@ -82,10 +96,20 @@ pub enum AiBackend{
     }
 }
 
+pub struct AiContextFile{
+    kind: String,
+    path: String
+}
+impl AiContextFile{
+    fn new(kind:&str, path:&str)->Self{
+        Self{kind:kind.to_string(), path:path.to_string()}
+    }
+}
+
 pub struct BaseContext{
     pub name: String,
     pub system: String,
-    pub files: Vec<String>
+    pub files: Vec<AiContextFile>
 }
 
 #[derive(Debug, SerRon, DeRon, Clone)]
@@ -96,6 +120,8 @@ pub enum AiContext{
 
 #[derive(Default, Debug, SerRon, DeRon, Clone)]
 pub struct AiUserMessage{
+    pub model: String,
+    pub project: String,
     pub base_context: String,
     pub context: Vec<AiContext>,
     pub message:String
@@ -213,6 +239,20 @@ impl AiChatFile{
         }
         else{panic!()}
     }
+    
+    pub fn set_model(&mut self, history_slot:usize, at:usize, model:&str){ 
+        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
+            s.model = model.to_string()
+        }
+        else{panic!()}
+    }
+    
+    pub fn set_project(&mut self, history_slot:usize, at:usize, project:&str){ 
+        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
+            s.project = project.to_string()
+        }
+        else{panic!()}
+    }
 }
 
 
@@ -221,11 +261,11 @@ impl AiChatManager{
         // lets load up all our context files
         for ctx in &self.contexts{
             for file in &ctx.files{
-                if let Some(file_id) = fs.path_to_file_node_id(&file){
+                if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                     fs.request_open_file(LiveId(0), file_id);
                 }
                 else{
-                    println!("Cant find {} in context {}",file,ctx.name);
+                    println!("Cant find {} in context {}",file.path,ctx.name);
                 }
             }
         }
@@ -313,10 +353,22 @@ impl AiChatManager{
         }
     }
             
-    pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, backend_index:usize, history_slot:usize, fs:&mut FileSystem) {
+    pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, history_slot:usize, fs:&mut FileSystem) {
         // build the request
         let request = if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
-            match &self.backends[backend_index].1{
+            // alright lets fetch which backend we want
+            let model = if let Some(AiChatMessage::User(msg)) = doc.file.history[history_slot].messages.last(){
+                if let Some(backend) = self.models.iter().find(|v| v.name == msg.model){
+                    backend
+                }
+                else{
+                    self.models.first().unwrap()
+                }
+            }
+            else{
+                self.models.first().unwrap()
+            };
+            match &model.backend{
                 AiBackend::OpenAI{url, model, key}=>{
                     
                     let mut request = HttpRequest::new(url.clone(), HttpMethod::POST);
@@ -333,13 +385,12 @@ impl AiChatManager{
                                 if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
                                     messages.push(ChatMessage {content: Some(ctx.system.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
                                     for file in &ctx.files{
-                                        if let Some(file_id) = fs.path_to_file_node_id(file){
+                                        if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
                                                 let mut content = String::new();
                                                 let text = doc.as_text().to_string();
-                                                content.push_str("\n File:");
-                                                content.push_str(file);
-                                                content.push_str("\n```rust\n");
+                                                content.push_str(&format!("\n Now follows a context file with description: ```{}``` given as context to help generating correct code. The filename is ```{}```\n",file.kind, file.path));
+                                                content.push_str("```rust\n");
                                                 content.push_str(&text);
                                                 content.push_str("```\n");
                                                  messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
@@ -347,6 +398,22 @@ impl AiChatManager{
                                         }
                                     }
                                 }
+                                if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
+                                    for file in &ctx.files{
+                                        if let Some(file_id) = fs.path_to_file_node_id(&file.path){
+                                            if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
+                                                let mut content = String::new();
+                                                let text = doc.as_text().to_string();
+                                                content.push_str(&format!("\n Now follows a user project file with description ```{}```. The filename is ```{}```\n", file.kind, file.path));
+                                                content.push_str("```rust\n");
+                                                content.push_str(&text);
+                                                content.push_str("```\n");
+                                                messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                                            }
+                                        }
+                                    }
+                                }
+                                
                                 //content.push_str(&v.message);
                                 //println!("{:?}", content);
                                 messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
