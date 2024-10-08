@@ -47,12 +47,24 @@ impl Default for AiChatManager{
             contexts: vec![
                 BaseContext{
                     name: "Rust".to_string(),
-                    system: "You are a Rust programming assistant. Please answer with code examples only and very little explanation".to_string(),
+                    system_pre: "You are a Rust programming assistant. Please answer with code examples only and very little explanation".to_string(),
+                    system_post: "".to_string(),
                     files: vec![]
                 },
                 BaseContext{
+                    name: "Makepad Rust".to_string(),
+                    system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project. Please answer with code only and don't give explanations.".to_string(),
+                    system_post:"Rewrite the main app to rewrite completely and don't omit any code".to_string(),
+                    files: vec![
+                        AiContextFile::new("Button component","widgets/src/button.rs"),
+                        AiContextFile::new("Slider component","widgets/src/slider.rs"),
+                        AiContextFile::new("Example code","examples/simple/src/app.rs"),
+                    ]
+                },
+                BaseContext{
                     name: "Makepad UI".to_string(),
-                    system: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project. Please answer with code only and don't give explanations".to_string(),
+                    system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
+                    system_post: "Please answer with code only and don't give explanations. Only rewrite the live_design block and only output that code not the rest of the file.".to_string(),
                     files: vec![
                         AiContextFile::new("Button component","widgets/src/button.rs"),
                         AiContextFile::new("Slider component","widgets/src/slider.rs"),
@@ -108,7 +120,8 @@ impl AiContextFile{
 
 pub struct BaseContext{
     pub name: String,
-    pub system: String,
+    pub system_pre: String,
+    pub system_post: String,
     pub files: Vec<AiContextFile>
 }
 
@@ -382,8 +395,10 @@ impl AiChatManager{
                             AiChatMessage::User(v)=>{
                                 // alright. we have to now collect our base context files
                                 // ok lets find these files
+                                let mut system_post = "".to_string();
                                 if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
-                                    messages.push(ChatMessage {content: Some(ctx.system.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                    system_post = ctx.system_post.clone();
+                                    messages.push(ChatMessage {content: Some(ctx.system_pre.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
                                     for file in &ctx.files{
                                         if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
@@ -413,10 +428,10 @@ impl AiChatManager{
                                         }
                                     }
                                 }
-                                
+                                let content = format!("{}\n{}", v.message, system_post);
                                 //content.push_str(&v.message);
                                 //println!("{:?}", content);
-                                messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                                messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
                             }
                             AiChatMessage::Assistant(v)=>{
                                 messages.push(ChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})
