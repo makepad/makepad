@@ -54,7 +54,7 @@ use {
 pub struct Cx {
     pub (crate) os_type: OsType,
     pub (crate) in_makepad_studio: bool,
-   
+    pub demo_time_repaint: bool,
     pub (crate) gpu_info: GpuInfo,
     pub (crate) xr_capabilities: XrCapabilities,
     pub (crate) cpu_cores: usize,
@@ -234,6 +234,7 @@ impl Cx {
         }
         
         Self {
+            demo_time_repaint: false,
             null_texture,
             cpu_cores: 8,
             in_makepad_studio: false,
