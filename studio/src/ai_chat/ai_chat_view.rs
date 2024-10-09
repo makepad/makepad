@@ -202,10 +202,12 @@ live_design!{
                     draw_text: {
                         color: (THEME_COLOR_U_4)
                     }
-                    text: "First Prompt ^ / "
+                    text: "First Prompt / "
                 }
-                <Pbold> { width: Fit, text: "Last Prompt ^"}
+                <Pbold> { width: Fit, text: "Last Prompt" }
+
                 <View> { width: Fill }
+
                 history_left = <ButtonFlatter> {
                     width: Fit,
                     padding: <THEME_MSPACE_1> {}
