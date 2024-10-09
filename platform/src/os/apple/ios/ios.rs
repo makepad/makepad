@@ -99,31 +99,6 @@ impl Cx {
         }
     }
 
-    #[allow(dead_code)]
-    pub (crate) fn ios_load_dependencies(&mut self){
-
-        let bundle_path = unsafe{
-            let main:ObjcId = msg_send![class!(NSBundle), mainBundle];
-            let path:ObjcId = msg_send![main, resourcePath];
-            nsstring_to_string(path)
-        };
-
-        for (path,dep) in &mut self.dependencies{
-            if let Ok(mut file_handle) = File::open(format!("{}/{}",bundle_path,path)) {
-                let mut buffer = Vec::<u8>::new();
-                if file_handle.read_to_end(&mut buffer).is_ok() {
-                    dep.data = Some(Ok(Rc::new(buffer)));
-                }
-                else{
-                    dep.data = Some(Err("read_to_end failed".to_string()));
-                }
-            }
-            else{
-                dep.data = Some(Err("File open failed".to_string()));
-            }
-        }
-    }
-
     fn ios_event_callback(
         &mut self,
         event: IosEvent,
@@ -364,12 +339,11 @@ impl CxOsApi for Cx {
         }
 
         self.live_scan_dependencies();
-        //#[cfg(target_feature="sim")]
-        #[cfg(apple_sim)]
-        self.native_load_dependencies();
 
-        #[cfg(not(apple_sim))]
-        self.ios_load_dependencies();
+        #[cfg(apple_bundle)]
+        self.apple_bundle_load_dependencies();
+        #[cfg(not(apple_bundle))]
+        self.native_load_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
