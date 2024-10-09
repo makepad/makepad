@@ -103,3 +103,8 @@ pub fn derive_live_atomic(input: TokenStream) -> TokenStream {
     derive_live_atomic_impl(input)
 }
 
+#[proc_macro_derive(DefaultNone)] 
+pub fn derive_widget_action(input: TokenStream) -> TokenStream {
+    derive_default_none_impl(input)
+}
+

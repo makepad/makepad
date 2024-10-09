@@ -128,8 +128,9 @@ pub struct BuildManager {
     pub recv_studio_msg: ToUIReceiver<(LiveId, AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
+    pub designer_selected_files: HashMap<LiveId, String>,
     //pub send_file_change: FromUISender<LiveFileChange>,
-    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, mpsc::Sender<Vec<u8>>)>>>>,
+    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, LiveId, mpsc::Sender<Vec<u8>>)>>>>,
 }
 
 pub struct BuildBinary {
@@ -293,8 +294,8 @@ impl BuildManager {
                 content: live_file_change.content.clone(),
             }])
             .serialize_bin();
-            for node in d.borrow_mut().iter_mut() {
-                let _ = node.1.send(data.clone());
+            for (_,_,sender) in d.borrow_mut().iter_mut() {
+                let _ = sender.send(data.clone());
             }
         }
     }
@@ -440,6 +441,28 @@ impl BuildManager {
                         AppToStudio::EditFile(ef) => cx.action(AppAction::EditFile(ef)),
                         AppToStudio::JumpToFile(jt) => {
                             cx.action(AppAction::JumpTo(jt));
+                        }
+                        AppToStudio::DesignerStarted=>{
+                            // send the app the select file init message
+                            if let Ok(d) = self.active_build_websockets.lock() {
+                                if let Some(file_name) = self.designer_selected_files.get(&build_id){
+                                    let data = StudioToAppVec(vec![StudioToApp::DesignerSelectFile {
+                                        file_name: file_name.clone()
+                                    }]).serialize_bin();
+                                    
+                                    for (_,id,sender) in d.borrow_mut().iter_mut() {
+                                        if *id == build_id{
+                                            println!("FOUND SENDER {}", file_name);
+                                            let _ = sender.send(data.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            
+                        }
+                        AppToStudio::DesignerFileSelected{file_name}=>{
+                            // alright now what. lets 
+                            self.designer_selected_files.insert(build_id, file_name);
                         }
                     }
                 }
@@ -604,7 +627,7 @@ impl BuildManager {
                                     .lock()
                                     .unwrap()
                                     .borrow_mut()
-                                    .push((web_socket_id, response_sender));
+                                    .push((web_socket_id, LiveId(id), response_sender));
                             }
                         }
                     }

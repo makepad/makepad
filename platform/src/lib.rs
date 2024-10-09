@@ -213,6 +213,7 @@ pub use {
             Actions,
             ActionsBuf, 
             ActionCast,
+            ActionCastRef,
             ActionTrait,
             ActionDefaultRef
         },

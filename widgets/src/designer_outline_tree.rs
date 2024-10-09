@@ -449,6 +449,7 @@ impl DesignerOutlineTree {
             tree_node.set_folder_is_open(cx, is_open, animate);
         }
     }
+    /*
     pub fn set_open_by_path(
         &mut self,
         cx: &mut Cx,
@@ -461,7 +462,7 @@ impl DesignerOutlineTree {
             let hash =  LiveId::from_str(slice).into();
             self.set_folder_is_open(cx, hash, is_open, animate);
         }
-    }
+    }*/
 /*    
     let folder1 =  LiveId::from_str("examples/").into();
     file_tree.set_folder_is_open(cx, folder1, true, Animate::No);
@@ -510,7 +511,9 @@ impl Widget for DesignerOutlineTree {
                     cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
-                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
+                            if let Some(node) = self.tree_nodes.get_mut(&last_selected){
+                                node.0.set_is_selected(cx, false, Animate::Yes);
+                            }
                         }
                     }
                     self.selected_node_id = Some(node_id);
