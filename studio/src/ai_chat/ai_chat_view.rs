@@ -145,14 +145,18 @@ live_design!{
                     }
                 }
                 <View>{
-                    //show_bg: true,
-                    //draw_bg:{color:#7}
                     width:Fill,
                     height:Fit,
-                    align:{x:1.0}
-                    copy_button = <Button> {
-                        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                        text: "Copy"
+                    align:{ x: 1.0 }
+                    copy_button = <ButtonFlatter> {
+                        icon_walk: {
+                            width: 12, height: Fit,
+                            margin: { left: 10 }
+                        }
+                        draw_icon: {
+                            color: (THEME_COLOR_U_4)
+                            svg_file: dep("crate://self/resources/icons/icon_copy.svg"),
+                        }
                     }
                     
                 }
@@ -162,18 +166,18 @@ live_design!{
             body:""
         }
         busy = <View>{
-            margin:{top: 5, bottom: 5}
-            width: 50,
-            height: 10
+            width: 50, height: 10,
+            margin: 0.,
+            padding: 0.,
             show_bg: true,
             draw_bg:{
                 fn pixel(self)->vec4{
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let x = 5.0;
-                    for i in 0..4{
-                        x = x + 8.0;
-                        sdf.circle(x,5.,3.);
-                        sdf.fill(#a);
+                    let x = 0.;
+                    for i in 0..3{
+                        x = x + 8.;
+                        sdf.circle(x,5.,2.5);
+                        sdf.fill((THEME_COLOR_MAKEPAD));
                     }
                     return sdf.result
                 }
