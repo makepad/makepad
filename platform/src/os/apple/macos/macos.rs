@@ -583,6 +583,10 @@ impl CxOsApi for Cx {
             self.start_disk_live_file_watcher(100);
         }
         self.live_scan_dependencies();
+
+        #[cfg(apple_bundle)]
+        self.apple_bundle_load_dependencies();
+        #[cfg(not(apple_bundle))]
         self.native_load_dependencies();
     }
     
