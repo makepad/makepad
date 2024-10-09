@@ -31,6 +31,25 @@ pub enum OutlineNode{
     }
 }
 
+impl OutlineNode{
+    fn children(&self)->&[LiveId]{
+        match self{
+            Self::Virtual{children,..}=>children,
+            Self::File{children,..}=>children,
+            Self::Folder{children,..}=>children,
+            Self::Component{children,..}=>children,
+        }
+    }
+    
+    fn name(&self)->&str{
+        match self{
+            Self::Virtual{name,..}=>name,
+            Self::File{name,..}=>name,
+            Self::Folder{name,..}=>name,
+            Self::Component{name,..}=>name,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct DesignerData{
@@ -40,6 +59,26 @@ pub struct DesignerData{
 }
 
 impl DesignerData{
+    pub fn get_node_by_path(&self, root:LiveId, path:&str)->Option<LiveId>{
+        let mut current = root;
+        let mut split = path.split("/");
+        'outer: while let Some(node) = self.node_map.get(&current){
+            if let Some(next_name) = split.next(){
+                for child in node.children(){
+                    let node = self.node_map.get(&child).unwrap();
+                    if node.name().starts_with(next_name){
+                        current = *child;
+                        continue 'outer;
+                    }
+                }
+                return None
+            }
+            else{
+                return Some(current)
+            }
+        }
+        None
+    }
     
     pub fn update_from_live_registry(&mut self, cx:&mut Cx){
         self.node_map.clear();
