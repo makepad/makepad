@@ -232,7 +232,7 @@ impl BuildManager {
         self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
-
+        self.designer_state.load_state();
         self.update_run_list(cx);
         //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
@@ -496,9 +496,14 @@ impl BuildManager {
                             // send the app the select file init message
                             if let Ok(d) = self.active_build_websockets.lock() {
                                 if let Some(file_name) = self.designer_state.selected_files.get(&build_id){
-                                    let data = StudioToAppVec(vec![StudioToApp::DesignerSelectFile {
-                                        file_name: file_name.clone()
-                                    }]).serialize_bin();
+                                    let data = StudioToAppVec(vec![
+                                        StudioToApp::DesignerLoadState{
+                                            positions: self.designer_state.component_positions.get(&build_id).cloned().unwrap_or(vec![])
+                                        },
+                                        StudioToApp::DesignerSelectFile {
+                                            file_name: file_name.clone()
+                                        },
+                                    ]).serialize_bin();
                                     
                                     for (_,id,sender) in d.borrow_mut().iter_mut() {
                                         if *id == build_id{
