@@ -53,7 +53,6 @@ fn main_wifi(clocks:&Clocks, pwm:Pwm, io:Io, periph:Periph, mut socket:UdpSocket
         else{
             let data = get_bno055_data(&mut i2c, wrap_counter);
             // alright lets send out a udp packet with the data
-            //println!("SENDING DATA {:?}", data);
             let _ = socket.send(IMU_TARGET_IP, 44442, &data);
             wrap_counter = wrap_counter.wrapping_add(1);
         }

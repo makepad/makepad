@@ -88,7 +88,6 @@ impl App {
         let mut request = HttpRequest::new(completion_url, HttpMethod::POST);
         request.set_is_streaming();
         let ai_key = std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string());
-        println!("{}", ai_key);
         request.set_header("Content-Type".to_string(), "application/json".to_string());
         request.set_header("Authorization".to_string(), format!("Bearer {ai_key}"));
                 
@@ -131,7 +130,7 @@ impl MatchEvent for App {
                                         }
                                     }
                                     Err(e)=>{
-                                        println!("JSon parse error {:?} {}", e, data);
+                                        error!("JSon parse error {:?} {}", e, data);
                                     }
                                 }
                             }
@@ -139,7 +138,7 @@ impl MatchEvent for App {
                     }
                 }
                 NetworkResponse::HttpStreamComplete(_res)=>{
-                    println!("Stream complete");
+                    error!("Stream complete");
                 }
                 NetworkResponse::HttpResponse(response) => {
                                        

@@ -48,7 +48,6 @@ impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         // we could create a theme mapping here
         //cx.set_theme("makepad_widgets::theme_desktop_dark")
-        //println!("{}", std::mem::size_of::<LiveNode2>());
         /*makepad_draw::live_design(cx);
         makepad_widgets::base::live_design(cx);
         makepad_widgets::theme_desktop_dark::live_design(cx);

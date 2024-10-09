@@ -27,7 +27,7 @@ impl FishDoc {
         let docdata = self.serialize_ron();
         let _ = fs::write(filename, docdata)
             .map_err(|err| format!("failed to write to {:?} - {:?}", filename, err));
-        println!("saved to {:?}", filename);
+        log!("saved to {:?}", filename);
         Ok(())
     }
 
@@ -54,7 +54,7 @@ impl FishDoc {
         *self = FishDoc::deserialize_ron(&docdata)
             .map_err(|_| format!("failed to deserialize {:?}", filename))
             .unwrap();
-        println!("loaded from {:?}", filename);
+            log!("loaded from {:?}", filename);
         Ok(())
     }
 

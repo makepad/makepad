@@ -1123,7 +1123,6 @@ impl EnvelopeState {
     fn get(&mut self, settings: &EnvelopeSettings, samplerate: f32) -> f32 {
         self.current_value = self.current_value + self.delta_value;
         self.state_time = self.state_time - 1;
-        //println!("st {}", self.state_time);
         if self.state_time < -1 {
             self.state_time = -1;
         }
@@ -1217,7 +1216,6 @@ impl EnvelopeState {
             (1.0 - self.current_value) / (EnvelopeState::nicerange(settings.a.get(), samplerate));
         self.state_time = EnvelopeState::nicerange(settings.a.get(), samplerate) as i32;
         self.target_value = 1.0;
-        //  println!("attacking with {} {} {} {} {}",self.state_time,  settings.a, samplerate, settings.a * samplerate, self.delta_value);
     }
 
     fn nicerange(input: f32, samplerate: f32) -> f32 {

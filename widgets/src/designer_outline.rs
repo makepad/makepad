@@ -17,7 +17,7 @@ live_design!{
 #[derive(Live, Widget, LiveHook)]
 pub struct DesignerOutline {
     #[deref] view: View
-}
+} 
 
 impl Widget for DesignerOutline {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
@@ -30,6 +30,11 @@ impl Widget for DesignerOutline {
         
         while let Some(next) = self.view.draw(cx, &mut Scope::empty()).step() {
             if let Some(mut file_tree) = file_tree.borrow_mut_if_eq(&next) {
+                // lets open 2 filenodes
+                /*file_tree.set_open_by_path(cx, "examples/ironfish/src/app_desktop.rs/", true, Animate::No);
+                file_tree.set_open_by_path(cx, "examples/ironfish/src/app.rs/", true, Animate::No);
+                file_tree.set_open_by_path(cx, "examples/ironfish/src/app_ui.rs/", true, Animate::No);
+                */                                                
                 if let OutlineNode::Virtual{children,..} = &data.node_map.get(&data.root).as_ref().unwrap(){
                     recur_nodes(cx,  &mut *file_tree, &data.node_map, children);
                 }

@@ -341,7 +341,7 @@ impl<'a> Cx2d<'a> {
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
-            println!("Data not multiple of total slots");
+            error!("Data not multiple of total slots");
             return Area::Empty
         }
         let ia: Area = (InstanceArea {
