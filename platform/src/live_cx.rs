@@ -226,7 +226,7 @@ impl Cx {
     pub fn handle_live_edit(&mut self)->bool{
         // lets poll our studio connection
         let mut all_changes:Vec<LiveFileChange> = Vec::new();
-        
+        let mut actions = Vec::new();
         if let Some(studio_socket) = &mut self.studio_web_socket{
             while let Ok(msg) = studio_socket.try_recv(){
                 match msg {
@@ -238,13 +238,20 @@ impl Cx {
                                         all_changes.retain(|v| v.file_name != file_name); 
                                         all_changes.push(LiveFileChange{file_name, content})
                                     }
+                                    x=>{
+                                        actions.push(x);
+                                    }
                                 }
+                                
                             }
                         }
                     }
                     _=>()
                 }
             }
+        }
+        for action in actions{
+            self.action(action);
         }
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
