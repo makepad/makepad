@@ -27,7 +27,7 @@ live_design!{
 
         <View> {
             height: Fit, width: Fill,
-            align: { x: 0.0, y: 1.0 },
+            align: { x: 0.0, y: 0.5 },
             spacing: (THEME_SPACE_3),
 
             <View> {
@@ -73,15 +73,22 @@ live_design!{
                 auto_run = <CheckBox> { text: "Autorun", width: Fit }
             }
 
-            run_button = <ButtonFlat> {
-                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                text: "Run"
+        run_button = <ButtonFlatter> {
+                width: Fit,
+                height: Fit,
+                padding: <THEME_MSPACE_1> {}
+                margin: { right: (THEME_SPACE_2) }
+                draw_icon: {
+                    color: #f00,
+                    svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                }
+                icon_walk: { width: 8. }
             }
+
         }
 
         <View>{
-            height:Fit,
-            width:Fill,
+            height:Fit, width: Fill,
 
             message_input = <TextInput> {
                 width: Fill,
@@ -92,10 +99,19 @@ live_design!{
             }
 
             send_button = <ButtonFlatter> {
-                margin: { left: -55.}
-                icon_walk: { width: 16, height: Fit}
-                text: ">"
+                width: Fit, height: 30,
+                padding: <THEME_MSPACE_1> {}
+                margin: { left: -45.}
+                draw_icon: {
+                    svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                }
+                icon_walk: { width: 6. }
             }
+            
+            // <ButtonFlatter> {
+            //     icon_walk: { width: 16, height: Fit}
+            //     text: ">"
+            // }
                     
             clear_button = <ButtonFlatter> {
                 padding: { right: 5. }
@@ -175,12 +191,33 @@ live_design!{
             content = {
                 height: Fit, width: Fill,
                 flow: Right,
-
                 align: { x: 0.0, y: 0.5},
-                spacing: (THEME_SPACE_1),
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
-                history_left = <ButtonFlat> { width: Fit, text: "<"}
-                history_right = <ButtonFlat> { width: Fit, text: ">"}
+                spacing: (THEME_SPACE_1),
+
+                <View> {
+                    height: Fit, width: Fit,
+                    align: { x: 0.0, y: 0.5 }
+                    spacing: 0.
+
+                    history_left = <ButtonFlatter> {
+                        width: Fit,
+                        padding: <THEME_MSPACE_1> {}
+                        draw_icon: {
+                            svg_file: dep("crate://self/resources/icons/icon_history_rew.svg"),
+                        }
+                        icon_walk: { width: 5. }
+                    }
+
+                    history_right = <ButtonFlatter> {
+                        width: Fit,
+                        padding: <THEME_MSPACE_1> {}
+                        draw_icon: {
+                            svg_file: dep("crate://self/resources/icons/icon_history_ff.svg"),
+                        }
+                        icon_walk: { width: 5. }
+                    }
+                }
                 slot = <Label> { width: Fit, text: "0"}
                 <View> { width: Fill }
                 history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
