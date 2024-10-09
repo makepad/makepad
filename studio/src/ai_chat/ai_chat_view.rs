@@ -79,7 +79,7 @@ live_design!{
                 padding: <THEME_MSPACE_1> {}
                 margin: { right: (THEME_SPACE_2) }
                 draw_icon: {
-                    color: #f00,
+                    color: (THEME_COLOR_U_4),
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                 }
                 icon_walk: { width: 8. }
@@ -103,6 +103,7 @@ live_design!{
                 padding: <THEME_MSPACE_1> {}
                 margin: { left: -45.}
                 draw_icon: {
+                    color: (THEME_COLOR_U_4),
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                 }
                 icon_walk: { width: 6. }
@@ -144,14 +145,18 @@ live_design!{
                     }
                 }
                 <View>{
-                    //show_bg: true,
-                    //draw_bg:{color:#7}
                     width:Fill,
                     height:Fit,
-                    align:{x:1.0}
-                    copy_button = <Button> {
-                        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                        text: "Copy"
+                    align:{ x: 1.0 }
+                    copy_button = <ButtonFlatter> {
+                        icon_walk: {
+                            width: 12, height: Fit,
+                            margin: { left: 10 }
+                        }
+                        draw_icon: {
+                            color: (THEME_COLOR_U_4)
+                            svg_file: dep("crate://self/resources/icons/icon_copy.svg"),
+                        }
                     }
                     
                 }
@@ -161,18 +166,18 @@ live_design!{
             body:""
         }
         busy = <View>{
-            margin:{top: 5, bottom: 5}
-            width: 50,
-            height: 10
+            width: 50, height: 10,
+            margin: 0.,
+            padding: 0.,
             show_bg: true,
             draw_bg:{
                 fn pixel(self)->vec4{
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let x = 5.0;
-                    for i in 0..4{
-                        x = x + 8.0;
-                        sdf.circle(x,5.,3.);
-                        sdf.fill(#a);
+                    let x = 0.;
+                    for i in 0..3{
+                        x = x + 8.;
+                        sdf.circle(x,5.,2.5);
+                        sdf.fill((THEME_COLOR_MAKEPAD));
                     }
                     return sdf.result
                 }
@@ -189,38 +194,71 @@ live_design!{
         
         tb = <DockToolbar> {
             content = {
-                height: Fit, width: Fill,
+                height: Fill, width: Fill,
                 flow: Right,
                 align: { x: 0.0, y: 0.5},
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                 spacing: (THEME_SPACE_1),
 
-                <View> {
-                    height: Fit, width: Fit,
-                    align: { x: 0.0, y: 0.5 }
-                    spacing: 0.
-
-                    history_left = <ButtonFlatter> {
-                        width: Fit,
-                        padding: <THEME_MSPACE_1> {}
-                        draw_icon: {
-                            svg_file: dep("crate://self/resources/icons/icon_history_rew.svg"),
-                        }
-                        icon_walk: { width: 5. }
+                <P> {
+                    width: Fit,
+                    height: Fit,
+                    draw_text: {
+                        color: (THEME_COLOR_U_4)
                     }
-
-                    history_right = <ButtonFlatter> {
-                        width: Fit,
-                        padding: <THEME_MSPACE_1> {}
-                        draw_icon: {
-                            svg_file: dep("crate://self/resources/icons/icon_history_ff.svg"),
-                        }
-                        icon_walk: { width: 5. }
-                    }
+                    text: "First Prompt / "
                 }
-                slot = <Label> { width: Fit, text: "0"}
+                <Pbold> { width: Fit, text: "Last Prompt" }
+
                 <View> { width: Fill }
-                history_delete = <ButtonFlat> { width: Fit, text: "Delete"}
+
+                history_left = <ButtonFlatter> {
+                    width: Fit,
+                    padding: <THEME_MSPACE_1> {}
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_history_rew.svg"),
+                    }
+                    icon_walk: { width: 5. }
+                }
+
+                slot = <Label> {
+                    draw_text: {
+                        color: (THEME_COLOR_U_4)
+                    }
+                    width: Fit,
+                    text: "0"
+                }
+
+                history_right = <ButtonFlatter> {
+                    width: Fit,
+                    padding: <THEME_MSPACE_1> {}
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_history_ff.svg"),
+                    }
+                    icon_walk: { width: 5. }
+                }
+
+                history_delete = <ButtonFlatter> {
+                    width: Fit,
+                    padding: <THEME_MSPACE_1> {}
+                    text: "Delete"
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_del.svg"),
+                    }
+                    icon_walk: { width: 10. }
+                }
+
+               <Vr> {} 
+
+                <ButtonFlatter> {
+                    width: Fit,
+                    padding: <THEME_MSPACE_1> {}
+                    text: "New"
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_add.svg"),
+                    }
+                    icon_walk: { width: 13. }
+                }
             }
         }
 
