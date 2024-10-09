@@ -529,8 +529,6 @@ impl CodeEditor {
             +self.pad_left_top.y * self.height_scale
         );
         
-        //println!("{} {}", session.layout().height() * self.cell_size.y, (self.viewport_rect.size.y));
-
         self.scroll_bars.end(cx);
         if session.update_folds() {
             self.scroll_bars.area().redraw(cx);

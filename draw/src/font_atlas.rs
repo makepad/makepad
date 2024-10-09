@@ -294,7 +294,7 @@ impl CxFontsAtlasAlloc {
         if h + self.ypos >= self.texture_size.y as usize {
             // ok so the fontatlas is full..
             self.full = true;
-            println!("FONT ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
+            error!("FONT ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
         }
         if h > self.hmax {
             self.hmax = h;

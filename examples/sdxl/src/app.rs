@@ -1014,7 +1014,7 @@ impl MatchEvent for App {
     }
     
     fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
-        println!("{:?}", devices);
+        log!("{:?}", devices);
         let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
         cx.use_video_input(&input);
     }
