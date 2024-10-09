@@ -175,6 +175,7 @@ impl Cx {
             self.inner_key_focus_change();
             if counter > 100 {
                 crate::error!("Action feedback loop detected");
+                crate::error!("New actions {:#?}", self.new_actions);
                 break
             }
         }
