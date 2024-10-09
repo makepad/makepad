@@ -65,7 +65,13 @@ live_design!{
     }
     
     Assistant = <RoundedView>{
-        draw_bg:{color:#4}
+        flow:Down
+        margin: <THEME_MSPACE_H_2> {}
+        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
+
+        draw_bg: {
+            color: (THEME_COLOR_D_2)
+        }
         flow: Down
         md = <Markdown>{
             code_block = <View>{
