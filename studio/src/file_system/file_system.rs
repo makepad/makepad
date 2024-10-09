@@ -220,7 +220,7 @@ impl FileSystem {
                     FileClientMessage::Notification(notification) => {
                         match notification{
                             FileNotification::FileChangedOnDisk(response)=>{
-                               println!("FILE CHANGED ON DISK {}", response.path);
+                               //println!("FILE CHANGED ON DISK {}", response.path);
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){
                                     
                                     if let Some(OpenDocument::Code(doc)) = self.open_documents.get_mut(&file_id){
@@ -262,7 +262,7 @@ impl FileSystem {
                 Ok(new_tokens) => {
                     // we need the space 'outside' of these tokens
                     if recompile && old_neg != new_neg {
-                        //cx.action(FileSystemAction::RecompileNeeded)
+                        cx.action(FileSystemAction::RecompileNeeded)
                     }
                     if old_tokens != new_tokens{
                         // design code changed, hotreload it
