@@ -89,11 +89,44 @@ impl App {
                             self.data.file_system.request_open_file(*tab_id, *file_node_id);
                         }
                     };
+                    self.data.build_manager.designer_selected_files = 
+                        state.designer_selected_files;
                 }
                 Err(e)=>{
                     println!("ERR {:?}",e);
                 }
             }
+        }
+    }
+    
+    fn maybe_save_state(&self){
+        let dock = self.ui.dock(id!(dock));
+        if let Some(mut dock_items) = dock.needs_save(){
+            // remove the runviews
+            let mut run_views = Vec::new();
+            dock_items.retain(|id, di| {
+                if let DockItem::Tab{kind,..} = di{
+                    if *kind == live_id!(RunView){
+                        run_views.push(*id);
+                        return false
+                    }
+                }
+                true 
+            }); 
+            for item in dock_items.values_mut(){
+                if let DockItem::Tabs{tabs,..} = item{
+                    tabs.retain(|id| !run_views.contains(id));
+                }
+            }
+            // alright lets save it to disk
+            let state = AppStateRon{
+                dock_items,
+                designer_selected_files: self.data.build_manager.designer_selected_files.clone(),
+                tab_id_to_file_node_id: self.data.file_system.tab_id_to_file_node_id.clone()
+            };
+            let saved = state.serialize_ron();
+            let mut f = File::create("makepad_state.ron").expect("Unable to create file");
+            f.write_all(saved.as_bytes()).expect("Unable to write data");
         }
     }
 }
@@ -543,43 +576,7 @@ impl AppMain for App {
         self.data.file_system.handle_event(cx, event, &self.ui);
         self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
         self.data.ai_chat_manager.handle_event(cx, event, &mut self.data.file_system);
-        // process events on all run_views
-        let dock = self.ui.dock(id!(dock));
-        /*
-        if let Some(mut dock) = dock.borrow_mut() {
-            for (id, (_, item)) in dock.items().iter() {
-                if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                    run_view.pump_event_loop(cx, event, *id, &mut self.data.build_manager);
-                }
-            }
-        }*/
-         
-        if let Some(mut dock_items) = dock.needs_save(){
-            // remove the runviews
-            let mut run_views = Vec::new();
-            dock_items.retain(|id, di| {
-                if let DockItem::Tab{kind,..} = di{
-                    if *kind == live_id!(RunView){
-                        run_views.push(*id);
-                        return false
-                    }
-                }
-                true 
-            }); 
-            for item in dock_items.values_mut(){
-                 if let DockItem::Tabs{tabs,..} = item{
-                     tabs.retain(|id| !run_views.contains(id));
-                 }
-            }
-            // alright lets save it to disk
-            let state = AppStateRon{
-                dock_items,
-                tab_id_to_file_node_id: self.data.file_system.tab_id_to_file_node_id.clone()
-            };
-            let saved = state.serialize_ron();
-            let mut f = File::create("makepad_state.ron").expect("Unable to create file");
-            f.write_all(saved.as_bytes()).expect("Unable to write data");
-        }
+        self.maybe_save_state();
     }
 }
 
@@ -587,6 +584,7 @@ impl AppMain for App {
 use std::collections::HashMap;
 #[derive(SerRon, DeRon)]
 pub struct AppStateRon{
+    designer_selected_files: HashMap<LiveId, String>,
     dock_items: HashMap<LiveId, DockItem>,
     tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
 }

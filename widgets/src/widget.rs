@@ -1,6 +1,5 @@
 pub use crate::register_widget;
 use {
-    crate::makepad_derive_widget::*,
     crate::makepad_draw::*,
     std::any::TypeId,
     std::cell::RefCell,
