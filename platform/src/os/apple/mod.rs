@@ -15,6 +15,9 @@ pub mod tvos;
 #[cfg(target_os = "macos")]
 pub mod metal_xpc;
 
+#[cfg(apple_bundle)]
+mod apple_resources;
+
 pub mod url_session;
 pub mod apple_classes;
 pub mod audio_unit;
@@ -31,4 +34,3 @@ pub(crate) use self::tvos::*;
 
 pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
 pub(crate) use self::url_session::{OsWebSocket};
-
