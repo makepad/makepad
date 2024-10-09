@@ -255,7 +255,6 @@ impl DrawText {
         //    .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
         //self.draw_vars.user_uniforms[0] = sdf_radius;
         //self.draw_vars.user_uniforms[1] = sdf_cutoff;
-        //println!("{}, {}", sdf_radius, sdf_cutoff);
     }
     
     pub fn get_line_spacing(&self) -> f64 {

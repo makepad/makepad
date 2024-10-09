@@ -124,6 +124,8 @@ impl DesignerData{
                                 ptr,
                                 children
                             });
+                            // find all the components that start with app_ and make sure the folder is visible
+                            
                         }
                         else{
                             //   log!("NOT A WIDGET {}", nodes[index].id);
@@ -188,7 +190,7 @@ impl DesignerData{
                     if map.get_mut(&what_uid).is_some(){
                         return path_split(what_uid, path_hash, rest, map, file_id)
                     }
-                                            
+                    
                     map.insert(what_uid, OutlineNode::Folder{
                         name: folder.to_string(),
                         children: SmallVec::new()
