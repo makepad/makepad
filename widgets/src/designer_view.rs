@@ -463,7 +463,17 @@ impl Widget for DesignerView {
                     Some(OutlineNode::File{children,..})=>{
                         for child in children{
                             if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(child){
-                                self.draw_container(cx, *child, *ptr, name);
+                                println!("got {}", name);
+                                if name == "App=<App>"{ // we need to skip inwards to 
+                                    if let Some(child) = data.get_node_by_path(*child, "ui:/main_window=/body="){
+                                        if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(&child){
+                                            self.draw_container(cx, child, *ptr, name);
+                                        }
+                                    }
+                                }
+                                else{
+                                    self.draw_container(cx, *child, *ptr, name);
+                                }
                             }
                         }
                     }
