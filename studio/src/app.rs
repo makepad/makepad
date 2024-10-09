@@ -89,8 +89,8 @@ impl App {
                             self.data.file_system.request_open_file(*tab_id, *file_node_id);
                         }
                     };
-                    self.data.build_manager.designer_selected_files = 
-                        state.designer_selected_files;
+                    //self.data.build_manager.designer_selected_files = 
+                     //   state.designer_selected_files;
                 }
                 Err(e)=>{
                     println!("ERR {:?}",e);
@@ -121,7 +121,7 @@ impl App {
             // alright lets save it to disk
             let state = AppStateRon{
                 dock_items,
-                designer_selected_files: self.data.build_manager.designer_selected_files.clone(),
+                //designer_selected_files: self.data.build_manager.designer_selected_files.clone(),
                 tab_id_to_file_node_id: self.data.file_system.tab_id_to_file_node_id.clone()
             };
             let saved = state.serialize_ron();
@@ -135,7 +135,7 @@ impl App {
 pub struct AppData{ 
     pub build_manager: BuildManager,
     pub file_system: FileSystem,
-    pub ai_chat_manager: AiChatManager
+    pub ai_chat_manager: AiChatManager,
 }
 
 // all global app commands coming in from keybindings, and UI components
@@ -584,7 +584,6 @@ impl AppMain for App {
 use std::collections::HashMap;
 #[derive(SerRon, DeRon)]
 pub struct AppStateRon{
-    designer_selected_files: HashMap<LiveId, String>,
     dock_items: HashMap<LiveId, DockItem>,
     tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
 }

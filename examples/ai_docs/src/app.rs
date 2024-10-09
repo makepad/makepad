@@ -23,7 +23,7 @@ live_design!{
         }
     }
 }
-
+/*
 // Below is an application with a horizontally stacked set of buttons and a slider
 live_design!{
     import makepad_widgets::base::*;
@@ -125,23 +125,7 @@ live_design!{
             }
         }
     }
-}
-
-// Text input component
-input1 = <TextInput> {
-    // here we set a text input to fixed with
-    width: 100
-    text: "Click to count"
-}
-// Basic label component
-label1 = <Label> {
-    draw_text: {
-        color: #f
-    },
-    text: r#"Lorem ipsum dolor sit amet"#,
-    width: 200.0,
-}
-
+}*/
 
 // The following Rust code is the minimum required for an applicaiton
 app_main!(App); 
@@ -170,7 +154,7 @@ impl AppMain for App {
 
 // THe following code can be changed depending on what components are in use
 impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
         }
     }

@@ -10,6 +10,7 @@ use {
             StdinScroll, StdinToHost,
         },
         makepad_platform::studio::{
+            ComponentPosition,
             AppToStudio, AppToStudioVec, EventSample, GPUSample, StudioToApp, StudioToAppVec,
         },
         makepad_shell::*,
@@ -128,9 +129,54 @@ pub struct BuildManager {
     pub recv_studio_msg: ToUIReceiver<(LiveId, AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
-    pub designer_selected_files: HashMap<LiveId, String>,
+    pub designer_state: DesignerState,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, LiveId, mpsc::Sender<Vec<u8>>)>>>>,
+}
+
+#[derive(Default, SerRon, DeRon)]
+pub struct DesignerState{
+    selected_files: HashMap<LiveId, String>,
+    component_positions: HashMap<LiveId, Vec<ComponentPosition>>
+}
+
+impl DesignerState{
+    fn save_state(&self){
+        let saved = self.serialize_ron();
+        let mut f = File::create("makepad_designer.ron").expect("Unable to create file");
+        f.write_all(saved.as_bytes()).expect("Unable to write data");
+    }
+        
+    fn load_state(&mut self){
+        if let Ok(contents) = std::fs::read_to_string("makepad_designer.ron") {
+            match DesignerState::deserialize_ron(&contents) {
+                Ok(state)=>{
+                    *self = state
+                }
+                Err(e)=>{
+                    println!("ERR {:?}",e);
+                }
+            }
+        }
+    }
+    
+    fn store_position(&mut self, build_id: LiveId, pos:ComponentPosition){
+        use std::collections::hash_map::Entry;
+        match self.component_positions.entry(build_id) {
+            Entry::Occupied(mut v) => {
+                let vec = v.get_mut();
+                if let Some(v) =  vec.iter_mut().find(|v| v.path == pos.path){
+                    *v = pos;
+                }
+                else{
+                    vec.push(pos);
+                }
+            },
+            Entry::Vacant(v) => {
+                v.insert(vec![pos]);
+            }
+        }
+    }
 }
 
 pub struct BuildBinary {
@@ -442,10 +488,14 @@ impl BuildManager {
                         AppToStudio::JumpToFile(jt) => {
                             cx.action(AppAction::JumpTo(jt));
                         }
+                        AppToStudio::DesignerComponentMoved(mv)=>{
+                            self.designer_state.store_position(build_id, mv);
+                            self.designer_state.save_state();
+                        }
                         AppToStudio::DesignerStarted=>{
                             // send the app the select file init message
                             if let Ok(d) = self.active_build_websockets.lock() {
-                                if let Some(file_name) = self.designer_selected_files.get(&build_id){
+                                if let Some(file_name) = self.designer_state.selected_files.get(&build_id){
                                     let data = StudioToAppVec(vec![StudioToApp::DesignerSelectFile {
                                         file_name: file_name.clone()
                                     }]).serialize_bin();
@@ -462,7 +512,8 @@ impl BuildManager {
                         }
                         AppToStudio::DesignerFileSelected{file_name}=>{
                             // alright now what. lets 
-                            self.designer_selected_files.insert(build_id, file_name);
+                            self.designer_state.selected_files.insert(build_id, file_name);
+                            self.designer_state.save_state();
                         }
                     }
                 }

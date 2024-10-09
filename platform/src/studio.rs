@@ -48,6 +48,15 @@ pub struct PatchFile{
     pub replace: String
 }
 
+#[derive(SerBin, DeBin, SerRon, DeRon, Debug, Clone)]
+pub struct ComponentPosition{
+    pub path: String,
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64
+}
+
 #[derive(SerBin, DeBin, Debug, Clone)]
 pub struct EditFile{
     pub file_name: String,
@@ -65,6 +74,7 @@ pub enum AppToStudio{
     GPUSample(GPUSample),
     JumpToFile(JumpToFile),
     PatchFile(PatchFile),
+    DesignerComponentMoved(ComponentPosition),
     EditFile(EditFile),
     DesignerStarted,
     DesignerFileSelected{
@@ -81,6 +91,9 @@ pub enum StudioToApp{
     LiveChange{
         file_name: String,
         content: String
+    },
+    DesignerLoadState{
+        positions: Vec<ComponentPosition>
     },
     DesignerSelectFile{
         file_name: String,
