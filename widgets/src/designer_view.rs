@@ -15,7 +15,6 @@ live_design!{
     
     DesignerContainerBase = {{DesignerContainer}}{
     }
-    
 }
 
 #[derive(Clone, Debug, DefaultNone)]
@@ -155,6 +154,7 @@ impl DesignerView{
     fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str){
         let registry = cx.live_registry.clone();
         let registry = registry.borrow();
+        
         let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
             rect(info.dx, info.dy, info.dw, info.dh)
         }
@@ -209,6 +209,11 @@ impl DesignerView{
         if let Some(container) = self.containers.get_mut(&id){
             container.container.redraw(cx);
             container.rect = rect;
+            // lets send the info over
+            
+            // ok first we have to build a
+            
+            /*
             // alright lets send over the rect to the editor
             // we need to find out the text position
             let registry = cx.live_registry.clone();
@@ -234,7 +239,7 @@ impl DesignerView{
                     replace
                 }));
                 //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
-            }
+            }*/
         }
     }
 }
@@ -463,7 +468,6 @@ impl Widget for DesignerView {
                     Some(OutlineNode::File{children,..})=>{
                         for child in children{
                             if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(child){
-                                println!("got {}", name);
                                 if name == "App=<App>"{ // we need to skip inwards to 
                                     if let Some(child) = data.get_node_by_path(*child, "ui:/main_window=/body="){
                                         if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(&child){
