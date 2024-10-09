@@ -26,6 +26,10 @@ impl LiveHook for Designer {
     fn before_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
         self.data.update_from_live_registry(cx);
     }
+    
+    fn after_new_from_doc(&mut self, _cx:&mut Cx){
+        Cx::send_studio_message(AppToStudio::DesignerStarted);
+    }
 }
 
 impl Designer{
@@ -60,14 +64,22 @@ impl WidgetMatchEvent for Designer{
         let designer_view = self.ui.designer_view(id!(designer_view));
         if let Some((outline_id, km, tap_count)) = designer_view.selected(&actions){
             // select the right node in the filetree
-            let path = self.data.construct_path(outline_id);
-            outline_tree.select_and_show_node(cx, &path);
+            let path_ids = self.data.construct_path_ids(outline_id);
+            outline_tree.select_and_show_node(cx, &path_ids);
             // if we click with control
             if km.control || tap_count > 1{
                 self.studio_jump_to_component(cx, outline_id)
             }
         }
-        
+        // ok lets see if we have a designerselectfile action
+        for action in actions{
+            if let StudioToApp::DesignerSelectFile{file_name} = action.cast_ref(){
+                let path_ids = DesignerData::path_str_to_path_ids(&file_name);
+                outline_tree.select_and_show_node(cx, &path_ids);
+                designer_view.select_component_and_redraw(cx, None);
+                designer_view.view_file_and_redraw(cx, *path_ids.last().unwrap());
+            }
+        }
         if let Some((outline_id,km)) = outline_tree.selected(&actions) {
             // alright we have a folder clicked
             // lets get a file/line number out of it so we can open it in the code editor.
@@ -75,6 +87,11 @@ impl WidgetMatchEvent for Designer{
             if let Some(node) = self.data.node_map.get(&outline_id){
                 match node{
                     OutlineNode::File{file_id,..}=>{
+                        let path_ids = self.data.construct_path_ids(outline_id);
+                        let file_name = self.data.path_ids_to_string(&path_ids);
+                        Cx::send_studio_message(AppToStudio::DesignerFileSelected{
+                            file_name
+                        });
                         if km.control{
                             self.studio_jump_to_file(cx, *file_id);
                         }

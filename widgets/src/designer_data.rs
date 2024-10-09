@@ -171,13 +171,14 @@ impl DesignerData{
                             
             fn path_split<'a>(parent_id: LiveId, path_hash:&mut String, name:&str, map:&mut HashMap<LiveId, OutlineNode>, file_id:LiveFileId)->LiveId{
                 if let Some((folder,rest)) = name.split_once("/"){
-                    path_hash.push_str(folder);
-                    path_hash.push_str("/");
                                             
                     if folder == "src"{ // flatten this
                         return path_split(parent_id, path_hash, rest, map, file_id)
                     }
-                                                                
+                    
+                    path_hash.push_str(folder);
+                    path_hash.push_str("/");
+                                                                                    
                     let what_uid =  LiveId::from_str(&path_hash).into();
                                             
                     // add node to pareht
@@ -230,7 +231,7 @@ impl DesignerData{
         None
     }
     
-    pub fn construct_path(&mut self, find_node:LiveId)->Vec<LiveId>{
+    pub fn construct_path_ids(&self, find_node:LiveId)->Vec<LiveId>{
         let mut result = Vec::new();
         result.push(find_node);
         let mut iter = find_node;
@@ -240,8 +241,34 @@ impl DesignerData{
         }
         result
     }
-        
-    pub fn find_parent(&mut self, find_node:LiveId)->Option<LiveId>{
+    
+    pub fn path_ids_to_string(&self, path:&[LiveId])->String{
+        let mut path_str= String::new();
+        for node_id in path{
+            if let Some(node) = self.node_map.get(&node_id){
+                match node{
+                    OutlineNode::Folder{name,..} | OutlineNode::File{name,..}=>{
+                        path_str.push_str(name);
+                        path_str.push_str("/");
+                    }
+                    _=>()
+                }
+            }
+        }
+        path_str
+    }
+    
+    pub fn path_str_to_path_ids(path:&str)->Vec<LiveId>{
+        let mut path_id = Vec::new();
+        for (idx,_) in path.match_indices('/'){
+            let slice = &path[0..idx+1];
+            let hash =  LiveId::from_str(slice).into();
+            path_id.push(hash);
+        }
+        path_id
+    }
+
+    pub fn find_parent(&self, find_node:LiveId)->Option<LiveId>{
         for (node_id, node) in &self.node_map{
             match node{
                 OutlineNode::Component{children,..} | OutlineNode::Virtual{children,..} | OutlineNode::File{children,..} | OutlineNode::Folder{children, ..} =>{
