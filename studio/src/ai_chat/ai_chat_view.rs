@@ -335,6 +335,21 @@ impl AiChatView{
                         doc.file.set_auto_run(self.history_slot, item_id, value);
                     }
                     
+                    if let Some(ke) = item.text_input(id!(message_input)).key_down_unhandled(actions){
+                        if ke.key_code == KeyCode::ReturnKey && ke.modifiers.logo{
+                            // run it
+                            cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
+                        }
+                        if ke.key_code == KeyCode::ArrowLeft && ke.modifiers.logo{
+                            self.history_slot = self.history_slot.saturating_sub(1);
+                            cx.action(AppAction::RedrawAiChat{chat_id});
+                        }
+                        if ke.key_code == KeyCode::ArrowRight && ke.modifiers.logo{
+                            self.history_slot = (self.history_slot + 1).min(doc.file.history.len().saturating_sub(1));
+                            cx.action(AppAction::RedrawAiChat{chat_id});                 
+                        }
+                    }
+                    
                     if item.button(id!(run_button)).pressed(actions){
                         cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
                     }
