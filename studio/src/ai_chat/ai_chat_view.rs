@@ -45,19 +45,7 @@ live_design!{
                 icon_walk: { width: 9. }
             }
 
-            auto_run = <CheckBoxCustom> {
-                text: "Auto",
-                align: { y: 0.5 }
-                draw_check: { check_type: None }
-                spacing: (THEME_SPACE_1),
-                padding: <THEME_MSPACE_V_2> {}
-                icon_walk: {width: 10. }
-                draw_icon: {
-                    color: (THEME_COLOR_D_4),
-                    color_active: (STUDIO_PALETTE_6),
-                    svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
-                }
-            }
+            
 
             <Vr> { height: 17.5}
 
@@ -210,7 +198,21 @@ live_design!{
                 align: { x: 0.0, y: 0.5},
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                 spacing: (THEME_SPACE_2),
-
+                
+                auto_run = <CheckBoxCustom> {
+                    text: "Auto run",
+                    align: { y: 0.5 }
+                    draw_check: { check_type: None }
+                    spacing: (THEME_SPACE_1),
+                    padding: <THEME_MSPACE_V_2> {}
+                    icon_walk: {width: 10. }
+                    draw_icon: {
+                        color: (THEME_COLOR_D_4),
+                        color_active: (STUDIO_PALETTE_6),
+                        svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
+                    }
+                }
+/*
                 <P> {
                     width: Fit,
                     height: Fit,
@@ -220,7 +222,7 @@ live_design!{
                     text: "First Prompt / "
                 }
                 <Pbold> { width: Fit, text: "Last Prompt" }
-
+*/
                 <View> { width: Fill }
 
                 history_left = <ButtonFlatter> {
@@ -299,6 +301,11 @@ impl AiChatView{
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get_mut(&chat_id){
+                                
+                if let Some(value) = self.view.check_box(id!(auto_run)).changed(actions){
+                    doc.auto_run = value;
+                }
+                
                 if let Some(wa) = actions.widget_action(id!(copy_button)){
                     if wa.widget().as_button().pressed(actions){
                         let code_view = wa.widget_nth(2).widget(id!(code_view));
@@ -333,9 +340,6 @@ impl AiChatView{
                         cx.action(AppAction::CancelAiGeneration{chat_id});
                     }
                     
-                    if let Some(value) = item.check_box(id!(auto_run)).changed(actions){
-                        doc.file.set_auto_run(self.history_slot, item_id, value);
-                    }
                     
                     if let Some(ke) = item.text_input(id!(message_input)).key_down_unhandled(actions){
                         if ke.key_code == KeyCode::ReturnKey && ke.modifiers.logo{
@@ -422,7 +426,8 @@ impl Widget for AiChatView {
                     .max_by(|(_, a), (_, b)| a.last_time.total_cmp(&b.last_time))
                     .map(|(index, _)| index).unwrap_or(0);
                 }
-                                
+                
+                self.view.check_box(id!(auto_run)).set_selected(cx, doc.auto_run);
                 
                 let history_len = doc.file.history.len(); 
                 self.view.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
