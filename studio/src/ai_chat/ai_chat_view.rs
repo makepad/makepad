@@ -39,7 +39,7 @@ live_design!{
                 spacing: (THEME_SPACE_1)
 
                 <Pbold> { width: Fit, text: "Project", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                project_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
+                project_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> {
@@ -49,7 +49,7 @@ live_design!{
                 spacing: (THEME_SPACE_1)
 
                 <Pbold> { width: Fit, text: "Context", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                context_dropdown = <DropDown>{ width: Fit, popup_menu_position: BelowInput }
+                context_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> {
@@ -58,8 +58,8 @@ live_design!{
                 height: Fit,
                 spacing: 0.
 
-                <Pbold> { width: Fit, text: "Model"}
-                model_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
+                <Pbold> { width: Fit, text: "Model", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                model_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> { width: Fill }
@@ -83,7 +83,7 @@ live_design!{
                     color: (THEME_COLOR_U_4),
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                 }
-                icon_walk: { width: 8. }
+                icon_walk: { width: 6. }
             }
 
         }

@@ -56,7 +56,12 @@ live_design!{
         align: { x: 0., y: 0. }
         spacing: (THEME_SPACE_2)
         <Filler> {}
-        <P> { width: Fit, text: "Open here"}
+        <P> {
+            width: Fit,
+            text: "Default dock for",
+            margin: 0.,
+            padding: <THEME_MSPACE_1> {}
+        }
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
@@ -502,7 +507,12 @@ live_design!{
                 padding: 0.,
                 <DockToolbar> {
                     content = {
-                        <Pbold> { width: Fit, text: "Types" } 
+                        <Pbold> {
+                            width: Fit,
+                            text: "Types",
+                            margin: 0.,
+                            padding: <THEME_MSPACE_1> {}
+                        }
                         <CheckBoxToggle> { text: "Release", }
                         <CheckBoxToggle> { text: "Debug"}
                     }
@@ -514,14 +524,14 @@ live_design!{
                 <DockToolbar> {
                     content = {
                         spacing: (THEME_SPACE_2)
+                        align: { y: 0.5 }
                         <TextInput> {
                             width: Fill,
                             empty_message: "Search",
                         }
 
                         <CheckBoxCustom> {
-                            margin: <THEME_MSPACE_2> {},
-                            padding: <THEME_MSPACE_2> {},
+                            padding: 0.
                             text: ""
                             draw_check: { check_type: None }
                             icon_walk: {width: 14.}
@@ -532,6 +542,7 @@ live_design!{
                             }
                         }
                         <CheckBoxCustom> {
+                            padding: 0.
                             text:""
                             draw_check: { check_type: None }
                             icon_walk: {width: 16.}
@@ -542,6 +553,7 @@ live_design!{
                             }
                         }
                         <CheckBoxCustom> {
+                            padding: 0.
                             text:""
                             draw_check: { check_type: None }
                             icon_walk: {width: 12.}
@@ -610,7 +622,9 @@ live_design!{
                             <CheckBoxCustom> {
                                 margin: {left: (THEME_SPACE_1)}
                                 text:"Error"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -620,7 +634,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Warning"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -630,7 +646,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Log"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -640,7 +658,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Wait"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -650,7 +670,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Panic"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -699,14 +721,14 @@ live_design!{
                             spacing: 0.,
                             <Pbold> {
                                 width: Fit,
-                                text: "Last",
+                                text: "Last ",
                                 margin: 0.,
                                 padding: <THEME_MSPACE_V_1> {}
                                 draw_text: { color: (THEME_COLOR_D_4) }
                             }
                             <P> {
                                 width: Fit,
-                                text: "Last",
+                                text: "500 ms",
                                 margin: 0.,
                                 padding: <THEME_MSPACE_V_1> {}
                                 draw_text: { color: (THEME_COLOR_D_4) }
