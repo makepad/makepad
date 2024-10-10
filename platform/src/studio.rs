@@ -1,5 +1,6 @@
 use crate::makepad_micro_serde::*;
 use crate::makepad_derive_live::*;
+use crate::LiveId;
 use crate::action::*;
 use crate::log::LogLevel;
 pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
@@ -50,11 +51,11 @@ pub struct PatchFile{
 
 #[derive(SerBin, DeBin, SerRon, DeRon, Debug, Clone)]
 pub struct ComponentPosition{
-    pub path: String,
+    pub id: LiveId,
     pub left: f64,
     pub top: f64,
-    pub right: f64,
-    pub bottom: f64
+    pub width: f64,
+    pub height: f64
 }
 
 #[derive(SerBin, DeBin, Debug, Clone)]

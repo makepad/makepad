@@ -139,12 +139,12 @@ impl WidgetMatchEvent for Designer{
 impl Widget for Designer {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         self.widget_match_event(cx, event, scope);
-        let mut scope = Scope::with_props(&self.data);
+        let mut scope = Scope::with_data(&mut self.data);
         self.ui.handle_event(cx, event, &mut scope);
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, _walk: Walk) -> DrawStep {
-        let mut scope = Scope::with_props(&self.data);
+        let mut scope = Scope::with_data(&mut self.data);
         self.ui.draw(cx, &mut scope)
     }
 }

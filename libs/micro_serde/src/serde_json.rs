@@ -1,6 +1,7 @@
 use std::collections::{HashMap};
 use std::hash::Hash;
 use std::str::Chars;
+use makepad_live_id::LiveId;
 
 pub struct SerJsonState {
     pub out: String
@@ -553,6 +554,19 @@ impl_ser_de_json_signed!(i16, std::i64::MIN, std::i64::MAX);
 impl_ser_de_json_signed!(i8, std::i64::MIN, std::i8::MAX);
 impl_ser_de_json_float!(f64);
 impl_ser_de_json_float!(f32);
+
+impl SerJson for LiveId {
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        self.0.ser_json(d, s);
+    }
+}
+
+impl DeJson for LiveId {
+    fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Self,
+    DeJsonErr> {
+        Ok(LiveId(u64::de_json(s, i)?))
+    }
+}
 
 impl<T> SerJson for Option<T> where T: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {

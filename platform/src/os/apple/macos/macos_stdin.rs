@@ -63,6 +63,7 @@ impl Cx {
         stdin_windows: &mut [StdinWindow],
         time: f32,
     ) {
+        //self.demo_time_repaint = false;
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
