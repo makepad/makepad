@@ -4483,7 +4483,7 @@ live_design! {
         <DockToolbar> {
             content = {
                 align: { x: 0., y: 0.5 }
-                spacing: (THEME_SPACE_3)
+                spacing: (THEME_SPACE_3 * 1.5)
                 <ButtonFlat> {
                     width: 32.
                     text: ""
@@ -4498,29 +4498,69 @@ live_design! {
                     width: Fit,
                     flow: Right,
                     spacing: (THEME_SPACE_1)
-                    <Pbold> { width: Fit, text: "Font" }
-                    <P> { width: Fit, text: "Noto Sans" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Font",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "Noto Sans",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 }
                 <View> {
                     width: Fit,
                     spacing: (THEME_SPACE_1)
                     flow: Right,
-                    <Pbold> { width: Fit, text: "Weight" }
-                    <P> { width: Fit, text: "Bold" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Weight",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "bold",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 }
                 <View> {
                     width: Fit,
                     spacing: (THEME_SPACE_1)
                     flow: Right,
-                    <Pbold> { width: Fit, text: "Size" }
-                    <P> { width: Fit, text: "11 pt" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Size",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "11 pt",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 } 
                 <View> {
                     width: Fit,
                     spacing: (THEME_SPACE_1)
                     flow: Right,
-                    <Pbold> { width: Fit, text: "Line height" }
-                    <P> { width: Fit, text: "1.2" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Line height",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "1.2",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 } 
                 <Vr> {}
                 <View> {
@@ -4944,13 +4984,16 @@ live_design! {
                     flow: Down,
                     <DockToolbar> {
                         content = {
+                            margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                             align: { x: 0., y: 0.0 }
                             spacing: (THEME_SPACE_3)
                             <Pbold> {
                                 width: Fit,
-                                margin: {left: (THEME_SPACE_1) },
-                                text: "Filter"
+                                text: "Filter",
+                                margin: 0.,
+                                padding: <THEME_MSPACE_V_1> {}
                             }
+
                             <View> {
                                 width: Fit
                                 flow: Right,
