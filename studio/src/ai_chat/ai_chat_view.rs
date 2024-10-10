@@ -22,7 +22,6 @@ live_design!{
         flow: Down,
         margin: <THEME_MSPACE_2> {}
         padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) } 
-
         draw_bg: { color: (THEME_COLOR_U_1) }
 
         <View> {
@@ -30,7 +29,21 @@ live_design!{
             flow: Right,
             align: { x: 0., y: 0. },
             spacing: (THEME_SPACE_3),
-            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1) }
+            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1) }
+
+            run_button = <ButtonFlat> {
+                width: Fit,
+                height: Fit,
+                padding: 6.,
+                margin: <THEME_MSPACE_V_1> {}
+                draw_icon: {
+                    color: (THEME_COLOR_MAKEPAD),
+                    svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                }
+                icon_walk: { width: 9. }
+            }
+
+            <Vr> { height: 17.5}
 
             <View> {
                 flow: Right,
@@ -63,6 +76,8 @@ live_design!{
 
             <View> { width: Fill }
 
+            <Vr> { height: 17.5}
+
             <View> {
                 flow: Right,
                 width: Fit,
@@ -73,16 +88,6 @@ live_design!{
                     text: "Autorun",
                     width: Fit,
                 }
-            }
-
-            run_button = <ButtonFlatter> {
-                width: Fit,
-                height: Fit,
-                draw_icon: {
-                    color: (THEME_COLOR_U_4),
-                    svg_file: dep("crate://self/resources/icons/icon_run.svg"),
-                }
-                icon_walk: { width: 6. }
             }
 
         }
