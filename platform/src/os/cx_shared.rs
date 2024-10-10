@@ -49,10 +49,8 @@ impl Cx {
         loop { // loop untill we don't propagate anymore
             let mut altered = false;
             for pass_id in self.passes.id_iter(){
-                if let CxPassParent::Window(_) = self.passes[pass_id].parent{
-                    if self.demo_time_repaint {
-                        self.passes[pass_id].paint_dirty = true;
-                    }
+                if self.demo_time_repaint {
+                    self.passes[pass_id].paint_dirty = true;
                 }
                 if self.passes[pass_id].paint_dirty {
                     let other = match self.passes[pass_id].parent {
@@ -106,7 +104,7 @@ impl Cx {
     }
     
     pub (crate) fn need_redrawing(&self) -> bool {
-        self.new_draw_event.will_redraw() || self.demo_time_repaint
+        self.new_draw_event.will_redraw() 
     }
     
     

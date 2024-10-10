@@ -3,6 +3,7 @@ use std::{
     hash::Hash,
     str,
 };
+use makepad_live_id::LiveId;
 
 #[allow(unused_imports)]
 #[cfg(any(target_os = "android", target_os = "linux", target_os="macos", target_os="ios"))]
@@ -99,6 +100,18 @@ impl DeBin for usize {
         let ret = u64::from_le_bytes(d[*o..*o+l].try_into().unwrap()) as usize;
         *o += l;
         Ok(ret)
+    }
+}
+
+impl SerBin for LiveId {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.0.ser_bin(s);
+    }
+}
+
+impl DeBin for LiveId {
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<LiveId, DeBinErr> {
+        Ok(LiveId(u64::de_bin(o, d)?))
     }
 }
 
