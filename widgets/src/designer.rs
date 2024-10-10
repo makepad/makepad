@@ -87,8 +87,9 @@ impl WidgetMatchEvent for Designer{
                 designer_view.select_component_and_redraw(cx, None);
                 designer_view.view_file_and_redraw(cx, *path_ids.last().unwrap());
             }
-             if let StudioToApp::DesignerLoadState{positions} = action.cast_ref(){
-                 
+             if let StudioToApp::DesignerLoadState{positions, zoom_pan} = action.cast_ref(){
+                 self.data.positions = positions.clone();
+                 designer_view.set_zoom_pan(cx,zoom_pan);
              }
         }
         if let Some((outline_id,km)) = outline_tree.selected(&actions) {
