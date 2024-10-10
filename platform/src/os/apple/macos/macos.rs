@@ -343,7 +343,7 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 // ok here we send out to all our childprocesses
-                self.demo_time_repaint = false;
+                //self.demo_time_repaint = false;
                 self.handle_repaint(metal_windows, metal_cx);
                 
             }

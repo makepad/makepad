@@ -144,7 +144,7 @@ pub struct DesignerView {
 }
 
 impl LiveHook for DesignerView {
-    fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
+    fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
         
         // find a bit cleaner way to do this
         self.reapply = true;
@@ -152,15 +152,20 @@ impl LiveHook for DesignerView {
 }
 
 impl DesignerView{
-    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str){
-        let registry = cx.live_registry.clone();
-        let registry = registry.borrow();
+    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str, pos: &mut Vec<ComponentPosition>){
         
-        let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
-            rect(info.dx, info.dy, info.dw, info.dh)
+        let rect = if let Some(v) = pos.iter().find(|v| v.id == id){
+            rect(v.left, v.top, v.width, v.height)
         }
         else{
-            rect(50.0,50.0,200.0,300.0)
+            pos.push(ComponentPosition{
+                id,
+                left: 50.0,
+                top: 50.0,
+                width: 200.0,
+                height: 200.00
+            });
+            return self.draw_container(cx, id, ptr, name, pos);
         };
                                     
         let container_ptr = self.container.unwrap();
@@ -176,7 +181,6 @@ impl DesignerView{
         });
         cd.rect = rect;
         cd.ptr = ptr;
-        println!("{:?}", rect);
         // fix up the livecoding of the
         if self.reapply{
             cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
@@ -207,12 +211,19 @@ impl DesignerView{
         self.selected_component = what_id;
     }
     
-    fn patch_design_info(&mut self, cx:&mut Cx, id: LiveId, rect:Rect){
+    fn update_rect(&mut self, cx:&mut Cx, id: LiveId, rect:Rect, pos:&mut Vec<ComponentPosition>){
         if let Some(container) = self.containers.get_mut(&id){
             container.container.redraw(cx);
             container.rect = rect;
             // lets send the info over
-            
+            if let Some(v) = pos.iter_mut().find(|v| v.id == id){
+                v.left = rect.pos.x;
+                v.top = rect.pos.y;
+                v.width = rect.size.x;
+                v.height = rect.size.y;
+                // alright lets send it over
+                Cx::send_studio_message(AppToStudio::DesignerComponentMoved(v.clone()));
+            }
             // ok first we have to build a
             
             /*
@@ -252,7 +263,7 @@ impl Widget for DesignerView {
         // alright so. our widgets dont have any 'event' flow here
         // so what can we do.
         // 
-        
+        let data = scope.data.get_mut::<DesignerData>().unwrap();
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
                 // lets poll our widget structure with a special event
@@ -392,7 +403,7 @@ impl Widget for DesignerView {
                                 pos: rect.pos + delta,
                                 size: rect.size
                             };
-                            self.patch_design_info(cx, id, r);
+                            self.update_rect(cx, id, r, &mut data.positions);
                         }
                     }
                     FingerMove::DragEdge{edge, rect, id}=>{
@@ -419,7 +430,7 @@ impl Widget for DesignerView {
                                  size: rect.size
                              }
                         };
-                        self.patch_design_info(cx, *id, rect);
+                        self.update_rect(cx, *id, rect, &mut data.positions);
                     }
                     FingerMove::DragBody{ptr:_}=>{
                         
@@ -460,7 +471,7 @@ impl Widget for DesignerView {
     
             cx.begin_pass_sized_turtle_no_clip(Layout::flow_down());
             
-            let data = scope.props.get::<DesignerData>().unwrap();
+            let data = scope.data.get_mut::<DesignerData>().unwrap();
             
             // lets draw the component container windows and components
             
@@ -475,12 +486,16 @@ impl Widget for DesignerView {
                                 if name == "App=<App>"{ // we need to skip inwards to 
                                     if let Some(child) = data.get_node_by_path(*child, "ui:/main_window=/body="){
                                         if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(&child){
-                                            self.draw_container(cx, child, *ptr, name);
+                                            // lets fetch the position of this thing
+                                            
+                                            self.draw_container(cx, child, *ptr, name, &mut data.positions);
                                         }
                                     }
                                 }
                                 else{
-                                    self.draw_container(cx, *child, *ptr, name);
+                                    // lets fetch the position of this thing
+                                    
+                                    self.draw_container(cx, *child, *ptr, name, &mut data.positions);
                                 }
                             }
                         }
