@@ -41,6 +41,7 @@ live_design!{
     RunButton = <CheckBox> {
         width: Fill,
         
+        margin: <THEME_MSPACE_H_1> {}
         draw_check: {
             uniform size: 3.5;
             instance open: 0.0
