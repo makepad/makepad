@@ -22,7 +22,7 @@ impl Widget for DesignerToolbox {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
-        let _data = scope.props.get::<DesignerData>().unwrap();
+        let _data = scope.data.get::<DesignerData>().unwrap();
         while let Some(_next) = self.view.draw(cx, &mut Scope::empty()).step() {
         }
         DrawStep::done()
