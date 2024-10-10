@@ -234,6 +234,7 @@ impl Widget for DropDown {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animator_play(cx, id!(hover.off));
+                    return;
                 }
             }
         }
