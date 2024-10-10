@@ -108,7 +108,9 @@ impl LiveHook for DesignerOutlineTree {
                 self.templates.insert(id, live_ptr);
                 for (_, (node, templ_id)) in self.tree_nodes.iter_mut() {
                     if *templ_id == id {
+                        let opened = node.opened;
                         node.apply(cx, apply, index, nodes);
+                        node.opened = opened;
                     }
                 }
             }
