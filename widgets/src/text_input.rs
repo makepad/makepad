@@ -65,11 +65,19 @@ impl TextInput {
         });
     }
 
-    pub fn filter_input(&mut self, input: String) -> String {
+    pub fn filter_input(&mut self, input: String, is_replace: bool) -> String {
         if self.is_numeric_only {
+            let mut dot = if is_replace {
+                false
+            } else {
+                let before = &self.text.split_at(self.cursor.start().index).0;
+                let after = &self.text.split_at(self.cursor.end().index).1;
+                before.contains('.') || after.contains('.')
+            };
+
             input.chars().filter_map(|char| {
                 match char {
-                    '.' | ',' => Some('.'),
+                    '.' | ',' if !dot => { dot = true; Some('.') },
                     char if char.is_ascii_digit() => Some(char),
                     _ => None,
                 }
@@ -479,9 +487,8 @@ impl Widget for TextInput {
                 input,
                 replace_last,
                 was_paste,
-                ..
             }) if !self.is_read_only => {
-                let input = self.filter_input(input);
+                let input = self.filter_input(input, false);
                 if !input.is_empty() {
                     let mut start = self.cursor.start().index;
                     let end = self.cursor.end().index;
@@ -651,7 +658,7 @@ impl Widget for TextInput {
         if self.text == text {
             return;
         }
-        self.text = self.filter_input(text.to_string());
+        self.text = self.filter_input(text.to_string(), true);
         self.cursor.head.index = self.cursor.head.index.min(text.len());
         self.cursor.tail.index = self.cursor.tail.index.min(text.len());
         self.history.clear();
