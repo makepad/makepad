@@ -71,7 +71,14 @@ impl Widget for Button {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-
+        
+        match event.hit_designer(cx, self.draw_bg.area()){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
+        
         if self.visible {
             // The button only handles hits when it's visible and enabled.
             // If it's not enabled, we still show the button, but we set
