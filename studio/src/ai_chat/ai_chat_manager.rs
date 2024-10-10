@@ -538,7 +538,6 @@ impl AiChatManager{
                             }
                         }
                     }
-                    println!("{:?}", messages);
                     request.set_json_body(ChatPrompt {
                         messages,
                         model: model.to_string(),
