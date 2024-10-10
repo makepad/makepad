@@ -100,7 +100,7 @@ impl Cx {
                 }
             }
         }
-        
+        self.demo_time_repaint = false;
     }
     
     pub (crate) fn need_redrawing(&self) -> bool {
