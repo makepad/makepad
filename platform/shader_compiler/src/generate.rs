@@ -291,7 +291,7 @@ impl<'a> BlockGenerator<'a> {
         write!(
             self.string,
             "for (int {0} = {1}; {0} {2} {3}; {0} {4} {5}) ",
-            ident,
+            &DisplayVarName(ident, ScopeSymShadow(0)),
             if from <= to {from} else {from - 1},
             if from <= to {"<"} else {">="},
             to,
