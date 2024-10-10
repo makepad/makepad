@@ -50,12 +50,20 @@ pub struct PatchFile{
 }
 
 #[derive(SerBin, DeBin, SerRon, DeRon, Debug, Clone)]
-pub struct ComponentPosition{
+pub struct DesignerComponentPosition{
     pub id: LiveId,
     pub left: f64,
     pub top: f64,
     pub width: f64,
     pub height: f64
+}
+
+
+#[derive(Default, SerBin, DeBin, SerRon, DeRon, Debug, Clone)]
+pub struct DesignerZoomPan{
+    pub zoom: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
 }
 
 #[derive(SerBin, DeBin, Debug, Clone)]
@@ -75,7 +83,8 @@ pub enum AppToStudio{
     GPUSample(GPUSample),
     JumpToFile(JumpToFile),
     PatchFile(PatchFile),
-    DesignerComponentMoved(ComponentPosition),
+    DesignerComponentMoved(DesignerComponentPosition),
+    DesignerZoomPan(DesignerZoomPan),
     EditFile(EditFile),
     DesignerStarted,
     DesignerFileSelected{
@@ -94,7 +103,8 @@ pub enum StudioToApp{
         content: String
     },
     DesignerLoadState{
-        positions: Vec<ComponentPosition>
+        zoom_pan: DesignerZoomPan,
+        positions: Vec<DesignerComponentPosition>
     },
     DesignerSelectFile{
         file_name: String,

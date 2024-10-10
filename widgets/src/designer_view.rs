@@ -152,13 +152,13 @@ impl LiveHook for DesignerView {
 }
 
 impl DesignerView{
-    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str, pos: &mut Vec<ComponentPosition>){
+    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str, pos: &mut Vec<DesignerComponentPosition>){
         
         let rect = if let Some(v) = pos.iter().find(|v| v.id == id){
             rect(v.left, v.top, v.width, v.height)
         }
         else{
-            pos.push(ComponentPosition{
+            pos.push(DesignerComponentPosition{
                 id,
                 left: 50.0,
                 top: 50.0,
@@ -211,7 +211,17 @@ impl DesignerView{
         self.selected_component = what_id;
     }
     
-    fn update_rect(&mut self, cx:&mut Cx, id: LiveId, rect:Rect, pos:&mut Vec<ComponentPosition>){
+    fn sync_zoom_pan(&self, _cx:&mut Cx){
+        Cx::send_studio_message(AppToStudio::DesignerZoomPan(
+            DesignerZoomPan{
+                zoom: self.zoom,
+                pan_x: self.pan.x,
+                pan_y: self.pan.y
+            }
+        ));
+    }
+    
+    fn update_rect(&mut self, cx:&mut Cx, id: LiveId, rect:Rect, pos:&mut Vec<DesignerComponentPosition>){
         if let Some(container) = self.containers.get_mut(&id){
             container.container.redraw(cx);
             container.rect = rect;
@@ -386,7 +396,7 @@ impl Widget for DesignerView {
                 // we should keep it in the same place
                 
                 self.pan += pan1 - pan2;
-                
+                self.sync_zoom_pan(cx);
                 self.redraw(cx);
             }
             Hit::FingerMove(fe) => {
@@ -560,6 +570,15 @@ impl DesignerViewRef{
                 inner.view_file = Some(file_id);
                 inner.redraw(cx);
             }
+        }
+    }
+    
+    pub fn set_zoom_pan (&self, cx:&mut Cx, zp:&DesignerZoomPan){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.zoom = zp.zoom;
+            inner.pan.x = zp.pan_x;
+            inner.pan.y = zp.pan_y;
+            inner.redraw(cx);
         }
     }
     
