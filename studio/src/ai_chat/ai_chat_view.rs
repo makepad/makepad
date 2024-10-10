@@ -73,7 +73,7 @@ live_design!{
                 auto_run = <CheckBox> { text: "Autorun", width: Fit }
             }
 
-        run_button = <ButtonFlatter> {
+            run_button = <ButtonFlatter> {
                 width: Fit,
                 height: Fit,
                 padding: <THEME_MSPACE_1> {}
@@ -323,6 +323,14 @@ impl AiChatView{
                         cx.action(AppAction::CancelAiGeneration{chat_id});
                     }
                     
+                    if let Some(value) = item.check_box(id!(auto_run)).changed(actions){
+                        doc.file.set_auto_run(self.history_slot, item_id, value);
+                    }
+                    
+                    if item.button(id!(run_button)).pressed(actions){
+                        cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
+                    }
+                    
                     if let Some(ctx_id) = item.drop_down(id!(context_dropdown)).selected(actions){
                         let ctx_name = &data.ai_chat_manager.contexts[ctx_id].name;
                         doc.file.set_base_context(self.history_slot, item_id, ctx_name);
@@ -351,6 +359,7 @@ impl AiChatView{
                         // lets fetch the context
                         // println!("{}", dd.selected_item());
                         // alright lets collect the context
+                        println!("SENDING TO BACKEND");
                         cx.action(AppAction::SendAiChatToBackend{chat_id, history_slot: self.history_slot});
                         cx.action(AppAction::SaveAiChat{chat_id});
                         cx.action(AppAction::RedrawAiChat{chat_id});
