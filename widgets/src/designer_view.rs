@@ -144,7 +144,8 @@ pub struct DesignerView {
 }
 
 impl LiveHook for DesignerView {
-    fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
+    fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
+        
         // find a bit cleaner way to do this
         self.reapply = true;
     }
@@ -175,6 +176,7 @@ impl DesignerView{
         });
         cd.rect = rect;
         cd.ptr = ptr;
+        println!("{:?}", rect);
         // fix up the livecoding of the
         if self.reapply{
             cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
@@ -467,6 +469,8 @@ impl Widget for DesignerView {
                 match data.node_map.get(view_file){
                     Some(OutlineNode::File{children,..})=>{
                         for child in children{
+                            // alright so. we need to use a path entry in our
+                            // datastructure
                             if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(child){
                                 if name == "App=<App>"{ // we need to skip inwards to 
                                     if let Some(child) = data.get_node_by_path(*child, "ui:/main_window=/body="){
@@ -534,7 +538,7 @@ impl DesignerViewRef{
         }
     }
     
-    pub fn view_file_and_redraw(&self, cx:&mut Cx, file_id:LiveId) -> Option<(LivePtr,KeyModifiers)> {
+    pub fn view_file_and_redraw(&self, cx:&mut Cx, file_id:LiveId){
         if let Some(mut inner) = self.borrow_mut(){
             if inner.view_file != Some(file_id){
                 inner.containers.clear();
@@ -542,7 +546,13 @@ impl DesignerViewRef{
                 inner.redraw(cx);
             }
         }
-        None
+    }
+    
+    pub fn reload_view(&self, cx:&mut Cx) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.containers.clear();
+            inner.redraw(cx);
+        }
     }
     
     pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers,u32)> {

@@ -27,7 +27,15 @@ impl LiveHook for Designer {
         self.data.update_from_live_registry(cx);
     }
     
+    fn after_update_from_doc(&mut self, cx:&mut Cx){
+        let designer_view = self.ui.designer_view(id!(designer_view));
+        designer_view.reload_view(cx);
+        let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
+        outline_tree.redraw(cx);
+    }
+    
     fn after_new_from_doc(&mut self, _cx:&mut Cx){
+        
         Cx::send_studio_message(AppToStudio::DesignerStarted);
     }
 }
@@ -79,6 +87,9 @@ impl WidgetMatchEvent for Designer{
                 designer_view.select_component_and_redraw(cx, None);
                 designer_view.view_file_and_redraw(cx, *path_ids.last().unwrap());
             }
+             if let StudioToApp::DesignerLoadState{positions} = action.cast_ref(){
+                 
+             }
         }
         if let Some((outline_id,km)) = outline_tree.selected(&actions) {
             // alright we have a folder clicked

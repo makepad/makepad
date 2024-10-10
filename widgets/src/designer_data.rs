@@ -1,6 +1,7 @@
 use crate::{
     makepad_draw::*,
     widget::*,
+    makepad_platform::studio::ComponentPosition,
     makepad_live_compiler::LiveTokenId,
 };
 use std::collections::HashMap;
@@ -55,7 +56,8 @@ impl OutlineNode{
 pub struct DesignerData{
     pub root: LiveId,
     pub node_map: HashMap<LiveId, OutlineNode>,
-    pub selected: Option<LiveId>
+    pub selected: Option<LiveId>,
+    pub positions: Vec<ComponentPosition>
 }
 
 impl DesignerData{
