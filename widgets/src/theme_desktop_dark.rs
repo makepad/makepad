@@ -8,7 +8,7 @@ live_design! {
     THEME_COLOR_CONTRAST = 1.0
     THEME_COLOR_TINT = #f00
     THEME_COLOR_TINT_AMOUNT = 0.0
-    THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
+    THEME_SPACE_FACTOR = 6. // Increase for a less dense layout
     THEME_CORNER_RADIUS = 2.5
     THEME_BEVELING = 0.75
     THEME_FONT_SIZE_BASE = 7.5
@@ -323,7 +323,9 @@ live_design! {
 
     P = <Label> {
         width: Fill,
-        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: 0.,
+        padding: 0.,
+        // margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -413,14 +415,13 @@ live_design! {
 
 
     LinkLabel = <LinkLabelBase> {
-        // TODO: adda  focus states
+        // TODO: add a focus states
         instance hover: 0.0
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        padding: { top: (THEME_SPACE_2), bottom: 2. }
-        spacing: 7.5,
-        align: {x: 0., y: 0.}
+        margin: <THEME_MSPACE_2> {}
+        padding: 0.,
 
         label_walk: { width: Fit, height: Fit, },
 
@@ -1573,10 +1574,10 @@ live_design! {
 
     ButtonFlatter = <ButtonIcon> {
         height: Fit, width: Fit,
-        padding: <THEME_MSPACE_2> {}
-        margin: 0.
-        align: { x: 0.5, y: 0.5 }
-        icon_walk: { width: 12. }
+        padding: <THEME_MSPACE_2> {},
+        margin: <THEME_MSPACE_2> {},
+        align: { x: 0.5, y: 0.5 },
+        icon_walk: { width: 12. },
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -1649,13 +1650,17 @@ live_design! {
     }
 
     CheckBox = <CheckBoxBase> {
-        width: Fit, height: 20,
-        margin: { top: (THEME_SPACE_1), bottom: (THEME_SPACE_1) }
-        align: { x: 0.0, y: 0.5 }
+        width: Fit, height: Fit,
+        padding: <THEME_MSPACE_2> {}
+        align: { x: 0., y: 0. }
+
+        margin: { right: 0.5}
+
         label_walk: {
             width: Fit, height: Fit,
-            margin: { left: 20., right: (THEME_SPACE_2) }
-        }
+            // margin: { left: 20., right: (THEME_SPACE_2) }
+            margin: <THEME_MSPACE_H_1> { left: 20.}
+    }
 
         draw_check: {
             uniform size: 7.5;
@@ -1664,16 +1669,20 @@ live_design! {
                 match self.check_type {
                     CheckType::Check => {
                         let left = 1;
-                        let sz = self.size - 0.5;
+                        let sz = self.size - 1.0;
+                        let offset_x = 5.0;
+                        let offset_y = -1.0;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
+
+                        sdf.box(left + offset_x, c.y - sz, sz * 2.0, sz * 2.0, 1.5 + offset_y);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
                         sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
+
                         let szs = sz * 0.5;
                         let dx = 1.0;
-                        sdf.move_to(left + 4.0, c.y);
-                        sdf.line_to(c.x, c.y + szs);
-                        sdf.line_to(c.x + szs, c.y - szs);
+                        sdf.move_to(left + 4.0 + offset_x, c.y);
+                        sdf.line_to(c.x + offset_x, c.y + szs);
+                        sdf.line_to(c.x + szs + offset_x, c.y - szs);
                         sdf.stroke(mix(
                             mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_CTRL_HOVER, self.hover),
                             THEME_COLOR_TEXT_ACTIVE,
@@ -1703,7 +1712,7 @@ live_design! {
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
-                        let left = sz + 1.;
+                        let left = sz + 5.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
 
@@ -1845,8 +1854,9 @@ live_design! {
     }
 
     CheckBoxToggle = <CheckBox> {
-        margin: { left: -8. }
+        align: { x: 0., y: 0. }
         draw_check: { check_type: Toggle }
+        margin: { right: -17.5}
         label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
 
         animator: {
@@ -2567,10 +2577,13 @@ live_design! {
     }
 
     DockToolbar = <RectShadowView> {
-        margin: { top: -1. }
-        padding: <THEME_MSPACE_1> {}
         width: Fill, height: 38.,
-        align: { x: 0., y: 1.0 }
+        flow: Down,
+        align: { x: 0., y: 0. }
+        margin: { top: -1. }
+        padding: <THEME_MSPACE_2> {}
+        spacing: 0.,
+
         draw_bg: {
             border_width: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
@@ -2579,10 +2592,14 @@ live_design! {
             shadow_offset: vec2(0.0, 0.0)
             color: (THEME_COLOR_FG_APP),
         }
+
         content = <View> {
+            flow: Right,
+            width: Fill, height: Fill,
             margin: 0.
             padding: 0.
-            width: Fill, height: Fill,
+            align: { x: 0., y: 0. }
+            spacing: (THEME_SPACE_3)
         }
     }
                 
@@ -2725,7 +2742,8 @@ live_design! {
     DropDown = <DropDownBase> {
         // TODO: utilize the existing focus state
         width: Fit, height: Fit,
-        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2), right: 22.5 }
+        margin: 0.,
+        padding: <THEME_MSPACE_2> { right: 22.5 }
         align: {x: 0., y: 0.}
 
         draw_text: {
@@ -2809,12 +2827,13 @@ live_design! {
 
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 3.;
+                let sz = 2.5;
                 let offset = 1.;
+                let offset_x = 2.;
 
-                sdf.move_to(c.x - sz, c.y - sz + offset);
-                sdf.line_to(c.x + sz, c.y - sz + offset);
-                sdf.line_to(c.x, c.y + sz * 0.25 + offset);
+                sdf.move_to(c.x - sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x + sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
 
                 sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
@@ -2825,7 +2844,8 @@ live_design! {
 
         popup_menu: <PopupMenu> {}
 
-        selected_item: 0
+        selected_item: 0,
+
         animator: {
             hover = {
                 default: off,
@@ -2872,6 +2892,53 @@ live_design! {
                         draw_text: {focus: 1.0}
                     }
                 }
+            }
+        }
+    }
+
+    DropDownFlat = <DropDown> {
+        draw_bg: {
+            instance hover: 0.0
+            instance focus: 0.0
+            instance pressed: 0.0
+            instance open: 0.0
+            
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), self.bodybottom, self.focus);
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    THEME_COLOR_U_HIDDEN,
+                    THEME_BEVELING * 1.5
+                )
+
+                // lets draw a little triangle in the corner
+                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                let sz = 2.5;
+                let offset = 1.;
+                let offset_x = 2.;
+
+                sdf.move_to(c.x - sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x + sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
+                sdf.close_path();
+
+                sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+
+                return sdf.result
             }
         }
     }
