@@ -2896,6 +2896,53 @@ live_design! {
         }
     }
 
+    DropDownFlat = <DropDown> {
+        draw_bg: {
+            instance hover: 0.0
+            instance focus: 0.0
+            instance pressed: 0.0
+            instance open: 0.0
+            
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), self.bodybottom, self.focus);
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    THEME_COLOR_U_HIDDEN,
+                    THEME_BEVELING * 1.5
+                )
+
+                // lets draw a little triangle in the corner
+                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                let sz = 2.5;
+                let offset = 1.;
+                let offset_x = 2.;
+
+                sdf.move_to(c.x - sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x + sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
+                sdf.close_path();
+
+                sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+
+                return sdf.result
+            }
+        }
+    }
+
     FileTreeNode = <FileTreeNodeBase> {
         align: { y: 0.5 }
         padding: { left: (THEME_SPACE_1) },
