@@ -22,7 +22,7 @@ live_design!{
 
         flow:Down
         margin: <THEME_MSPACE_2> {}
-        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) } 
+        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
         draw_bg: { color: (THEME_COLOR_U_1) }
 
         <View> {
@@ -35,7 +35,7 @@ live_design!{
                 width: Fit,
                 height: Fit,
                 align: { x: 0.0, y: 0.8 }
-            spacing: (THEME_SPACE_1)
+                spacing: (THEME_SPACE_1)
 
                 <Pbold> { width: Fit, text: "Project" }
                 project_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
@@ -291,10 +291,9 @@ impl AiChatView{
                 if let Some(wa) = actions.widget_action(id!(copy_button)){
                     if wa.widget().as_button().pressed(actions){
                         let code_view = wa.widget_nth(2).widget(id!(code_view));
-                        log!("COPY! {}", code_view.text());
+                        log!("COPY! {}", code_view.text( ));
                     }
                 }
-                
                 if self.view.button(id!(history_left)).pressed(actions){
                     // first we check if our messages are the same as 'slot'.
                     // if not, we should create an undo item first
@@ -302,7 +301,7 @@ impl AiChatView{
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
                 if self.view.button(id!(history_right)).pressed(actions){
-                    self.history_slot = (self.history_slot+ 1).min(doc.file.history.len().saturating_sub(1));
+                    self.history_slot = (self.history_slot + 1).min(doc.file.history.len().saturating_sub(1));
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
                 if self.view.button(id!(history_delete)).pressed(actions){
