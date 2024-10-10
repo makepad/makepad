@@ -17,10 +17,10 @@ live_design!{
         
     import makepad_widgets::theme_desktop_dark::*;
 
-    User = <RoundedView>{
+    User = <RoundedView> {
         height: Fit,
         flow: Down,
-        margin: <THEME_MSPACE_2> {}
+        margin: <THEME_MSPACE_3> {}
         padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) } 
         draw_bg: { color: (THEME_COLOR_U_1) }
 
@@ -34,13 +34,29 @@ live_design!{
             run_button = <ButtonFlat> {
                 width: Fit,
                 height: Fit,
-                padding: 6.,
-                margin: <THEME_MSPACE_V_1> {}
+                padding: <THEME_MSPACE_2> {}
+                margin: 0.
+
+                text: "Run",
                 draw_icon: {
-                    color: (THEME_COLOR_MAKEPAD),
+                    color: (THEME_COLOR_U_4),
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                 }
                 icon_walk: { width: 9. }
+            }
+
+            auto_run = <CheckBoxCustom> {
+                text: "Auto",
+                align: { y: 0.5 }
+                draw_check: { check_type: None }
+                spacing: (THEME_SPACE_1),
+                padding: <THEME_MSPACE_V_2> {}
+                icon_walk: {width: 10. }
+                draw_icon: {
+                    color: (THEME_COLOR_D_4),
+                    color_active: (STUDIO_PALETTE_6),
+                    svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
+                }
             }
 
             <Vr> { height: 17.5}
@@ -48,10 +64,11 @@ live_design!{
             <View> {
                 flow: Right,
                 width: Fit,
+                height: Fit,
                 spacing: (THEME_SPACE_1)
 
-                <Pbold> { width: Fit, text: "Project", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                project_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
+                <Pbold> { width: Fit, text: "Model", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                model_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> {
@@ -67,28 +84,13 @@ live_design!{
             <View> {
                 flow: Right,
                 width: Fit,
-                height: Fit,
-                spacing: 0.
+                spacing: (THEME_SPACE_1)
 
-                <Pbold> { width: Fit, text: "Model", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                model_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
+                <Pbold> { width: Fit, text: "Project", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                project_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> { width: Fill }
-
-            <Vr> { height: 17.5}
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-                spacing: 0.
-
-                auto_run = <CheckBox> {
-                    text: "Autorun",
-                    width: Fit,
-                }
-            }
 
         }
 
@@ -133,9 +135,9 @@ live_design!{
         
     }
     
-    Assistant = <RoundedView>{
+    Assistant = <RoundedView> {
         flow: Down
-        margin: <THEME_MSPACE_H_2> {}
+        margin: <THEME_MSPACE_H_3> {}
         padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
 
         draw_bg: {
