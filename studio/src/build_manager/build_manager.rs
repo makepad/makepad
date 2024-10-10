@@ -165,7 +165,7 @@ impl DesignerState{
         match self.component_positions.entry(build_id) {
             Entry::Occupied(mut v) => {
                 let vec = v.get_mut();
-                if let Some(v) =  vec.iter_mut().find(|v| v.path == pos.path){
+                if let Some(v) =  vec.iter_mut().find(|v| v.id == pos.id){
                     *v = pos;
                 }
                 else{
