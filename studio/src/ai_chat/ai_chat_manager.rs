@@ -197,6 +197,7 @@ pub struct AiInFlight{
 #[derive(Debug)]
 pub struct AiChatDocument{
     pub in_flight: Option<AiInFlight>,
+    pub auto_run: bool,
     pub file: AiChatFile
 }
 
@@ -206,12 +207,14 @@ impl AiChatDocument{
             Err(e)=>{
                 error!("Error parsing AiChatDocument {e}");
                 Self{
+                    auto_run: true,
                     in_flight: None,
                     file: AiChatFile::new()
                 }
             }
             Ok(file)=>{
                 Self{
+                    auto_run: true,
                     in_flight: None,
                     file
                 }
@@ -388,8 +391,12 @@ impl AiChatManager{
                                     cx.action(AppAction::RedrawAiChat{chat_id});
                                     cx.action(AppAction::SaveAiChat{chat_id});
                                     
-                                    let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(3);
-                                    cx.action(AppAction::RunAiChat{chat_id, history_slot:in_flight.history_slot, item_id});
+                                    if doc.auto_run{
+                                        let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(3);
+                                        // lets check it auto_run = true
+                                        cx.action(AppAction::RunAiChat{chat_id, history_slot:in_flight.history_slot, item_id});
+                                        
+                                    }
                                     // alright so we're done.. check if we have run-when-done
                                     doc.file.history[in_flight.history_slot].follow_up();
                                                                        
