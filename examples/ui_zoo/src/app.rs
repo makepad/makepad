@@ -110,6 +110,7 @@ live_design!{
                     }
                     <View> {
                         width: Fill, height: Fit,
+                        align: { x: 0., y: 0.}
                         flow: Right,
                         spacing: (THEME_SPACE_1)
                         <P> { text: "TestButton", width: Fit}
