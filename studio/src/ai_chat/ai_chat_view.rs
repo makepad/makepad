@@ -18,49 +18,47 @@ live_design!{
     import makepad_widgets::theme_desktop_dark::*;
 
     User = <RoundedView>{
-        height: Fit
-
-        flow:Down
+        height: Fit,
+        flow: Down,
         margin: <THEME_MSPACE_2> {}
-        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
+        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) } 
+
         draw_bg: { color: (THEME_COLOR_U_1) }
 
         <View> {
             height: Fit, width: Fill,
-            align: { x: 0.0, y: 0.5 },
+            flow: Right,
+            align: { x: 0., y: 0. },
             spacing: (THEME_SPACE_3),
+            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1) }
 
             <View> {
                 flow: Right,
                 width: Fit,
-                height: Fit,
-                align: { x: 0.0, y: 0.8 }
                 spacing: (THEME_SPACE_1)
 
-                <Pbold> { width: Fit, text: "Project" }
-                project_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
+                <Pbold> { width: Fit, text: "Project", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                project_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> {
                 flow: Right,
                 width: Fit,
                 height: Fit,
-                align: { x: 0.0, y: 0.8 }
                 spacing: (THEME_SPACE_1)
 
-                <Pbold> { width: Fit, text: "Context" }
-                context_dropdown = <DropDown>{ width: Fit, popup_menu_position: BelowInput }
+                <Pbold> { width: Fit, text: "Context", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                context_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> {
                 flow: Right,
                 width: Fit,
                 height: Fit,
-                align: { x: 0.0, y: 0.8 }
-                spacing: (THEME_SPACE_1)
+                spacing: 0.
 
-                <Pbold> { width: Fit, text: "Model"}
-                model_dropdown = <DropDown> { width: Fit, popup_menu_position: BelowInput }
+                <Pbold> { width: Fit, text: "Model", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                model_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
             }
 
             <View> { width: Fill }
@@ -69,20 +67,22 @@ live_design!{
                 flow: Right,
                 width: Fit,
                 height: Fit,
+                spacing: 0.
 
-                auto_run = <CheckBox> { text: "Autorun", width: Fit }
+                auto_run = <CheckBox> {
+                    text: "Autorun",
+                    width: Fit,
+                }
             }
 
             run_button = <ButtonFlatter> {
                 width: Fit,
                 height: Fit,
-                padding: <THEME_MSPACE_1> {}
-                margin: { right: (THEME_SPACE_2) }
                 draw_icon: {
                     color: (THEME_COLOR_U_4),
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                 }
-                icon_walk: { width: 8. }
+                icon_walk: { width: 6. }
             }
 
         }
@@ -99,9 +99,9 @@ live_design!{
             }
 
             send_button = <ButtonFlatter> {
-                width: Fit, height: 30,
-                padding: <THEME_MSPACE_1> {}
-                margin: { left: -45.}
+                width: Fit,
+                padding: <THEME_MSPACE_V_1> {}
+                margin: { left: -35.}
                 draw_icon: {
                     color: (THEME_COLOR_U_4),
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
@@ -115,9 +115,13 @@ live_design!{
             // }
                     
             clear_button = <ButtonFlatter> {
-                padding: { right: 5. }
-                icon_walk: {width: 16, height: Fit}
-                text: "×"
+                width: Fit,
+                padding: <THEME_MSPACE_V_1> {}
+                draw_icon: {
+                    color: (THEME_COLOR_U_4),
+                    svg_file: dep("crate://self/resources/icons/icon_times.svg"),
+                }
+                icon_walk: { width: 7. }
             }
         }
         
@@ -125,7 +129,7 @@ live_design!{
     }
     
     Assistant = <RoundedView>{
-        flow:Down
+        flow: Down
         margin: <THEME_MSPACE_H_2> {}
         padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
 
@@ -198,7 +202,7 @@ live_design!{
                 flow: Right,
                 align: { x: 0.0, y: 0.5},
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
-                spacing: (THEME_SPACE_1),
+                spacing: (THEME_SPACE_2),
 
                 <P> {
                     width: Fit,
