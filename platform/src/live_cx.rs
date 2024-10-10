@@ -253,6 +253,7 @@ impl Cx {
         for action in actions{
             self.action(action);
         }
+        self.handle_actions();
         // ok so we have a life filechange
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
