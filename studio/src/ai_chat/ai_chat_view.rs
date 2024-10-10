@@ -345,10 +345,16 @@ impl AiChatView{
                         if ke.key_code == KeyCode::ArrowLeft && ke.modifiers.logo{
                             self.history_slot = self.history_slot.saturating_sub(1);
                             cx.action(AppAction::RedrawAiChat{chat_id});
+                            if ke.modifiers.control{
+                                cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
+                            }
                         }
                         if ke.key_code == KeyCode::ArrowRight && ke.modifiers.logo{
                             self.history_slot = (self.history_slot + 1).min(doc.file.history.len().saturating_sub(1));
                             cx.action(AppAction::RedrawAiChat{chat_id});                 
+                            if ke.modifiers.control{
+                                cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
+                            }
                         }
                     }
                     
