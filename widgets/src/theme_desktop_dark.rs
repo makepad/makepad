@@ -1654,6 +1654,8 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
         align: { x: 0., y: 0. }
 
+        margin: { left: -5.0 }
+
         label_walk: {
             width: Fit, height: Fit,
             margin: <THEME_MSPACE_H_1> { left: 20. }
@@ -1853,8 +1855,10 @@ live_design! {
     CheckBoxToggle = <CheckBox> {
         align: { x: 0., y: 0. }
         draw_check: { check_type: Toggle }
-        margin: { right: 0.}
-        label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
+        margin: { left: -12.5 }
+        label_walk: {
+            margin: <THEME_MSPACE_H_1> { left: 35.}
+        }
 
         animator: {
             hover = {
