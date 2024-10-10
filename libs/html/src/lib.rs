@@ -168,6 +168,21 @@ impl<'a> HtmlWalker<'a>{
         }
         None
     }
+    
+    pub fn find_tag_text(&self, tag:LiveId)->Option<&'a str>{
+        for i in self.index..self.nodes.len(){
+            match &self.nodes[i]{
+                HtmlNode::OpenTag{nc,..} if *nc == tag =>{
+                    // the next one must be a text node
+                    if let Some(HtmlNode::Text{start, end,..}) = self.nodes.get(i+1){
+                        return Some(&self.decoded[*start..*end])
+                    }
+                }
+                _=>()
+            }
+        }
+        None
+    }
         
     pub fn text(&self)->Option<&'a str>{
         match self.nodes.get(self.index){
