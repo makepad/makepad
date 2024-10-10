@@ -403,6 +403,7 @@ impl Widget for DesignerView {
                 match self.finger_move.as_ref().unwrap(){
                     FingerMove::Pan{start_pan} =>{
                         self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
+                        self.sync_zoom_pan(cx);
                         self.redraw(cx);
                     }
                     FingerMove::DragAll{rects}=>{
