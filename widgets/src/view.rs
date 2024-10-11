@@ -584,6 +584,15 @@ impl WidgetNode for View {
                     results.extend_from_set(&local_results);
                 }
                 self.find_cache.borrow_mut().push((hash, local_results));
+                #[cfg(log_query)]
+                if results.0.len() == 0{
+                    log!("Widget query not found: {:?}", path);
+                }
+                #[cfg(panic_query)]
+                if results.0.len() == 0{
+                    panic!("Widget query not found: {:?}", path);
+                }
+                                
             }
             WidgetCache::No => {
                  if let Some((_,child)) = self.children.iter().find(|(id,_)| *id == path[0]) {
