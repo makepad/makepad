@@ -1,6 +1,6 @@
 use crate::makepad_micro_serde::*;
 
-#[derive(SerJson, DeJson)]
+#[derive(Debug, SerJson, DeJson)]
 pub struct ChatPrompt {
     pub messages: Vec<ChatMessage>,
     pub model: String,
@@ -8,7 +8,7 @@ pub struct ChatPrompt {
     pub stream: bool
 }
 
-#[derive(SerJson, DeJson)]
+#[derive(Debug, SerJson, DeJson)]
 pub struct ChatMessage {
     pub content: Option<String>,
     pub role: Option<String>,
@@ -16,7 +16,7 @@ pub struct ChatMessage {
 } 
 
 #[allow(unused)]
-#[derive(DeJson)]
+#[derive(Debug, DeJson)]
 pub struct ChatResponse {
     pub id: String,
     pub object: String,
@@ -28,13 +28,13 @@ pub struct ChatResponse {
 }
 
 #[allow(unused)]
-#[derive(DeJson)]
+#[derive(Debug, DeJson)]
 pub struct CompletionDetails {
     pub reasoning_tokens: i32,
 }
 
 #[allow(unused)]
-#[derive(DeJson)]
+#[derive(Debug, DeJson)]
 pub struct ChatUsage {
     pub prompt_tokens: i32,
     pub completion_tokens: i32,
@@ -43,7 +43,7 @@ pub struct ChatUsage {
 }
 
 #[allow(unused)]
-#[derive(DeJson)]
+#[derive(Debug, DeJson)]
 pub struct ChatChoice {
     pub message: Option<ChatMessage>,
     pub delta: Option<ChatMessage>,

@@ -54,8 +54,17 @@ impl Widget for Label {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+                
+        match event.hit_designer(cx, self.area){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
+        
         if self.hover_actions_enabled {
-            let uid = self.widget_uid();
+            
             match event.hits_with_capture_overload(cx, self.area, true) {
                 Hit::FingerHoverIn(fh) => {
                     cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));

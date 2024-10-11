@@ -40,8 +40,8 @@ live_design!{
     
     RunButton = <CheckBox> {
         width: Fill,
-        margin:{top:3,bottom:0}
         
+        margin: <THEME_MSPACE_H_1> {}
         draw_check: {
             uniform size: 3.5;
             instance open: 0.0
@@ -59,7 +59,7 @@ live_design!{
                         // PAUSE
                         sdf.box(
                             sz * 0.5,
-                            sz * 1.25,
+                            sz * 2.25,
                             sz * 0.9,
                             sz * 3.0,
                             1.0
@@ -67,7 +67,7 @@ live_design!{
 
                         sdf.box(
                             sz * 1.75,
-                            sz * 1.25,
+                            sz * 2.25,
                             sz * 0.9,
                             sz * 3.0,
                             1.0
