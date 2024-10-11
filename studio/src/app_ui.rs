@@ -614,11 +614,10 @@ live_design!{
                 <DockToolbar> {
                     content = {
                         align: { x: 0., y: 0.5 }
-                        spacing: (THEME_SPACE_1)
                         <View> {
                             width: Fit
                             flow: Right,
-                            spacing: (THEME_SPACE_2)
+                            spacing: (THEME_SPACE_1)
                             <CheckBoxCustom> {
                                 margin: {left: (THEME_SPACE_1)}
                                 text:"Error"
