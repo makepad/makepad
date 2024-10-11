@@ -567,6 +567,14 @@ impl WidgetNode for View {
                 }
                 if let Some((_,widget_set)) = self.find_cache.borrow().iter().find(|(h,_v)| h == &hash) {
                     results.extend_from_set(widget_set);
+                    /*#[cfg(not(ignore_query))]
+                    if results.0.len() == 0{
+                        log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
+                    }
+                    #[cfg(panic_query)]
+                    if results.0.len() == 0{
+                        panic!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
+                    }*/
                     return;
                 }
                 let mut local_results = WidgetSet::empty();
@@ -583,16 +591,15 @@ impl WidgetNode for View {
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-                self.find_cache.borrow_mut().push((hash, local_results));
-                #[cfg(log_query)]
-                if results.0.len() == 0{
-                    log!("Widget query not found: {:?}", path);
+                #[cfg(not(ignore_query))]
+                if local_results.0.len() == 0{
+                    log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
                 }
                 #[cfg(panic_query)]
-                if results.0.len() == 0{
-                    panic!("Widget query not found: {:?}", path);
+                if local_results.0.len() == 0{
+                    panic!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
                 }
-                                
+                self.find_cache.borrow_mut().push((hash, local_results));
             }
             WidgetCache::No => {
                  if let Some((_,child)) = self.children.iter().find(|(id,_)| *id == path[0]) {
