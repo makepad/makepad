@@ -212,7 +212,7 @@ impl Debug for WidgetRef {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct WidgetSet(SmallVec<[WidgetRef;2]>);
+pub struct WidgetSet(pub SmallVec<[WidgetRef;2]>);
 
 impl WidgetSet {
     pub fn is_empty(&mut self) -> bool {
@@ -787,7 +787,7 @@ pub trait WidgetActionsApi {
     
     fn widget_action(&self, path:&[LiveId])->Option<&WidgetAction>;
         
-    fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
+    fn find_widget_action_cast<T: WidgetActionTrait>(
         &self,
         widget_uid: WidgetUid,
     ) -> T
@@ -849,14 +849,14 @@ pub trait WidgetActionsApi {
     ///     })
     /// });
     /// ```
-    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send+ Sync>(
+    fn filter_widget_actions_cast<T: WidgetActionTrait>(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
     where
         T: Default + Clone;
         
-    fn filter_actions_data<T: WidgetActionTrait + 'static + Send+ Sync>(
+    fn filter_actions_data<T: WidgetActionTrait>(
             &self,
         ) -> impl Iterator<Item = T>
         where
@@ -865,10 +865,10 @@ pub trait WidgetActionsApi {
 
 pub trait WidgetActionOptionApi {
     fn widget_uid_eq(&self, widget_uid: WidgetUid) -> Option<&WidgetAction>;
-    fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
+    fn cast<T: WidgetActionTrait>(&self) -> T
     where
         T: Default + Clone;
-    fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T;
+    fn cast_ref<T: WidgetActionTrait+ ActionDefaultRef>(&self) -> &T;
 }
 
 impl WidgetActionOptionApi for Option<&WidgetAction> {
@@ -881,7 +881,7 @@ impl WidgetActionOptionApi for Option<&WidgetAction> {
         None
     }
 
-    fn cast<T: WidgetActionTrait + 'static + Send>(&self) -> T
+    fn cast<T: WidgetActionTrait>(&self) -> T
     where
         T: Default + Clone,
     {
@@ -893,7 +893,7 @@ impl WidgetActionOptionApi for Option<&WidgetAction> {
         T::default()
     }
     
-    fn cast_ref<T: WidgetActionTrait + 'static + Send + ActionDefaultRef>(&self) -> &T
+    fn cast_ref<T: WidgetActionTrait+ ActionDefaultRef>(&self) -> &T
     {
         if let Some(item) = self {
             if let Some(item) = item.action.downcast_ref::<T>() {
@@ -977,7 +977,7 @@ impl WidgetActionsApi for Actions {
         })
     }
 
-    fn filter_widget_actions_cast<T: WidgetActionTrait + 'static + Send + Sync>(
+    fn filter_widget_actions_cast<T: WidgetActionTrait >(
         &self,
         widget_uid: WidgetUid,
     ) -> impl Iterator<Item = T>
@@ -993,7 +993,7 @@ impl WidgetActionsApi for Actions {
         })
     }
     
-    fn filter_actions_data<T: WidgetActionTrait + 'static + Send>(
+    fn filter_actions_data<T: WidgetActionTrait>(
         &self,
     ) -> impl Iterator<Item = T>
     where

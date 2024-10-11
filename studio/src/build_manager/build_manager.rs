@@ -10,7 +10,8 @@ use {
             StdinScroll, StdinToHost,
         },
         makepad_platform::studio::{
-            ComponentPosition,
+            DesignerComponentPosition,
+            DesignerZoomPan,
             AppToStudio, AppToStudioVec, EventSample, GPUSample, StudioToApp, StudioToAppVec,
         },
         makepad_shell::*,
@@ -137,7 +138,8 @@ pub struct BuildManager {
 #[derive(Default, SerRon, DeRon)]
 pub struct DesignerState{
     selected_files: HashMap<LiveId, String>,
-    component_positions: HashMap<LiveId, Vec<ComponentPosition>>
+    zoom_pan: DesignerZoomPan,
+    component_positions: HashMap<LiveId, Vec<DesignerComponentPosition>>
 }
 
 impl DesignerState{
@@ -160,7 +162,7 @@ impl DesignerState{
         }
     }
     
-    fn store_position(&mut self, build_id: LiveId, pos:ComponentPosition){
+    fn store_position(&mut self, build_id: LiveId, pos:DesignerComponentPosition){
         use std::collections::hash_map::Entry;
         match self.component_positions.entry(build_id) {
             Entry::Occupied(mut v) => {
@@ -492,12 +494,17 @@ impl BuildManager {
                             self.designer_state.store_position(build_id, mv);
                             self.designer_state.save_state();
                         }
+                        AppToStudio::DesignerZoomPan(zp)=>{
+                            self.designer_state.zoom_pan = zp;
+                            self.designer_state.save_state();
+                        }
                         AppToStudio::DesignerStarted=>{
                             // send the app the select file init message
                             if let Ok(d) = self.active_build_websockets.lock() {
                                 if let Some(file_name) = self.designer_state.selected_files.get(&build_id){
                                     let data = StudioToAppVec(vec![
                                         StudioToApp::DesignerLoadState{
+                                            zoom_pan: self.designer_state.zoom_pan.clone(),
                                             positions: self.designer_state.component_positions.get(&build_id).cloned().unwrap_or(vec![])
                                         },
                                         StudioToApp::DesignerSelectFile {

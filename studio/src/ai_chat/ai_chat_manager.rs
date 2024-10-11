@@ -47,28 +47,32 @@ impl Default for AiChatManager{
             contexts: vec![
                 BaseContext{
                     name: "Rust".to_string(),
-                    system_pre: "You are a Rust programming assistant. Please answer with code examples only and very little explanation".to_string(),
-                    system_post: "".to_string(),
+                    system_pre: live_id!(RUST_PRE),
+                    system_post: live_id!(RUST_POST),
+                    general_post: live_id!(RUST_GENERAL),
                     files: vec![]
                 },
                 BaseContext{
                     name: "Follow up".to_string(),
-                    system_pre: "".to_string(),
-                    system_post: "".to_string(),
+                    system_pre: live_id!(FOLLOW_UP_PRE),
+                    system_post: live_id!(FOLLOW_UP_POST),
+                    general_post: live_id!(FOLLOW_UP_GENERAL),
                     files: vec![]
                 },
                 BaseContext{
                     name: "Makepad All".to_string(),
-                    system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
-                    system_post: "Please answer with code only and don't give explanations. Generate the whole file including the Rust logic. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods".to_string(),
+                    system_pre: live_id!(ALL_PRE),
+                    system_post: live_id!(ALL_POST),
+                    general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
                     ]
                 },
                 BaseContext{
                     name: "Makepad UI".to_string(),
-                    system_pre: "You are a Rust programming assistant for writing Makepad applications. You have been given components and example code as context, plus the users project.".to_string(),
-                    system_post: "Please answer with code only and don't give explanations. Only rewrite the live_design block and only output that code not the rest of the file. Don't invent new function signatures, only use what is given in the example. Remove all comments from the generated code. Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods. Don't use ````iTime```` but use ````self.time````. Types in shader code are inferenced, and written as ````let variable = value````\nMake sure that the ````pixel()``` function has an explicit ````return```` call\nMakepad shader values are mut by default and should be declard as ````let```` and not ````let mut````Makepad shaders use ````for i in 0..10{ }```` as their loop construct. You cannot use ````while```` as this is potentially unbounded\n".to_string(),
+                    system_pre: live_id!(UI_PRE),
+                    system_post: live_id!(UI_POST),
+                    general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
                     ]
@@ -122,8 +126,9 @@ impl AiContextFile{
 
 pub struct BaseContext{
     pub name: String,
-    pub system_pre: String,
-    pub system_post: String,
+    pub system_pre: LiveId,
+    pub system_post: LiveId,
+    pub general_post: LiveId,
     pub files: Vec<AiContextFile>
 }
 
@@ -192,6 +197,7 @@ pub struct AiInFlight{
 #[derive(Debug)]
 pub struct AiChatDocument{
     pub in_flight: Option<AiInFlight>,
+    pub auto_run: bool,
     pub file: AiChatFile
 }
 
@@ -201,12 +207,14 @@ impl AiChatDocument{
             Err(e)=>{
                 error!("Error parsing AiChatDocument {e}");
                 Self{
+                    auto_run: true,
                     in_flight: None,
                     file: AiChatFile::new()
                 }
             }
             Ok(file)=>{
                 Self{
+                    auto_run: true,
                     in_flight: None,
                     file
                 }
@@ -294,6 +302,7 @@ impl AiChatFile{
         
 }
 
+const AI_PROMPT_FILE:&'static str = "studio/resources/ai/ai_markup.txt";
 
 impl AiChatManager{
     pub fn init(&mut self, fs:&mut FileSystem) {
@@ -317,6 +326,9 @@ impl AiChatManager{
                     println!("Cant find {} in context {}",file.path,prj.name);
                 }
             }
+        }
+        if let Some(file_id) = fs.path_to_file_node_id(AI_PROMPT_FILE){
+            fs.request_open_file(LiveId(0), file_id);
         }
     }
     
@@ -379,8 +391,12 @@ impl AiChatManager{
                                     cx.action(AppAction::RedrawAiChat{chat_id});
                                     cx.action(AppAction::SaveAiChat{chat_id});
                                     
-                                    let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(3);
-                                    cx.action(AppAction::RunAiChat{chat_id, history_slot:in_flight.history_slot, item_id});
+                                    if doc.auto_run{
+                                        let item_id = doc.file.history[in_flight.history_slot].messages.len().saturating_sub(3);
+                                        // lets check it auto_run = true
+                                        cx.action(AppAction::RunAiChat{chat_id, history_slot:in_flight.history_slot, item_id});
+                                        
+                                    }
                                     // alright so we're done.. check if we have run-when-done
                                     doc.file.history[in_flight.history_slot].follow_up();
                                                                        
@@ -466,12 +482,26 @@ impl AiChatManager{
                     for msg in &doc.file.history[history_slot].messages{
                         match msg{
                             AiChatMessage::User(v)=>{
+                                let doc = fs.file_path_as_string(AI_PROMPT_FILE).unwrap();
+                                // parse it as html
+                                let html = makepad_html::parse_html(&doc, &mut None, InternLiveId::No);
+                                let html = html.new_walker();
+                                
+                                
                                 // alright. we have to now collect our base context files
                                 // ok lets find these files
-                                let mut system_post = "".to_string();
+                                let mut system_post = LiveId(0);
+                                let mut general_post = LiveId(0);
+                                                                
                                 if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
-                                    system_post = ctx.system_post.clone();
-                                    messages.push(ChatMessage {content: Some(ctx.system_pre.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                    // alright lets fetch things
+                                    system_post = ctx.system_post;
+                                    general_post = ctx.general_post;
+                                    
+                                    if let Some(text) = html.find_tag_text(ctx.system_pre){
+                                        messages.push(ChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                    }
+                                        
                                     for file in &ctx.files{
                                         if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
@@ -501,10 +531,14 @@ impl AiChatManager{
                                         }
                                     }
                                 }
-                                let content = format!("{}\n{}", v.message, system_post);
-                                //content.push_str(&v.message);
-                                //println!("{:?}", content);
-                                messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                                messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                
+                                if let Some(text) = html.find_tag_text(system_post){
+                                    messages.push(ChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                }
+                                if let Some(text) = html.find_tag_text(general_post){
+                                    messages.push(ChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                }
                             }
                             AiChatMessage::Assistant(v)=>{
                                 messages.push(ChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})

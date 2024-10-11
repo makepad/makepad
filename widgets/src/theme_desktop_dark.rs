@@ -1654,13 +1654,12 @@ live_design! {
         padding: <THEME_MSPACE_2> {}
         align: { x: 0., y: 0. }
 
-        margin: { right: 0.5}
+        margin: { left: -5.0 }
 
         label_walk: {
             width: Fit, height: Fit,
-            // margin: { left: 20., right: (THEME_SPACE_2) }
-            margin: <THEME_MSPACE_H_1> { left: 20.}
-    }
+            margin: <THEME_MSPACE_H_1> { left: 20. }
+        }
 
         draw_check: {
             uniform size: 7.5;
@@ -1856,8 +1855,10 @@ live_design! {
     CheckBoxToggle = <CheckBox> {
         align: { x: 0., y: 0. }
         draw_check: { check_type: Toggle }
-        margin: { right: -17.5}
-        label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
+        margin: { left: -12.5 }
+        label_walk: {
+            margin: <THEME_MSPACE_H_1> { left: 35.}
+        }
 
         animator: {
             hover = {
@@ -4947,9 +4948,19 @@ live_design! {
         clear_color: #333333
         draw_outline:{
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p)
                 sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
-                sdf.stroke(#fff, 1.0);
+                
+                let line_width = 0.58;
+                let dash_length = 10;
+                let pos = p.x + p.y;//+self.time*10.0 ;
+                let dash_pattern = fract(pos / dash_length);
+                let alpha = step(dash_pattern, line_width);
+                
+                let c = vec4(mix(#c, #0000, alpha))
+                
+                sdf.stroke(c, 1.5);
                 return sdf.result;
                 //return vec4(self.color.xyz * self.color.w, self.color.w)
             }

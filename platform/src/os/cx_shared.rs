@@ -50,7 +50,9 @@ impl Cx {
             let mut altered = false;
             for pass_id in self.passes.id_iter(){
                 if self.demo_time_repaint {
-                    self.passes[pass_id].paint_dirty = true;
+                    if self.passes[pass_id].main_draw_list_id.is_some(){
+                        self.passes[pass_id].paint_dirty = true;
+                    }
                 }
                 if self.passes[pass_id].paint_dirty {
                     let other = match self.passes[pass_id].parent {
@@ -100,7 +102,7 @@ impl Cx {
                 }
             }
         }
-        
+        self.demo_time_repaint = false;
     }
     
     pub (crate) fn need_redrawing(&self) -> bool {

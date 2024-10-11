@@ -9,4 +9,16 @@ fn main() {
     let cwd = std::env::current_dir().unwrap();
     let mut file = File::create(path.join("makepad-widgets.path")).unwrap();
     file.write_all(&format!("{}", cwd.display()).as_bytes()).unwrap();
+    println!("cargo:rustc-check-cfg=cfg(ignore_query, panic_query)");
+    println!("cargo:rerun-if-env-changed=MAKEPAD");
+    if let Ok(configs) = env::var("MAKEPAD"){
+        for config in configs.split('+'){
+            match config{
+                "ignore_query"=>println!("cargo:rustc-cfg=ignore_query"), 
+                "panic_query"=>println!("cargo:rustc-cfg=panic_query"), 
+                _=>{}
+            }
+        }
+    }
+    
 }

@@ -346,7 +346,16 @@ impl FileSystem {
         };
     }
     
-    pub fn file_id_as_string(&mut self, file_id: LiveId)->Option<String>{
+    pub fn file_path_as_string(&self, path:&str)->Option<String>{
+        if let Some(file_id) = self.path_to_file_node_id(&path){
+            self.file_id_as_string(file_id)
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn file_id_as_string(&self, file_id: LiveId)->Option<String>{
         match self.open_documents.get(&file_id){
             Some(OpenDocument::Code(doc))=>{
                 Some(doc.as_text().to_string())
