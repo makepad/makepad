@@ -4,13 +4,16 @@ pub use {
     std::{
         borrow::Borrow,
         collections::VecDeque,
+        env,
         hash::{Hash, Hasher},
         rc::Rc,
         cell::RefCell,
+        io,
         io::prelude::*,
-        fs::File,
+        fs::{File, OpenOptions},
         collections::HashMap,
         mem,
+        path::Path,
     },
     crate::{
         makepad_platform::*,
@@ -40,15 +43,159 @@ pub struct CxFontAtlas {
     pub texture_svg: Texture,
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc,
-    pub font_cache: Vec<u8>,
-    pub font_cache_index: HashMap<LiveId, FontCacheIndexEntry>,
+    pub font_cache: Option<FontCache>,
+}
+
+/// A cache for rasterized glyph data.
+/// 
+/// The cache is split into two parts:
+/// - The rasterized glyph data itself.
+/// - An index for the rasterized glyph data.
+/// 
+/// The index contains a mapping from the `LiveId` of a glyph to an index entry. Each index entry
+/// contains the offset of the glyph within the rasterized glyph data, as well as its size.
+/// 
+/// This cache can optionally be backed by a file on disk, allowing the cache to be persisted across
+/// runs of the application. This should improve startup time, as the cache data does not need to be
+/// re-generated every time the application is started.
+#[derive(Debug)]
+pub struct FontCache {
+    /// The rasterized glyph data.
+    data: Vec<u8>,
+    /// An optional file, backing the rasterized glyph data.
+    data_file: Option<File>,
+    /// An index for the rasterized glyph data.
+    index: HashMap<LiveId, FontCacheIndexEntry>,
+    /// An optional file, backing the index.
+    index_file: Option<File>,
+}
+
+impl FontCache {
+    /// Creates a new `FontCache`.
+    /// 
+    /// If a directory is provided, the cache data will be initialized from the file `font_cache`,
+    /// and the cache index from the file `font_cache_index`. Moreover, every time a new glyph is
+    /// inserted into the cache, the data for the glyph will be appended to `font_cache`, and the
+    /// index entry for the glyph to `font_cache_index`.
+    /// 
+    /// If no directory is provided, the cache will start out empty, and will not be backed by a
+    /// file on disk.
+    fn new(dir: Option<impl AsRef<Path>>) -> Self {
+        Self::new_(dir.as_ref().map(|dir| dir.as_ref()))
+    }
+
+    fn new_(dir: Option<&Path>) -> Self {
+        // Open the data file, if a directory was provided.
+        let mut data_file = dir.map(|dir| {
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(dir.join("font_cache"))
+                .expect("couldn't open font cache data file")
+        });
+
+        // Initialize the cache data from the data file, if it exists.
+        let mut data = Vec::new();
+        if let Some(data_file) = &mut data_file {
+            data_file
+                .read_to_end(&mut data)
+                .expect("couldn't read from font cache data file");
+        }
+
+        // Open the index file, if a directory was provided.
+        let mut index_file = dir.map(|dir| {
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(dir.join("font_cache_index"))
+                .expect("couldn't open font cache index file")
+        });
+
+        // Initialize the cache index from the index file, if it exists.
+        let mut index = HashMap::new();
+        if let Some(index_file) = &mut index_file {
+            loop {
+                let mut buffer = [0; 32];
+                match index_file.read_exact(&mut buffer) {
+                    Ok(_) => (),
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(_) => panic!("couldn't read from font cache index file"),
+                }
+                let id = LiveId(u64::from_be_bytes(buffer[0..8].try_into().unwrap()));
+                let offset = usize::try_from(u64::from_be_bytes(buffer[8..16].try_into().unwrap())).unwrap();
+                let width = usize::try_from(u64::from_be_bytes(buffer[16..24].try_into().unwrap())).unwrap();
+                let height = usize::try_from(u64::from_be_bytes(buffer[24..32].try_into().unwrap())).unwrap();
+                index.insert(id, FontCacheIndexEntry {
+                    offset,
+                    size: SizeUsize::new(width, height),
+                });
+            }
+        }
+        Self {
+            data,
+            data_file,
+            index,
+            index_file,
+        }
+    }
+
+    fn get(&self, id: LiveId) -> Option<FontCacheEntry<'_>> {
+        let FontCacheIndexEntry {
+            size,
+            offset,
+        } = self.index.get(&id).copied()?;
+        Some(FontCacheEntry {
+            size,
+            bytes: &self.data[offset..][..size.width * size.height],
+        })
+    }
+
+    fn insert_with(&mut self, id: LiveId, f: impl FnOnce(&mut Vec<u8>) -> SizeUsize) {
+        let offset = self.data.len();
+        let size = f(&mut self.data);
+        if let Some(data_file) = &mut self.data_file {
+            data_file
+                .write_all(&self.data[offset..][..size.width * size.height])
+                .expect("couldn't write to font cache data file");
+        }
+        self.index.insert(id, FontCacheIndexEntry { size, offset });
+        if let Some(index_file) = &mut self.index_file {
+            let mut buffer = [0; 32];
+            buffer[0..8].copy_from_slice(&id.0.to_be_bytes());
+            buffer[8..16].copy_from_slice(&u64::try_from(offset).unwrap().to_be_bytes());
+            buffer[16..24].copy_from_slice(&u64::try_from(size.width).unwrap().to_be_bytes());
+            buffer[24..32].copy_from_slice(&u64::try_from(size.height).unwrap().to_be_bytes());
+            
+            index_file
+                .write_all(&buffer)
+                .expect("couldn't write to font cache index file");
+        }
+    }
+
+    fn get_or_insert_with(
+        &mut self,
+        id: LiveId,
+        f: impl FnOnce(&mut Vec<u8>
+    ) -> SizeUsize) -> FontCacheEntry<'_> {
+        if !self.index.contains_key(&id) {
+            self.insert_with(id, f);
+        }
+        self.get(id).unwrap()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FontCacheIndexEntry {
+struct FontCacheEntry<'a> {
+    size: SizeUsize,
+    bytes: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FontCacheIndexEntry {
+    size: SizeUsize,
     offset: usize,
-    width: usize,
-    height: usize
 }
 
 pub struct CxShapeCache {
@@ -241,7 +388,7 @@ pub struct CxFontsAtlasSdfConfig {
 }
 
 impl CxFontAtlas {
-    pub fn new(texture_sdf: Texture, texture_svg: Texture) -> Self {
+    pub fn new(texture_sdf: Texture, texture_svg: Texture, os_type: &OsType) -> Self {
         Self {
             fonts: Vec::new(),
             path_to_font_id: HashMap::new(),
@@ -269,8 +416,7 @@ impl CxFontAtlas {
                     },
                 })
             },
-            font_cache: Vec::new(),
-            font_cache_index: HashMap::new(),
+            font_cache: Some(FontCache::new(os_type.get_cache_dir())),
         }
     }
 }
@@ -426,7 +572,7 @@ impl<'a> Cx2d<'a> {
                 updated: TextureUpdated::Full,
             });
             
-            let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg);
+            let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg, cx.os_type());
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
     }
@@ -482,15 +628,13 @@ impl<'a> Cx2d<'a> {
     ) {
         let font = font_atlas.fonts[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
-        
+
         if ['\t', '\n', '\r'].iter().any(|&c| {
             Some(todo.glyph_id) == font.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
         }) {
             return;
         }
 
-        // We need to create a stable id for this glyph in the on disk font cache. We will base
-        // this id on the font path, the font size, and the glyph id.
         let font_path = font_atlas.font_id_to_path[&todo.font_id].clone();
         let font_size = atlas_page.font_size_in_device_pixels;
         let glyph_id = todo.glyph_id;
@@ -500,32 +644,23 @@ impl<'a> Cx2d<'a> {
             .bytes_append(&font_size.to_ne_bytes())
             .bytes_append(&glyph_id.to_ne_bytes());
 
-        // If the glyph is not in the cache, rasterize it and add it to the cache.
-        if font_atlas.font_cache_index.get(&font_cache_id).is_none() {
-            let mut bytes = mem::replace(&mut font_atlas.font_cache, Vec::new());
-            let offset = bytes.len();
-            let (width, height) = self.rasterize_sdf(
+        let mut font_cache = font_atlas.font_cache.take().unwrap();
+
+        let FontCacheEntry {
+            size,
+            bytes,
+        } = font_cache.get_or_insert_with(font_cache_id, |bytes| {
+            self.rasterize_sdf(
                 font_atlas,
                 todo,
                 reuse_sdfer_bufs,
-                &mut bytes
-            );
-            font_atlas.font_cache = bytes;
-            font_atlas.font_cache_index.insert(font_cache_id, FontCacheIndexEntry {
-                offset,
-                width,
-                height,
-            });
-        }
+                bytes
+            )
+        });
 
-        // Passing `font_atlas` to `rasterize_sdf` above invalidated all borrows from it.
         let font = font_atlas.fonts[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
         let atlas_glyph = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
-
-        // Copy the glyph from the font cache to the atlas texture.
-        let FontCacheIndexEntry { offset, width, height } = font_atlas.font_cache_index[&font_cache_id];
-        let bytes = &font_atlas.font_cache[offset..][..width * height];
 
         let mut atlas_data = font_atlas.texture_sdf.take_vec_u8(self.cx);
         let (atlas_w, atlas_h) = font_atlas.texture_sdf.get_format(self.cx).vec_width_height().unwrap();
@@ -540,8 +675,8 @@ impl<'a> Cx2d<'a> {
         let atlas_y0 = (atlas_glyph.t1.y as f64 * font_atlas.alloc.texture_size.y) as usize - sdf_pad;
 
         let mut index = 0;
-        for y in 0..height {
-            let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..width];
+        for y in 0..size.height {
+            let dst = &mut atlas_data[(atlas_h - atlas_y0 - 1 - y) * atlas_w..][..atlas_w][atlas_x0..][..size.width];
             for dst in dst {
                 *dst = bytes[index];
                 index += 1;
@@ -549,9 +684,11 @@ impl<'a> Cx2d<'a> {
         }
 
         font_atlas.texture_sdf.put_back_vec_u8(self.cx, atlas_data, Some(RectUsize::new(
-            PointUsize::new(atlas_x0, atlas_h - atlas_y0 - height),
-            SizeUsize::new(width, height),
+            PointUsize::new(atlas_x0, atlas_h - atlas_y0 - size.height),
+            size,
         )));
+
+        font_atlas.font_cache = Some(font_cache);
     }
 
     fn rasterize_sdf(
@@ -560,7 +697,7 @@ impl<'a> Cx2d<'a> {
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
         bytes: &mut Vec<u8>
-    ) -> (usize, usize) {
+    ) -> SizeUsize {
         let font = fonts_atlas.fonts[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
         let glyph = font.owned_font_face.with_ref(|face| font.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
@@ -663,7 +800,7 @@ impl<'a> Cx2d<'a> {
             }
         }
 
-        (glyph_out.width(), glyph_out.height())
+        SizeUsize::new(glyph_out.width(), glyph_out.height())
     }
 }
 
