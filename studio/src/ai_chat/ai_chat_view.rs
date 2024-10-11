@@ -195,9 +195,9 @@ live_design!{
                 height: Fill, width: Fill,
                 flow: Right,
                 align: { x: 0.0, y: 0.5},
-                margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
+                margin: <THEME_MSPACE_H_2> {}
                 spacing: (THEME_SPACE_2),
-                
+
                 auto_run = <CheckBoxCustom> {
                     text: "Auto run",
                     align: { y: 0.5 }
@@ -250,9 +250,8 @@ live_design!{
                     icon_walk: { width: 5. }
                 }
 
-                history_delete = <ButtonFlatter> {
+                history_delete = <ButtonFlat> {
                     width: Fit,
-                    padding: <THEME_MSPACE_1> {}
                     text: "Delete"
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_del.svg"),
@@ -262,9 +261,8 @@ live_design!{
 
                <Vr> {} 
 
-                <ButtonFlatter> {
+                <ButtonFlat> {
                     width: Fit,
-                    padding: <THEME_MSPACE_1> {}
                     text: "New"
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_add.svg"),
