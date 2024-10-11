@@ -4457,7 +4457,7 @@ live_design! {
     DesignerOutline = <DesignerOutlineBase>{ }
 
     Vr = <View> {
-        width: Fit, height: 27.,
+        width: Fit, height: Fill,
         flow: Right,
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
