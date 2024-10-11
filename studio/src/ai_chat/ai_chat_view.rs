@@ -197,7 +197,7 @@ live_design!{
                 align: { x: 0.0, y: 0.5},
                 margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                 spacing: (THEME_SPACE_2),
-                
+
                 auto_run = <CheckBoxCustom> {
                     text: "Auto run",
                     align: { y: 0.5 }
