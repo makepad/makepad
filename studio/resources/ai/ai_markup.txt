@@ -32,5 +32,12 @@ Makepad shader values are mut by default and should be declard as ````let```` an
 Makepad shaders use ````for i in 0..10{ }```` as their loop construct. 
 You cannot use ````while```` as this is potentially unbounded
 you have to set ````show_bg: true```` on a View if you want the background shader to be visible
+remember that return types for the shaders are written rust style: ````fn pixel(self)->vec4{}````
+Local function for the shader cannot be placed inside the ````pixel```` function but need to be inside the draw_bg scope and before the pixel function. Please remember to write the function type signature in the declaration rust-style `````
+fn thing(a:vec3, b:vec4)->vec4```` 
+Please remember to give functions an explicit ````return```` call, it is like GLSL and not like Rust with an automatic return value.
+If you use ````self.time```` make sure the first function argument is called ````self```` and the function is called as ````self.functionname()````
+Shader code does not support the ````f32```` type but needs to use ````float```` instead
+Constant definitions can only be inside functions and not at the root ````draw_bg```` block
 </GENERAL_POST>
 

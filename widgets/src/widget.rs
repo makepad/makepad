@@ -212,7 +212,7 @@ impl Debug for WidgetRef {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct WidgetSet(SmallVec<[WidgetRef;2]>);
+pub struct WidgetSet(pub SmallVec<[WidgetRef;2]>);
 
 impl WidgetSet {
     pub fn is_empty(&mut self) -> bool {
