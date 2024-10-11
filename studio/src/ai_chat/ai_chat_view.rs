@@ -21,7 +21,7 @@ live_design!{
         height: Fit,
         flow: Down,
         margin: <THEME_MSPACE_3> {}
-        padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) } 
+        padding: <THEME_MSPACE_2> { top: (THEME_SPACE_1), bottom: (THEME_SPACE_2) } 
         draw_bg: { color: (THEME_COLOR_U_1) }
 
         <View> {
@@ -30,6 +30,7 @@ live_design!{
             align: { x: 0., y: 0. },
             spacing: (THEME_SPACE_3),
             padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1) }
+            margin: { bottom: -5.}
 
             run_button = <ButtonFlat> {
                 width: Fit,
@@ -44,8 +45,6 @@ live_design!{
                 }
                 icon_walk: { width: 9. }
             }
-
-            
 
             <Vr> { height: 17.5}
 
@@ -205,7 +204,7 @@ live_design!{
                     draw_check: { check_type: None }
                     spacing: (THEME_SPACE_1),
                     padding: <THEME_MSPACE_V_2> {}
-                    icon_walk: {width: 10. }
+                    icon_walk: { width: 10. }
                     draw_icon: {
                         color: (THEME_COLOR_D_4),
                         color_active: (STUDIO_PALETTE_6),
