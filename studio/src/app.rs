@@ -185,7 +185,7 @@ impl MatchEvent for App{
         let dock = self.ui.dock(id!(dock));
         let file_tree = self.ui.view(id!(file_tree));
         let log_list = self.ui.log_list(id!(log_list));
-        let run_list = self.ui.view(id!(run_list));
+        let run_list = self.ui.view(id!(run_list_tab));
         let profiler = self.ui.view(id!(profiler));
         
         match action.cast(){
