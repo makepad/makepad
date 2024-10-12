@@ -419,7 +419,7 @@ impl AiChatManager{
             let usr = doc.file.history[history_slot].messages.iter().nth(item_id);
             let ast = doc.file.history[history_slot].messages.iter().nth(item_id+1);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
-                if let Some(AiChatMessage::User(usr)) = usr.cloned(){
+                if let Some(AiChatMessage::User(_usr)) = usr.cloned(){
                     let file_path =  "examples/simple/src/app.rs";
                     let file_id = fs.path_to_file_node_id(file_path).unwrap();
                     let old_data = fs.file_id_as_string(file_id).unwrap();
