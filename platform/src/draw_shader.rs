@@ -314,7 +314,6 @@ impl CxDrawShaderMapping {
         let mut rect_pos = None;
         let mut rect_size = None;
         let mut draw_clip = None;
-        let mut uses_time = false;
         for field in &draw_shader_def.fields {
             let ty = field.ty_expr.ty.borrow().as_ref().unwrap().clone();
             match &field.kind {
@@ -352,9 +351,6 @@ impl CxDrawShaderMapping {
                         }
                         live_id!(pass) => {
                             pass_uniforms.push(field.ident.0, ty, None);
-                            if field.ident.0 == live_id!(time){
-                                uses_time = true;
-                            }
                         }
                         live_id!(user) => {
                             user_uniforms.push(field.ident.0, ty, None);
@@ -391,7 +387,7 @@ impl CxDrawShaderMapping {
         
         CxDrawShaderMapping {
             const_table,
-            uses_time,
+            uses_time: draw_shader_def.uses_time.get(),
             flags: draw_shader_def.flags,
             geometries,
             instances,
