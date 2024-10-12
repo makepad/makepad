@@ -458,8 +458,6 @@ export class WasmWebBrowser extends WasmBridge {
             context_ptr
         };
         if (typeof this.exports.__wbindgen_start !== 'undefined') {
-            // ret.tls_ptr = this.exports.__stack_alloc.value;
-            ret.stack_ptr = this.exports.__stack_pointer.value;
             ret.wasm_bindgen = true;
         } else {
             let tls_size = this.exports.__tls_size.value;
