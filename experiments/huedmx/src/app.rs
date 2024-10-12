@@ -583,6 +583,7 @@ impl App {
                                 for i in 5..8{
                                     state.dial_a[i] = ts.dial_a[i];
                                     state.dial_b[i] = ts.dial_b[i];
+                                    state.fade[4] = ts.fade[4];
                                 }
                             }
                         }
