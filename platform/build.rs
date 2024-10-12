@@ -50,14 +50,14 @@ fn main() {
         "ios"=>{
             if target == "aarch64-apple-ios-sim"{
                 println!("cargo:rustc-cfg=apple_sim"); 
-                println!("cargo:rustc-cfg=apple_bundle"); 
+                //println!("cargo:rustc-cfg=apple_bundle"); 
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
         }
         "tvos"=>{
             if target == "aarch64-apple-tvos-sim"{
                 println!("cargo:rustc-cfg=apple_sim"); 
-                println!("cargo:rustc-cfg=apple_bundle"); 
+                //println!("cargo:rustc-cfg=apple_bundle"); 
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
         }
