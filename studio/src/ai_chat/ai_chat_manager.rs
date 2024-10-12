@@ -342,6 +342,7 @@ impl AiChatManager{
                 // lets check our in flight queries
                 if let Some((chat_id,OpenDocument::AiChat(doc))) = fs.open_documents.iter_mut().find(
                     |(_,v)| if let OpenDocument::AiChat(v) = v {if let Some(v) = &v.in_flight{v.request_id == e.request_id}else{false}} else{false}){
+                        
                     let chat_id = *chat_id;
                     let in_flight = doc.in_flight.as_ref().unwrap();
                     match &e.response{
