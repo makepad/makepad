@@ -85,6 +85,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    self.handle_action_receiver();
                     if self.handle_live_edit() {
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
