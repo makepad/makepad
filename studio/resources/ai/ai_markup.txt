@@ -38,6 +38,10 @@ fn thing(a:vec3, b:vec4)->vec4````
 Please remember to give functions an explicit ````return```` call, it is like GLSL and not like Rust with an automatic return value.
 If you use ````self.time```` make sure the first function argument is called ````self```` and the function is called as ````self.functionname()````
 Shader code does not support the ````f32```` type but needs to use ````float```` instead
+You cannot cast an int to a float with ````i as float```` but you have to write it as ````float(i)````
 Constant definitions can only be inside functions and not at the root ````draw_bg```` block
+Make sure that when you call a method ````self.fnclall```` that the first argument in the declaration is ````fn fncall(self)
+If you call a method on self call ````fncall```` make sure the first argument on the function declaration is ````(self)````
+
 </GENERAL_POST>
 
