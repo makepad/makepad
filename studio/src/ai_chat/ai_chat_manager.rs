@@ -420,20 +420,18 @@ impl AiChatManager{
             let ast = doc.file.history[history_slot].messages.iter().nth(item_id+1);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
                 if let Some(AiChatMessage::User(usr)) = usr.cloned(){
-                    if usr.auto_run{
-                        let file_path =  "examples/simple/src/app.rs";
-                        let file_id = fs.path_to_file_node_id(file_path).unwrap();
-                        let old_data = fs.file_id_as_string(file_id).unwrap();
-                        if let Some(new_data) = ast.strip_prefix("```rust"){
-                            if let Some(new_data) = new_data.strip_suffix("```"){
-                                fs.process_possible_live_reload(
-                                    cx,
-                                    file_path,
-                                    &old_data,
-                                    &new_data,
-                                    false
-                                );
-                            }
+                    let file_path =  "examples/simple/src/app.rs";
+                    let file_id = fs.path_to_file_node_id(file_path).unwrap();
+                    let old_data = fs.file_id_as_string(file_id).unwrap();
+                    if let Some(new_data) = ast.strip_prefix("```rust"){
+                        if let Some(new_data) = new_data.strip_suffix("```"){
+                            fs.process_possible_live_reload(
+                                cx,
+                                file_path,
+                                &old_data,
+                                &new_data,
+                                false
+                            );
                         }
                     }
                 }
