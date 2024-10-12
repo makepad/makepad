@@ -475,7 +475,6 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     // NSTextInput protocol
     extern fn marked_range(this: &Object, _sel: Sel) -> NSRange {
-        //println!("markedRange");
         unsafe {
             let marked_text: ObjcId = *this.get_ivar("markedText");
             let length = marked_text.length();
