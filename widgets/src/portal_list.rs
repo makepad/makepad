@@ -1059,7 +1059,7 @@ impl PortalListRef {
     /// ```
     /// smooth_scroll_to(&mut cx, 42, 100.0); // Scrolls to item 42 at speed 100.0
     /// ```
-    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, target_id: usize, speed: f64) {
+    pub fn smooth_scroll_to(&self, cx: &mut Cx, target_id: usize, speed: f64) {
         let Some(mut inner) = self.borrow_mut() else { return };
         if inner.items.is_empty() { return };
 
@@ -1102,7 +1102,7 @@ impl PortalListRef {
     /// Note: This number should be large enough to reach the end, so it is important to
     /// test the passed number. TODO provide a better implementation to ensure that the end
     /// is always reached, no matter the speed value.
-    pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, max_delta: usize, speed: f64) {
+    pub fn smooth_scroll_to_end(&self, cx: &mut Cx, max_delta: usize, speed: f64) {
         let Some(mut inner) = self.borrow_mut() else { return };
         if inner.items.is_empty() { return };
 
