@@ -136,7 +136,7 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
         let hglobal_raw_ptr = unsafe { GlobalLock(hglobal) };
 
         // initialize DROPFILES part
-        let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,5) };
+        let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,7) };
         u32_slice[0] = 28; // offset to filename
         u32_slice[1] = 0;
         u32_slice[2] = 0;
@@ -145,8 +145,8 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
 
         // initialize internal ID
         if let Some(internal_id) = internal_id {
-            u32_slice[5] = (internal_id.0&0xffff_ffff) as u32 ;
-            u32_slice[6] = (internal_id.0>>32) as u32;
+            u32_slice[5] = (internal_id.0>>32) as u32;
+            u32_slice[6] = (internal_id.0&0xffff_ffff) as u32 ;
             //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
             //u64_slice[0] = internal_id.0;
         }
