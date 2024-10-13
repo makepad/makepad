@@ -77,7 +77,7 @@ impl Cx{
         let mut thread_sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
         *thread_sender = Some(rx_sender);
         let sockets = Mutex::new(RefCell::new(HashMap::new()));
-        self.spawn_timer_thread(16, move ||{ 
+        self.spawn_timer_thread(1, move ||{ 
             let mut app_to_studio = AppToStudioVec(Vec::new());
             while let Ok(msg) = rx_receiver.try_recv(){
                 match msg{
