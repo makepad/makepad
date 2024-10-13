@@ -35,7 +35,7 @@ impl Cx {
                 }
             }
             else{
-                dep.data = Some(Err("File open failed".to_string()));
+                dep.data = Some(Err("Bundled file open failed".to_string()));
             }
         }
     }
