@@ -145,8 +145,8 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
 
         // initialize internal ID
         if let Some(internal_id) = internal_id {
-            u32_slice[5] = (internal_id.0>>32) as u32;
-            u32_slice[6] = (internal_id.0&0xffff_ffff) as u32 ;
+            u32_slice[6] = (internal_id.0>>32) as u32;
+            u32_slice[5] = (internal_id.0&0xffff_ffff) as u32 ;
             //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
             //u64_slice[0] = internal_id.0;
         }
