@@ -46,6 +46,13 @@ impl Default for AiChatManager{
             ],
             contexts: vec![
                 BaseContext{
+                    name: "Chat".to_string(),
+                    system_pre: live_id!(CHAT_PRE),
+                    system_post: live_id!(CHAT_POST),
+                    general_post: live_id!(CHAT_GENERAL),
+                    files: vec![]
+                },
+                BaseContext{
                     name: "Rust".to_string(),
                     system_pre: live_id!(RUST_PRE),
                     system_post: live_id!(RUST_POST),
