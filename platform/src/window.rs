@@ -245,12 +245,21 @@ pub struct CxWindow {
     pub create_inner_size: Option<DVec2>,
     pub kind_id: usize,
     pub dpi_override: Option<f64>,
+    pub os_dpi_factor: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
 }
 
 impl CxWindow {
+    pub fn remap_dpi_override(&self, pos:DVec2)->DVec2{
+        if let Some(dpi_override) = self.dpi_override{
+            if let Some(os_dpi_factor) = self.os_dpi_factor{
+                return pos * ( os_dpi_factor / dpi_override)
+            }
+        }
+        return pos
+    }
     
     pub fn get_inner_size(&self) -> DVec2 {
         if !self.is_created {
