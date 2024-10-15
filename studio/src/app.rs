@@ -552,6 +552,7 @@ impl MatchEvent for App{
         }
             
         if let Some(file_id) = file_tree.file_clicked(&actions) {
+            println!("FILE CLICKED");
             // ok lets open the file
             if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
                 // If the tab is already open, focus it
