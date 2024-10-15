@@ -666,7 +666,7 @@ impl Widget for View {
             }
         }
                 
-        match event.hit_designer(cx, self.draw_bg.area()){
+        match event.hit_designer(cx, self.area()){
             HitDesigner::DesignerPick(_e)=>{
                 cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
             }
