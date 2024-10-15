@@ -514,7 +514,6 @@ impl BuildManager {
                                     
                                     for (_,id,sender) in d.borrow_mut().iter_mut() {
                                         if *id == build_id{
-                                            println!("FOUND SENDER {}", file_name);
                                             let _ = sender.send(data.clone());
                                         }
                                     }

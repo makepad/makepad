@@ -797,13 +797,11 @@ impl Dock {
     }
         
     pub fn load_state(&mut self, cx: &mut Cx, dock_items: HashMap<LiveId, DockItem>) {
+        //log!("{:#?}", self.dock_items);
         self.dock_items = dock_items;
-        // Clear existing items
-        //self.items.clear();
-        //self.tab_bars.clear();
-        //self.splitters.clear();
-        //self.templates.clear();
-        
+        self.items.clear();
+        self.tab_bars.clear();
+        self.splitters.clear();
         // let the dock lazily reconstruct itself
         self.area.redraw(cx);
     }
