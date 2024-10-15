@@ -1132,17 +1132,22 @@ impl DockRef {
         LiveId(0)
     }
         
-    pub fn needs_save(&self)->Option<HashMap<LiveId, DockItem>>{
+    pub fn check_and_clear_need_save(&self)->bool{
         if let Some(mut dock) = self.borrow_mut() {
             if dock.needs_save{
                 dock.needs_save = false;
-                return Some(dock.dock_items.clone())
+                return true
             }
+        }
+        false
+    }
+    
+    pub fn clone_state(&self)->Option<HashMap<LiveId, DockItem>>{
+        if let Some(dock) = self.borrow(){
+            return Some(dock.dock_items.clone());
         }
         None
     }
-    
-    
     
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);

@@ -863,4 +863,66 @@ impl BuildManager {
             }
         });
     }
+    
+            
+    pub fn binary_name_to_id(&self, name:&str)->Option<usize>{
+        self.binaries.iter().position(|v| v.name == name)
+    }
+        
+    pub fn run_app(&mut self, cx:&mut Cx, binary_name:&str){
+        let binary_id = self.binary_name_to_id(binary_name).unwrap();
+        self.start_active_build(cx, binary_id, BuildTarget::Release);
+    }
+            
+    pub fn start_active_build(&mut self, _cx:&mut Cx, binary_id:usize, target: BuildTarget) {
+        let binary = &self. binaries[binary_id];
+        let process = BuildProcess {
+            binary: binary.name.clone(),
+            target
+        };
+        let item_id = process.as_id();
+        self.clients[0].send_cmd_with_id(item_id, BuildCmd::Run(process.clone(),self.studio_http.clone()));
+        //let run_view_id = LiveId::unique();
+        if self.active.builds.get(&item_id).is_none() {
+            let index = self.active.builds.len();
+            self.active.builds.insert(item_id, ActiveBuild {
+                log_index: format!("[{}]", index),
+                process: process.clone(),
+                app_area: Default::default(),
+                swapchain: Default::default(),
+                last_swapchain_with_completed_draws: Default::default(),
+                aux_chan_host_endpoint: None,
+            });
+        }
+        //if process.target.runs_in_studio(){
+            // create the runview tab
+        //    cx.action(AppA::Create(item_id, process.binary.clone()))
+        //}
+    }
+    
+    pub fn stop_all_active_builds(&mut self, cx:&mut Cx){
+        while self.active.builds.len()>0{
+            let build = &self.active.builds.values().next().unwrap();
+            let binary_id = self.binary_name_to_id(&build.process.binary).unwrap();
+            let target = build.process.target;
+            self.stop_active_build(cx, binary_id, target);
+        }
+    }
+        
+    pub fn stop_active_build(&mut self, cx:&mut Cx, binary_id: usize, target: BuildTarget) {
+        let binary = &self. binaries[binary_id];
+                
+        let process = BuildProcess {
+            binary: binary.name.clone(),
+            target
+        };
+        let build_id = process.as_id().into();
+        if let Some(_) = self.active.builds.remove(&build_id) {
+            self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
+            if process.target.runs_in_studio(){
+                cx.action(AppAction::DestroyRunViews{run_view_id:build_id})
+            }
+        }
+    }
+    
 }

@@ -1,8 +1,9 @@
 use crate::{
     makepad_code_editor::text::Position, makepad_live_id::LiveId, makepad_platform::log::LogLevel,
+    makepad_micro_serde::*,
 };
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, SerRon, DeRon)]
 pub enum BuildTarget {
     Release,
     Debug,
@@ -47,8 +48,8 @@ impl BuildTarget {
     pub const CHECK_WINDOWS: u64 = 13;
     pub const CHECK_LINUX: u64 = 14;
     pub const CHECK_ALL: u64 = 15;
-    pub fn len() -> u64 {
-        Self::CHECK_ALL + 1
+    pub fn len() -> usize {
+        Self::CHECK_ALL as usize + 1
     }
     pub fn name(&self) -> &'static str {
         match self {
@@ -70,8 +71,8 @@ impl BuildTarget {
             Self::CheckAll => "Check All",
         }
     }
-    pub fn as_id(&self) -> u64 {
-        match self {
+    pub fn as_id(&self) -> usize {
+        (match self {
             Self::ReleaseStudio => Self::RELEASE_STUDIO,
             Self::DebugStudio => Self::DEBUG_STUDIO,
             Self::Release => Self::RELEASE,
@@ -88,10 +89,10 @@ impl BuildTarget {
             Self::CheckWindows => Self::CHECK_WINDOWS,
             Self::CheckLinux => Self::CHECK_LINUX,
             Self::CheckAll => Self::CHECK_ALL,
-        }
+        }) as usize
     }
-    pub fn from_id(tgt: u64) -> Self {
-        match tgt {
+    pub fn from_id(tgt: usize) -> Self {
+        match tgt as u64{
             Self::RELEASE => Self::Release,
             Self::DEBUG => Self::Debug,
             Self::RELEASE_STUDIO => Self::ReleaseStudio,
@@ -113,7 +114,7 @@ impl BuildTarget {
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, SerRon, DeRon)]
 pub struct BuildProcess {
     pub binary: String,
     pub target: BuildTarget,
