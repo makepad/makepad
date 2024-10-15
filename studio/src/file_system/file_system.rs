@@ -90,6 +90,14 @@ impl FileSystem {
         }
     }
     
+    pub fn get_tab_after_from_path(path:&str)->LiveId{
+        match Self::get_editor_template_from_path(path){
+            live_id!(AiChat)=>live_id!(ai_first),
+            _=>live_id!(edit_first),
+        }
+    }
+        
+    
     pub fn get_editor_template_from_file_id(&self, file_id:LiveId)->Option<LiveId>{
         if let Some(path) = self.file_node_id_to_path(file_id){
             Some(Self::get_editor_template_from_path(path))
