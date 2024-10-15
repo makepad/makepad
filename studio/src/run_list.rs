@@ -227,7 +227,7 @@ impl RunList{
             
             let cb =  item.check_box(id!(check));
             cb.set_selected(cx, build_manager.active.any_binary_active(&binary.name));
-            cb.set_action_data(ActionData::RunTarget{target:BuildTarget::from_id(0), binary_id});
+            cb.set_action_data(ActionData::RunMain{binary_id});
             
             item.draw_all(cx, &mut Scope::empty());
             counter += 1;

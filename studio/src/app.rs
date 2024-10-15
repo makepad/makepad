@@ -84,7 +84,7 @@ impl App {
                     let dock = self.ui.dock(id!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         dock.load_state(cx, state.dock_items);
-                        //self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
+                        self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
                         for (tab_id, file_node_id) in state.tab_id_to_file_node_id.iter() {
                             self.data.file_system.request_open_file(*tab_id, *file_node_id);
                         }
