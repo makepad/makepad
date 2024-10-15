@@ -92,7 +92,7 @@ live_design!{
                 empty_message: "Enter prompt"
             }
 
-            send_button = <ButtonFlatter> {
+            /*send_button = <ButtonFlatter> {
                 width: Fit,
                 padding: <THEME_MSPACE_V_1> {}
                 margin: { left: -35.}
@@ -116,7 +116,7 @@ live_design!{
                     svg_file: dep("crate://self/resources/icons/icon_times.svg"),
                 }
                 icon_walk: { width: 7. }
-            }
+            }*/
         }
         
         
