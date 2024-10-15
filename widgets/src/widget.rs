@@ -484,7 +484,14 @@ impl WidgetRef {
         }
         WidgetRef::empty()
     }
-
+        
+    pub fn clear_query_cache(&self){
+        if let Some(inner) = self.0.borrow_mut().as_ref() {
+            let mut res = WidgetSet::empty();
+            inner.widget.find_widgets(&[], WidgetCache::Clear, &mut res);
+        }
+    }
+    
     pub fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.find_widgets(path, cached, results)
