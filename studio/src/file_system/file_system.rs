@@ -2,7 +2,7 @@ use {
     std::collections::{HashMap, hash_map},
     std::path::Path,
     crate::{
-        makepad_code_editor::{session::SessionId,  CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
+        makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
