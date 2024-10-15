@@ -6,6 +6,7 @@ use {
         ops::{Index, IndexMut, Deref, DerefMut},
         collections::{HashMap},
         sync::Once,
+        sync::Mutex,
         fmt,
     }
 };
@@ -24,9 +25,9 @@ impl LiveIdInterner {
     where
     F: FnOnce(&mut Self) -> R,
     {
-        static mut IDMAP: Option<LiveIdInterner> = None;
+        static IDMAP: Mutex<Option<LiveIdInterner>> = Mutex::new(None);
         static ONCE: Once = Once::new();
-        ONCE.call_once( || unsafe {
+        ONCE.call_once( ||{
             let mut map = LiveIdInterner {
                 //alloc: 0,
                 id_to_string: HashMap::new()
@@ -94,9 +95,10 @@ impl LiveIdInterner {
                 }
                 map.add(item);
             }
-            IDMAP = Some(map)
+            *IDMAP.lock().unwrap() = Some(map)
         });
-        f(unsafe {IDMAP.as_mut().unwrap()})
+        let mut idmap = IDMAP.lock().unwrap();
+        f(idmap.as_mut().unwrap())
     }
 }
 

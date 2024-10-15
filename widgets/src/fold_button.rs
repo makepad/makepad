@@ -16,7 +16,8 @@ pub struct FoldButton {
     #[live] abs_size: DVec2,
     #[live] abs_offset: DVec2,
     #[walk] walk: Walk,
-    #[live] open: f64
+    #[live] open: f64,
+    #[action_data] #[rust] action_data: WidgetActionData,
 }
 
 #[derive(Clone, Debug, DefaultNone)]

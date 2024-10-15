@@ -111,7 +111,12 @@ live_design!{
 
     AppUI =  <Window> {
         margin: 5.
-        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
+        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} 
+        preset_1 = <Button>{text:"A"}
+        preset_2 = <Button>{text:"C"}
+        preset_3 = <Button>{text:"D"}
+        preset_4 = <Button>{text:"P"}
+    },
         window: { inner_size: vec2(1600, 900) },
         show_bg: true,
         draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
