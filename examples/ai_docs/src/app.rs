@@ -1,3 +1,4 @@
+// tis is an example application with a horizontal gradient
 use makepad_widgets::*;
 
 live_design!{
@@ -11,6 +12,11 @@ live_design!{
                     align:{
                         x:0.5, // align horizontal center, 0.0=left, 1.0=right
                         y:0.5 // align vertical center, 0.0=top, 1.0= right
+                    }
+                    // this shader syntax is NOT Rust code but comparable to GLSL. Do NOT write Rust code in these blocks
+                    fn pixel(self)->vec4{
+                        // make a vertical background shader
+                        return mix(#ccc,#333,self.pos.y)
                     }
                     button1 = <Button> {
                         text: "Button 1"

@@ -93,6 +93,9 @@ impl Default for AiChatManager{
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
                     ]
                 },
                 BaseContext{
@@ -103,6 +106,9 @@ impl Default for AiChatManager{
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
                     ]
                 }
             ],
@@ -581,7 +587,7 @@ impl AiChatManager{
                                         }
                                     }
                                 }
-                                if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
+                               /* if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
                                     for file in &ctx.files{
                                         if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
@@ -595,7 +601,7 @@ impl AiChatManager{
                                             }
                                         }
                                     }
-                                }
+                                }*/
                                 messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
                                 
                                 if let Some(text) = html.find_tag_text(system_post){
