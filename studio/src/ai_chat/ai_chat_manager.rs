@@ -181,7 +181,7 @@ impl AiChatMessages{
             self.messages.push(AiChatMessage::User(AiUserMessage{
                 auto_run: usr.auto_run,
                 model: usr.model.clone(),
-                project: user.project.clone(),
+                project: usr.project.clone(),
                 base_context: "Follow up".to_string(),
                 context: vec![],
                 message:"".to_string()
