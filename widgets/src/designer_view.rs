@@ -448,7 +448,6 @@ impl Widget for DesignerView {
                         // lets compare our rect to the mouse
                         // and if we are below ask the parent component view to move down
                         if let Some(parent) = &cs.parent{
-                            let rect = self.get_component_rect(cx, &cs.component);
                             let vw = parent.as_view();
                             if let Some(mut vw) = vw.borrow_mut(){
                                 
