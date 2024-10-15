@@ -23,7 +23,7 @@ live_design!{
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "Visual application development\nin Rust"},
+                        title = {text: "Visual application development\nin Rust/AI"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
@@ -31,44 +31,40 @@ live_design!{
                         <SlideBody> {text: "- Reimagining VB/Delphi for Rust\n- Integrated design workflow\n- All platforms: Web Desktop Mobile"}
                     }
                     <Slide> {
-                        title = {text:"What is Rust"},
-                        <SlideBody> {text: "- Originated at mozilla\n- Open Source\n- Systems language\n- Memory safe\n- No GC\n- Can compile fast\n- Large package ecosystem  "}
+                        title = {text:"Since last year"},
+                        <SlideBody> {text: "- Visual designer WIP\n- AI integration\n- External projects: \n     - Moxin: LMStudio\n     - Robrix: Matrix client  "}
                     }
                     <Slide> {
                         title = {text:"Makepad Framework"},
-                        <SlideBody> {text: "- Our flutter/swiftUI\n- Designed for live coding / editing\n- DSL: Live\n- Rust: Compiled "}
+                        <SlideBody> {text: "- Our flutter/swiftUI\n- Designed for live coding / editing\n- DSL: Live\n- Rust: Compiled\n- It works! "}
                     }
                     <Slide> {
                         title = {text: "Makepad Studio"},
                         <SlideBody> {text: "- Code editor (vscode)\n- Build system\n- Visual designer (figma)  "}
                     }
                     <Slide> {
-                        title = {text: "Examples"},
-                        <SlideBody> {text: "- Makepad studio\n- Fractals\n- Ironfish\n- AI "}
+                        title = {text: "But this is not 2023"},
+                        <SlideBody> {text: "- AI is automating software development\n"}
                     }
                     <Slide> {
-                        title = {text: "Build to"},
-                        <SlideBody> {text: "- Web\n- Mobile\n- Desktop "}
+                        title = {text: "What can an AI do"},
+                        <SlideBody> {text: "- Help write Rust\n- Understand our APIs\n- Write DSL"}
                     }
                     <Slide> {
-                        title = {text: "Architecture"},
-                        <SlideBody> {text: "- DSL for UI structure\n- Shaders for styling\n- Fast GPU instancing, low CPU overhead\n- Scalable: Rust for all application code"}
+                        title = {text: "Demo basic workflow"},
+                        <SlideBody> {text: ""}
                     }
                     <Slide> {
-                        title = {text: "Example code"},
-                        <SlideBody> {text: "- DSL at the top\n- Rust app below "}
+                        title = {text: "How does it work?"},
+                        <SlideBody> {text: "- In trainingset\n- Context "}
                     }
                     <Slide> {
-                        title = {text: "More apps"},
-                        <SlideBody> {text: "- Moxin, LM Studio-like\n- Robrix, matrix client "}
+                        title = {text: "Future: Vision models"},
+                        <SlideBody> {text: "- Sketch generation\n- See your application\n- Correct designs\n- Automated UI testing "}
                     }
                     <Slide> {
-                        title = {text: "Challenges"},
-                        <SlideBody> {text: "- Many mobile APIs (Robius)\n- App store packaging (Robius)\n- Font rendering\n- Visual design tool "}
-                    }
-                    <Slide> {
-                        title = {text: "Extensions / micro apps"},
-                        <SlideBody> {text: "- WASM engine: Stitch\n- Fastest interpreter: iOS possible\n- Eddy Bruël"}
+                        title = {text: "Future: Language models"},
+                        <SlideBody> {text: "- Automatic localisation\n- Generating Rust code iteratively "}
                     }
                     <Slide> {
                         title = {text: "Links"}, 
