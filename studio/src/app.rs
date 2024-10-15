@@ -97,8 +97,9 @@ impl App {
                             }       
                         }
                     };
+                    self.ui.clear_query_cache();
                     //self.ui.redraw(cx);
-                    //cxu.redraw_all();
+                     cx.redraw_all();
                     //self.data.build_manager.designer_selected_files = 
                      //   state.designer_selected_files;
                 }
@@ -304,7 +305,7 @@ impl MatchEvent for App{
                 if let Some(mut dock) = dock.borrow_mut() {
                     for (tab_id, (_, item)) in dock.items().iter() {
                         if let Some(run_view) = item.as_run_view().borrow_mut() {
-                            if run_view.build_id == build_id {
+                            if run_view.build_id == Some(build_id) {
                                 if let WindowKindId::Design = run_view.kind_id{
                                     // lets focus this tab
                                     id = Some(*tab_id);
@@ -374,11 +375,14 @@ impl MatchEvent for App{
                             // we might already have it
                             
                             let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), live_id!(CloseableTab), Some(pos)).unwrap();
-                            
+                                                        
                             if let Some(mut item) = item.as_run_view().borrow_mut(){
                                 item.window_id = window_id;
-                                item.build_id = build_id;
+                                item.build_id = Some(build_id);
                                 item.kind_id = WindowKindId::from_usize(kind_id);
+                            }
+                            else{
+                                println!("WHIT");
                             }
                             
                             dock.redraw(cx);
@@ -393,7 +397,7 @@ impl MatchEvent for App{
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
                                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                                    if run_view.build_id == build_id{
+                                    if run_view.build_id == Some(build_id){
                                         run_view.ready_to_start(cx);
                                     }
                                 }
@@ -404,7 +408,7 @@ impl MatchEvent for App{
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
                                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                                    if run_view.build_id == build_id && run_view.window_id == presentable_draw.window_id{
+                                    if run_view.build_id == Some(build_id) && run_view.window_id == presentable_draw.window_id{
                                         run_view.draw_complete_and_flip(cx, &presentable_draw, &mut self.data.build_manager);
                                     }
                                 }
@@ -563,7 +567,7 @@ impl MatchEvent for App{
                 let (tab_bar, pos) = dock.find_tab_bar_of_tab(tab_after).unwrap();
                 let template = FileSystem::get_editor_template_from_path(path);
                 dock.create_and_select_tab(cx, tab_bar, tab_id, template, "".to_string(), live_id!(CloseableTab), Some(pos));
-                                            
+                
                 // lets scan the entire doc for duplicates
                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
             }

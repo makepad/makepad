@@ -291,6 +291,7 @@ impl Widget for DesignerView {
                             abs: abs
                         }), &mut Scope::empty())
                     });
+                    self.selected_subcomponent = None;
                     for action in actions{
                         if let Some(action) = action.as_widget_action(){
                             match action.cast(){
@@ -302,12 +303,12 @@ impl Widget for DesignerView {
                                     self.selected_subcomponent = Some(
                                         comp
                                     );
-                                    self.draw_list.redraw(cx);
                                 }
                                 _=>()
                             }
                         }
                     }
+                    self.draw_list.redraw(cx);
                 }
                 
                 let mut cursor = None;
@@ -344,26 +345,31 @@ impl Widget for DesignerView {
                         self.finger_move = Some(FingerMove::DragAll{rects})
                     }
                     else{
-                        for (id, cd) in self.containers.iter(){
-                            match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
-                                Some(edge)=>{
-                                    self.finger_move = Some(FingerMove::DragEdge{
-                                        rect: cd.rect,
-                                        id: *id,
-                                        edge
-                                    });
-                                    // lets send out a click on this containter
-                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Selected{
-                                        id:*id, 
-                                        tap_count: fe.tap_count , 
-                                        km:fe.modifiers
-                                    });
-                                    // set selected component
-                                    // unselect all other components
-                                    self.select_component(cx, Some(*id));
-                                    break;
+                        if let Some(sc) = &self.selected_subcomponent{
+                            
+                        }
+                        else{
+                            for (id, cd) in self.containers.iter(){
+                                match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
+                                    Some(edge)=>{
+                                        self.finger_move = Some(FingerMove::DragEdge{
+                                            rect: cd.rect,
+                                            id: *id,
+                                            edge
+                                        });
+                                        // lets send out a click on this containter
+                                        cx.widget_action(uid, &scope.path, DesignerViewAction::Selected{
+                                            id:*id, 
+                                            tap_count: fe.tap_count , 
+                                            km:fe.modifiers
+                                        });
+                                        // set selected component
+                                        // unselect all other components
+                                        self.select_component(cx, Some(*id));
+                                        break;
+                                    }
+                                    None=>()
                                 }
-                                None=>()
                             }
                         }
                     }
