@@ -195,7 +195,7 @@ live_design!{
                 AiFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 6.
+                        width: 10.
                         margin: { top: 3. }
                     }
                     draw_icon: {
@@ -369,29 +369,29 @@ live_design!{
             }
 
             run_first = Tab {
-                name: ">"
+                name: ""
                 template: RunFirstTab,
                 kind: RunFirst
             }
 
             design_first = Tab {
-                name: ">"
+                name: ""
                 template: DesignFirstTab,
                 kind: DesignFirst
             }
 
             edit_first = Tab {
-                name: ">"
+                name: ""
                 template: EditFirstTab,
                 kind: EditFirst
             }
             ai_first = Tab {
-                name: ">"
+                name: ""
                 template: AiFirstTab,
                 kind: AiFirst
             }
             outline_first = Tab {
-                name: ">"
+                name: ""
                 template: OutlineFirstTab,
                 kind: OutlineFirst
             }
