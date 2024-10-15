@@ -560,6 +560,9 @@ impl WidgetNode for View {
             WidgetCache::Yes | WidgetCache::Clear => {
                 if let WidgetCache::Clear = cached {
                     self.find_cache.borrow_mut().clear();
+                    if path.len() == 0{
+                        return
+                    }
                 }
                 let mut hash = 0u64;
                 for i in 0..path.len() {
