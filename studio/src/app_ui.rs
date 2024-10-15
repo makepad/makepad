@@ -200,7 +200,7 @@ live_design!{
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_6)
-                        svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+                        svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
                     }
                 }
                 DesignFirstTab = <IconTab> {
