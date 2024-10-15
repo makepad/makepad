@@ -1,7 +1,11 @@
 use crate::{
     makepad_widgets::*,
+    makepad_widgets::slides_view::*,
+    makepad_widgets::makepad_micro_serde::*,
 }; 
- 
+use std::fs::File;
+use std::io::Write;
+
 live_design!{ 
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
@@ -12,7 +16,7 @@ live_design!{
             width: Fill,
             height: Fill
             body = {
-                <SlidesView> {
+                slides_view = <SlidesView> {
                     //current_slide:2.0
                     <Slide> {
                         title = {text: "Welcome!"},
@@ -78,10 +82,23 @@ live_design!{
 
 app_main!(App);
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct App {
     #[live] ui: WidgetRef,
 
+}
+
+impl LiveHook for App{
+    fn after_new_from_doc(&mut self, cx:&mut Cx){
+        if let Ok(contents) = std::fs::read_to_string("makepad_slides_state.ron") {
+            match AppStateRon::deserialize_ron(&contents) {
+                Ok(state)=>{
+                    self.ui.slides_view(id!(slides_view)).set_current_slide(cx, state.slide);
+                }
+                _=>()
+            }
+        }
+    }
 }
 
 impl LiveRegister for App {
@@ -90,8 +107,25 @@ impl LiveRegister for App {
     }
 }
 
+#[derive(SerRon, DeRon)]
+struct AppStateRon{
+    slide:usize
+}
+
+impl MatchEvent for App {
+    fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
+        let slides_view = self.ui.slides_view(id!(slides_view));
+        if let Some(slide) = slides_view.flipped(&actions){
+            let saved = AppStateRon{slide}.serialize_ron();
+            let mut f = File::create("makepad_slides_state.ron").expect("Unable to create file");
+            f.write_all(saved.as_bytes()).expect("Unable to write data");
+        }
+    }
+}
+
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
