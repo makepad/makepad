@@ -39,6 +39,10 @@ Makepad shader values are mut by default and should be declard as ```let``` and 
 Makepad shaders use ```for i in 0..10{ }``` as their loop construct. 
 You cannot use ```while``` as this is potentially unbounded
 Remember that return types for the shaders are written rust style: ```fn pixel(self)->vec4{}```
+Please write background shaders as ```draw_bg:{fn pixel(self)->vec4{return #f00}}```
+Do not write ```mut Cx2dShader``` this does not exist.
+Instead of ```self.time()``` it is ```self.time```
+Instead of ```event.action``` write ```action```
 Local function for the shader cannot be placed inside the ```pixel``` function but need to be inside the draw_bg scope and before the pixel function. Please remember to write the function type signature in the declaration rust-style ```fn thing(a:vec3, b:vec4)->vec4``` 
 Please remember to give functions an explicit ```return``` call, it is like GLSL and not like Rust with an automatic return value.
 If you use ```self.time``` make sure the first function argument is called ```self``` and the function is called as ```self.functionname()```
@@ -47,8 +51,10 @@ You cannot cast an int to a float with ```i as float``` but you have to write it
 Constant definitions can only be inside functions and not at the root ```draw_bg``` block
 Make sure that when you call a method ```self.methodname``` that the first argument in the declaration is ```fn methodname(self)```
 If you call a method on self call ```fncall``` make sure the first argument on the function declaration is ```(self)```
-
+When asked to write code in Rust, remember to put the code in the ```clicked``` if of the Rust block, do not put it in the shader code ```draw_bg``` area
+You cannot set event handlers like ```onclick``` in the ```live_design{}``` block, only in the Rust code
 you have to set ```show_bg: true``` on a View if you want the background shader to be visible
+
 
 </GENERAL_POST>
 
