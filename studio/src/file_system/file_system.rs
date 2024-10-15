@@ -490,7 +490,7 @@ impl FileSystem {
             count
         }
         // Collect the path components for each open tab
-        let mut tabs: Vec<(LiveId, Vec<&str>)> = Vec::new();
+        let mut tabs: Vec<(LiveId, Vec<&str>, usize)> = Vec::new();
         for (&tab_id, &file_id) in &self.tab_id_to_file_node_id {
             let mut path_components = Vec::new();
             let mut file_node = &self.file_nodes[file_id];
@@ -503,35 +503,46 @@ impl FileSystem {
             // Reverse the components so they go from root to leaf
             path_components.reverse();
             
-            tabs.push((tab_id, path_components));
+            tabs.push((tab_id, path_components, 1));
         }
         
         // Sort the tabs by their path components
         tabs.sort_by(|a, b| a.1.cmp(&b.1));
         
         // Determine the minimal unique suffix for each tab
+        let mut changing = true;
+        while changing{
+            changing = false;
+            for i in 0..tabs.len() {
+                let (_, ref path, minsfx) = tabs[i];
+                let mut min_suffix_len = minsfx;
+                // Compare with previous tab
+                if i > 0 {
+                    let (_, ref prev_path, minsfx) = tabs[i - 1];
+                    let common = longest_common_suffix(path, prev_path);
+                    min_suffix_len = min_suffix_len.max(common + 1).max(minsfx);
+                }
+                // Compare with next tab
+                if i + 1 < tabs.len() {
+                    let (_, ref next_path, minsfx) = tabs[i + 1];
+                    let common = longest_common_suffix(path, next_path);
+                    min_suffix_len = min_suffix_len.max(common + 1).max(minsfx);
+                }
+                // lets store this one 
+                let (_,_, ref mut minsfx) = tabs[i];
+                if *minsfx != min_suffix_len{
+                    changing = true;
+                    *minsfx = min_suffix_len;
+                }
+            }
+        }
         for i in 0..tabs.len() {
-            let (tab_id, ref path) = tabs[i];
-            let mut min_suffix_len = 1;
-            
-            // Compare with previous tab
-            if i > 0 {
-                let (_, ref prev_path) = tabs[i - 1];
-                let common = longest_common_suffix(path, prev_path);
-                min_suffix_len = min_suffix_len.max(common + 1);
-            }
-            // Compare with next tab
-            if i + 1 < tabs.len() {
-                let (_, ref next_path) = tabs[i + 1];
-                let common = longest_common_suffix(path, next_path);
-                min_suffix_len = min_suffix_len.max(common + 1);
-            }
-            
-            // Build the tab title using the minimal unique suffix
-            let start = path.len().saturating_sub(min_suffix_len);
+            let (tab_id, ref path, minsfx) = tabs[i];
+            let start = path.len().saturating_sub(minsfx);
             let title = path[start..].join("/");
             dock.set_tab_title(cx, tab_id, title);
         }
+        
     }
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
