@@ -181,7 +181,7 @@ impl AiChatMessages{
             self.messages.push(AiChatMessage::User(AiUserMessage{
                 auto_run: usr.auto_run,
                 model: usr.model.clone(),
-                project: "None".to_string(),
+                project: user.project.to_string(),
                 base_context: "Follow up".to_string(),
                 context: vec![],
                 message:"".to_string()
@@ -427,6 +427,11 @@ impl AiChatManager{
             let ast = doc.file.history[history_slot].messages.iter().nth(item_id+1);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
                 if let Some(AiChatMessage::User(_usr)) = usr.cloned(){
+                    // alright. check which project we're patching
+                    // lets fetch the first path
+                    
+                    // lets check the project and the mode
+                    
                     let file_path =  "examples/simple/src/app.rs";
                     let file_id = fs.path_to_file_node_id(file_path).unwrap();
                     let old_data = fs.file_id_as_string(file_id).unwrap();

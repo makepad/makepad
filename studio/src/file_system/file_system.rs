@@ -472,6 +472,9 @@ impl FileSystem {
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
                 
         fn longest_common_suffix(a: &[&str], b: &[&str]) -> usize {
+            if a == b{
+                return 1 // same file
+            }
             let mut ai = a.len();
             let mut bi = b.len();
             let mut count = 0;
