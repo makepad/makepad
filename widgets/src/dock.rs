@@ -289,6 +289,12 @@ impl LiveHook for Dock {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.create_all_items(cx);
+    }
+}
+
+impl Dock {
+    fn create_all_items(&mut self, cx: &mut Cx) {
         // make sure our items exist
         let mut items = Vec::new();
         for (item_id, item) in self.dock_items.iter() {
@@ -300,9 +306,6 @@ impl LiveHook for Dock {
             self.item_or_create(cx, item_id, kind);
         }
     }
-}
-
-impl Dock {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
@@ -802,8 +805,8 @@ impl Dock {
         self.items.clear();
         self.tab_bars.clear();
         self.splitters.clear();
-        // let the dock lazily reconstruct itself
         self.area.redraw(cx);
+        self.create_all_items(cx);
     }
 }
 
