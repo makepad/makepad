@@ -471,9 +471,9 @@ impl FileSystem {
     }
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
                 
-        fn longest_common_suffix(a: &[&str], b: &[&str]) -> usize {
+        fn longest_common_suffix(a: &[&str], b: &[&str]) -> Option<usize> {
             if a == b{
-                return 0 // same file
+                return None // same file
             }
             let mut ai = a.len();
             let mut bi = b.len();
@@ -487,7 +487,7 @@ impl FileSystem {
                     break;
                 }
             }
-            count
+            Some(count)
         }
         // Collect the path components for each open tab
         let mut tabs: Vec<(LiveId, Vec<&str>, usize)> = Vec::new();
@@ -518,15 +518,20 @@ impl FileSystem {
                 let mut min_suffix_len = minsfx;
                 // Compare with previous tab
                 if i > 0 {
-                    let (_, ref prev_path, minsfx) = tabs[i - 1];
-                    let common = longest_common_suffix(path, prev_path);
-                    min_suffix_len = min_suffix_len.max(common + 1).max(minsfx);
+                    let (_, ref prev_path, _) = tabs[i - 1];
+                    if let Some(common)= longest_common_suffix(path, prev_path){
+                        min_suffix_len = min_suffix_len.max(common + 1)
+                    }
                 }
                 // Compare with next tab
                 if i + 1 < tabs.len() {
                     let (_, ref next_path, minsfx) = tabs[i + 1];
-                    let common = longest_common_suffix(path, next_path);
-                    min_suffix_len = min_suffix_len.max(common + 1).max(minsfx);
+                    if let Some(common) = longest_common_suffix(path, next_path){
+                        min_suffix_len = min_suffix_len.max(common + 1).max(minsfx);
+                    }
+                    else{
+                        min_suffix_len = minsfx;
+                    }
                 }
                 // lets store this one 
                 let (_,_, ref mut minsfx) = tabs[i];
