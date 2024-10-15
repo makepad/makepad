@@ -10,6 +10,10 @@ live_design!{
             main_window = <Window>{
                 body = <ScrollXYView>{
                     flow: Down,
+                    align:{
+                        x:0.5, // align horizontal center, 0.0=left, 1.0=right
+                        y:0.5 // align vertical center, 0.0=top, 1.0= right
+                    }
                     button1 = <Button> {
                         text: "Button 1"
                     }
@@ -21,7 +25,7 @@ live_design!{
         }
     }
 }
-/*
+
 // Below is an application with a horizontally stacked set of buttons and a slider
 live_design!{
     import makepad_widgets::base::*;

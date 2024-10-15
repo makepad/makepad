@@ -84,7 +84,9 @@ impl App {
                     let dock = self.ui.dock(id!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         dock.load_state(cx, state.dock_items);
+                        
                         self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
+                        
                         for (tab_id, file_node_id) in state.tab_id_to_file_node_id.iter() {
                             self.data.file_system.request_open_file(*tab_id, *file_node_id);
                         }
@@ -556,8 +558,9 @@ impl MatchEvent for App{
                 self.data.file_system.request_open_file(tab_id, file_id);
                                 
                 // lets add a file tab 'some
-                let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
                 let path = self.data.file_system.file_node_id_to_path(file_id).unwrap();
+                let tab_after = FileSystem::get_tab_after_from_path(path);
+                let (tab_bar, pos) = dock.find_tab_bar_of_tab(tab_after).unwrap();
                 let template = FileSystem::get_editor_template_from_path(path);
                 dock.create_and_select_tab(cx, tab_bar, tab_id, template, "".to_string(), live_id!(CloseableTab), Some(pos));
                                             
