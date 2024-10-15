@@ -72,8 +72,8 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         }
         
         if let Some(action_data_field) = &action_data_field{
-            tb.add("    fn set_action_data(&mut self, action_data:std::sync::Arc<dyn WidgetActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
-            tb.add("    fn action_data(&mut self)->Option<std::sync::Arc<dyn WidgetActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
+            tb.add("    fn set_action_data(&mut self, action_data:std::sync::Arc<dyn ActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
+            tb.add("    fn action_data(&self)->Option<std::sync::Arc<dyn ActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
         }
         
         if let Some(wrap_field) = &wrap_field{
@@ -343,6 +343,13 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
             
+            /*                        
+            tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
+            tb.add("    type Target = WidgetRef;");
+            tb.add("    fn deref(&self)->&WidgetRef{&self.0}");
+            tb.add("}");
+            */
+                        
             return tb.end();
         }
     }

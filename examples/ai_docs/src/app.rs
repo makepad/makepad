@@ -12,11 +12,9 @@ live_design!{
                     flow: Down,
                     button1 = <Button> {
                         text: "Button 1"
-                        draw_text:{color:#f00}
                     }
                     button2 = <Button> {
                         text: "Button 2"
-                        draw_text:{color:#f00}
                     }
                 }
             }
@@ -40,11 +38,11 @@ live_design!{
                         spacing: 10.0 // spacing between items
                         button1 = <Button> {
                             text: "Button 1"
+                            // this sets the text color of the button to red
                             draw_text:{color:#f00}
                         }
                         button2 = <Button> {
                             text: "Button 2"
-                            draw_text:{color:#f00}
                         }
                     }
                     <View>{ 
