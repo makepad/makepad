@@ -473,7 +473,7 @@ impl FileSystem {
                 
         fn longest_common_suffix(a: &[&str], b: &[&str]) -> usize {
             if a == b{
-                return 1 // same file
+                return 0 // same file
             }
             let mut ai = a.len();
             let mut bi = b.len();
