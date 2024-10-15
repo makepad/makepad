@@ -95,6 +95,8 @@ impl App {
                             }       
                         }
                     };
+                    //self.ui.redraw(cx);
+                    //cxu.redraw_all();
                     //self.data.build_manager.designer_selected_files = 
                      //   state.designer_selected_files;
                 }
@@ -538,6 +540,7 @@ impl MatchEvent for App{
                 }
                 else{
                     self.load_state(cx, i+1);
+                    cx.redraw_all();
                 }
             }
         }
