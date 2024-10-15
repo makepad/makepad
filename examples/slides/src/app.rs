@@ -31,6 +31,10 @@ live_design!{
                         <SlideBody> {text: "- Reimagining VB/Delphi for Rust\n- Integrated design workflow\n- All platforms: Web Desktop Mobile"}
                     }
                     <Slide> {
+                        title = {text:"Makepad Studio"},
+                        <SlideBody> {text: "- Ironfish\n- Live code itself\n"}
+                    }
+                    <Slide> {
                         title = {text:"Since last year"},
                         <SlideBody> {text: "- Visual designer WIP\n- AI integration\n- External projects: \n     - Moxin: LMStudio\n     - Robrix: Matrix client  "}
                     }

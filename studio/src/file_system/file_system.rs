@@ -2,7 +2,7 @@ use {
     std::collections::{HashMap, hash_map},
     std::path::Path,
     crate::{
-        makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
+        makepad_code_editor::{session::SessionId,  CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
@@ -232,14 +232,7 @@ impl FileSystem {
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){
                                     
                                     if let Some(OpenDocument::Code(doc)) = self.open_documents.get_mut(&file_id){
-                                        if let Some(tab_id) = 
-                                        // lets grab a session id for our first session
-                                        self.tab_id_to_file_node_id.iter()
-                                        .find_map(|(k, v)| if v == file_id { Some(k) } else { None }){
-                                            if let Some(EditSession::Code(session)) = self.tab_id_to_session.get(&tab_id){
-                                                doc.replace(session.id(), response.new_data.clone().into());
-                                            }
-                                        }
+                                        doc.replace(response.new_data.clone().into());
                                     }
                                     ui.redraw(cx);
                                 }
@@ -352,6 +345,16 @@ impl FileSystem {
         if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
             self.request_save_file_for_file_node_id(*file_id, was_patch)
         };
+    }
+    
+    pub fn replace_code_document(&self, file_id:LiveId, text:&str){
+        match self.open_documents.get(&file_id){
+            Some(OpenDocument::Code(doc))=>{
+                doc.replace(text.into());
+            }
+            _=>()
+        }
+        
     }
     
     pub fn file_path_as_string(&self, path:&str)->Option<String>{
