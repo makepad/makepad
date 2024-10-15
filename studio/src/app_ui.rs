@@ -58,7 +58,7 @@ live_design!{
         <Filler> {}
         <P> {
             width: Fit,
-            text: "Default dock for",
+            text: "",
             margin: 0.,
             padding: <THEME_MSPACE_1> {}
         }

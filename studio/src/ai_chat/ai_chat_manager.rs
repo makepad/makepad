@@ -476,13 +476,25 @@ impl AiChatManager{
                             let old_data = fs.file_id_as_string(file_id).unwrap();
                             if let Some(new_data) = ast.strip_prefix("```rust"){
                                 if let Some(new_data) = new_data.strip_suffix("```"){
-                                    fs.process_possible_live_reload(
-                                        cx,
-                                        &first.path,
-                                        &old_data,
-                                        &new_data,
-                                        false
-                                    );
+                                    // alright depending
+                                    if let Some(ctx) = self.contexts.iter().find(|v| v.name == usr.base_context){
+                                        match ctx.apply{
+                                            AiApply::PatchDSL=>{
+                                                fs.process_possible_live_reload(
+                                                    cx,
+                                                    &first.path,
+                                                    &old_data,
+                                                    &new_data,
+                                                    false
+                                                );
+                                            }
+                                            AiApply::WholeFile=>{
+                                                fs.replace_code_document(file_id, new_data);
+                                                fs.request_save_file_for_file_node_id(file_id, false);
+                                            }
+                                            _=>()
+                                        }
+                                    }
                                 }
                             }
                         }
