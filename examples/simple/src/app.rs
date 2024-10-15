@@ -12,7 +12,7 @@ live_design!{
                     show_bg: true,
                     draw_bg:{
                         fn pixel(self)->vec4{
-                            return mix(#0f0,#f00,self.pos.y)
+                            return mix(#a,#6,self.pos.y)
                         }
                     }
                     button1 = <Button> {
