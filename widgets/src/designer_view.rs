@@ -380,10 +380,7 @@ impl Widget for DesignerView {
                         self.finger_move = Some(FingerMove::DragAll{rects})
                     }
                     else{
-                        if let Some(sc) = &self.selected_subcomponent{
-                            self.finger_move = Some(FingerMove::DragSubComponentOrder(sc.clone()));
-                        }
-                        else{
+                        if fe.modifiers.logo || self.selected_subcomponent.is_none(){
                             for (id, cd) in self.containers.iter(){
                                 match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
                                     Some(edge)=>{
@@ -405,6 +402,11 @@ impl Widget for DesignerView {
                                     }
                                     None=>()
                                 }
+                            }
+                        }
+                        else{
+                            if let Some(sc) = &self.selected_subcomponent{
+                                self.finger_move = Some(FingerMove::DragSubComponentOrder(sc.clone()));
                             }
                         }
                     }
