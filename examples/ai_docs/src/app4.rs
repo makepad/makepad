@@ -52,9 +52,14 @@ impl LiveRegister for App {
         crate::makepad_widgets::live_design(cx);
     }
 }
+impl MatchEvent for App{
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
+    }
+}
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
