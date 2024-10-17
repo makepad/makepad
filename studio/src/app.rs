@@ -75,6 +75,7 @@ impl App {
     }
     
     pub fn load_state(&mut self, cx:&mut Cx, slot:usize){
+        
         if let Ok(contents) = std::fs::read_to_string(format!("makepad_state{}.ron", slot)) {
             match AppStateRon::deserialize_ron(&contents) {
                 Ok(state)=>{
@@ -84,13 +85,13 @@ impl App {
                     let dock = self.ui.dock(id!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
                         dock.load_state(cx, state.dock_items);
-                        
+                                                
                         self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
-                        
                         for (tab_id, file_node_id) in state.tab_id_to_file_node_id.iter() {
                             self.data.file_system.request_open_file(*tab_id, *file_node_id);
                         }
                         // ok lets run the processes
+                                                                       
                         for process in state.processes{
                             if let Some(binary_id) = self.data.build_manager.binary_name_to_id(&process.binary){
                                 self.data.build_manager.start_active_build(cx, binary_id, process.target);
@@ -98,8 +99,9 @@ impl App {
                         }
                     };
                     self.ui.clear_query_cache();
+                    return;
                     //self.ui.redraw(cx);
-                     cx.redraw_all();
+                    // cx.redraw_all();
                     //self.data.build_manager.designer_selected_files = 
                      //   state.designer_selected_files;
                 }

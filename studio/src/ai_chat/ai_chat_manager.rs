@@ -479,20 +479,27 @@ impl AiChatManager{
                         if let Some(first) = project.files.get(0){
                             //let file_path =  "examples/simple/src/app.rs";
                             let file_id = fs.path_to_file_node_id(&first.path).unwrap();
-                            let old_data = fs.file_id_as_string(file_id).unwrap();
+                            //let old_data = fs.file_id_as_string(file_id).unwrap();
                             if let Some(new_data) = ast.strip_prefix("```rust"){
                                 if let Some(new_data) = new_data.strip_suffix("```"){
                                     // alright depending
                                     if let Some(ctx) = self.contexts.iter().find(|v| v.name == usr.base_context){
                                         match ctx.apply{
                                             AiApply::PatchDSL=>{
+                                                fs.replace_live_design(
+                                                    cx,
+                                                    file_id,
+                                                    &new_data
+                                                );
+                                                fs.request_save_file_for_file_node_id(file_id, false);
+                                                /*
                                                 fs.process_possible_live_reload(
                                                     cx,
                                                     &first.path,
                                                     &old_data,
                                                     &new_data,
                                                     false
-                                                );
+                                                );*/
                                             }
                                             AiApply::WholeFile=>{
                                                 fs.replace_code_document(file_id, new_data);

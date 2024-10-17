@@ -249,6 +249,49 @@ impl FileSystem {
         }
     }
     
+    pub fn replace_live_design(&self, cx:&mut Cx, file_id:LiveId, new_data:&str){
+        let mut old_neg = Vec::new();
+        let mut new_neg = Vec::new();
+        
+        match self.open_documents.get(&file_id){
+            Some(OpenDocument::Code(doc))=>{
+                let old_data = doc.as_text().to_string();
+                match LiveRegistry::tokenize_from_str_live_design(&old_data, Default::default(), Default::default(), Some(&mut old_neg)) {
+                    Err(e) => {
+                        log!("Cannot tokenize old file {}", e)
+                    }
+                    Ok(old_tokens) => match LiveRegistry::tokenize_from_str_live_design(new_data, Default::default(), Default::default(), Some(&mut new_neg)) {
+                        Err(e) => {
+                            log!("Cannot tokenize new file {}", e);
+                        }
+                        Ok(new_tokens) => {
+                            let old_start = old_tokens[0].span.start.to_byte_offset(&old_data);
+                            let old_end = old_tokens.iter().rev().nth(1).unwrap().span.end.to_byte_offset(&old_data);
+                            let new_start = new_tokens[0].span.start.to_byte_offset(&new_data);
+                            let new_end = new_tokens.iter().rev().nth(1).unwrap().span.end.to_byte_offset(&new_data);
+                            if old_start.is_none() || old_end.is_none() || new_start.is_none() || new_end.is_none(){
+                                log!("Cannot find range correctly {:?} {:?} {:?} {:?}", old_start, old_end, new_start, new_end);
+                            }
+                            else{
+                                let mut combined_data = old_data.to_string();
+                                combined_data.replace_range(old_start.unwrap()..old_end.unwrap(), &new_data[new_start.unwrap()..new_end.unwrap()]);
+                                cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                                    file_name: self.file_node_id_to_path(file_id).unwrap().to_string(),
+                                    content: combined_data.to_string(),
+                                }));
+                                doc.replace(combined_data.into());
+                            }
+                        }
+                            
+                    }
+                }
+            }
+            _=>()
+        }
+                
+    }
+    
+    
     pub fn process_possible_live_reload(&mut self, cx:&mut Cx, path:&str, old_data:&str, new_data:&str, recompile:bool){
         let mut old_neg = Vec::new();
         let mut new_neg = Vec::new();
