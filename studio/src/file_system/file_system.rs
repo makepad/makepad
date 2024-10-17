@@ -260,11 +260,11 @@ impl FileSystem {
                     Err(e) => {
                         log!("Cannot tokenize old file {}", e)
                     }
-                    Ok(old_tokens) => match LiveRegistry::tokenize_from_str_live_design(new_data, Default::default(), Default::default(), Some(&mut new_neg)) {
+                    Ok(old_tokens) if old_tokens.len()>2  => match LiveRegistry::tokenize_from_str_live_design(new_data, Default::default(), Default::default(), Some(&mut new_neg)) {
                         Err(e) => {
                             log!("Cannot tokenize new file {}", e);
                         }
-                        Ok(new_tokens) => {
+                        Ok(new_tokens) if new_tokens.len()>2 => {
                             let old_start = old_tokens[0].span.start.to_byte_offset(&old_data);
                             let old_end = old_tokens.iter().rev().nth(1).unwrap().span.end.to_byte_offset(&old_data);
                             let new_start = new_tokens[0].span.start.to_byte_offset(&new_data);
@@ -282,7 +282,12 @@ impl FileSystem {
                                 doc.replace(combined_data.into());
                             }
                         }
-                            
+                        _ => {
+                            log!("Cannot tokenize new file");
+                        }
+                    }
+                    _ => {
+                        log!("Cannot tokenize new file");
                     }
                 }
             }
