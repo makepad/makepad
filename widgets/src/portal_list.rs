@@ -220,7 +220,7 @@ impl PortalList {
                         }
                         else {
                             let ret = (viewport.size.index(vi) - last_item_pos).max(0.0);
-                            if ret > 0.0 {
+                            if ret >= 0.0 {
                                 self.at_end = true;
                             }
                             ret
