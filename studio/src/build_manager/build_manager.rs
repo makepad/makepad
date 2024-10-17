@@ -137,9 +137,14 @@ pub struct BuildManager {
 
 #[derive(Default, SerRon, DeRon)]
 pub struct DesignerState{
-    selected_files: HashMap<LiveId, String>,
+    state: HashMap<LiveId, DesignerStatePerBuildId>
+}
+
+#[derive(Default, SerRon, DeRon)]
+pub struct DesignerStatePerBuildId{
+    selected_file: String,
     zoom_pan: DesignerZoomPan,
-    component_positions: HashMap<LiveId, Vec<DesignerComponentPosition>>
+    component_positions: Vec<DesignerComponentPosition>
 }
 
 impl DesignerState{
@@ -162,20 +167,15 @@ impl DesignerState{
         }
     }
     
-    fn store_position(&mut self, build_id: LiveId, pos:DesignerComponentPosition){
-        use std::collections::hash_map::Entry;
-        match self.component_positions.entry(build_id) {
-            Entry::Occupied(mut v) => {
-                let vec = v.get_mut();
-                if let Some(v) =  vec.iter_mut().find(|v| v.id == pos.id){
-                    *v = pos;
-                }
-                else{
-                    vec.push(pos);
-                }
+    fn get_build_storage<F:FnOnce(&mut DesignerStatePerBuildId)>(&mut self, build_id: LiveId, f:F){
+        match self.state.entry(build_id) {
+            hash_map::Entry::Occupied(mut v) => {
+                f(v.get_mut());
             },
-            Entry::Vacant(v) => {
-                v.insert(vec![pos]);
+            hash_map::Entry::Vacant(v) => {
+                let mut db = DesignerStatePerBuildId::default();
+                f(&mut db);
+                v.insert(db);
             }
         }
     }
@@ -491,24 +491,33 @@ impl BuildManager {
                             cx.action(AppAction::JumpTo(jt));
                         }
                         AppToStudio::DesignerComponentMoved(mv)=>{
-                            self.designer_state.store_position(build_id, mv);
+                            self.designer_state.get_build_storage(build_id, |bs|{
+                                if let Some(v) =  bs.component_positions.iter_mut().find(|v| v.id == mv.id){
+                                    *v = mv;
+                                }
+                                else{
+                                    bs.component_positions.push(mv);
+                                }
+                            });
                             self.designer_state.save_state();
                         }
                         AppToStudio::DesignerZoomPan(zp)=>{
-                            self.designer_state.zoom_pan = zp;
+                            self.designer_state.get_build_storage(build_id, |bs|{
+                                bs.zoom_pan = zp;
+                            });
                             self.designer_state.save_state();
                         }
                         AppToStudio::DesignerStarted=>{
                             // send the app the select file init message
                             if let Ok(d) = self.active_build_websockets.lock() {
-                                if let Some(file_name) = self.designer_state.selected_files.get(&build_id){
+                                if let Some(bs) = self.designer_state.state.get(&build_id){
                                     let data = StudioToAppVec(vec![
                                         StudioToApp::DesignerLoadState{
-                                            zoom_pan: self.designer_state.zoom_pan.clone(),
-                                            positions: self.designer_state.component_positions.get(&build_id).cloned().unwrap_or(vec![])
+                                            zoom_pan: bs.zoom_pan.clone(),
+                                            positions: bs.component_positions.clone()
                                         },
                                         StudioToApp::DesignerSelectFile {
-                                            file_name: file_name.clone()
+                                            file_name: bs.selected_file.clone()
                                         },
                                     ]).serialize_bin();
                                     
@@ -523,7 +532,9 @@ impl BuildManager {
                         }
                         AppToStudio::DesignerFileSelected{file_name}=>{
                             // alright now what. lets 
-                            self.designer_state.selected_files.insert(build_id, file_name);
+                            self.designer_state.get_build_storage(build_id, |bs|{
+                                bs.selected_file = file_name;
+                            });
                             self.designer_state.save_state();
                         }
                     }
