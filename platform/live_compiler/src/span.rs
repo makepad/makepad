@@ -12,6 +12,24 @@ pub struct TextPos {
     pub line: u32,
     pub column: u32
 }
+
+impl TextPos{
+    pub fn to_byte_offset(&self, s:&str)->Option<usize>{
+        let mut line = 0;
+        let mut col = 0;
+        for (byte_index, c) in s.char_indices(){
+            if line == self.line as usize && col == self.column as usize{
+                return Some(byte_index)
+            }
+            col += 1;
+            if c == '\n'{
+                line += 1;
+                col = 0;
+            }
+        }
+        None
+    }
+}
 /*
 impl From<TextPos> for Position {
     fn from(text_pos: TextPos) -> Position {
