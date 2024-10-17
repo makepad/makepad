@@ -291,6 +291,7 @@ impl PortalList {
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
         match self.vec_index {
             Vec2Index::Y => {
+                println!("DRAWSCROLBAR {:?} {}", rect, rect.size.y * total_views);
                 self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
             }
             Vec2Index::X => {
@@ -602,7 +603,12 @@ impl PortalList {
     }
     
     fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top: bool) {
-        self.first_scroll += delta;
+        if self.range_start == self.range_end{
+            self.first_scroll = 0.0
+        }
+        else{
+            self.first_scroll += delta;
+        }            
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
         }
