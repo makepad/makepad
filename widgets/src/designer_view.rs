@@ -336,7 +336,6 @@ impl Widget for DesignerView {
                                             parent: parent.cloned(),
                                         }
                                     );
-                                    println!("SELECTING SUBCOMPONENT");
                                     //println!("{:?}", self.selected_subcomponent);
                                     break
                                 }
@@ -613,7 +612,6 @@ impl Widget for DesignerView {
         // alright and now we need to highlight a component
         if let Some(cs) = &self.selected_subcomponent{
             let rect = self.get_component_rect(cx, &cs.component);
-            println!("GOT RECT {:?}", rect);
             self.draw_outline.draw_abs(cx, rect);
         } 
         else if let Some(component) = self.selected_component{
