@@ -23,56 +23,73 @@ live_design!{
                         <SlideBody> {text: ""}
                     }
                     <SlideChapter> {
-                        title = {text: "Visual application development\nin Rust/AI"},
+                        title = {text: "Visual application development\nin Rust, with a bit of AI"},
                         <SlideBody> {text: "Rik Arends\n"}
                     }
                     <Slide> {
                         title = {text:"Our mission"},
-                        <SlideBody> {text: "- Reimagining VB/Delphi for Rust\n- Integrated design workflow\n- All platforms: Web Desktop Mobile"}
+                        <SlideBody> {text: "AI Accelerated app design for Rust"}
                     }
                     <Slide> {
-                        title = {text:"Makepad Studio"},
-                        <SlideBody> {text: "- Ironfish\n- Live code itself\n"}
+                        title = {text:"Projects using Makepad"},
+                        <SlideBody> {text: "- Moxin: LMStudio\n- Robrix: Matrix client  "}
                     }
                     <Slide> {
-                        title = {text:"Since last year"},
-                        <SlideBody> {text: "- Visual designer WIP\n- AI integration\n- External projects: \n     - Moxin: LMStudio\n     - Robrix: Matrix client  "}
+                        title = {text:"What is Makepad"},
+                        <SlideBody> {text: "- Makepad Studio\n- Makepad Framework"}
                     }
                     <Slide> {
                         title = {text:"Makepad Framework"},
-                        <SlideBody> {text: "- Our flutter/swiftUI\n- Designed for live coding / editing\n- DSL: Live\n- Rust: Compiled\n- It works! "}
+                        <SlideBody> {text: "- Our Flutter/React\n- Designed for livecoding\n    - DSL: Live\n    - Rust: Compiled "}
                     }
                     <Slide> {
                         title = {text: "Makepad Studio"},
-                        <SlideBody> {text: "- Code editor (vscode)\n- Build system\n- Visual designer (figma)  "}
+                        <SlideBody> {text: "- Our IDE\n    - Code editor\n    - Build system\n    - Visual designer"}
                     }
                     <Slide> {
-                        title = {text: "But this is not 2023"},
+                        title = {text: "But this is not the year 2005"},
                         <SlideBody> {text: "- AI is automating software development\n"}
                     }
                     <Slide> {
-                        title = {text: "What can an AI do"},
-                        <SlideBody> {text: "- Help write Rust\n- Understand our APIs\n- Write DSL"}
+                        title = {text: "What can AI do"},
+                        <SlideBody> {text: "- Generate UIs\n- Write code\n- Understand APIs "}
                     }
                     <Slide> {
-                        title = {text: "Demo basic workflow"},
+                        title = {text: "Basic workflow"},
                         <SlideBody> {text: ""}
                     }
+                    /*
                     <Slide> {
-                        title = {text: "How does it work?"},
-                        <SlideBody> {text: "- In trainingset\n- Context "}
+                        title = {text: ""},
+                        <SlideBody> {text: "- Generate app\n- Modify in designer\n- Write shader code\n- Writes Rust code"}
+                    }*/
+                    <Slide> {
+                        title = {text: "How does the AI work?"},
+                        <SlideBody> {text: "- Makepad codebase in training set\n- Custom context "}
                     }
                     <Slide> {
-                        title = {text: "Future: Vision models"},
+                        title = {text: "Workflow"},
+                        <SlideBody> {text: "- Generate App\n- Change UI in designer\n- Change code in editor\n- Iterate with AI "}
+                    }
+                    <Slide> {
+                        title = {text: "Real examples"},
+                        <SlideBody> {text: "- Ironfish\n- Studio"}
+                    }
+                    <Slide> {
+                        title = {text: "The Future"},
+                        <SlideBody> {text: "- Vision models\n- Language models "}
+                    }
+                    <Slide> {
+                        title = {text: "Vision models"},
                         <SlideBody> {text: "- Sketch generation\n- See your application\n- Correct designs\n- Automated UI testing "}
                     }
                     <Slide> {
-                        title = {text: "Future: Language models"},
-                        <SlideBody> {text: "- Automatic localisation\n- Generating Rust code iteratively "}
+                        title = {text: "Language models"},
+                        <SlideBody> {text: "- Automatic localisation\n- Generating Rust code\n     - Types\n     - Clean error messages"}
                     }
                     <Slide> {
-                        title = {text: "Links"}, 
-                        <SlideBody> {text: "- github.com/makepad/makepad\n- makepad.nl\n- twitter @rikarends"}
+                        title = {text: "Thank you"}, 
+                        <SlideBody> {text: "- Repo\n        https://github.com/makepad/makepad\n- Website\n        www.makepad.nl\n- Twitter\n        @rikarends\n        @ejpbruel\n- Questions?"}
                     }
                 }
             }
