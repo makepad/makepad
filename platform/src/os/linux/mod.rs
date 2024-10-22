@@ -11,6 +11,7 @@ pub mod egl_sys;
 pub mod gl_sys;
 pub mod libc_sys;
 pub mod opengl;
+pub mod module_loader;
 
 #[cfg(not(any(target_env="ohos", target_os="android")))]
 pub mod dma_buf;
