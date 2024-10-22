@@ -40,6 +40,11 @@ impl Widget for Label {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
         let walk = walk.with_add_padding(self.padding);
         cx.begin_turtle(walk, Layout::default());
+        // here we need to check if the text is empty, if so we need to set it to a space
+        // or the text draw will not work(seems like lazy drawtext bug)
+        let _ = self.text.as_ref().is_empty().then(|| {
+            let _ = self.set_text(" ");
+        });
         self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
