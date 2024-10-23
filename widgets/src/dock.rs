@@ -289,6 +289,12 @@ impl LiveHook for Dock {
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.create_all_items(cx);
+    }
+}
+
+impl Dock {
+    fn create_all_items(&mut self, cx: &mut Cx) {
         // make sure our items exist
         let mut items = Vec::new();
         for (item_id, item) in self.dock_items.iter() {
@@ -300,9 +306,6 @@ impl LiveHook for Dock {
             self.item_or_create(cx, item_id, kind);
         }
     }
-}
-
-impl Dock {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
@@ -797,15 +800,13 @@ impl Dock {
     }
         
     pub fn load_state(&mut self, cx: &mut Cx, dock_items: HashMap<LiveId, DockItem>) {
+        //log!("{:#?}", self.dock_items);
         self.dock_items = dock_items;
-        // Clear existing items
-        /*self.items.clear();
+        self.items.clear();
         self.tab_bars.clear();
         self.splitters.clear();
-        self.templates.clear();
-        */
-        // let the dock lazily reconstruct itself
         self.area.redraw(cx);
+        self.create_all_items(cx);
     }
 }
 
@@ -1132,17 +1133,22 @@ impl DockRef {
         LiveId(0)
     }
         
-    pub fn needs_save(&self)->Option<HashMap<LiveId, DockItem>>{
+    pub fn check_and_clear_need_save(&self)->bool{
         if let Some(mut dock) = self.borrow_mut() {
             if dock.needs_save{
                 dock.needs_save = false;
-                return Some(dock.dock_items.clone())
+                return true
             }
+        }
+        false
+    }
+    
+    pub fn clone_state(&self)->Option<HashMap<LiveId, DockItem>>{
+        if let Some(dock) = self.borrow(){
+            return Some(dock.dock_items.clone());
         }
         None
     }
-    
-    
     
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
