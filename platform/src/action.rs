@@ -70,6 +70,16 @@ impl<T: ActionTrait + ActionDefaultRef> ActionCastRef<T> for Box<dyn ActionTrait
     }
 }
 
+impl<T: ActionTrait + ActionDefaultRef> ActionCastRef<T> for Option<std::sync::Arc<dyn ActionTrait>>{
+    fn cast_ref(&self) -> &T{
+        if let Some(item) = self{
+            if let Some(item) = item.downcast_ref::<T>() {
+                return item
+            }
+        }
+        T::default_ref()
+    }
+}
 
 impl Cx{
     pub fn handle_action_receiver(&mut self){

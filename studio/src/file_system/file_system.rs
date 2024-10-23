@@ -90,6 +90,14 @@ impl FileSystem {
         }
     }
     
+    pub fn get_tab_after_from_path(path:&str)->LiveId{
+        match Self::get_editor_template_from_path(path){
+            live_id!(AiChat)=>live_id!(ai_first),
+            _=>live_id!(edit_first),
+        }
+    }
+        
+    
     pub fn get_editor_template_from_file_id(&self, file_id:LiveId)->Option<LiveId>{
         if let Some(path) = self.file_node_id_to_path(file_id){
             Some(Self::get_editor_template_from_path(path))
@@ -224,14 +232,7 @@ impl FileSystem {
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){
                                     
                                     if let Some(OpenDocument::Code(doc)) = self.open_documents.get_mut(&file_id){
-                                        if let Some(tab_id) = 
-                                        // lets grab a session id for our first session
-                                        self.tab_id_to_file_node_id.iter()
-                                        .find_map(|(k, v)| if v == file_id { Some(k) } else { None }){
-                                            if let Some(EditSession::Code(session)) = self.tab_id_to_session.get(&tab_id){
-                                                doc.replace(session.id(), response.new_data.clone().into());
-                                            }
-                                        }
+                                        doc.replace(response.new_data.clone().into());
                                     }
                                     ui.redraw(cx);
                                 }
@@ -247,6 +248,54 @@ impl FileSystem {
             }
         }
     }
+    
+    pub fn replace_live_design(&self, cx:&mut Cx, file_id:LiveId, new_data:&str){
+        let mut old_neg = Vec::new();
+        let mut new_neg = Vec::new();
+        
+        match self.open_documents.get(&file_id){
+            Some(OpenDocument::Code(doc))=>{
+                let old_data = doc.as_text().to_string();
+                match LiveRegistry::tokenize_from_str_live_design(&old_data, Default::default(), Default::default(), Some(&mut old_neg)) {
+                    Err(e) => {
+                        log!("Cannot tokenize old file {}", e)
+                    }
+                    Ok(old_tokens) if old_tokens.len()>2  => match LiveRegistry::tokenize_from_str_live_design(new_data, Default::default(), Default::default(), Some(&mut new_neg)) {
+                        Err(e) => {
+                            log!("Cannot tokenize new file {}", e);
+                        }
+                        Ok(new_tokens) if new_tokens.len()>2 => {
+                            let old_start = old_tokens[0].span.start.to_byte_offset(&old_data);
+                            let old_end = old_tokens.iter().rev().nth(1).unwrap().span.end.to_byte_offset(&old_data);
+                            let new_start = new_tokens[0].span.start.to_byte_offset(&new_data);
+                            let new_end = new_tokens.iter().rev().nth(1).unwrap().span.end.to_byte_offset(&new_data);
+                            if old_start.is_none() || old_end.is_none() || new_start.is_none() || new_end.is_none(){
+                                log!("Cannot find range correctly {:?} {:?} {:?} {:?}", old_start, old_end, new_start, new_end);
+                            }
+                            else{
+                                let mut combined_data = old_data.to_string();
+                                combined_data.replace_range(old_start.unwrap()..old_end.unwrap(), &new_data[new_start.unwrap()..new_end.unwrap()]);
+                                cx.action( FileSystemAction::LiveReloadNeeded(LiveFileChange {
+                                    file_name: self.file_node_id_to_path(file_id).unwrap().to_string(),
+                                    content: combined_data.to_string(),
+                                }));
+                                doc.replace(combined_data.into());
+                            }
+                        }
+                        _ => {
+                            log!("Cannot tokenize new file");
+                        }
+                    }
+                    _ => {
+                        log!("Cannot tokenize new file");
+                    }
+                }
+            }
+            _=>()
+        }
+                
+    }
+    
     
     pub fn process_possible_live_reload(&mut self, cx:&mut Cx, path:&str, old_data:&str, new_data:&str, recompile:bool){
         let mut old_neg = Vec::new();
@@ -344,6 +393,16 @@ impl FileSystem {
         if let Some(file_id) = self.tab_id_to_file_node_id.get(&tab_id) {
             self.request_save_file_for_file_node_id(*file_id, was_patch)
         };
+    }
+    
+    pub fn replace_code_document(&self, file_id:LiveId, text:&str){
+        match self.open_documents.get(&file_id){
+            Some(OpenDocument::Code(doc))=>{
+                doc.replace(text.into());
+            }
+            _=>()
+        }
+        
     }
     
     pub fn file_path_as_string(&self, path:&str)->Option<String>{
@@ -471,7 +530,10 @@ impl FileSystem {
     }
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
                 
-        fn longest_common_suffix(a: &[&str], b: &[&str]) -> usize {
+        fn longest_common_suffix(a: &[&str], b: &[&str]) -> Option<usize> {
+            if a == b{
+                return None // same file
+            }
             let mut ai = a.len();
             let mut bi = b.len();
             let mut count = 0;
@@ -484,10 +546,10 @@ impl FileSystem {
                     break;
                 }
             }
-            count
+            Some(count)
         }
         // Collect the path components for each open tab
-        let mut tabs: Vec<(LiveId, Vec<&str>)> = Vec::new();
+        let mut tabs: Vec<(LiveId, Vec<&str>, usize)> = Vec::new();
         for (&tab_id, &file_id) in &self.tab_id_to_file_node_id {
             let mut path_components = Vec::new();
             let mut file_node = &self.file_nodes[file_id];
@@ -500,35 +562,51 @@ impl FileSystem {
             // Reverse the components so they go from root to leaf
             path_components.reverse();
             
-            tabs.push((tab_id, path_components));
+            tabs.push((tab_id, path_components, 1));
         }
         
         // Sort the tabs by their path components
         tabs.sort_by(|a, b| a.1.cmp(&b.1));
         
         // Determine the minimal unique suffix for each tab
+        let mut changing = true;
+        while changing{
+            changing = false;
+            for i in 0..tabs.len() {
+                let (_, ref path, minsfx) = tabs[i];
+                let mut min_suffix_len = minsfx;
+                // Compare with previous tab
+                if i > 0 {
+                    let (_, ref prev_path, _) = tabs[i - 1];
+                    if let Some(common)= longest_common_suffix(path, prev_path){
+                        min_suffix_len = min_suffix_len.max(common + 1)
+                    }
+                }
+                // Compare with next tab
+                if i + 1 < tabs.len() {
+                    let (_, ref next_path, minsfx) = tabs[i + 1];
+                    if let Some(common) = longest_common_suffix(path, next_path){
+                        min_suffix_len = min_suffix_len.max(common + 1).max(minsfx);
+                    }
+                    else{
+                        min_suffix_len = minsfx;
+                    }
+                }
+                // lets store this one 
+                let (_,_, ref mut minsfx) = tabs[i];
+                if *minsfx != min_suffix_len{
+                    changing = true;
+                    *minsfx = min_suffix_len;
+                }
+            }
+        }
         for i in 0..tabs.len() {
-            let (tab_id, ref path) = tabs[i];
-            let mut min_suffix_len = 1;
-            
-            // Compare with previous tab
-            if i > 0 {
-                let (_, ref prev_path) = tabs[i - 1];
-                let common = longest_common_suffix(path, prev_path);
-                min_suffix_len = min_suffix_len.max(common + 1);
-            }
-            // Compare with next tab
-            if i + 1 < tabs.len() {
-                let (_, ref next_path) = tabs[i + 1];
-                let common = longest_common_suffix(path, next_path);
-                min_suffix_len = min_suffix_len.max(common + 1);
-            }
-            
-            // Build the tab title using the minimal unique suffix
-            let start = path.len().saturating_sub(min_suffix_len);
+            let (tab_id, ref path, minsfx) = tabs[i];
+            let start = path.len().saturating_sub(minsfx);
             let title = path[start..].join("/");
             dock.set_tab_title(cx, tab_id, title);
         }
+        
     }
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {

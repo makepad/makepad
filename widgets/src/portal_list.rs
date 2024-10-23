@@ -220,7 +220,7 @@ impl PortalList {
                         }
                         else {
                             let ret = (viewport.size.index(vi) - last_item_pos).max(0.0);
-                            if ret > 0.0 {
+                            if ret >= 0.0 {
                                 self.at_end = true;
                             }
                             ret
@@ -602,7 +602,12 @@ impl PortalList {
     }
     
     fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top: bool) {
-        self.first_scroll += delta;
+        if self.range_start == self.range_end{
+            self.first_scroll = 0.0
+        }
+        else{
+            self.first_scroll += delta;
+        }            
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
         }
