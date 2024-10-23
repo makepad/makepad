@@ -302,6 +302,7 @@ impl Cx {
             }
             MacosEvent::WindowGeomChange(mut re) => { // do this here because mac
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                    self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
                     if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
                         re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
                         re.new_geom.dpi_factor = dpi_override;
@@ -346,7 +347,8 @@ impl Cx {
                 self.handle_repaint(metal_windows, metal_cx);
                 
             }
-            MacosEvent::MouseDown(e) => {
+            MacosEvent::MouseDown(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.fingers.process_tap_count(
                     e.abs,
                     e.time
@@ -354,21 +356,25 @@ impl Cx {
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            MacosEvent::MouseMove(e) => {
+            MacosEvent::MouseMove(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            MacosEvent::MouseUp(e) => {
+            MacosEvent::MouseUp(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            MacosEvent::Scroll(e) => {
+            MacosEvent::Scroll(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::Scroll(e.into()))
             }
-            MacosEvent::WindowDragQuery(e) => {
+            MacosEvent::WindowDragQuery(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::WindowDragQuery(e))
             }
             MacosEvent::WindowCloseRequested(e) => {
@@ -428,6 +434,10 @@ impl Cx {
         } else {
             EventFlow::Wait
         }
+    }
+    
+    fn dpi_override_scale(&self, pos:&mut DVec2, window_id:WindowId){
+        *pos = self.windows[window_id].remap_dpi_override(*pos)
     }
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {

@@ -560,6 +560,9 @@ impl WidgetNode for View {
             WidgetCache::Yes | WidgetCache::Clear => {
                 if let WidgetCache::Clear = cached {
                     self.find_cache.borrow_mut().clear();
+                    if path.len() == 0{
+                        return
+                    }
                 }
                 let mut hash = 0u64;
                 for i in 0..path.len() {
@@ -662,7 +665,14 @@ impl Widget for View {
                 }
             }
         }
-
+                
+        match event.hit_designer(cx, self.area()){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
+        
         if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
@@ -956,6 +966,28 @@ enum DrawState {
 }
 
 impl View {
+    pub fn swap_child(&mut self, pos_a: usize, pos_b: usize){
+        self.children.swap(pos_a, pos_b);
+    }
+    
+    pub fn child_index(&mut self, comp:&WidgetRef)->Option<usize>{
+        if let Some(pos) = self.children.iter().position(|(_,w)|{w == comp}){
+            Some(pos)
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn child_at_index(&mut self, index:usize)->Option<&WidgetRef>{
+        if let Some(f) = self.children.get(index){
+            Some(&f.1)
+        }
+        else{
+            None
+        }
+    }
+    
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.set_scroll_pos(cx, v);

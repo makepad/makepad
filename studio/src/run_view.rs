@@ -69,7 +69,7 @@ pub struct RunView {
    // #[rust] time: f64,
    // #[rust] frame: u64,
     #[rust] started: bool,
-    #[rust] pub build_id: LiveId,
+    #[rust] pub build_id: Option<LiveId>,
     #[rust] pub window_id: usize,
     #[rust(WindowKindId::Main)] pub kind_id: WindowKindId,
 }
@@ -122,7 +122,10 @@ impl RunView {
     
     pub fn draw_complete_and_flip(&mut self, cx: &mut Cx, presentable_draw: &PresentableDraw, manager: &mut BuildManager){
         let window_id = self.window_id;
-        if let Some(v) = manager.active.builds.get_mut(&self.build_id){
+        if self.build_id.is_none(){
+            return
+        }
+        if let Some(v) = manager.active.builds.get_mut(self.build_id.as_ref().unwrap()){
             // Only allow presenting images in the current host swapchain
             // (or the previous one, before any draws on the current one),
             // and look them up by their unique IDs, to avoid rendering
@@ -140,7 +143,7 @@ impl RunView {
                     (swapchain.alloc_width as f32),
                     (swapchain.alloc_height as f32),
                 ]);
-                        
+                
                 if !self.started {
                     self.started = true;
                     self.animator_play(cx, id!(started.on));
@@ -184,6 +187,9 @@ impl RunView {
     }
     
     pub fn draw_run_view(&mut self, cx: &mut Cx2d, run_view_id: LiveId, manager: &mut BuildManager, walk:Walk) {
+        if self.build_id.is_none(){
+            return
+        }
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
