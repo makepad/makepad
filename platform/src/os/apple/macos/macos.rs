@@ -276,7 +276,6 @@ impl Cx {
             }
             _ => ()
         }
-        
         //self.process_desktop_pre_event(&mut event);
         match event {
             MacosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
