@@ -46,42 +46,69 @@ impl Default for AiChatManager{
             ],
             contexts: vec![
                 BaseContext{
-                    name: "Assistant".to_string(),
-                    system_pre: live_id!(ASSISTANT_PRE),
-                    system_post: live_id!(ASSISTANT_POST),
-                    general_post: live_id!(ASSISTANT_GENERAL),
+                    name: "Chat".to_string(),
+                    apply: AiApply::PatchDSL,
+                    system_pre: live_id!(CHAT_PRE),
+                    system_post: live_id!(CHAT_POST),
+                    general_post: live_id!(CHAT_GENERAL),
                     files: vec![]
                 },
                 BaseContext{
                     name: "Rust".to_string(),
+                    apply: AiApply::PatchDSL,
                     system_pre: live_id!(RUST_PRE),
                     system_post: live_id!(RUST_POST),
                     general_post: live_id!(RUST_GENERAL),
                     files: vec![]
                 },
                 BaseContext{
-                    name: "Follow up".to_string(),
-                    system_pre: live_id!(FOLLOW_UP_PRE),
-                    system_post: live_id!(FOLLOW_UP_POST),
-                    general_post: live_id!(FOLLOW_UP_GENERAL),
+                    name: "Next".to_string(),
+                    apply: AiApply::WholeFile,
+                    system_pre: live_id!(NEXT_PRE),
+                    system_post: live_id!(NEXT_POST),
+                    general_post: live_id!(NEXT_GENERAL),
+                    files: vec![]
+                },
+                BaseContext{
+                    name: "Next All".to_string(),
+                    apply: AiApply::WholeFile,
+                    system_pre: live_id!(NEXT_ALL_PRE),
+                    system_post: live_id!(NEXT_ALL_POST),
+                    general_post: live_id!(NEXT_ALL_GENERAL),
+                    files: vec![]
+                },
+                BaseContext{
+                    name: "Next UI".to_string(),
+                    apply: AiApply::PatchDSL,
+                    system_pre: live_id!(FNEXT_UI_PRE),
+                    system_post: live_id!(NEXT_UI_POST),
+                    general_post: live_id!(NEXT_UI_GENERAL),
                     files: vec![]
                 },
                 BaseContext{
                     name: "Makepad All".to_string(),
+                    apply: AiApply::WholeFile,
                     system_pre: live_id!(ALL_PRE),
                     system_post: live_id!(ALL_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
                     ]
                 },
                 BaseContext{
                     name: "Makepad UI".to_string(),
+                    apply: AiApply::PatchDSL,
                     system_pre: live_id!(UI_PRE),
                     system_post: live_id!(UI_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
                     ]
                 }
             ],
@@ -106,6 +133,13 @@ pub struct AiProject{
     pub files: Vec<AiContextFile>
 }
 
+#[derive(Debug, SerRon, DeRon)]
+pub enum AiApply{
+    PatchDSL,
+    WholeFile,
+    None
+}
+    
 #[derive(Debug, SerRon, DeRon)]
 pub struct AiModel{
     pub name: String,
@@ -133,6 +167,7 @@ impl AiContextFile{
 
 pub struct BaseContext{
     pub name: String,
+    pub apply: AiApply,
     pub system_pre: LiveId,
     pub system_post: LiveId,
     pub general_post: LiveId,
@@ -178,11 +213,20 @@ impl AiChatMessages{
     
     fn follow_up(&mut self){
         if let Some(AiChatMessage::User(usr)) = self.messages.iter().rev().nth(1).cloned(){
+            let next = if usr.base_context == "Makepad UI"{
+                "Next UI"
+            }
+            else if usr.base_context == "Makepad All"{
+                "Next All"
+            }
+            else{
+                "Next"
+            };
             self.messages.push(AiChatMessage::User(AiUserMessage{
                 auto_run: usr.auto_run,
                 model: usr.model.clone(),
-                project: "None".to_string(),
-                base_context: "Follow up".to_string(),
+                project: usr.project.clone(),
+                base_context: next.to_string(),
                 context: vec![],
                 message:"".to_string()
             }));
@@ -426,21 +470,49 @@ impl AiChatManager{
             let usr = doc.file.history[history_slot].messages.iter().nth(item_id);
             let ast = doc.file.history[history_slot].messages.iter().nth(item_id+1);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
-                if let Some(AiChatMessage::User(_usr)) = usr.cloned(){
-                    let file_path =  "examples/simple/src/app.rs";
-                    let file_id = fs.path_to_file_node_id(file_path).unwrap();
-                    let old_data = fs.file_id_as_string(file_id).unwrap();
-                    if let Some(new_data) = ast.strip_prefix("```rust"){
-                        if let Some(new_data) = new_data.strip_suffix("```"){
-                            fs.process_possible_live_reload(
-                                cx,
-                                file_path,
-                                &old_data,
-                                &new_data,
-                                false
-                            );
+                if let Some(AiChatMessage::User(usr)) = usr.cloned(){
+                    
+                    // lets check the project and the mode
+                    println!("{:?}", usr);
+                    
+                    if let Some(project) = self.projects.iter().find(|v| v.name == usr.project){
+                        if let Some(first) = project.files.get(0){
+                            //let file_path =  "examples/simple/src/app.rs";
+                            let file_id = fs.path_to_file_node_id(&first.path).unwrap();
+                            //let old_data = fs.file_id_as_string(file_id).unwrap();
+                            if let Some(new_data) = ast.strip_prefix("```rust"){
+                                if let Some(new_data) = new_data.strip_suffix("```"){
+                                    // alright depending
+                                    if let Some(ctx) = self.contexts.iter().find(|v| v.name == usr.base_context){
+                                        match ctx.apply{
+                                            AiApply::PatchDSL=>{
+                                                fs.replace_live_design(
+                                                    cx,
+                                                    file_id,
+                                                    &new_data
+                                                );
+                                                fs.request_save_file_for_file_node_id(file_id, false);
+                                                /*
+                                                fs.process_possible_live_reload(
+                                                    cx,
+                                                    &first.path,
+                                                    &old_data,
+                                                    &new_data,
+                                                    false
+                                                );*/
+                                            }
+                                            AiApply::WholeFile=>{
+                                                fs.replace_code_document(file_id, new_data);
+                                                fs.request_save_file_for_file_node_id(file_id, false);
+                                            }
+                                            _=>()
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+                    
                 }
             }
         }
@@ -522,7 +594,7 @@ impl AiChatManager{
                                         }
                                     }
                                 }
-                                if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
+                               /* if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
                                     for file in &ctx.files{
                                         if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
@@ -536,7 +608,7 @@ impl AiChatManager{
                                             }
                                         }
                                     }
-                                }
+                                }*/
                                 messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
                                 
                                 if let Some(text) = html.find_tag_text(system_post){
