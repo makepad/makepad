@@ -1,5 +1,6 @@
 use {
-    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
+    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*, 
+    adaptive_view::AdaptiveViewAction},
     std::{
         cell::RefCell,
     },
@@ -626,6 +627,7 @@ impl Widget for View {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
         }
+        self.match_event(cx, event);
 
         if self.block_signal_event {
             if let Event::Signal = event {
@@ -956,6 +958,21 @@ impl Widget for View {
             }
         }
         DrawStep::done()
+    }
+}
+
+impl MatchEvent for View {
+    fn handle_action(&mut self, _cx: &mut Cx, action: &Action) {
+        match action.as_widget_action().cast() {
+            AdaptiveViewAction::InvalidateWidgetSearchCache => {
+                // If the AdaptiveView that dispatched this actions is a child of the current view,
+                // invalidate the widget search cache of the current view.
+                if self.children.iter().any(|(_, child)| action.as_widget_action().widget_uid_eq(child.widget_uid()).is_some()) {
+                    self.find_cache.borrow_mut().clear();
+                }
+            }
+            _ => (),
+        }
     }
 }
 
