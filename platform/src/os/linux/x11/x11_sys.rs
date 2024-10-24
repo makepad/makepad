@@ -357,6 +357,13 @@ extern "C" {
     ) -> c_int;
     
     pub fn XMapWindow(arg1: *mut Display, arg2: Window) -> c_int;
+
+    pub fn XMoveWindow(
+        display: *mut Display,
+        window: Window,
+        x: c_int,
+        y: c_int,
+    );
     
     pub fn XFlush(arg1: *mut Display) -> c_int;
     
