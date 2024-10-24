@@ -62,6 +62,7 @@ pub mod performance_view;
 pub mod nav_control;
 
 pub mod view;
+pub mod adaptive_view;
 pub mod widget;
 pub mod widget_match_event;
 pub mod toggle_panel;
@@ -89,6 +90,7 @@ pub use crate::{
     button::*,
     cached_widget::*,
     view::*,
+    adaptive_view::*,
     image::*,
     image_blend::*,
     icon::*,
@@ -174,6 +176,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::popup_notification::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
+    crate::adaptive_view::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
     crate::link_label::live_design(cx);
