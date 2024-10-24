@@ -2,6 +2,7 @@ use crate::makepad_platform::*;
 
 live_design!{
     import crate::button::ButtonBase;
+    import crate::cached_widget::CachedWidgetBase;
     import crate::check_box::CheckBoxBase;
     import crate::dock::DockBase;
     import crate::splitter::SplitterBase;
@@ -987,6 +988,7 @@ live_design!{
     TurtleStep = <TurtleStep>{}
     ColorPicker = <ColorPicker>{}
     TogglePanelBase = <TogglePanelBase>{}
+    CachedWidget = <CachedWidgetBase>{}
     
     DesignerBase = <DesignerBase>{}
     DesignerOutlineBase = <DesignerOutlineBase>{}
