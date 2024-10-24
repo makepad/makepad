@@ -8,7 +8,18 @@ use crate::{
 const DEFAULT_MIN_DESKTOP_WIDTH: f64 = 860.;
 
 live_design! {
-    AdaptiveViewBase = {{AdaptiveView}} {}
+    link widgets;
+    use link::theme::*;
+    use crate::view_ui::View;
+
+    pub AdaptiveViewBase = {{AdaptiveView}} {}
+    pub AdaptiveView = <AdaptiveViewBase> {
+        width: Fill, height: Fill
+    
+        Default = <View> {}
+        Mobile = <View> {}
+        Desktop = <View> {}
+    }
 }
 
 /// A widget that adapts its content based on the current context.
@@ -372,10 +383,4 @@ impl DisplayContext {
     pub fn is_desktop(&self) -> bool {
         self.screen_size.x >= DEFAULT_MIN_DESKTOP_WIDTH
     }
-}
-
-#[derive(Clone, Debug, DefaultNone)]
-pub enum AdaptiveViewAction {
-    InvalidateWidgetSearchCache,
-    None,
 }

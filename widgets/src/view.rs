@@ -1,9 +1,6 @@
 use {
-    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*, 
-    adaptive_view::AdaptiveViewAction},
-    std::{
-        cell::RefCell,
-    },
+    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
+    std::cell::RefCell,
 };
 
 live_design! {
@@ -643,7 +640,7 @@ impl Widget for View {
 
         // If the UI tree has changed significantly (e.g. AdaptiveView varaints changed),
         // we need to clear the cache and re-query widgets.
-        if cx.clear_query_cache.is_some() {
+        if cx.widget_query_invalidation_event.is_some() {
             self.find_cache.borrow_mut().clear();
         }
 
