@@ -30,6 +30,7 @@ live_design!{
     import crate::flat_list::FlatListBase;
     import crate::scroll_bars::ScrollBarsBase;
     import crate::view::ViewBase;
+    import crate::adaptive_view::AdaptiveViewBase;
     import crate::nav_control::NavControlBase;
     import crate::popup_menu::PopupMenuItemBase;
     import crate::popup_menu::PopupMenuBase;
@@ -413,6 +414,13 @@ live_design!{
     
     MultiWindow = <MultiWindowBase> {}
     View = <ViewBase> {}
+    AdaptiveView = <AdaptiveViewBase> {
+        width: Fill, height: Fill
+    
+        Default = <View> {},
+        Mobile = <View> {}
+        Desktop = <View> {}
+    }
 
     SolidView = <ViewBase> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
