@@ -290,6 +290,7 @@ MidiManager.OnDeviceOpenedListener{
         String androidVersion = Build.VERSION.RELEASE;
         String buildNumber = Build.DISPLAY;
         String kernelVersion = this.getKernelVersion();
+        int sdkVersion = Build.VERSION.SDK_INT;
 
         MakepadNative.onAndroidParams(cache_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
 
@@ -297,7 +298,7 @@ MidiManager.OnDeviceOpenedListener{
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         float refreshRate = getDeviceRefreshRate();
-        MakepadNative.initChoreographer(refreshRate);
+        MakepadNative.initChoreographer(refreshRate, sdkVersion);
         //% MAIN_ACTIVITY_ON_CREATE
     }
 
