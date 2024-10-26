@@ -714,14 +714,39 @@ live_design!{
                         text: "Workflow"
                     }*/
                     
-                    settings_cfg = <SettingsSlider> {input = {text: "Config", default: 4.0, min:1.0, max:8.0, step:0.01}}
+                    settings_cfg = <SettingsSlider> {visible: false, input = {text: "Config", default: 4.0, min:1.0, max:8.0, step:0.01}}
                     
-                    settings_steps = <SettingsSlider> {input = {text: "Steps", default: 10.0, min:1, max: 10, step:1}}
+                    settings_steps = <SettingsSlider> {input = {text: "Steps", default: 4.0, min:1, max: 10, step:1}}
                                                 
-                    settings_denoise = <SettingsSlider> {input = {text: "Denoise", default: 0.5, min:0.2, max:1.0, step:0.01}}
+                    settings_denoise = <SettingsSlider> {visible: false, input = {text: "Denoise", default: 1.0, min:0.2, max:1.0, step:0.01}}
                     
-                    settings_delay = <SettingsSlider> {input = {text: "Delay", default: 0., min:0., max:5.0, step:0.01}}                    
-                                          
+                    settings_delay = <SettingsSlider> {input = {text: "Delay", default: 0., min:0., max:5.0, step:0.01}} 
+                    
+                    resolution = <DropDownFlat> { 
+                        width: Fit, 
+                        popup_menu_position: BelowInput 
+                    }
+                    <BarLabel> {
+                        text: "width:"
+                    }
+                    settings_width = <TextInput> {
+                        draw_text: {text_style: <TEXT_BOLD> {}}
+                        text: "1920",
+                        height: Fit,
+                        width: Fit,
+                        margin: {bottom: 0, left: 0}
+                    }
+                    <BarLabel> {
+                        text: "height:"
+                    }
+                    settings_height = <TextInput> {
+                        draw_text: {text_style: <TEXT_BOLD> {}}
+                        text: "1088",
+                        height: Fit,
+                        width: Fit,
+                        margin: {bottom: 0, left: 0}
+                    }
+                     
                     //workflow_dropdown = <SdxlDropDown> {}
                     random_check_box = <SdxlCheckBox> {
                         text: "Random"
@@ -748,6 +773,13 @@ live_design!{
                         width: Fit,
                         margin: {bottom: 0, left: 0}
                     }
+                    
+                    <BarLabel> {
+                        text: "Progress:"
+                    }
+                    progress = <BarLabel> {
+                        text: "1/1"
+                    }
                     <FillerH> {}
                 }
                 <View> {
@@ -770,7 +802,6 @@ live_design!{
                                 height: Fill,
                                 margin: {top: 0},
                                 AI = <TextInput> {
-                                    ascii_only: true,
                                     width: Fill,
                                     height: Fill,
                                     margin: {top: 0.0, left: 20.0, bottom: 5.0, right: 0.0},
@@ -783,7 +814,6 @@ live_design!{
                                     }
                                 }
                                 Human = <TextInput> {
-                                    ascii_only: true,
                                     width: Fill,
                                     height: Fill,
                                     margin: {top: 0.0, left: 0.0, bottom: 5.0, right: 0.0},
@@ -829,7 +859,6 @@ live_design!{
                         }
                     }
                     positive = <TextInput> {
-                        ascii_only: true,
                         width: Fill,
                         height: Fill,
                         margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
@@ -841,10 +870,25 @@ live_design!{
                             color: (COLOR_TEXT_INPUT)
                         }
                     }
+                    last_sent = <TextInput> {
+                        is_read_only: true,
+                        width: Fill,
+                        height: Fill,
+                        margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
+                        text: "Positive"
+                        draw_text: {
+                            text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
+                        }
+                        draw_bg: {
+                            fn pixel(self)->vec4{
+                                return #4
+                            }
+                        }
+                    }
+                    
                     <View>{
                         visible: false,
                         negative = <TextInput> {
-                            ascii_only: true,
                             width: 200,
                             height: Fill,
                             margin: {top: 0.0, left: 5.0, bottom: 10.0, right: 10.0},
@@ -854,23 +898,6 @@ live_design!{
                                 color: (COLOR_TEXT_INPUT)
                             }
                         }
-                    }
-                    <View> {
-                        visible: false,
-                        width: Fill,
-                        height: Fill
-                        flow: Right
-                        <View> {
-                            width: 200,
-                            height: Fit,
-                            
-                            margin: {top: 10, right: 20},
-                            flow: Down
-                            settings_width = <SettingsInput> {label = {text: "width:"}, input = {text: "1344"}}
-                            settings_height = <SettingsInput> {label = {text: "height:"}, input = {text: "768"}}
-
-                        }
-                        
                     }
                 }
             }
