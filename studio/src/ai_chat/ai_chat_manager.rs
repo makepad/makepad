@@ -531,8 +531,6 @@ impl AiChatManager{
         }
     }
     
-    
-            
     pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, history_slot:usize, fs:&mut FileSystem) {
         // build the request
         let request = if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){

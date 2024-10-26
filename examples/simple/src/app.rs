@@ -3,30 +3,21 @@ use makepad_widgets::*;
 
 live_design!{
     import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*; 
+    import makepad_widgets::theme_desktop_dark::*;
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
                 body = <ScrollXYView>{
                     flow: Down
-                    align:{
-                        x:0.5, 
-                        y:0.5 
-                    }
                     show_bg: true,
                     draw_bg:{
-                        fn pixel(self)->vec4{
-                            return #46
+                        fn plasma(self, pos: vec2) -> vec4 {
+                            let color = sin(pos.x * 10.0 + self.time) * cos(pos.y * 10.0 + self.time);
+                            return mix(#f0f, #f80, color);
                         }
-                    }
-                    button1 = <Button> {
-                        text: "Button 1"
-                    }
-                    button2 = <Button> {
-                        text: "Button 2"
-                    }
-                    button3 = <Button> {
-                        text: "Button 3"
+                        fn pixel(self) -> vec4 {
+                            return self.plasma(self.pos);
+                        }
                     }
                 }
             }
