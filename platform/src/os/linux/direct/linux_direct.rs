@@ -186,6 +186,11 @@ impl Cx {
                 else {
                     self.call_event_handler(&Event::Timer(e))
                 }
+
+                if self.handle_live_edit() {
+                    self.call_event_handler(&Event::LiveEdit);
+                    self.redraw_all();
+                }
             }
         }
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
@@ -309,6 +314,9 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.live_expand();
+        if !Self::has_studio_web_socket() {
+            self.start_disk_live_file_watcher(100);
+        }
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }
