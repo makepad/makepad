@@ -4,13 +4,18 @@
 use {
     std::cell::RefCell,
     crate::{
-        implement_com,
         windows::{
             core,
+            core::implement,
             Win32::{
                 System::{
-                    Ole::CF_HDROP,
+                    Ole::{
+                        CF_HDROP,
+                    },
                     Com::{
+                        IDataObject_Impl,
+                        IEnumFORMATETC,
+                        IDataObject,
                         FORMATETC,
                         STGMEDIUM,
                         STGMEDIUM_0,
@@ -42,7 +47,7 @@ use {
         event::DragItem,
     },
 };
-
+/*
 // This is a reimplementation of windows-rs IDataObject that refers to the reimplemented IEnumFORMATETC from enumformatetc.rs
 
 #[repr(transparent)]pub struct IDataObject(core::IUnknown);
@@ -226,8 +231,8 @@ impl IDataObject_Vtbl {
     pub fn matches(iid: &core::GUID) -> bool {
         iid == &<IDataObject as core::ComInterface>::IID
     }
-}
-
+}*/
+/*
 implement_com!{
     for_struct: DragItem,
     identity: IDataObject,
@@ -237,12 +242,13 @@ implement_com!{
         0: IDataObject
     }
 }
-
-
+*/
+#[implement(IDataObject)]
+pub struct DragItemWindows(pub DragItem);
 // IDataObject implementation for DragItem
 
 #[allow(non_snake_case)]
-impl IDataObject_Impl for DragItem {
+impl IDataObject_Impl for DragItemWindows {
 
     fn GetData(&self, pformatetc: *const FORMATETC) -> core::Result<STGMEDIUM> {
 
@@ -274,7 +280,7 @@ impl IDataObject_Impl for DragItem {
             }
 
             else {
-                let hglobal_opt = create_hglobal_for_dragitem(&self);
+                let hglobal_opt = create_hglobal_for_dragitem(&self.0);
 
                 if let Some(hglobal) = hglobal_opt {
                     Ok(STGMEDIUM {
