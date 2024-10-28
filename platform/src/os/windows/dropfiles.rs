@@ -51,7 +51,7 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
     let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,7) };
     let names_offset = u32_slice[0];
     let has_wide_strings = u32_slice[4];
-
+    
     // guard against non-wide strings or unknown objects
     if has_wide_strings == 0 {
         log!("drag object should have wide strings");
@@ -73,7 +73,10 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
         unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,(hglobal_size - 20) / 2) }
     }
     else {
-        internal_id = Some(LiveId(((u32_slice[6] as u64)<<32)|(u32_slice[5] as u64)));
+        let id = LiveId(((u32_slice[6] as u64)<<32)|(u32_slice[5] as u64));
+        if id.0 != 0{
+            internal_id = Some(id);
+        }
         // internal DROPFILES with internal ID as well
         //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
         //internal_id = Some(LiveId(u64_slice[0]));
