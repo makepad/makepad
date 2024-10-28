@@ -3,12 +3,13 @@ use {
     std::sync::{Arc, Mutex},
     std::collections::HashSet,
     crate::{
-        implement_com,
+        //implement_com,
         makepad_live_id::*,
         os::windows::win32_app::FALSE,
         audio::*,
         thread::SignalToUI,
         windows::{
+            core::implement,
             core::PCWSTR,
             Win32::Foundation::{
                 WAIT_OBJECT_0,
@@ -22,7 +23,6 @@ use {
                 CLSCTX_ALL,
                 //STGM_READ,
             },
-            Win32::System::Variant::VT_LPWSTR,
             Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
             Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
             Win32::Media::Multimedia::{
@@ -37,6 +37,7 @@ use {
                 WAVEFORMATEXTENSIBLE,
                 WAVEFORMATEXTENSIBLE_0,
                 //WAVEFORMATEX,
+                DEVICE_STATE,
                 MMDeviceEnumerator,
                 IMMDeviceEnumerator,
                 IMMNotificationClient,
@@ -234,9 +235,10 @@ impl WasapiAccess {
         let dev_id = device.GetId().unwrap();
         let props = device.OpenPropertyStore(STGM_READ).unwrap();
         let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
-        assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
-        let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
-        (dev_name.to_string().unwrap(), dev_id.to_string().unwrap())
+        let dev_name = value.to_string();
+        //assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
+        //let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
+        (dev_name.to_string(), dev_id.to_string().unwrap())
     }
     
     // add audio device enumeration for input and output
@@ -516,10 +518,11 @@ impl WasapiInput {
     }
 }
 
+#[implement(IMMNotificationClient)]
 struct WasapiChangeListener {
     change_signal:SignalToUI
 }
-
+/*
 implement_com!{
     for_struct: WasapiChangeListener,
     identity: IMMNotificationClient,
@@ -528,10 +531,10 @@ implement_com!{
     interfaces: {
         0: IMMNotificationClient
     }
-}
+}*/
 
 impl IMMNotificationClient_Impl for WasapiChangeListener {
-    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows::core::Result<()> {
+    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: DEVICE_STATE) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }
