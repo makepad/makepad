@@ -21,7 +21,7 @@ use crate::{
     windows::{
         core::{
             PCSTR,
-            ComInterface,
+            //ComInterface,
             Interface,
         },
         Win32::{
