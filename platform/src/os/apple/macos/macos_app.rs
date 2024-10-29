@@ -57,7 +57,6 @@ use {
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut MACOS_CLASSES: *const MacosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
-
 pub static mut MACOS_APP: Option<RefCell<MacosApp>> = None;
 
 pub fn get_macos_app_global() -> std::cell::RefMut<'static, MacosApp> {
@@ -436,6 +435,16 @@ impl MacosApp {
                         _ => {}
                     }
                     let time = get_macos_app_global().time_now();
+                    // lets check if we have marked text
+                    if KeyCode::Backspace == key_code {
+                        // we have to check if we dont have any marked text in our windows
+                        for (_,view) in &get_macos_app_global().cocoa_windows{
+                            let marked = unsafe{msg_send![*view, hasMarkedText]};
+                            if marked{
+                                return
+                            }
+                        }
+                    }
                     MacosApp::do_callback(
                         MacosEvent::KeyDown(KeyEvent {
                             key_code: key_code,

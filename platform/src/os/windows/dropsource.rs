@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 use crate::{
-    implement_com,
+    windows::core::implement,
     windows::{
         core,
         Win32::{
@@ -27,8 +27,9 @@ use crate::{
     },
 };
 
+#[implement(IDropSource)]
 pub struct DropSource { }
-
+/*
 implement_com!{
     for_struct: DropSource,
     identity: IDropSource,
@@ -37,7 +38,7 @@ implement_com!{
     interfaces: {
         0: IDropSource
     }
-}
+}*/
 
 // IDropSource implementation for DropSource, which validates a drop on left mouse button up
 

@@ -37,8 +37,8 @@ pub trait WidgetNode: LiveApply {
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
-    fn set_action_data(&mut self, _data:Arc<dyn WidgetActionTrait>){}
-    fn action_data(&mut self)->Option<Arc<dyn WidgetActionTrait>>{None}
+    fn set_action_data(&mut self, _data:Arc<dyn ActionTrait>){}
+    fn action_data(&self)->Option<Arc<dyn ActionTrait>>{None}
 }
 
 pub trait Widget: WidgetNode {
@@ -448,7 +448,7 @@ impl WidgetRef {
         false
     }
     
-    pub fn set_action_data<T:WidgetActionTrait + PartialEq>(&self, data:T){
+    pub fn set_action_data<T:ActionTrait + PartialEq>(&self, data:T){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(v) = inner.widget.action_data(){
                 if let Some(v) = v.downcast_ref::<T>(){
@@ -463,7 +463,7 @@ impl WidgetRef {
         }
     }
     
-    pub fn set_action_data_always<T:WidgetActionTrait>(&self, data:T){
+    pub fn set_action_data_always<T:ActionTrait>(&self, data:T){
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.set_action_data(Arc::new(data));
         }
@@ -484,7 +484,14 @@ impl WidgetRef {
         }
         WidgetRef::empty()
     }
-
+        
+    pub fn clear_query_cache(&self){
+        if let Some(inner) = self.0.borrow_mut().as_ref() {
+            let mut res = WidgetSet::empty();
+            inner.widget.find_widgets(&[], WidgetCache::Clear, &mut res);
+        }
+    }
+    
     pub fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(inner) = self.0.borrow().as_ref() {
             inner.widget.find_widgets(path, cached, results)
@@ -560,6 +567,13 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all(cx, scope);
         }
+    }
+    
+    pub fn action_data(&self)->Option<Arc<dyn ActionTrait>>{
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.action_data()
+        }
+        None
     }
     
     pub fn draw_all_unscoped(&self, cx: &mut Cx2d) {
@@ -732,19 +746,19 @@ impl Clone for Box<dyn WidgetActionTrait> {
 
 #[derive(Default)]
 pub struct WidgetActionData{
-    data: Option<Arc<dyn WidgetActionTrait>>
+    data: Option<Arc<dyn ActionTrait>>
 }
 
 impl WidgetActionData{
-    pub fn set(&mut self,  data:impl WidgetActionTrait){
+    pub fn set(&mut self,  data:impl ActionTrait){
         self.data = Some(Arc::new(data));
     }
     
-    pub fn set_box(&mut self,  data:Arc<dyn  WidgetActionTrait>){
+    pub fn set_box(&mut self,  data:Arc<dyn ActionTrait>){
         self.data = Some(data);
     }
     
-    pub fn clone_data(&self)->Option<Arc<dyn WidgetActionTrait>>{
+    pub fn clone_data(&self)->Option<Arc<dyn ActionTrait>>{
         self.data.clone()
     }
 }
@@ -753,7 +767,7 @@ impl WidgetActionData{
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
     pub action: Box<dyn WidgetActionTrait>,
-    pub data: Option< Arc<dyn WidgetActionTrait>>,
+    pub data: Option< Arc<dyn ActionTrait>>,
     pub widgets: SmallVec<[WidgetRef;4]>,
     pub widget_uid: WidgetUid,
     pub path: HeapLiveIdPath,
@@ -856,9 +870,9 @@ pub trait WidgetActionsApi {
     where
         T: Default + Clone;
         
-    fn filter_actions_data<T: WidgetActionTrait>(
+    fn filter_actions_data<T: ActionTrait>(
             &self,
-        ) -> impl Iterator<Item = T>
+        ) -> impl Iterator<Item = &T>
         where
         T: Clone;
 }
@@ -993,12 +1007,9 @@ impl WidgetActionsApi for Actions {
         })
     }
     
-    fn filter_actions_data<T: WidgetActionTrait>(
+    fn filter_actions_data<T: ActionTrait>(
         &self,
-    ) -> impl Iterator<Item = T>
-    where
-    T: Clone,
-    
+    ) -> impl Iterator<Item = &T>
     {
         self.iter().filter_map(move |action| {
             action
@@ -1006,7 +1017,7 @@ impl WidgetActionsApi for Actions {
             .and_then(|action|{
                 if let Some(a) = &action.data{
                     if let Some(a) = a.downcast_ref::<T>() {
-                        Some(a.clone())
+                        Some(a)
                     }else {
                         None
                     }

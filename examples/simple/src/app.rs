@@ -1,9 +1,9 @@
+
 use makepad_widgets::*;
-        
+
 live_design!{
     import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*; 
-    
+    import makepad_widgets::theme_desktop_dark::*;
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
@@ -34,10 +34,9 @@ live_design!{
             }
         }
     }
-}  
-              
+}
+
 app_main!(App); 
- 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
@@ -48,7 +47,6 @@ impl LiveRegister for App {
         crate::makepad_widgets::live_design(cx);
     }
 }
-
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {

@@ -233,6 +233,30 @@ impl<'a> DrawShaderAnalyser<'a> {
                 self.analyse_hidden_args(fn_def);
            // }
         } 
+        let mut uses_time = false;
+        for all_fn in &all_fns {
+            // if we run into a DrawShaderMethod mark it as
+            if let Some(fn_def) = self.shader_registry.all_fns.get(all_fn) {
+                if let Some(FnSelfKind::DrawShader(_)) = fn_def.self_kind {
+                    // lets iterate all
+                    for dsr in fn_def.draw_shader_refs.borrow().as_ref().unwrap() {
+                        // ok we have a draw shader ident we use, now mark it on our draw_shader_decl.
+                        for field in &self.draw_shader_def.fields {
+                            if field.ident == *dsr { // we found it
+                                match &field.kind {
+                                    DrawShaderFieldKind::Uniform { ..} => {
+                                        if field.ident == Ident(live_id!(time)){
+                                            uses_time = true;
+                                        }
+                                    }
+                                    _ => ()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
         
@@ -243,6 +267,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         *self.draw_shader_def.all_structs.borrow_mut() = all_structs;
         *self.draw_shader_def.vertex_structs.borrow_mut() = vertex_structs;
         *self.draw_shader_def.pixel_structs.borrow_mut() = pixel_structs;
+        self.draw_shader_def.uses_time.set(uses_time);
         Ok(())
     }
     
