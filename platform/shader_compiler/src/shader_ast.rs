@@ -90,6 +90,7 @@ pub struct DrawShaderDef {
     pub all_structs: RefCell<Vec<StructPtr >>,
     pub vertex_structs: RefCell<Vec<StructPtr >>,
     pub pixel_structs: RefCell<Vec<StructPtr >>,
+    pub uses_time: Cell<bool>,
     // ok these 2 things dont belong here
     //pub const_table: DrawShaderConstTable,
     //pub var_inputs: RefCell<DrawShaderVarInputs>

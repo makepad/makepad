@@ -7,6 +7,7 @@ pub use makepad_derive_widget::*;
 pub use makepad_markdown;
 
 pub mod button;
+pub mod cached_widget;
 pub mod label;
 pub mod image;
 pub mod image_blend;
@@ -86,6 +87,7 @@ pub mod designer_toolbox;
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
+    cached_widget::*,
     view::*,
     image::*,
     image_blend::*,
@@ -204,6 +206,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::bare_step::live_design(cx);
     crate::turtle_step::live_design(cx);
     crate::toggle_panel::live_design(cx);
+    crate::cached_widget::live_design(cx);
     
     crate::designer::live_design(cx);
     crate::designer_view::live_design(cx);

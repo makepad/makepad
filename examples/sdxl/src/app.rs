@@ -85,7 +85,7 @@ impl Workflow {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-       Machine::new("10.0.0.111:8188", id_lut!(m1)),
+       Machine::new("10.0.0.120:8188", id_lut!(m1)),
         //Machine::new("192.168.8.231:8188", id_lut!(m1)),
     ])] machines: Vec<Machine>,
     
@@ -130,11 +130,11 @@ impl App {
         });
     }
     
-    fn get_camera_frame_jpeg(&mut self,  cx: &mut Cx, width:usize, height: usize)->Vec<u8>{
-        let mut buf = Vec::new();
+    fn _get_camera_frame_jpeg(&mut self,  cx: &mut Cx, width:usize, height: usize)->Vec<u8>{
+        //let mut buf = Vec::new();
         let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
         let img_width = img_width * 2;
-        self.video_input[0].swap_vec_u32(cx, &mut buf);
+        let buf = self.video_input[0].take_vec_u32(cx);
         // alright we have the buffer // now lets cut a 1344x768 out of the center
         let mut out = Vec::new();
         VideoPixelFormat::NV12.buffer_to_rgb_8(
@@ -161,7 +161,7 @@ impl App {
                 out[y*width*3 + x*3 + 2] = (c.z * 255.0).min(255.0).max(0.0) as u8;
             }
         }
-        self.video_input[0].swap_vec_u32(cx, &mut buf);
+        self.video_input[0].put_back_vec_u32(cx, buf, None);
         // lets encode it
         let mut jpeg = Vec::new();
         let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
@@ -179,8 +179,8 @@ impl App {
         None
     }
     
-    fn send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
-        let jpeg = self.get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
+    fn _send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
+        let jpeg = self._get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
         let url = format!("http://{}/upload/image", machine.ip);
         let mut request = HttpRequest::new(url, HttpMethod::POST);
@@ -194,10 +194,10 @@ impl App {
         request.set_metadata_id(machine.id);
         let mut body = Vec::new();
         body.extend_from_slice(form_top.as_bytes());
-        body.extend_from_slice(&jpeg); 
+        body.extend_from_slice(&jpeg);
         body.extend_from_slice(form_bottom.as_bytes());
         //request.set_header("Content-Length".to_string(), format!("{}", body.len()));
-                 
+
         request.set_body(body);
         cx.http_request(live_id!(camera), request);
         self.current_photo_name = Some(photo_name.clone());
@@ -212,10 +212,11 @@ impl App {
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
         let url = format!("http://{}/prompt", machine.ip);
         let mut request = HttpRequest::new(url, HttpMethod::POST);
-             
+        self.ui.text_input(id!(last_sent)).set_text_and_redraw(cx, &prompt_state.prompt.positive);
+        self.ui.label(id!(progress)).set_text_and_redraw(cx, "Prompted");
         request.set_header("Content-Type".to_string(), "application/json".to_string());
 
-        let ws = fs::read_to_string("examples/sdxl/workspace_turbo.json").unwrap();
+        let ws = fs::read_to_string("examples/sdxl/workspace_flux.json").unwrap();
         let ws = ws.replace("CLIENT_ID", "1234");
         let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
         let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
@@ -326,16 +327,6 @@ impl App {
             machine.web_socket = Some(WebSocket::open(request));
         }
     }
-    /*
-    fn update_progress(cx: &mut Cx, ui: &WidgetRef, machine: LiveId, active: bool, steps: usize, total: usize) { 
-        let progress_id = match machine {
-            live_id!(m1) => id!(progress1),
-            _ => panic!()
-        };
-        ui.view(progress_id).apply_over_and_redraw(cx, live!{
-            draw_bg: {active: (if active {1.0}else {0.0}), progress: (steps as f64 / total as f64)}
-        });
-    }*/
     
     fn load_seed_from_current_image(&mut self, cx: &mut Cx) {
         if let Some(current_image) = &self.current_image {
@@ -365,6 +356,13 @@ impl App {
             self.ui.text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
             self.ui.redraw(cx);
             self.load_preset(&prompt_file.prompt.preset)
+        }
+    }
+    
+    fn load_last_sent_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
+        if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
+            self.ui.text_input(id!(last_sent)).set_text(&prompt_file.prompt.positive);
+            self.ui.redraw(cx);
         }
     }
     
@@ -503,7 +501,8 @@ impl App {
             seed: self.last_seed as u64
         };
         if let Some(machine_id) = self.get_free_machine(){
-            self.send_camera_to_machine(cx, machine_id, prompt_state);
+            self.send_prompt_to_machine(cx, machine_id, "".to_string(), prompt_state);
+            //self.send_camera_to_machine(cx, machine_id, prompt_state);
         }
     }
     
@@ -547,7 +546,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
-        cx.use_midi_inputs(&ports.all_inputs());
+        //cx.use_midi_inputs(&ports.all_inputs());
     }
     
     fn handle_startup(&mut self, cx:&mut Cx){
@@ -579,7 +578,7 @@ impl MatchEvent for App {
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){
                     Ok(WebSocketMessage::String(s))=>{
-                        if s.contains("execution_interrupted") {
+                        if s.contains("execution_interrupted") || s.contains("crystools.monitor") {
                                                                                      
                         }
                         else if s.contains("execution_error") { // i dont care to expand the json def for this one
@@ -613,7 +612,8 @@ impl MatchEvent for App {
                                             }
                                         }
                                     }
-                                    else if data._type == "progress" {
+                                    else if data._type == "progress"{
+                                        self.ui.label(id!(progress)).set_text_and_redraw(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)));
                                         // draw the progress bar / progress somewhere
                                         //let id =self.machines[m].id;
                                         //if let Some(running) = &mut self.machines[m].running {
@@ -628,6 +628,8 @@ impl MatchEvent for App {
                                 }
                             }
                         }
+                        self.handle_signal(cx);
+                        
                     }
                     _=>()
                 }
@@ -795,13 +797,16 @@ impl MatchEvent for App {
             let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
             if img_width != vfb.format.width / 2 || img_height != vfb.format.height {
                 self.video_input[id] = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32{
-                    data: vec![],
+                    updated: TextureUpdated::Full,
+                    data: Some(vec![]),
                     width: vfb.format.width/2,
                     height: vfb.format.height
                 });
             }
             if let Some(buf) = vfb.as_vec_u32() {
-                self.video_input[id].swap_vec_u32(cx, buf);
+                let mut buf2 = self.video_input[id].take_vec_u32(cx);
+                std::mem::swap(&mut buf2, buf);
+                self.video_input[id].put_back_vec_u32(cx, buf2, None);
             }
             let image_size = [vfb.format.width as f32, vfb.format.height as f32];
             let v = self.ui.image(id!(video_input0));
@@ -910,7 +915,7 @@ impl MatchEvent for App {
                         LLMMsg::Human=>live_id!(Human),
                         LLMMsg::Progress=>live_id!(AI)
                     };
-                    let item = llm_chat.item(cx, item_id, template).unwrap();
+                    let item = llm_chat.item(cx, item_id, template);
                     item.set_text(msg);
                     item.draw_all(cx, &mut Scope::empty());
                 }
@@ -925,12 +930,12 @@ impl MatchEvent for App {
                         match item {
                             ImageListItem::Prompt {prompt_hash} => {
                                 let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
-                                let item = image_list.item(cx, item_id, live_id!(PromptGroup)).unwrap();
+                                let item = image_list.item(cx, item_id, live_id!(PromptGroup));
                                 item.label(id!(prompt)).set_text(&group.prompt.positive);
                                 item.draw_all(cx, &mut Scope::empty());
                             }
                             ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
-                                let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]).unwrap();
+                                let item = image_list.item(cx, item_id, id!(Empty.ImageRow1.ImageRow2)[*image_count]);
                                 let rows = item.view_set(ids!(row1, row2, row3));
                                 for (index, row) in rows.iter().enumerate() {
                                     if index >= *image_count {break}
@@ -1091,6 +1096,11 @@ impl MatchEvent for App {
                         if let ImageListItem::ImageRow {prompt_hash, ..} = self.filtered.list[item_id as usize] {
                             self.load_seed_from_current_image(cx);
                             self.load_inputs_from_prompt_hash(cx, prompt_hash);
+                        }
+                    }
+                    if fd.tap_count == 1 {
+                        if let ImageListItem::ImageRow {prompt_hash, ..} = self.filtered.list[item_id as usize] {
+                            self.load_last_sent_from_prompt_hash(cx, prompt_hash);
                         }
                     }
                 }

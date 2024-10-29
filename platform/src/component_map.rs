@@ -7,7 +7,7 @@ use {
     crate::cx::Cx
 };
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ComponentMap<K,V>{
     map: HashMap<K,V>,
     visible: HashSet<K>

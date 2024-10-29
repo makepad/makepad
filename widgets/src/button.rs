@@ -63,6 +63,8 @@ pub struct Button {
 
     #[live]
     pub text: ArcStringMut,
+    
+    #[action_data] #[rust] action_data: WidgetActionData,
 }
 
 impl Widget for Button {
@@ -74,7 +76,7 @@ impl Widget for Button {
         
         match event.hit_designer(cx, self.draw_bg.area()){
             HitDesigner::DesignerPick(_e)=>{
-                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+                cx.widget_action_with_data(&self.action_data, uid, &scope.path, WidgetDesignAction::PickedBody)
             }
             _=>()
         }
@@ -88,7 +90,7 @@ impl Widget for Button {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
-                    cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                     self.animator_play(cx, id!(hover.pressed));
                 }
                 Hit::FingerHoverIn(_) => {
@@ -104,7 +106,7 @@ impl Widget for Button {
                 }
                 Hit::FingerUp(fe) if self.enabled => {
                     if fe.is_over {
-                        cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                         if self.reset_hover_on_click {
                             self.animator_cut(cx, id!(hover.off));
                         } else if fe.device.has_hovers() {
@@ -114,7 +116,7 @@ impl Widget for Button {
                             self.animator_play(cx, id!(hover.off));
                         }
                     } else {
-                        cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
                         self.animator_play(cx, id!(hover.off));
                     }
                 }

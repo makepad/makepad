@@ -58,7 +58,7 @@ live_design!{
         <Filler> {}
         <P> {
             width: Fit,
-            text: "Default dock for",
+            text: "",
             margin: 0.,
             padding: <THEME_MSPACE_1> {}
         }
@@ -111,8 +111,13 @@ live_design!{
 
     AppUI =  <Window> {
         margin: 5.
-        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
-        window: { inner_size: vec2(1600, 900) },
+        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad"}} 
+        preset_1 = <Button>{text:"A"}
+        preset_2 = <Button>{text:"C"}
+        preset_3 = <Button>{text:"D"}
+        preset_4 = <Button>{text:"P"}
+    },
+        window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
         show_bg: true,
         draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
         window_menu = {
@@ -190,12 +195,12 @@ live_design!{
                 AiFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 6.
+                        width: 10.
                         margin: { top: 3. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_6)
-                        svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
+                        svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
                     }
                 }
                 DesignFirstTab = <IconTab> {
@@ -364,29 +369,29 @@ live_design!{
             }
 
             run_first = Tab {
-                name: ">"
+                name: ""
                 template: RunFirstTab,
                 kind: RunFirst
             }
 
             design_first = Tab {
-                name: ">"
+                name: ""
                 template: DesignFirstTab,
                 kind: DesignFirst
             }
 
             edit_first = Tab {
-                name: ">"
+                name: ""
                 template: EditFirstTab,
                 kind: EditFirst
             }
             ai_first = Tab {
-                name: ">"
+                name: ""
                 template: AiFirstTab,
                 kind: AiFirst
             }
             outline_first = Tab {
-                name: ">"
+                name: ""
                 template: OutlineFirstTab,
                 kind: OutlineFirst
             }
