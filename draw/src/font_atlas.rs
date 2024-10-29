@@ -2,7 +2,7 @@ use makepad_rustybuzz::UnicodeBuffer;
 
 pub use {
     std::{
-        borrow::Borrow,
+        borrow::{Borrow, Cow},
         collections::VecDeque,
         env,
         hash::{Hash, Hasher},
@@ -30,6 +30,7 @@ pub use {
     fxhash::FxHashMap,
     makepad_rustybuzz::{Direction, GlyphBuffer},
     makepad_vector::ttf_parser::GlyphId,
+    unicode_segmentation::UnicodeSegmentation
 };
 
 pub(crate) const ATLAS_WIDTH: usize = 4096;
@@ -211,17 +212,59 @@ impl CxShapeCache {
         }
     }
 
-    pub fn shape(
+    pub fn shape<'a>(
+        &'a mut self,
+        is_secret: bool,
+        direction: Direction,
+        text: &str,
+        font_ids: &[usize],
+        font_atlas: &mut CxFontAtlas,
+    ) -> Cow<'a, [GlyphInfo]> {
+        if is_secret {
+            Cow::Owned(self.shape_secret(direction, text, font_ids, font_atlas))
+        } else {
+            Cow::Borrowed(self.shape_full(direction, text, font_ids, font_atlas))
+        }
+    }
+
+    fn shape_secret(
         &mut self,
+        _direction: Direction,
+        text: &str,
+        font_ids: &[usize],
+        font_atlas: &mut CxFontAtlas,
+    ) -> Vec<GlyphInfo> {
+        let Some((font_id, glyph_id)) = font_ids.iter().copied().find_map(|font_id| {
+            let font = font_atlas.fonts[font_id].as_mut().unwrap();
+            let glyph_id = font.glyph_id('•').0 as usize;
+            if glyph_id == 0 {
+                None 
+            } else {
+                Some((font_id, glyph_id))
+            }
+        }) else {
+            return Vec::new();
+        };
+        text.grapheme_indices(true).map(|(index, _)| {
+            GlyphInfo {
+                font_id,
+                glyph_id,
+                cluster: index,
+            }
+        }).collect()
+    }
+
+    fn shape_full<'a>(
+        &'a mut self,
         direction: Direction,
         text: &str,
         font_ids: &[usize],
         font_atlas: &CxFontAtlas,
-    ) -> &[GlyphInfo] {
+    ) -> &'a [GlyphInfo] {
         if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
             let shape_key = (direction, text.into(), font_ids.into());
             let mut glyph_infos = Vec::new();
-            let _ = self.shape_internal(
+            let _ = self.shape_full_recursive(
                 text,
                 font_ids,
                 font_atlas,
@@ -237,7 +280,7 @@ impl CxShapeCache {
         &self.shapes[&(direction, text, font_ids) as &(dyn ShapeKey)]
     }
 
-    fn shape_internal(
+    fn shape_full_recursive(
         &mut self,
         text: &str,
         font_ids: &[usize],
@@ -248,7 +291,7 @@ impl CxShapeCache {
             return Err(());
         };
         let Some(font) = &font_atlas.fonts[font_id] else {
-            return self.shape_internal(text, font_ids, font_atlas, glyph_infos);
+            return self.shape_full_recursive(text, font_ids, font_atlas, glyph_infos);
         };
 
         let mut buffer = UnicodeBuffer::new();
@@ -280,7 +323,7 @@ impl CxShapeCache {
                         break text.len()
                     }
                 };
-                if self.shape_internal(
+                if self.shape_full_recursive(
                     &text[start..end],
                     font_ids,
                     font_atlas,
