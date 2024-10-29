@@ -84,6 +84,8 @@ pub mod designer_outline;
 pub mod designer_data;
 pub mod designer_toolbox;
 
+pub mod defer_with_redraw;
+
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
@@ -123,6 +125,7 @@ pub use crate::{
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
     toggle_panel::*,
+    defer_with_redraw::*,
     widget::{
         WidgetSet,
         WidgetUid,
