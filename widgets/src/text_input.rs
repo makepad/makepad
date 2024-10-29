@@ -24,7 +24,7 @@ pub struct TextInput {
     #[animator] animator: Animator,
     
     #[redraw] #[live] draw_bg: DrawColor,
-    #[live] draw_text: DrawLabel,
+    #[live] pub draw_text: DrawLabel,
     #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
     
