@@ -15,18 +15,19 @@ live_design!{
                         y: 0.5
                     },
                     button1 = <Button> {
-                        text: "Hello world "
+                        text: "Show/hide password"
                         draw_text:{color:#f00}
                     }
                     input1 = <TextInput> {
                         width: 100
-                        text: "Click to count"
+                        text: "Your password here"
+                        draw_text: { text_style: { is_secret: true } },
                     }
                     label1 = <Label> {
                         draw_text: {
                             color: #f
                         },
-                        text: r#"Lorem ipsum dolor sit amet"#,
+                        text: "This is a label",
                         width: 200.0,
                     }
                 }
@@ -40,7 +41,6 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust] counter: usize,
  }
  
 impl LiveRegister for App {
@@ -52,9 +52,10 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
-            self.counter += 1;
-            let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx, &format!("Counter: {} Time:{}", self.counter, Cx::time_now()));
+            let text_input = self.ui.text_input(id!(input1));
+            let mut text_input = text_input.borrow_mut().unwrap();
+            text_input.draw_text.text_style.is_secret = !text_input.draw_text.text_style.is_secret;
+            text_input.redraw(cx);
         }
     }
 }
