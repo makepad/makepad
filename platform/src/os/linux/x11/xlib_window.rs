@@ -177,6 +177,14 @@ impl XlibWindow {
             // Map the window to the screen
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
+
+            // Explicitly set the window position after mapping
+            // This is necessary because some window managers might ignore the initial position
+            // and override it with their own heuristics.
+            if let Some(pos) = position {
+                x11_sys::XMoveWindow(display, window, pos.x as i32, pos.y as i32);
+                x11_sys::XFlush(display);
+            }
             
             let xic = x11_sys::XCreateIC(
                 get_xlib_app_global().xim,

@@ -92,7 +92,7 @@ live_design!{
                 empty_message: "Enter prompt"
             }
 
-            send_button = <ButtonFlatter> {
+            /*send_button = <ButtonFlatter> {
                 width: Fit,
                 padding: <THEME_MSPACE_V_1> {}
                 margin: { left: -35.}
@@ -116,7 +116,7 @@ live_design!{
                     svg_file: dep("crate://self/resources/icons/icon_times.svg"),
                 }
                 icon_walk: { width: 7. }
-            }
+            }*/
         }
         
         
@@ -259,7 +259,7 @@ live_design!{
                     icon_walk: { width: 10. }
                 }
 
-               <Vr> {} 
+                <Vr> {}
 
                 <ButtonFlat> {
                     width: Fit,
@@ -391,7 +391,6 @@ impl AiChatView{
                         // lets fetch the context
                         // println!("{}", dd.selected_item());
                         // alright lets collect the context
-                        println!("SENDING TO BACKEND");
                         cx.action(AppAction::SendAiChatToBackend{chat_id, history_slot: self.history_slot});
                         cx.action(AppAction::SaveAiChat{chat_id});
                         cx.action(AppAction::RedrawAiChat{chat_id});

@@ -11,11 +11,11 @@ use crate::{
     studio_editor::*,
     run_view::*,
     makepad_platform::studio::{JumpToFile,EditFile, PatchFile},
-    run_list::*,
     log_list::*,
     makepad_code_editor::text::{Position},
     ai_chat::ai_chat_manager::AiChatManager,
     build_manager::{
+        build_protocol::BuildProcess,
         build_manager::{
             BuildManager,
             BuildManagerAction
@@ -74,21 +74,34 @@ impl App {
         }
     }
     
-    pub fn load_state(&mut self, cx:&mut Cx){
-        if let Ok(contents) = std::fs::read_to_string("makepad_state.ron") {
+    pub fn load_state(&mut self, cx:&mut Cx, slot:usize){
+        
+        if let Ok(contents) = std::fs::read_to_string(format!("makepad_state{}.ron", slot)) {
             match AppStateRon::deserialize_ron(&contents) {
                 Ok(state)=>{
+                    // lets kill all running processes
+                    self.data.build_manager.stop_all_active_builds(cx);
                     // Now we need to apply the saved state
                     let dock = self.ui.dock(id!(dock));
                     if let Some(mut dock) = dock.borrow_mut() {
-                        // lets load the code editors
-                        // Set the dock's items to the loaded dock_items
                         dock.load_state(cx, state.dock_items);
-                        //self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
+                                                
+                        self.data.file_system.tab_id_to_file_node_id = state.tab_id_to_file_node_id.clone();
                         for (tab_id, file_node_id) in state.tab_id_to_file_node_id.iter() {
                             self.data.file_system.request_open_file(*tab_id, *file_node_id);
                         }
+                        // ok lets run the processes
+                                                                       
+                        for process in state.processes{
+                            if let Some(binary_id) = self.data.build_manager.binary_name_to_id(&process.binary){
+                                self.data.build_manager.start_active_build(cx, binary_id, process.target);
+                            }       
+                        }
                     };
+                    self.ui.clear_query_cache();
+                    return;
+                    //self.ui.redraw(cx);
+                    // cx.redraw_all();
                     //self.data.build_manager.designer_selected_files = 
                      //   state.designer_selected_files;
                 }
@@ -99,35 +112,26 @@ impl App {
         }
     }
     
-    fn maybe_save_state(&self){
+    fn save_state(&self, slot:usize){
         let dock = self.ui.dock(id!(dock));
-        if let Some(mut dock_items) = dock.needs_save(){
-            // remove the runviews
-            let mut run_views = Vec::new();
-            dock_items.retain(|id, di| {
-                if let DockItem::Tab{kind,..} = di{
-                    if *kind == live_id!(RunView){
-                        run_views.push(*id);
-                        return false
-                    }
-                }
-                true 
-            }); 
-            for item in dock_items.values_mut(){
-                if let DockItem::Tabs{tabs,..} = item{
-                    tabs.retain(|id| !run_views.contains(id));
-                }
-            }
-            // alright lets save it to disk
-            let state = AppStateRon{
-                dock_items,
-                //designer_selected_files: self.data.build_manager.designer_selected_files.clone(),
-                tab_id_to_file_node_id: self.data.file_system.tab_id_to_file_node_id.clone()
-            };
-            let saved = state.serialize_ron();
-            let mut f = File::create("makepad_state.ron").expect("Unable to create file");
-            f.write_all(saved.as_bytes()).expect("Unable to write data");
+        let dock_items = dock.clone_state().unwrap();
+        
+        // lets store the active build ids so we can fire them up again
+        let mut processes = Vec::new();
+        for build in self.data.build_manager.active.builds.values(){
+            processes.push(build.process.clone());
         }
+                
+        //do we keep the runviews? we should eh.
+        // alright lets save it to disk
+        let state = AppStateRon{
+            dock_items,
+            processes,
+            tab_id_to_file_node_id: self.data.file_system.tab_id_to_file_node_id.clone()
+        };
+        let saved = state.serialize_ron();
+        let mut f = File::create(format!("makepad_state{}.ron", slot)).expect("Unable to create file");
+        f.write_all(saved.as_bytes()).expect("Unable to write data");
     }
 }
 
@@ -158,6 +162,7 @@ pub enum AppAction{
     SaveAiChat{chat_id:LiveId},
     RedrawAiChat{chat_id:LiveId},
     RunAiChat{chat_id:LiveId, history_slot:usize, item_id:usize},
+    DestroyRunViews{run_view_id:LiveId},
     None
 }
 
@@ -302,7 +307,7 @@ impl MatchEvent for App{
                 if let Some(mut dock) = dock.borrow_mut() {
                     for (tab_id, (_, item)) in dock.items().iter() {
                         if let Some(run_view) = item.as_run_view().borrow_mut() {
-                            if run_view.build_id == build_id {
+                            if run_view.build_id == Some(build_id) {
                                 if let WindowKindId::Design = run_view.kind_id{
                                     // lets focus this tab
                                     id = Some(*tab_id);
@@ -342,6 +347,13 @@ impl MatchEvent for App{
             AppAction::RunAiChat{chat_id, history_slot, item_id}=>{
                 self.data.ai_chat_manager.run_ai_chat(cx, chat_id, history_slot, item_id, &mut self.data.file_system);
             }
+            AppAction::DestroyRunViews{run_view_id} => {
+                dock.close_tab(cx, run_view_id);
+                dock.close_tab(cx, run_view_id.add(1));
+                dock.close_tab(cx, run_view_id.add(2));
+                dock.redraw(cx);
+                log_list.redraw(cx);
+            }
         }
                 
         match action.cast(){
@@ -365,11 +377,14 @@ impl MatchEvent for App{
                             // we might already have it
                             
                             let item = dock.create_and_select_tab(cx, tab_bar_id, panel_id, live_id!(RunView), name.clone(), live_id!(CloseableTab), Some(pos)).unwrap();
-                            
+                                                        
                             if let Some(mut item) = item.as_run_view().borrow_mut(){
                                 item.window_id = window_id;
-                                item.build_id = build_id;
+                                item.build_id = Some(build_id);
                                 item.kind_id = WindowKindId::from_usize(kind_id);
+                            }
+                            else{
+                                println!("WHIT");
                             }
                             
                             dock.redraw(cx);
@@ -384,7 +399,7 @@ impl MatchEvent for App{
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
                                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                                    if run_view.build_id == build_id{
+                                    if run_view.build_id == Some(build_id){
                                         run_view.ready_to_start(cx);
                                     }
                                 }
@@ -395,7 +410,7 @@ impl MatchEvent for App{
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
                                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                                    if run_view.build_id == build_id && run_view.window_id == presentable_draw.window_id{
+                                    if run_view.build_id == Some(build_id) && run_view.window_id == presentable_draw.window_id{
                                         run_view.draw_complete_and_flip(cx, &presentable_draw, &mut self.data.build_manager);
                                     }
                                 }
@@ -410,7 +425,7 @@ impl MatchEvent for App{
         match action.cast(){
             FileSystemAction::TreeLoaded => {
                 file_tree.redraw(cx);
-                self.load_state(cx);
+                self.load_state(cx, 0);
                 self.data.ai_chat_manager.init(&mut self.data.file_system);
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
@@ -426,20 +441,6 @@ impl MatchEvent for App{
                 
             }
             FileSystemAction::None=>()
-        }
-                
-        match action.cast(){
-            RunListAction::Create(..) => {
-                
-            }
-            RunListAction::Destroy(run_view_id) => {
-                dock.close_tab(cx, run_view_id);
-                dock.close_tab(cx, run_view_id.add(1));
-                dock.close_tab(cx, run_view_id.add(2));
-                dock.redraw(cx);
-                log_list.redraw(cx);
-            }
-            RunListAction::None=>{}
         }
         
         if let Some(action) = action.as_widget_action(){
@@ -539,8 +540,21 @@ impl MatchEvent for App{
                 internal_id: None
             }); 
         }
-                            
+        
+        for (i,id) in [*id!(preset_1),*id!(preset_2),*id!(preset_3),*id!(preset_4)].iter().enumerate(){
+            if let Some(km) = self.ui.button(id).pressed_modifiers(actions){
+                if km.control{
+                    self.save_state(i+1)
+                }
+                else{
+                    self.load_state(cx, i+1);
+                    cx.redraw_all();
+                }
+            }
+        }
+            
         if let Some(file_id) = file_tree.file_clicked(&actions) {
+            println!("FILE CLICKED");
             // ok lets open the file
             if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
                 // If the tab is already open, focus it
@@ -551,11 +565,12 @@ impl MatchEvent for App{
                 self.data.file_system.request_open_file(tab_id, file_id);
                                 
                 // lets add a file tab 'some
-                let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
                 let path = self.data.file_system.file_node_id_to_path(file_id).unwrap();
+                let tab_after = FileSystem::get_tab_after_from_path(path);
+                let (tab_bar, pos) = dock.find_tab_bar_of_tab(tab_after).unwrap();
                 let template = FileSystem::get_editor_template_from_path(path);
                 dock.create_and_select_tab(cx, tab_bar, tab_id, template, "".to_string(), live_id!(CloseableTab), Some(pos));
-                                            
+                
                 // lets scan the entire doc for duplicates
                 self.data.file_system.ensure_unique_tab_names(cx, &dock)
             }
@@ -576,7 +591,9 @@ impl AppMain for App {
         self.data.file_system.handle_event(cx, event, &self.ui);
         self.data.build_manager.handle_event(cx, event, &mut self.data.file_system); 
         self.data.ai_chat_manager.handle_event(cx, event, &mut self.data.file_system);
-        self.maybe_save_state();
+        if self.ui.dock(id!(dock)).check_and_clear_need_save(){
+            self.save_state(0);
+        }
     }
 }
 
@@ -585,5 +602,6 @@ use std::collections::HashMap;
 #[derive(SerRon, DeRon)]
 pub struct AppStateRon{
     dock_items: HashMap<LiveId, DockItem>,
+    processes: Vec<BuildProcess>,
     tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
 }

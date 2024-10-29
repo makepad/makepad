@@ -1381,11 +1381,12 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
+            color: (THEME_COLOR_TEXT_DEFAULT)
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return THEME_COLOR_TEXT_DEFAULT
+                return self.color
             }
         }
 
@@ -4865,7 +4866,7 @@ live_design! {
         }
         view = <RoundedView>{
             draw_bg:{
-                color:#3,
+                color:#4,
                 border_width:2
                 border_color:#5
             }
@@ -4942,7 +4943,7 @@ live_design! {
     }
 
     DesignerView = <DesignerViewBase>{
-        clear_color: #333333
+        clear_color: #3
         draw_outline:{
             fn pixel(self) -> vec4 {
                 let p = self.pos * self.rect_size;
@@ -4955,9 +4956,9 @@ live_design! {
                 let dash_pattern = fract(pos / dash_length);
                 let alpha = step(dash_pattern, line_width);
                 
-                let c = vec4(mix(#c, #0000, alpha))
+                let c = vec4(mix(#c, #555f, alpha))
                 
-                sdf.stroke(c, 1.5);
+                sdf.stroke(c, 2.5);
                 return sdf.result;
                 //return vec4(self.color.xyz * self.color.w, self.color.w)
             }

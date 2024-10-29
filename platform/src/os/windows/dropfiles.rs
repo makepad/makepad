@@ -48,10 +48,10 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
     */
 
     // read DROPFILES part
-    let i32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut i32,5) };
-    let names_offset = i32_slice[0];
-    let has_wide_strings = i32_slice[4];
-
+    let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,7) };
+    let names_offset = u32_slice[0];
+    let has_wide_strings = u32_slice[4];
+    
     // guard against non-wide strings or unknown objects
     if has_wide_strings == 0 {
         log!("drag object should have wide strings");
@@ -69,15 +69,17 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
 
     let mut internal_id: Option<LiveId> = None;
     let u16_slice = if names_offset == 20 {
-
         // regular DROPFILES from external source
         unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u16,(hglobal_size - 20) / 2) }
     }
     else {
-
+        let id = LiveId(((u32_slice[6] as u64)<<32)|(u32_slice[5] as u64));
+        if id.0 != 0{
+            internal_id = Some(id);
+        }
         // internal DROPFILES with internal ID as well
-        let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
-        internal_id = Some(LiveId(u64_slice[0]));
+        //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
+        //internal_id = Some(LiveId(u64_slice[0]));
         unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(28) as *mut u16,(hglobal_size - 28) / 2) }            
     };
 
@@ -136,17 +138,19 @@ pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
         let hglobal_raw_ptr = unsafe { GlobalLock(hglobal) };
 
         // initialize DROPFILES part
-        let i32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut i32,5) };
-        i32_slice[0] = 28; // offset to filename
-        i32_slice[1] = 0;
-        i32_slice[2] = 0;
-        i32_slice[3] = 0;
-        i32_slice[4] = 1; // not 0 because 16-bit characters in the filename
+        let u32_slice = unsafe { std::slice::from_raw_parts_mut(hglobal_raw_ptr as *mut u32,7) };
+        u32_slice[0] = 28; // offset to filename
+        u32_slice[1] = 0;
+        u32_slice[2] = 0;
+        u32_slice[3] = 0;
+        u32_slice[4] = 1; // not 0 because 16-bit characters in the filename
 
         // initialize internal ID
         if let Some(internal_id) = internal_id {
-            let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
-            u64_slice[0] = internal_id.0;
+            u32_slice[6] = (internal_id.0>>32) as u32;
+            u32_slice[5] = (internal_id.0&0xffff_ffff) as u32 ;
+            //let u64_slice = unsafe { std::slice::from_raw_parts_mut((hglobal_raw_ptr as *mut u8).offset(20) as *mut u64,1) };
+            //u64_slice[0] = internal_id.0;
         }
 
         // initialize filename

@@ -7,6 +7,7 @@ use {
         os::windows::win32_app::TRUE,
         windows::{
             core::{
+                implement,
                 AsImpl,
                 //Interface,
                 PWSTR,
@@ -49,6 +50,7 @@ use {
             },
             Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
             Win32::Media::Audio::{
+                DEVICE_STATE,
                 MMDeviceEnumerator,
                 IMMNotificationClient_Impl,
                 IMMNotificationClient,
@@ -274,11 +276,12 @@ struct SourceReaderConfig{
     callback:Arc<Mutex<Option<VideoInputFn> > >
 }
 
+#[implement(IMFSourceReaderCallback)]
 struct SourceReaderCallback {
     config: Mutex<Option<SourceReaderConfig>>,
     source_reader: Mutex<Option< IMFSourceReader >>,
 }
-
+/*
 implement_com!{
     for_struct: SourceReaderCallback,
     identity: IMFSourceReaderCallback,
@@ -287,7 +290,7 @@ implement_com!{
     interfaces: {
         0: IMFSourceReaderCallback
     }
-}
+}*/
 
 impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
     fn OnReadSample(
@@ -363,11 +366,11 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
     }
 }
 
-
+#[implement(IMMNotificationClient)]
 struct MediaFoundationChangeListener {
     change_signal: SignalToUI
 }
-
+/*
 implement_com!{
     for_struct: MediaFoundationChangeListener,
     identity: IMMNotificationClient,
@@ -376,10 +379,10 @@ implement_com!{
     interfaces: {
         0: IMMNotificationClient
     }
-}
+}*/
 
 impl IMMNotificationClient_Impl for MediaFoundationChangeListener {
-    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows::core::Result<()> {
+    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: DEVICE_STATE) -> crate::windows::core::Result<()> {
         self.change_signal.set();
         Ok(())
     }

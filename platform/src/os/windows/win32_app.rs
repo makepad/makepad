@@ -15,7 +15,7 @@ use {
             core::HRESULT,
             core::PCWSTR,
             core::PCSTR,
-            core::IntoParam,
+            //core::IntoParam,
             Win32::{
                 UI::{
                     WindowsAndMessaging::{
@@ -90,10 +90,10 @@ use {
                         QueryPerformanceCounter,
                         QueryPerformanceFrequency,
                     },
-                    //Com::IDataObject,
+                    Com::IDataObject,
                     Ole::{
                         OleInitialize,
-                        //DoDragDrop,
+                        DoDragDrop,
                         IDropSource,
                         DROPEFFECT,
                         DROPEFFECT_COPY,
@@ -108,7 +108,7 @@ use {
             cx_native::EventFlow,
             windows::{
                 dropsource::*,
-                dataobject::*,
+                dataobject::DragItemWindows,
                 win32_event::Win32Event,
                 win32_window::Win32Window,
             },
@@ -132,7 +132,7 @@ pub fn init_win32_app_global(event_callback: Box<dyn FnMut(Win32Event) -> EventF
         WIN32_APP = Some(RefCell::new(Win32App::new(event_callback)));
     }
 }
-
+/*
 // copied from Microsoft so it refers to the right IDataObject
 #[allow(non_snake_case)]
 pub unsafe fn DoDragDrop<P0, P1>(pdataobj: P0, pdropsource: P1, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT
@@ -142,7 +142,7 @@ P1: IntoParam<IDropSource>,
 {
     ::windows_targets::link!("ole32.dll" "system" fn DoDragDrop(pdataobj: *mut::core::ffi::c_void, pdropsource: *mut::core::ffi::c_void, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT);
     DoDragDrop(pdataobj.into_param().abi(), pdropsource.into_param().abi(), dwokeffects, pdweffect)
-}
+}*/
 
 pub struct Win32App {
     pub time_start: i64,
@@ -195,7 +195,7 @@ impl Win32App {
         
         unsafe {
             RegisterClassExW(&class);
-            IsGUIThread(TRUE);
+            let _ = IsGUIThread(TRUE);
             
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
             OleInitialize(None).unwrap();
@@ -242,7 +242,7 @@ impl Win32App {
                             get_win32_app_global().event_flow = EventFlow::Exit;
                         }
                         else {
-                            TranslateMessage(&msg);
+                            let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !get_win32_app_global().was_signal_poll() {
                                 Win32App::do_callback(Win32Event::Paint);
@@ -257,7 +257,7 @@ impl Win32App {
                             Win32App::do_callback(Win32Event::Paint)
                         }
                         else {
-                            TranslateMessage(&msg);
+                            let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                         }
                     }
@@ -412,7 +412,7 @@ impl Win32App {
                     if (path.len() > 0) || internal_id.is_some() {
                         
                         // create COM IDataObject that hosts the drag item
-                        let data_object: IDataObject = DragItem::FilePath {path: path.clone(), internal_id: internal_id.clone(),}.into();
+                        let data_object: IDataObject = DragItemWindows(DragItem::FilePath {path: path.clone(), internal_id: internal_id.clone(),}).into();
                         
                         // create COM IDropSource to indicate when to stop dragging
                         let drop_source: IDropSource = DropSource {}.into();
@@ -519,6 +519,8 @@ impl Win32App {
     }
 }
 
+
+
 // reworked from winit windows platform https://github.com/rust-windowing/winit/blob/eventloop-2.0/src/platform_impl/windows/dpi.rs
 
 type SetProcessDPIAware = unsafe extern "system" fn () -> BOOL;
@@ -597,7 +599,7 @@ impl DpiFunctions {
                 if set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
                     // V2 only works with Windows 10 Creators Update (1703). Try using the older
                     // V1 if we can't set V2.
-                    set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+                    let _ = set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
                 }
             }
             else if let Some(set_process_dpi_awareness) = self.set_process_dpi_awareness {
@@ -614,7 +616,7 @@ impl DpiFunctions {
     pub fn enable_non_client_dpi_scaling(&self, hwnd: HWND) {
         unsafe {
             if let Some(enable_nonclient_dpi_scaling) = self.enable_nonclient_dpi_scaling {
-                enable_nonclient_dpi_scaling(hwnd);
+                let _ = enable_nonclient_dpi_scaling(hwnd);
             }
         }
     }
