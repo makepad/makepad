@@ -45,15 +45,15 @@ macro_rules!implement_com{
             }
             
             #[allow(non_snake_case)]
-            unsafe fn QueryInterface(&self, iid: &crate::windows::core::GUID, interface: *mut *const ::core ::ffi ::c_void) -> crate::windows::core::HRESULT {
+            unsafe fn QueryInterface(&self, iid: *const crate::windows::core::GUID, interface: *mut *mut ::core ::ffi ::c_void) -> crate::windows::core::HRESULT {
                 *interface =
-                if iid == &<crate::windows::core::IUnknown as crate::windows::core::ComInterface> ::IID ||
-                  iid == &<crate::windows::core::IInspectable as crate::windows::core::ComInterface> ::IID ||
-                  iid == &<crate::windows::core::imp::IAgileObject as crate::windows::core::ComInterface> ::IID{
-                    &self.identity as *const _ as *const _
+                if iid == &<crate::windows::core::IUnknown as crate::windows::core::Interface> ::IID ||
+                  iid == &<crate::windows::core::IInspectable as crate::windows::core::Interface> ::IID ||
+                  iid == &<crate::windows::core::imp::IAgileObject as crate::windows::core::Interface> ::IID{
+                    &self.identity as *mut _ as *mut _
                 }
                 $ (else if < $ iface as crate::windows::core::Interface> ::Vtable::matches(iid) {
-                    &self.vtables. $ iface_index as *const _ as *const _
+                    &self.vtables. $ iface_index as *mut _ as *mut _
                 }) *
                 else {
                     std::ptr::null_mut()
@@ -78,10 +78,10 @@ macro_rules!implement_com{
             fn AddRef(&self) -> u32 {self.count.add_ref()}
             
             #[allow(non_snake_case)]
-            unsafe fn Release(&self) -> u32 {
-                let remaining = self.count.release();
+            unsafe fn Release(self_: *mut Self) -> u32 {
+                let remaining = self_.count.release();
                 if remaining == 0 {
-                    let _ = Box ::from_raw(self as *const Self as *mut Self);
+                    let _ = Box ::from_raw(self_);
                 } remaining
             }
         }

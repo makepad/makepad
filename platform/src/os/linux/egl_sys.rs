@@ -258,9 +258,6 @@ unsafe extern "C" fn(
 )->EGLBoolean,
 >;
 
-
-struct Module(::std::ptr::NonNull<::std::os::raw::c_void>);
-
 pub struct LibEgl {
     pub eglPresentationTimeANDROID: PFNEGLPRESENTATIONTIMEANDROID,
     pub eglBindAPI: PFNEGLBINDAPIPROC,
@@ -302,50 +299,17 @@ pub struct LibEgl {
     // HACK(eddyb) this is actually an OpenGL extension function.
     pub glEGLImageTargetTexture2DOES: PFNGLEGLIMAGETARGETTEXTURE2DOESPROC,
 
-    _keep_module_alive: Module,
+    _keep_module_alive: ModuleLoader,
 }
 
-use self::super::libc_sys::{dlclose, dlopen, dlsym, RTLD_LAZY, RTLD_LOCAL};
-use std::{
-    ffi::{CString, CStr},
-    ptr::NonNull,
-};
+use std::ffi::CStr;
 
-impl Module {
-    pub fn load(path: &str) -> Result<Self,()> {
-        let path = CString::new(path).unwrap();
-                        
-        let module = unsafe {dlopen(path.as_ptr(), RTLD_LAZY | RTLD_LOCAL)};
-        if module.is_null() {
-            Err(())
-        } else {
-            Ok(Module(unsafe {NonNull::new_unchecked(module)}))
-        }
-    }
-                
-    pub fn get_symbol<F: Sized>(&self, name: &str) -> Result<F, ()> {
-        let name = CString::new(name).unwrap();
-                        
-        let symbol = unsafe {dlsym(self.0.as_ptr(), name.as_ptr())};
-                        
-        if symbol.is_null() {
-            return Err(());
-        }
-                        
-        Ok(unsafe {std::mem::transmute_copy::<_, F>(&symbol)})
-    }
-}
-
-impl Drop for Module {
-    fn drop(&mut self) {
-        unsafe {dlclose(self.0.as_ptr())};
-    }
-}
+use crate::module_loader::ModuleLoader;
 
 impl LibEgl {
     pub fn try_load() -> Option<LibEgl> {
         
-        let module = Module::load("libEGL.so").or_else(|_| Module::load("libEGL.so.1")).ok()?;
+        let module = ModuleLoader::load("libEGL.so").or_else(|_| ModuleLoader::load("libEGL.so.1")).ok()?;
 
         let eglGetProcAddress: PFNEGLGETPROCADDRESSPROC = module.get_symbol("eglGetProcAddress").ok();
         macro_rules! get_ext_fn {

@@ -4,11 +4,15 @@
 use {
     std::cell::RefCell,
     crate::{
-        implement_com,
         windows::{
+            core::implement,
             core,
             Win32::{
-                System::Com::FORMATETC,
+                System::Com::{
+                    FORMATETC,
+                    IEnumFORMATETC,
+                    IEnumFORMATETC_Impl
+                },
                 Foundation::{
                     S_OK,
                     S_FALSE,
@@ -18,7 +22,7 @@ use {
         },
     },
 };
-
+/*
 // This is a reimplementation of windows-rs IEnumFORMATETC which allows to return a HRESULT instead of a Result<()> for the Next() method, to return S_FALSE (which is a success) when no more items are available in the enumeration
 
 #[repr(transparent)]pub struct IEnumFORMATETC(core::IUnknown);
@@ -150,13 +154,14 @@ impl IEnumFORMATETC_Vtbl {
     pub fn matches(iid: &core::GUID) -> bool {
         iid == &<IEnumFORMATETC as core::ComInterface>::IID
     }
-}
+}*/
 
+#[implement(IEnumFORMATETC)]
 pub struct EnumFormatEtc {
     pub formats: Vec<FORMATETC>,
     pub index: RefCell<usize>,
 }
-
+/*
 implement_com!{
     for_struct: EnumFormatEtc,
     identity: IEnumFORMATETC,
@@ -165,7 +170,7 @@ implement_com!{
     interfaces: {
         0: IEnumFORMATETC
     }
-}
+}*/
 
 
 // IEnumFORMATETC implementation for EnumFormatEtc, which hosts a list of FORMATETCs that can be queried by COM and DoDragDrop

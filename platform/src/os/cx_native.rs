@@ -35,7 +35,7 @@ impl Cx {
             }
             else{
                 println!("Could not load resource {}", path);
-                dep.data = Some(Err("File open failed".to_string()));
+                dep.data = Some(Err("File! open failed".to_string()));
             }
         }
     }
