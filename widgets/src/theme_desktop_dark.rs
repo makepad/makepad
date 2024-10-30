@@ -2310,7 +2310,7 @@ live_design! {
                 )
                 sdf.fill_keep(
                     mix(
-                        THEME_COLOR_D_2 * 0.75,
+                        THEME_COLOR_D_2 * 0.64,
                         THEME_COLOR_DOCK_TAB_SELECTED,
                         self.selected
                     )
