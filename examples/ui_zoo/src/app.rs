@@ -232,7 +232,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}

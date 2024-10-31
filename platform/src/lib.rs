@@ -64,8 +64,6 @@ pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
 pub use ::windows as windows;
-#[cfg(target_os = "windows")]
-pub use ::windows::core as windows_core;
 
 pub use makepad_futures;
  
