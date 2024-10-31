@@ -130,7 +130,7 @@ impl WindowsHttpSocket{
             let buffer = response.Content()?.ReadAsBufferAsync()?.await?;
             let byte_access:IBufferByteAccess = buffer.cast()?;
             let chunk_size = buffer.Length()?;
-            let chunk =  unsafe {std::slice::from_raw_parts(byte_access.as_raw() as *const u8, chunk_size as usize)};
+            let chunk =  unsafe {std::slice::from_raw_parts(byte_access.Buffer()? as *const u8, chunk_size as usize)};
             let message = NetworkResponseItem {
                 request_id: request_id,
                 response: NetworkResponse::HttpResponse(HttpResponse{
