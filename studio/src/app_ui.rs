@@ -66,7 +66,8 @@ live_design!{
             text:""
             // text:"Apps"
             draw_check: { check_type: None }
-            icon_walk: {width: 13.}
+            icon_walk: {width: 11., margin: {top: 1.75, right: 3. }}
+            padding: { right: 0, left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
@@ -77,7 +78,8 @@ live_design!{
             text:""
             // text:"Designer"
             draw_check: { check_type: None }
-            icon_walk: {width: 14.}
+            icon_walk: {width: 12., margin: {top: 1.0 }}
+            padding: { right: 0, left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
@@ -89,7 +91,8 @@ live_design!{
             // text:"Editor"
             width: 13.
             draw_check: { check_type: None }
-            icon_walk: {width: 7.}
+            icon_walk: {width: 6., margin: {top: 0.5, left: 3. }}
+            padding: { right: 0., left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
@@ -100,7 +103,8 @@ live_design!{
             text:""
             // text:"Scene"
             draw_check: { check_type: None }
-            icon_walk: {width: 13.}
+            icon_walk: {width: 11.5, margin: {top: 1.5 } }
+            padding: { right: 5., left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
@@ -173,8 +177,8 @@ live_design!{
                 OutlineFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 11.
-                        margin: { top: 4. }
+                        width: 10.
+                        margin: { top: 5. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_1)
@@ -184,8 +188,8 @@ live_design!{
                 EditFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 6.
-                        margin: { top: 3. }
+                        width: 5.
+                        margin: { top: 5. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_6)
@@ -195,8 +199,8 @@ live_design!{
                 AiFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 10.
-                        margin: { top: 3. }
+                        width: 8.
+                        margin: { top: 5.5 }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_6)
@@ -206,8 +210,8 @@ live_design!{
                 DesignFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 13.
-                        margin: { top: 2. }
+                        width: 11.
+                        margin: { top: 4. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_3)
@@ -217,7 +221,7 @@ live_design!{
                 FilesFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 10.,
+                        width: 8.5,
                         margin: { top: 4. }
                     }
                     draw_icon: {
@@ -228,8 +232,8 @@ live_design!{
                 RunFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 13.,
-                        margin: { top: 4. }
+                        width: 11.,
+                        margin: { top: 6. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_4)
@@ -239,8 +243,8 @@ live_design!{
                 RunListTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 9.
-                        margin: { top: 4. }
+                        width: 7.
+                        margin: { top: 5. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_5)
@@ -250,8 +254,8 @@ live_design!{
                 LogTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk:{
-                        width: 12.5
-                        margin: { top: 5. }
+                        width: 9.5
+                        margin: { top: 7. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_2)
@@ -261,8 +265,8 @@ live_design!{
                 ProfilerTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 11.
-                        margin: { top: 2. }
+                        width: 9.
+                        margin: { top: 4. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_7)
@@ -272,7 +276,7 @@ live_design!{
                 SearchFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 13.,
+                        width: 10.5,
                         margin: { top: 4. }
                     }
                     draw_icon: {

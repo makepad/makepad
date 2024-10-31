@@ -2310,7 +2310,7 @@ live_design! {
                 )
                 sdf.fill_keep(
                     mix(
-                        THEME_COLOR_D_2 * 0.75,
+                        THEME_COLOR_D_2 * 0.64,
                         THEME_COLOR_DOCK_TAB_SELECTED,
                         self.selected
                     )
@@ -2376,6 +2376,7 @@ live_design! {
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
+        margin: { top: 0.5, right: 0.5, bottom: 0.0, left: 0.5 }
 
         scroll_bars: <ScrollBarsTabs> {
             show_scroll_x: true
