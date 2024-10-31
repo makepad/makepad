@@ -8,6 +8,7 @@ live_design!{
         ui: <Root>{
             main_window = <Window>{
                 body = <ScrollXYView>{
+
                     flow: Down,
                     spacing:10,
                     align: {

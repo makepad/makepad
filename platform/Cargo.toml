@@ -98,10 +98,13 @@ features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Variant",
     "Win32_System_SystemServices",
+    "Win32_System_WinRT",
     "Devices_Enumeration", 
     "Devices_Midi",
     "Foundation_Collections",
     "Storage",
+    "Web_Http",
+    "Web_Http_Headers",
     "Storage_Streams",
     "implement"
 ]

@@ -1,6 +1,7 @@
 
 use crate::event::HttpRequest;
 use crate::web_socket::{WebSocketMessage};
+use crate::thread::SignalToUI;
 use std::sync::mpsc::{channel, Sender};
 use std::net::TcpStream;
 use std::io::{Read};
@@ -80,14 +81,19 @@ impl OsWebSocket{
         let _reader_thread = std::thread::spawn(move || {
             let mut web_socket = ServerWebSocket::new();
             let mut done = false;
+            let mut first = true;
             while !done {
                 let mut buffer = [0u8; 65535];
                 match input_stream.read(&mut buffer) {
                     Ok(bytes_read) => {
+                        if first{
+                            first = false;
+                            continue;
+                        }
                         web_socket.parse(&buffer[0..bytes_read], | result | {
                             match result {
                                 Ok(ServerWebSocketMessage::Ping(_)) => {
-                                    println!("ping!");
+                                    //println!("ping!");
                                     if write_bytes_to_tcp_stream_no_error(&mut input_stream, &SERVER_WEB_SOCKET_PONG_MESSAGE){
                                         done = true;
                                         let _ = rx_sender.send(WebSocketMessage::Error("Pong message send failed".into()));
@@ -99,16 +105,19 @@ impl OsWebSocket{
                                     if rx_sender.send(WebSocketMessage::String(text.into())).is_err(){
                                         done = true;
                                     };
-                                    println!("text => {}", text);
+                                    SignalToUI::set_ui_signal();
+                                    //println!("text => {}", text);
                                 },
                                 Ok(ServerWebSocketMessage::Binary(data)) => {
                                     if rx_sender.send(WebSocketMessage::Binary(data.into())).is_err(){
                                         done = true;
                                     };
-                                    println!("binary!");
+                                    SignalToUI::set_ui_signal();
+                                    //println!("binary!");
                                 },
                                 Ok(ServerWebSocketMessage::Close) => {
                                     let _ = rx_sender.send(WebSocketMessage::Closed);
+                                    SignalToUI::set_ui_signal();
                                     done = true;
                                 },
                                 Err(e) => {
