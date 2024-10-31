@@ -1009,7 +1009,7 @@ live_design!{
             flow: Overlay,
             align: {x: 0.5, y: 0.5}
             image1 = <ImageBlend> {
-                breathe: true,
+                breathe: false,
                 fit: Smallest,
                 width: Fill,
                 height: Fill
