@@ -80,19 +80,7 @@ impl Cx {
         let mut paint_dirty = false;
         match &event{
             Win32Event::Timer(time) =>{
-                if time.timer_id == 0{
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        self.handle_media_signals();
-                        self.call_event_handler(&Event::Signal);
-                    }
-                    self.handle_action_receiver();
-                    if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
-                    self.handle_networking_events();
-                    return EventFlow::Poll;
-                }
+                
             }
             _=>{}
         }
@@ -247,6 +235,13 @@ impl Cx {
                     self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
                 }
+                self.handle_action_receiver();
+                if self.handle_live_edit() {
+                    self.call_event_handler(&Event::LiveEdit);
+                    self.redraw_all();
+                }
+                self.handle_networking_events();
+                return EventFlow::Poll;
             }
         }
         
