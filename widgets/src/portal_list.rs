@@ -363,7 +363,7 @@ impl PortalList {
 
                     if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) || index+1 == self.range_end {
                         // lets scan upwards
-                        if self.first_id>0 && self.first_scroll>0.0 && !is_down_again {
+                        if self.first_id>0 && !is_down_again {
                             self.draw_state.set(ListDrawState::Up {
                                 index: self.first_id - 1,
                                 pos: self.first_scroll,
