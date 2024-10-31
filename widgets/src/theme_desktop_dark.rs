@@ -2376,6 +2376,7 @@ live_design! {
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
+        margin: { top: 0.5, right: 0.5, bottom: 0.0, left: 0.5 }
 
         scroll_bars: <ScrollBarsTabs> {
             show_scroll_x: true
