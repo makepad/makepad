@@ -62,14 +62,15 @@ impl WindowsHttpSocket{
                 writer.FlushAsync()?.await?;
                 // Reset stream position to beginning
                 stream.Seek(0)?;
-                
-                let headers_map = req.Headers()?;
-                if let Some(content_type) = content_type{
-                    headers_map.Append(&"Content-Type".into(), &content_type.into())?;
-                }
                     
                 // Create and set content
                 let content = HttpStreamContent::CreateFromInputStream(&stream)?;
+                                
+                let headers_map = content.Headers()?;
+                if let Some(content_type) = content_type{
+                    headers_map.Append(&"Content-Type".into(), &content_type.into())?;
+                }
+                
                 req.SetContent(&content.cast::<IHttpContent>()?)?;
             }
             
@@ -147,10 +148,10 @@ impl WindowsHttpSocket{
         // create a thread and run the request
         let _reader_thread = std::thread::spawn(move || {
            if request.is_streaming{
-               let _ = executor::block_on(streaming_request(request_id, request, response_sender));
+               executor::block_on(streaming_request(request_id, request, response_sender)).unwrap();
            }
            else{
-               let _ = executor::block_on(non_streaming_request(request_id, request, response_sender));
+               executor::block_on(non_streaming_request(request_id, request, response_sender)).unwrap();;
            }
         });
     }
