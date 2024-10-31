@@ -137,9 +137,9 @@ impl PortalList {
         cx.begin_turtle(walk, self.layout);
         self.draw_align_list.clear();
     }
-
+    
     fn end(&mut self, cx: &mut Cx2d) {
-        // in this code we position all the drawn items
+        // in this code we position all the drawn items 
 
         self.at_end = false;
         self.not_filling_viewport = false;
@@ -152,9 +152,9 @@ impl PortalList {
             if list.len()>0 {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
                 let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
-
+                
                 // find the position of the first item in our set
-
+                
                 let mut first_pos = self.first_scroll;
                 for i in (0..first_index).rev() {
                     let item = &list[i];
@@ -253,15 +253,14 @@ impl PortalList {
                         let item = &list[i];
                         let shift = DVec2::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
-
-                        if pos < 0.0 { // move down
-                            self.first_scroll = pos;
+                        pos += item.size.index(vi);
+                        let invisible = pos < 0.0;
+                        if invisible { // move down
+                            self.first_scroll = pos - item.size.index(vi);
                             self.first_id = item.index;
                             first_id_changed = true;
                         }
-
-                        pos += item.size.index(vi);
-                        if pos >= 0.0 && item.index < self.range_end {
+                        else if item.index < self.range_end {
                             visible_items += 1;
                         }
                     }
@@ -356,12 +355,12 @@ impl PortalList {
                     let rect = cx.end_turtle();
                     self.draw_align_list.push(AlignItem {
                         align_range,
-                        shift: pos,
+                        shift: pos, 
                         size: rect.size,
                         index
                     });
-
-                    if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) || index+1 == self.range_end {
+                    
+                    if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
                         // lets scan upwards
                         if self.first_id>0 && !is_down_again {
                             self.draw_state.set(ListDrawState::Up {
@@ -466,7 +465,7 @@ impl PortalList {
                         return None
                     }
                     
-                    if !did_draw || pos - rect.size.index(vi) < if hit_bottom {-viewport.size.index(vi)} else {0.0} {
+                    if !did_draw || pos < if hit_bottom {-viewport.size.index(vi)} else {0.0} {
                         self.draw_state.set(ListDrawState::End {viewport});
                         return None
                     }
