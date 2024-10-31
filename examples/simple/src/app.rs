@@ -9,16 +9,9 @@ live_design!{
             main_window = <Window>{
                 body = <ScrollXYView>{
                     flow: Down
-                    show_bg: true,
-                    draw_bg:{
-                        fn plasma(self, pos: vec2) -> vec4 {
-                            let color = sin(pos.x * 10.0 + self.time) * cos(pos.y * 10.0 + self.time);
-                            return mix(#f0f, #f80, color);
-                        }
-                        fn pixel(self) -> vec4 {
-                            return self.plasma(self.pos);
-                        }
-                    }
+                    height: Fill
+                    show_bg: true
+                    <Button>{text:"Hi"}
                 }
             }
         }
