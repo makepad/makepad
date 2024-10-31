@@ -78,12 +78,12 @@ impl Cx {
         }
         
         let mut paint_dirty = false;
-        match &event{
+        /*match &event{
             Win32Event::Timer(time) =>{
                 
             }
             _=>{}
-        }
+        }*/
 
         //self.process_desktop_pre_event(&mut event);
         match event {
