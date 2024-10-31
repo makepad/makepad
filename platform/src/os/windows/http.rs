@@ -151,7 +151,7 @@ impl WindowsHttpSocket{
                executor::block_on(streaming_request(request_id, request, response_sender)).unwrap();
            }
            else{
-               executor::block_on(non_streaming_request(request_id, request, response_sender)).unwrap();;
+               executor::block_on(non_streaming_request(request_id, request, response_sender)).unwrap();
            }
         });
     }
