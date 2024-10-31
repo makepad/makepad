@@ -399,7 +399,7 @@ impl AiChatManager{
                     match &e.response{
                         NetworkResponse::HttpRequestError(_err)=>{
                         }
-                        NetworkResponse::(res)=>{
+                        NetworkResponse::HttpStreamResponse(res)=>{
                             let data = res.get_string_body().unwrap();
                             let mut changed = false;
                             for data in data.split("\n\n"){
