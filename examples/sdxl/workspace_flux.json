@@ -17,8 +17,8 @@
         },
         "179": {
             "inputs": {
-                "width": 1600,
-                "height": 1400,
+                "width": 1920,
+                "height": 1088,
                 "batch_size": 1
             },
             "class_type": "EmptyLatentImage"
