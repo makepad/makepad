@@ -27,6 +27,7 @@ live_design!{
                 body = <AppUI>{}
             }
             <Window> {
+               hide_caption_on_fullscreen:true
                 window: {inner_size: vec2(960, 540)},
                 body = <AppWindow>{}
             }
