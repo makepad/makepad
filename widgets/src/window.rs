@@ -221,7 +221,7 @@ impl Widget for Window {
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
                     match cx.os_type() {
-                        OsType::Macos => {
+                        OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen{
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
                                     self.view(id!(caption_bar)).set_visible(false);

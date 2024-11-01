@@ -756,13 +756,10 @@ live_design!{
                         text: "Render"
                     }
                     single_check_box = <SdxlCheckBox> {
-                        text: "Single"
+                        text: "Sync"
                     }
-                    trim_button = <BarButton> {
-                        text: "Trim"
-                    }
-                    clear_button = <BarButton> {
-                        text: "Clear"
+                    voice_check_box = <SdxlCheckBox> {
+                        text: "Voice"
                     }
                     <BarLabel> {
                         text: "Seed:"
@@ -827,33 +824,41 @@ live_design!{
                                 }
                             }
                         }
-                       
-                        chat = <TextInput> {
+                        <View>{
                             height: Fit,
-                            width: Fill,
-                            margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
-                            margin: {bottom: 0}
-                            empty_message: "Talk here"
-                            draw_bg: {
-                                color: (COLOR_TEXT_INPUT)
+                            trim_button = <BarButton> {
+                                text: "Ask"
                             }
-                            draw_text: {
-                                text_style: {font_size: (TEXT_BIG)}
-                                fn get_color(self) -> vec4 {
-                                    return
-                                    mix(
+                            clear_button = <BarButton> {
+                                text: "Clear"
+                            }
+                            chat = <TextInput> {
+                                height: Fit,
+                                width: Fill,
+                                margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
+                                margin: {bottom: 0}
+                                empty_message: "Chat here"
+                                draw_bg: {
+                                    color: (COLOR_TEXT_INPUT)
+                                }
+                                draw_text: {
+                                    text_style: {font_size: (TEXT_BIG)}
+                                    fn get_color(self) -> vec4 {
+                                        return
                                         mix(
                                             mix(
-                                                #xFFFFFF55,
-                                                #xFFFFFF88,
-                                                self.hover
+                                                mix(
+                                                    #xFFFFFF55,
+                                                    #xFFFFFF88,
+                                                    self.hover
+                                                ),
+                                                #xFFFFFFCC,
+                                                self.focus
                                             ),
-                                            #xFFFFFFCC,
-                                            self.focus
-                                        ),
-                                        #xFFFFFF66,
-                                        self.is_empty
-                                    )
+                                            #xFFFFFF66,
+                                            self.is_empty
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -961,7 +966,7 @@ live_design!{
                         row1 = <ImageTile> {}
                     }
                 }
-                <RoundedView>{
+                /*<RoundedView>{
                     draw_bg:{
                         color:#2
                     }
@@ -977,7 +982,7 @@ live_design!{
                         video_input0 = <VideoFrame>{}
                         video_input1 = <VideoFrame>{}
                     }
-                }
+                }*/
                 
             }
         }
@@ -1034,3 +1039,4 @@ live_design!{
         }
     }
 }
+ 
