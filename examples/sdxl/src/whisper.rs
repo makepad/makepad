@@ -31,7 +31,7 @@ impl WhisperProcess{
         #[cfg(target_os = "windows")]
         let model="C:/Users/admin/whisper.cpp/models/ggml-base-en.bin";
         #[cfg(target_os = "windows")]
-        let bin = "C:/Users/admin/whisper.cpp/stream";
+        let bin = "C:/Users/admin/whisper.cpp/stream.exe";
         
         let args = ["-m",model,"-t","8","--step","0","--length","5000"];
         let mut cmd_build = Command::new(bin);
