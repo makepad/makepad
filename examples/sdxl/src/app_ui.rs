@@ -724,7 +724,10 @@ live_design!{
                     
                     resolution = <DropDownFlat> { 
                         width: Fit, 
+                        margin:{left:10},
                         popup_menu_position: BelowInput 
+                        labels: ["1920x1088","1440x816","960x544","1088x1920","2048x1448"]
+                        
                     }
                     <BarLabel> {
                         text: "width:"
