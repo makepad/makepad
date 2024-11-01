@@ -10,6 +10,7 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::cell::RefCell;
 use std::sync::{Arc,Mutex};
+use crate::whisper::*;
    
 live_design!{
     import makepad_widgets::base::*;
@@ -45,7 +46,7 @@ struct Machine {
 #[derive(Debug)]
 enum MachineRunning{
     Stopped,
-    UploadingImage{
+    _UploadingImage{
         photo_name: String,
         prompt_state: PromptState,
     },
@@ -99,13 +100,13 @@ pub struct App {
     #[rust(10000u64)] last_seed: u64,
     
     #[rust] current_image: Option<ImageId>,
-    #[rust] current_photo_name: Option<String>,
+    #[rust] _current_photo_name: Option<String>,
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
     #[rust] llm_chat: Vec<(LLMMsg,String)>,
-    
+    #[rust] voice_input: Option<WhisperProcess>,
     #[rust] delay_timer: Timer,
 }
 
@@ -200,9 +201,9 @@ impl App {
 
         request.set_body(body);
         cx.http_request(live_id!(camera), request);
-        self.current_photo_name = Some(photo_name.clone());
+        self._current_photo_name = Some(photo_name.clone());
         
-        machine.running = MachineRunning::UploadingImage{
+        machine.running = MachineRunning::_UploadingImage{
             photo_name,
             prompt_state: prompt_state.clone(),
         };
@@ -542,10 +543,30 @@ impl App {
             }
         });
     }
+    
+    pub fn start_voice_input(&mut self, cx:&mut Cx){
+        if self.voice_input.is_some(){
+            self.stop_voice_input(cx);
+        }
+        match WhisperProcess::new(){
+            Ok(wp)=>{
+                self.voice_input = Some(wp);
+            }
+            Err(e)=>{
+                log!("Cannot start whisper {e}");
+            }
+        }
+    }
+    
+    pub fn stop_voice_input(&mut self, _cx:&mut Cx){
+        if let Some(voice_input) = self.voice_input.take(){
+            voice_input.stop();
+        }
+    }
 }
 
 impl MatchEvent for App {
-    fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+    fn handle_midi_ports(&mut self, _cx: &mut Cx, _ports: &MidiPortsEvent) {
         //cx.use_midi_inputs(&ports.all_inputs());
     }
     
@@ -878,7 +899,7 @@ impl MatchEvent for App {
                         live_id!(camera) => {
                             // move to next step
                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
-                                if let MachineRunning::UploadingImage{photo_name, prompt_state} = &machine.running{
+                                if let MachineRunning::_UploadingImage{photo_name, prompt_state} = &machine.running{
                                                                                     
                                     let photo_name = photo_name.clone();
                                     let prompt_state = prompt_state.clone();
@@ -1018,13 +1039,23 @@ impl MatchEvent for App {
         }
     }
     
-    fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
-        log!("{:?}", devices);
-        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
-        cx.use_video_input(&input);
+    fn handle_video_inputs(&mut self, _cx: &mut Cx, devices:&VideoInputsEvent){
+        //log!("{:?}", devices);
+        let _input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
+        //cx.use_video_input(&input);
     }
     
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
+        for action in actions{
+            if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
+                if *clear{
+                    self.ui.text_input(id!(positive)).set_text("");
+                }
+                let t = self.ui.text_input(id!(positive)).text();
+                self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}",t, text));
+            }
+        }
+        
         let image_list = self.ui.portal_list(id!(image_list));
         if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
@@ -1054,12 +1085,20 @@ impl MatchEvent for App {
             self.render(cx);
         }
         
-        if self.ui.button(id!(trim_button)).clicked(&actions) {
-            if self.llm_chat.len()>2{
-                let last = self.llm_chat.len().max(2)-1;
-                self.llm_chat.drain(2..last);
-                self.ui.widget(id!(llm_chat)).redraw(cx);
+        if let Some(voice) = self.ui.check_box(id!(voice_check_box)).changed(&actions) {
+            if voice{
+                self.start_voice_input(cx);
             }
+            else{
+                self.stop_voice_input(cx);
+            }
+        }
+        
+        if self.ui.button(id!(trim_button)).clicked(&actions) {
+            let positive = self.ui.text_input(id!(positive)).text();
+            self.llm_chat.clear();
+            self.llm_chat.push((LLMMsg::AI, positive));
+            self.ui.widget(id!(llm_chat)).redraw(cx);
         }
         
         if self.ui.button(id!(clear_button)).clicked(&actions) {
