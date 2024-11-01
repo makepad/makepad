@@ -288,6 +288,7 @@ pub struct CxDrawShaderMapping {
     pub view_uniforms: DrawShaderInputs,
     pub pass_uniforms: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
+    pub uses_time: bool,
     pub instance_enums: Vec<usize>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
@@ -313,7 +314,6 @@ impl CxDrawShaderMapping {
         let mut rect_pos = None;
         let mut rect_size = None;
         let mut draw_clip = None;
-        
         for field in &draw_shader_def.fields {
             let ty = field.ty_expr.ty.borrow().as_ref().unwrap().clone();
             match &field.kind {
@@ -387,6 +387,7 @@ impl CxDrawShaderMapping {
         
         CxDrawShaderMapping {
             const_table,
+            uses_time: draw_shader_def.uses_time.get(),
             flags: draw_shader_def.flags,
             geometries,
             instances,

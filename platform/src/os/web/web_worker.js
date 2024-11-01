@@ -35,7 +35,7 @@ onmessage = async function(e) {
                 }
             }
         },
-
+        
         js_web_socket_send_binary(id, bin_ptr, bin_len){
             let bin = u8_to_array(bin_ptr, bin_len);
             let web_socket = web_sockets[id];
@@ -48,7 +48,11 @@ onmessage = async function(e) {
                 }
             }
         },
-
+        
+        js_time_now(){
+            return Date.now()/ 1000.0;
+        },
+        
         js_open_web_socket:(id, url_ptr, url_len)=>{
             let url = u8_to_string(url_ptr, url_len);
             let web_socket = new WebSocket(url);
@@ -57,7 +61,7 @@ onmessage = async function(e) {
             
             web_socket.onclose = e => {
                 wasm.exports.wasm_web_socket_closed(id);
-                delete websockets[id];
+                delete web_sockets[id];
             }
             web_socket.onerror = e => {
                 let err = string_to_u8("" + e);
@@ -121,10 +125,12 @@ onmessage = async function(e) {
     }
     
     let wasm = null;
-    WebAssembly.instantiate(thread_info.module, {env}).then(inner_wasm => {
+    const doit = inner_wasm => {
         wasm = inner_wasm;
         wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
-        wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+        if(!thread_info.wasm_bindgen) {
+            wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+        }
         if(thread_info.timer > 0){
             this.setInterval(()=>{
                 wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
@@ -134,8 +140,13 @@ onmessage = async function(e) {
             wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
             close();
         }
-        
-    }, error => {
-        console.error("Cannot instantiate wasm" + error);
-    })
+    };
+    if(thread_info.wasm_bindgen) {
+        let inner_wasm = await init({module_or_path: thread_info.module, memory: env.memory}, env);
+        doit(inner_wasm);
+    } else {
+        WebAssembly.instantiate(thread_info.module, {env}).then(doit, error => {
+            console.error("Cannot instantiate wasm" + error);
+        })
+    }
 }

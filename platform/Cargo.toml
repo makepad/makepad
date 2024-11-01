@@ -59,10 +59,13 @@ ohos-sys = { version = "0.2.1", features = ["xcomponent"] }
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../libs/futures_legacy"
 version = "0.7.0"
- 
-[target.'cfg(windows)'.dependencies.makepad-windows]
-path = "../libs/windows"
-version = "0.51.1"
+
+[target.'cfg(windows)'.dependencies.windows-core]
+version = "0.56"
+
+[target.'cfg(windows)'.dependencies.windows]
+#path = "../libs/windows"
+version = "0.56"
 features = [
     "Win32_Foundation", 
     "Win32_UI_WindowsAndMessaging",
@@ -95,10 +98,13 @@ features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Variant",
     "Win32_System_SystemServices",
+    "Win32_System_WinRT",
     "Devices_Enumeration", 
     "Devices_Midi",
     "Foundation_Collections",
     "Storage",
+    "Web_Http",
+    "Web_Http_Headers",
     "Storage_Streams",
     "implement"
 ]

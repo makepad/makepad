@@ -1,7 +1,9 @@
 use makepad_jni_sys as jni_sys;
+use crate::module_loader::ModuleLoader;
+
 use {
     std::sync::Mutex,
-    std::{cell::{Cell}, ffi::CString, sync::mpsc::{self, Sender}},
+    std::{cell::Cell, ffi::CString, sync::mpsc::{self, Sender}},
     self::super::{
         ndk_sys,
         ndk_utils,
@@ -157,7 +159,11 @@ unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANati
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
+#[cfg(not(no_android_choreographer))]
 static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
+
+#[cfg(not(no_android_choreographer))]
+static mut CHOREOGRAPHER_POST_CALLBACK_FN: Option<unsafe extern "C" fn(*mut ndk_sys::AChoreographer, Option<unsafe extern "C" fn(*mut ndk_sys::AChoreographerFrameCallbackData, *mut std::ffi::c_void)>, *mut std::ffi::c_void) -> i32> = None;
 
 /// Initializes the render loop which used the Android Choreographer when available to ensure proper vsync.
 /// If `no_android_choreographer` is present (e.g. OHOS with non-compatiblity), we fallback to a simple loop with frame pacing.
@@ -168,41 +174,33 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
     device_refresh_rate: jni_sys::jfloat,
+    sdk_version: jni_sys::jint,
 ) {
     // If the Choreographer is not available (e.g. OHOS), use a manual render loop
     #[cfg(no_android_choreographer)]
     {
-        std::thread::spawn(move || {
-            let mut last_frame_time = std::time::Instant::now();
-            let target_frame_time = std::time::Duration::from_secs_f32(1.0 / device_refresh_rate);
-            loop {
-                let now = std::time::Instant::now();
-                let elapsed = now - last_frame_time;
-                
-                if elapsed >= target_frame_time {
-                    let frame_start = std::time::Instant::now();
-                    send_from_java_message(FromJavaMessage::RenderLoop);
-                    let frame_duration = frame_start.elapsed();
-                    
-                    // Adaptive sleep: sleep less if the last frame took longer to process
-                    if frame_duration < target_frame_time {
-                        std::thread::sleep(target_frame_time - frame_duration);
-                    }
-                    
-                    last_frame_time = now;
-                } else {
-                    std::thread::sleep(target_frame_time - elapsed);
-                }
-            }
-        });
+        init_simple_render_loop(device_refresh_rate);
         return;
     }
-    
-    // Otherwise use the actual Choreographer
-    CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
-    post_vsync_callback();
+    #[allow(unused)]
+    #[cfg(not(no_android_choreographer))]
+    {
+        // Otherwise use the actual Choreographer
+        CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+        if sdk_version >= 33 {
+            let lib = ModuleLoader::load("libandroid.so").expect("Failed to load libandroid.so");
+            let func: Option<ndk_sys::AChoreographerPostCallbackFn> = lib.get_symbol("AChoreographer_postVsyncCallback").ok();
+            CHOREOGRAPHER_POST_CALLBACK_FN = func;
+        } else if sdk_version >= 29 {
+            CHOREOGRAPHER_POST_CALLBACK_FN = Some(ndk_sys::AChoreographer_postFrameCallback64 as _);
+        } else {
+            init_simple_render_loop(device_refresh_rate);
+        }
+        post_vsync_callback();
+    }
 }
 
+#[cfg(not(no_android_choreographer))]
 unsafe extern "C" fn vsync_callback(
     _data: *mut ndk_sys::AChoreographerFrameCallbackData,
     _user_data: *mut std::ffi::c_void,
@@ -211,14 +209,43 @@ unsafe extern "C" fn vsync_callback(
     post_vsync_callback();
 }
 
+#[cfg(not(no_android_choreographer))]
 pub unsafe fn post_vsync_callback() {
-    if !CHOREOGRAPHER.is_null() {
-        ndk_sys::AChoreographer_postVsyncCallback(
-            CHOREOGRAPHER,
-            Some(vsync_callback),
-            std::ptr::null_mut(),
-        );
+    if let Some(post_callback) = CHOREOGRAPHER_POST_CALLBACK_FN {
+        if !CHOREOGRAPHER.is_null() {
+            post_callback(
+                CHOREOGRAPHER,
+                Some(vsync_callback),
+                std::ptr::null_mut(),
+            );
+        }
     }
+}
+
+fn init_simple_render_loop(device_refresh_rate: f32) {
+    std::thread::spawn(move || {
+        let mut last_frame_time = std::time::Instant::now();
+        let target_frame_time = std::time::Duration::from_secs_f32(1.0 / device_refresh_rate);
+        loop {
+            let now = std::time::Instant::now();
+            let elapsed = now - last_frame_time;
+            
+            if elapsed >= target_frame_time {
+                let frame_start = std::time::Instant::now();
+                send_from_java_message(FromJavaMessage::RenderLoop);
+                let frame_duration = frame_start.elapsed();
+                
+                // Adaptive sleep: sleep less if the last frame took longer to process
+                if frame_duration < target_frame_time {
+                    std::thread::sleep(target_frame_time - frame_duration);
+                }
+                
+                last_frame_time = now;
+            } else {
+                std::thread::sleep(target_frame_time - elapsed);
+            }
+        }
+    });
 }
 
 #[no_mangle]

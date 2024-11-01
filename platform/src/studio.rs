@@ -1,4 +1,7 @@
 use crate::makepad_micro_serde::*;
+use crate::makepad_derive_live::*;
+use crate::LiveId;
+use crate::action::*;
 use crate::log::LogLevel;
 pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
 // communication enums for studio
@@ -46,6 +49,23 @@ pub struct PatchFile{
     pub replace: String
 }
 
+#[derive(SerBin, DeBin, SerRon, DeRon, Debug, Clone)]
+pub struct DesignerComponentPosition{
+    pub id: LiveId,
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64
+}
+
+
+#[derive(Default, SerBin, DeBin, SerRon, DeRon, Debug, Clone)]
+pub struct DesignerZoomPan{
+    pub zoom: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+}
+
 #[derive(SerBin, DeBin, Debug, Clone)]
 pub struct EditFile{
     pub file_name: String,
@@ -63,19 +83,33 @@ pub enum AppToStudio{
     GPUSample(GPUSample),
     JumpToFile(JumpToFile),
     PatchFile(PatchFile),
+    DesignerComponentMoved(DesignerComponentPosition),
+    DesignerZoomPan(DesignerZoomPan),
     EditFile(EditFile),
+    DesignerStarted,
+    DesignerFileSelected{
+        file_name:String,
+    },
     FocusDesign
 }
 
 #[derive(SerBin, DeBin)]
 pub struct AppToStudioVec(pub Vec<AppToStudio>);
 
-#[derive(SerBin, DeBin)]
+#[derive(Debug, DefaultNone, SerBin, DeBin)]
 pub enum StudioToApp{
     LiveChange{
         file_name: String,
         content: String
-    }
+    },
+    DesignerLoadState{
+        zoom_pan: DesignerZoomPan,
+        positions: Vec<DesignerComponentPosition>
+    },
+    DesignerSelectFile{
+        file_name: String,
+    },
+    None,
 }
 
 #[derive(SerBin, DeBin)]

@@ -10,6 +10,8 @@ use {
             StdinScroll, StdinToHost,
         },
         makepad_platform::studio::{
+            DesignerComponentPosition,
+            DesignerZoomPan,
             AppToStudio, AppToStudioVec, EventSample, GPUSample, StudioToApp, StudioToAppVec,
         },
         makepad_shell::*,
@@ -128,8 +130,55 @@ pub struct BuildManager {
     pub recv_studio_msg: ToUIReceiver<(LiveId, AppToStudioVec)>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
+    pub designer_state: DesignerState,
     //pub send_file_change: FromUISender<LiveFileChange>,
-    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, mpsc::Sender<Vec<u8>>)>>>>,
+    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, LiveId, mpsc::Sender<Vec<u8>>)>>>>,
+}
+
+#[derive(Default, SerRon, DeRon)]
+pub struct DesignerState{
+    state: HashMap<LiveId, DesignerStatePerBuildId>
+}
+
+#[derive(Default, SerRon, DeRon)]
+pub struct DesignerStatePerBuildId{
+    selected_file: String,
+    zoom_pan: DesignerZoomPan,
+    component_positions: Vec<DesignerComponentPosition>
+}
+
+impl DesignerState{
+    fn save_state(&self){
+        let saved = self.serialize_ron();
+        let mut f = File::create("makepad_designer.ron").expect("Unable to create file");
+        f.write_all(saved.as_bytes()).expect("Unable to write data");
+    }
+        
+    fn load_state(&mut self){
+        if let Ok(contents) = std::fs::read_to_string("makepad_designer.ron") {
+            match DesignerState::deserialize_ron(&contents) {
+                Ok(state)=>{
+                    *self = state
+                }
+                Err(e)=>{
+                    println!("ERR {:?}",e);
+                }
+            }
+        }
+    }
+    
+    fn get_build_storage<F:FnOnce(&mut DesignerStatePerBuildId)>(&mut self, build_id: LiveId, f:F){
+        match self.state.entry(build_id) {
+            hash_map::Entry::Occupied(mut v) => {
+                f(v.get_mut());
+            },
+            hash_map::Entry::Vacant(v) => {
+                let mut db = DesignerStatePerBuildId::default();
+                f(&mut db);
+                v.insert(db);
+            }
+        }
+    }
 }
 
 pub struct BuildBinary {
@@ -185,7 +234,7 @@ impl BuildManager {
         self.tick_timer = cx.start_interval(0.008);
         self.root_path = path.to_path_buf();
         self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
-
+        self.designer_state.load_state();
         self.update_run_list(cx);
         //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
@@ -293,8 +342,8 @@ impl BuildManager {
                 content: live_file_change.content.clone(),
             }])
             .serialize_bin();
-            for node in d.borrow_mut().iter_mut() {
-                let _ = node.1.send(data.clone());
+            for (_,_,sender) in d.borrow_mut().iter_mut() {
+                let _ = sender.send(data.clone());
             }
         }
     }
@@ -440,6 +489,53 @@ impl BuildManager {
                         AppToStudio::EditFile(ef) => cx.action(AppAction::EditFile(ef)),
                         AppToStudio::JumpToFile(jt) => {
                             cx.action(AppAction::JumpTo(jt));
+                        }
+                        AppToStudio::DesignerComponentMoved(mv)=>{
+                            self.designer_state.get_build_storage(build_id, |bs|{
+                                if let Some(v) =  bs.component_positions.iter_mut().find(|v| v.id == mv.id){
+                                    *v = mv;
+                                }
+                                else{
+                                    bs.component_positions.push(mv);
+                                }
+                            });
+                            self.designer_state.save_state();
+                        }
+                        AppToStudio::DesignerZoomPan(zp)=>{
+                            self.designer_state.get_build_storage(build_id, |bs|{
+                                bs.zoom_pan = zp;
+                            });
+                            self.designer_state.save_state();
+                        }
+                        AppToStudio::DesignerStarted=>{
+                            // send the app the select file init message
+                            if let Ok(d) = self.active_build_websockets.lock() {
+                                if let Some(bs) = self.designer_state.state.get(&build_id){
+                                    let data = StudioToAppVec(vec![
+                                        StudioToApp::DesignerLoadState{
+                                            zoom_pan: bs.zoom_pan.clone(),
+                                            positions: bs.component_positions.clone()
+                                        },
+                                        StudioToApp::DesignerSelectFile {
+                                            file_name: bs.selected_file.clone()
+                                        },
+                                    ]).serialize_bin();
+                                    
+                                    for (_,id,sender) in d.borrow_mut().iter_mut() {
+                                        if *id == build_id{
+                                            let _ = sender.send(data.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            
+                        }
+                        AppToStudio::DesignerFileSelected{file_name}=>{
+                            // alright now what. lets 
+                            self.designer_state.get_build_storage(build_id, |bs|{
+                                bs.selected_file = file_name;
+                            });
+                            self.designer_state.save_state();
                         }
                     }
                 }
@@ -604,7 +700,7 @@ impl BuildManager {
                                     .lock()
                                     .unwrap()
                                     .borrow_mut()
-                                    .push((web_socket_id, response_sender));
+                                    .push((web_socket_id, LiveId(id), response_sender));
                             }
                         }
                     }
@@ -777,4 +873,66 @@ impl BuildManager {
             }
         });
     }
+    
+            
+    pub fn binary_name_to_id(&self, name:&str)->Option<usize>{
+        self.binaries.iter().position(|v| v.name == name)
+    }
+        
+    pub fn run_app(&mut self, cx:&mut Cx, binary_name:&str){
+        let binary_id = self.binary_name_to_id(binary_name).unwrap();
+        self.start_active_build(cx, binary_id, BuildTarget::Release);
+    }
+            
+    pub fn start_active_build(&mut self, _cx:&mut Cx, binary_id:usize, target: BuildTarget) {
+        let binary = &self. binaries[binary_id];
+        let process = BuildProcess {
+            binary: binary.name.clone(),
+            target
+        };
+        let item_id = process.as_id();
+        self.clients[0].send_cmd_with_id(item_id, BuildCmd::Run(process.clone(),self.studio_http.clone()));
+        //let run_view_id = LiveId::unique();
+        if self.active.builds.get(&item_id).is_none() {
+            let index = self.active.builds.len();
+            self.active.builds.insert(item_id, ActiveBuild {
+                log_index: format!("[{}]", index),
+                process: process.clone(),
+                app_area: Default::default(),
+                swapchain: Default::default(),
+                last_swapchain_with_completed_draws: Default::default(),
+                aux_chan_host_endpoint: None,
+            });
+        }
+        //if process.target.runs_in_studio(){
+            // create the runview tab
+        //    cx.action(AppA::Create(item_id, process.binary.clone()))
+        //}
+    }
+    
+    pub fn stop_all_active_builds(&mut self, cx:&mut Cx){
+        while self.active.builds.len()>0{
+            let build = &self.active.builds.values().next().unwrap();
+            let binary_id = self.binary_name_to_id(&build.process.binary).unwrap();
+            let target = build.process.target;
+            self.stop_active_build(cx, binary_id, target);
+        }
+    }
+        
+    pub fn stop_active_build(&mut self, cx:&mut Cx, binary_id: usize, target: BuildTarget) {
+        let binary = &self. binaries[binary_id];
+                
+        let process = BuildProcess {
+            binary: binary.name.clone(),
+            target
+        };
+        let build_id = process.as_id().into();
+        if let Some(_) = self.active.builds.remove(&build_id) {
+            self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
+            if process.target.runs_in_studio(){
+                cx.action(AppAction::DestroyRunViews{run_view_id:build_id})
+            }
+        }
+    }
+    
 }

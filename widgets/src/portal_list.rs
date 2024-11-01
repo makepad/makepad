@@ -1,4 +1,3 @@
-
 use crate::{
     widget::*,
     makepad_derive_widget::*,
@@ -220,7 +219,7 @@ impl PortalList {
                         }
                         else {
                             let ret = (viewport.size.index(vi) - last_item_pos).max(0.0);
-                            if ret > 0.0 {
+                            if ret >= 0.0 {
                                 self.at_end = true;
                             }
                             ret
@@ -602,7 +601,12 @@ impl PortalList {
     }
     
     fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top: bool) {
-        self.first_scroll += delta;
+        if self.range_start == self.range_end{
+            self.first_scroll = 0.0
+        }
+        else{
+            self.first_scroll += delta;
+        }            
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
         }
@@ -1059,7 +1063,7 @@ impl PortalListRef {
     /// ```
     /// smooth_scroll_to(&mut cx, 42, 100.0); // Scrolls to item 42 at speed 100.0
     /// ```
-    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, target_id: usize, speed: f64) {
+    pub fn smooth_scroll_to(&self, cx: &mut Cx, target_id: usize, speed: f64) {
         let Some(mut inner) = self.borrow_mut() else { return };
         if inner.items.is_empty() { return };
 
@@ -1102,7 +1106,7 @@ impl PortalListRef {
     /// Note: This number should be large enough to reach the end, so it is important to
     /// test the passed number. TODO provide a better implementation to ensure that the end
     /// is always reached, no matter the speed value.
-    pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, max_delta: usize, speed: f64) {
+    pub fn smooth_scroll_to_end(&self, cx: &mut Cx, max_delta: usize, speed: f64) {
         let Some(mut inner) = self.borrow_mut() else { return };
         if inner.items.is_empty() { return };
 

@@ -198,7 +198,8 @@ impl CxTexture{
             _ => panic!(),
         }
     }
-
+    
+    #[allow(unused)]
     pub(crate) fn initial(&mut self) -> bool {
         match self.format {
             TextureFormat::DepthD32{ initial, .. } => initial,
@@ -238,7 +239,7 @@ impl CxTexture{
         self.set_updated(TextureUpdated::Empty);
         updated
     }
-    
+    #[allow(unused)]
     pub(crate) fn take_initial(&mut self) -> bool {
         let initial = self.initial();
         self.set_initial(false);
@@ -520,7 +521,7 @@ impl Texture {
             TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for u32 image data"),
         };
-        assert!(data.is_none(), "image data not taken or already put back");
+        //assert!(data.is_none(), "image data not taken or already put back");
         *data = Some(new_data);
         *updated = updated.update(dirty_rect);
     }

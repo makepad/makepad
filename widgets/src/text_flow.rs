@@ -97,7 +97,7 @@ pub struct TextFlow {
     #[rust] pub underline: StackCounter,
     #[rust] pub strikethrough: StackCounter,
     #[rust] pub inline_code: StackCounter,
-    
+        
     #[rust] pub item_counter: u64,
     
     #[rust] pub areas_tracker: RectAreasTracker,
@@ -210,6 +210,7 @@ impl Widget for TextFlow {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for (id,(entry,_)) in self.items.as_mut().unwrap().iter_mut(){
+            
             scope.with_id(*id, |scope| {
                 entry.handle_event(cx, event, scope);
             });
@@ -270,9 +271,11 @@ impl TextFlow{
         self.draw_block.block_type = FlowBlockType::Code;
         self.draw_block.begin(cx, self.code_walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
+        
     }
     
     pub fn end_code(&mut self, cx:&mut Cx2d){
+        // check if we need to use a widget
         self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
         self.draw_block.end(cx);
     }
@@ -459,10 +462,9 @@ impl TextFlow{
             else{
                 &mut self.draw_normal
             };
-
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
-            dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
+            //dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
             dt.text_style.font_size = *font_size;
             dt.color = *font_color;
             dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
@@ -519,7 +521,7 @@ impl TextFlow{
         })
     }
     
-    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl WidgetActionTrait, label:&str){
+    pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl ActionTrait + PartialEq, label:&str){
         let entry_id = self.new_counted_id();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
             item.set_text(label);

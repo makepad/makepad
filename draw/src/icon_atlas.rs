@@ -241,12 +241,12 @@ impl CxIconAtlas {
                         return Some((path_hash, bounds));              
                     }
 
-                    println!("No SVG path tag found in svg file {}",path_str);
+                    error!("No SVG path tag found in svg file {}",path_str);
                     return None
                     
                 }
                 Err(_err)=>{
-                    println!("Error in SVG file {}: {}",path_str, _err);
+                    error!("Error in SVG file {}: {}",path_str, _err);
                     return None
                 }
             }
@@ -296,7 +296,7 @@ impl CxIconAtlasAlloc {
             self.hmax = 0.0;
         }
         if h + self.ypos >= self.texture_size.y {
-            println!("ICON ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
+            error!("ICON ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
         }
         if h > self.hmax {
             self.hmax = h;

@@ -32,6 +32,8 @@ pub struct ComfyUIData {
     pub node: Option<String>,
     pub prompt_id: Option<String>,
     pub nodes: Option<Vec<String >>,
+    pub display_node: Option<String>,
+    pub timestamp: Option<u64>,
     pub status: Option<ComfyUIStatus>,
     pub sid: Option<String>,
     pub output: Option<ComfyUIOutput>

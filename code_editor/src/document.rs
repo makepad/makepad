@@ -25,9 +25,9 @@ use {
 };
 
 #[derive(Clone, Debug)]
-pub struct Document(Rc<DocumentInner>);
+pub struct CodeDocument(Rc<DocumentInner>);
 
-impl Document {
+impl CodeDocument {
     pub fn new(text: Text, decorations: DecorationSet) -> Self {
         let line_count = text.as_lines().len();
         let tokens: Vec<_> = (0..line_count)
@@ -53,7 +53,7 @@ impl Document {
         inner
     }
     
-    pub fn replace(&self, origin_id: SessionId, new_text: Text) {
+    pub fn replace(&self, new_text: Text) {
         let mut history = self.0.history.borrow_mut();
         
         // Create an edit that deletes the entire existing text.
@@ -78,7 +78,7 @@ impl Document {
         
         // Now, update the document state after the edits.
         let edits = vec![delete_edit, insert_edit];
-        self.update_after_edit(origin_id, None, &edits);
+        self.update_after_edit(None, None, &edits);
     }
 
     pub fn as_text(&self) -> Ref<'_, Text> {
@@ -163,7 +163,7 @@ impl Document {
         }
         drop(history);
         self.autoindent(&line_ranges, settings.tab_column_count, &mut edits);
-        self.update_after_edit(session_id, None, &edits);
+        self.update_after_edit(Some(session_id), None, &edits);
     }
 
     pub fn edit_linewise(
@@ -199,7 +199,7 @@ impl Document {
             }
         }
         drop(history);
-        self.update_after_edit(origin_id, None, &edits);
+        self.update_after_edit(Some(origin_id), None, &edits);
     }
 
     pub fn add_decoration(&mut self, decoration: Decoration) {
@@ -351,7 +351,7 @@ impl Document {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().undo(selections, &mut changes);
         if let Some(selections) = selections {
-            self.update_after_edit(origin_id, Some(selections), &changes);
+            self.update_after_edit(Some(origin_id), Some(selections), &changes);
             true
         } else {
             false
@@ -362,7 +362,7 @@ impl Document {
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().redo(selections, &mut changes);
         if let Some(selections) = selections {
-            self.update_after_edit(origin_id, Some(selections), &changes);
+            self.update_after_edit(Some(origin_id), Some(selections), &changes);
             true
         } else {
             false
@@ -371,7 +371,7 @@ impl Document {
 
     fn update_after_edit(
         &self,
-        origin_id: SessionId,
+        origin_id: Option<SessionId>,
         selections: Option<SelectionSet>,
         edits: &[Edit],
     ) {
@@ -415,7 +415,7 @@ impl Document {
         }
         drop(decorations);
         for (&session_id, edit_sender) in &*self.0.edit_senders.borrow() {
-            if session_id == origin_id {
+            if Some(session_id) == origin_id {
                 edit_sender
                     .send((selections.clone(), edits.to_vec()))
                     .unwrap();

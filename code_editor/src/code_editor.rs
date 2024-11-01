@@ -3,7 +3,7 @@ use {
         decoration::{Decoration, DecorationType},
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
-        session::{SelectionMode, Session},
+        session::{SelectionMode, CodeSession},
         history::{NewGroup},
         settings::Settings,
         str::StrExt,
@@ -115,7 +115,7 @@ live_design! {
     CodeEditor = {{CodeEditor}} {
         height: Fill, width: Fill,
         margin: 0,
-
+        pad_left_top: vec2(10.0,10.0)
         scroll_bars: <ScrollBars> {}
         draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
         draw_gutter: {
@@ -235,16 +235,20 @@ pub struct CodeEditor {
     #[live] draw_bg: DrawColor,
     #[rust(KeepCursorInView::Off)] keep_cursor_in_view: KeepCursorInView,
     #[rust] last_cursor_screen_pos: Option<DVec2>,
-
+    #[live] pad_left_top: DVec2, 
     #[rust] cell_size: DVec2,
     #[rust] gutter_rect: Rect,
+    #[rust] gutter_chars: usize,
     #[rust] viewport_rect: Rect,
     #[rust] unscrolled_rect: Rect,
     #[rust] line_start: usize,
     #[rust] line_end: usize,
     #[rust(1.0)] pub height_scale: f64,
     #[live(true)] word_wrap: bool,
-
+    #[live(false)] read_only: bool,
+    #[live(true)] show_gutter: bool,
+    #[live(2usize)] gutter_pad: usize,
+        
     #[live(0.5)] blink_speed: f64,
 
     #[animator] animator: Animator,
@@ -337,8 +341,14 @@ impl CodeEditor {
     
     pub fn find_widgets(&self, _path: &[LiveId], _cached: WidgetCache, _results: &mut WidgetSet){
     }
+    
+    pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk:Walk) {
+        self.scroll_bars.begin(cx, walk, Layout::default());
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        self.scroll_bars.end(cx);
+    }
         
-    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut Session, walk:Walk) {
+    pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut CodeSession, walk:Walk) {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
@@ -436,15 +446,21 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, walk, Layout::default());
         
         let turtle_rect = cx.turtle().rect();
-        let gutter_width = (session
-            .document()
-            .as_text()
-            .as_lines()
-            .len()
-            .to_string()
-            .column_count()
-            + 3) as f64
-            * self.cell_size.x;
+        
+        let gutter_width = if self.show_gutter{
+            self.gutter_chars =  session
+                .document()
+                .as_text()
+                .as_lines()
+                .len()
+                .to_string()
+                .column_count()+1;
+            self.gutter_chars as f64 * self.cell_size.x + self.gutter_pad as f64 * self.cell_size.x
+        }
+        else{
+            self.gutter_chars = 0;
+            0.0
+        };
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
             size: DVec2 {
@@ -463,11 +479,11 @@ impl CodeEditor {
             },
         };
 
-        let pad_left_top = dvec2(10., 10.);
-        self.gutter_rect.pos += pad_left_top;
-        self.gutter_rect.size -= pad_left_top;
-        self.viewport_rect.pos += pad_left_top;
-        self.viewport_rect.size -= pad_left_top;
+        //let pad_left_top = dvec2(10., 10.);
+        self.gutter_rect.pos += self.pad_left_top;
+        self.gutter_rect.size -= self.pad_left_top;
+        self.viewport_rect.pos += self.pad_left_top;
+        self.viewport_rect.size -= self.pad_left_top;
 
         session.set_wrap_column(if self.word_wrap {
             Some((self.viewport_rect.size.x / self.cell_size.x) as usize)
@@ -484,9 +500,19 @@ impl CodeEditor {
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.unscrolled_rect = cx.turtle().unscrolled_rect();
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
 
-        self.draw_gutter(cx, session);
+        let bg_rect = Rect {
+            pos: self.unscrolled_rect.pos,
+            size: DVec2 {
+                x: self.unscrolled_rect.size.x,
+                y:if height_is_fit{MAX_HEIGHT}else{self.unscrolled_rect.size.y},
+            },
+        };
+        self.draw_bg.draw_abs(cx, bg_rect);
+
+        if self.show_gutter{
+            self.draw_gutter(cx, session);
+        }
         self.draw_selection_layer(cx, session);
         self.draw_text_layer(cx, session);
         self.draw_indent_guide_layer(cx, session);
@@ -498,13 +524,11 @@ impl CodeEditor {
         // the cell size, then shift by the viewport origin.
         
         cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x +pad_left_top.x,
+            session.layout().width() * self.cell_size.x +self.pad_left_top.x,
             self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y}
-            +pad_left_top.y * self.height_scale
+            +self.pad_left_top.y * self.height_scale
         );
         
-        //println!("{} {}", session.layout().height() * self.cell_size.y, (self.viewport_rect.size.y));
-
         self.scroll_bars.end(cx);
         if session.update_folds() {
             self.scroll_bars.area().redraw(cx);
@@ -521,7 +545,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         pos: Position,
-        session: &mut Session,
+        session: &mut CodeSession,
     ) {
         session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
@@ -557,9 +581,14 @@ impl CodeEditor {
     }
 
     pub fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
-        self.animator_cut(cx, id!(blink.off));
-        cx.stop_timer(self.blink_timer);
-        self.blink_timer = cx.start_timeout(self.blink_speed)
+        if self.read_only{
+            self.animator_cut(cx, id!(blink.off));
+        }
+        else{
+            self.animator_cut(cx, id!(blink.off));
+            cx.stop_timer(self.blink_timer);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
     }
 
     pub fn handle_event(
@@ -567,7 +596,7 @@ impl CodeEditor {
         cx: &mut Cx,
         event: &Event,
         scope: &mut Scope,
-        session: &mut Session,
+        session: &mut CodeSession,
     ) -> Vec<CodeEditorAction> {
         let mut actions = Vec::new();
         
@@ -662,10 +691,19 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    //session.select_all();
+                    let ((cursor, affinity), _is_in_gutter) = self.pick(session, dvec2(0.0,0.0));
+                    session.set_selection(
+                        cursor,
+                        affinity,
+                        SelectionMode::All,
+                        NewGroup::Yes
+                    );
+                    self.reset_cursor_blinker(cx);
+                    self.keep_cursor_in_view = KeepCursorInView::Off;
                     self.redraw(cx);
                 }
             }
+            
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers:
@@ -767,7 +805,7 @@ impl CodeEditor {
                 ref input,
                 was_paste: false,
                 ..
-            }) if input.len() > 0 => {
+            }) if input.len() > 0 && !self.read_only => {
                 session.insert(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -777,7 +815,7 @@ impl CodeEditor {
                 ref input,
                 was_paste: true,
                 ..
-            }) if input.len() > 0 => {
+            }) if input.len() > 0 && !self.read_only => {
                 session.paste(input.into());
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -796,7 +834,7 @@ impl CodeEditor {
                 key_code: KeyCode::Tab,
                 modifiers: KeyModifiers { shift: false, .. },
                 ..
-            }) => {
+            }) if !self.read_only => {
                 session.indent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -806,7 +844,7 @@ impl CodeEditor {
                 key_code: KeyCode::Tab,
                 modifiers: KeyModifiers { shift: true, .. },
                 ..
-            }) => {
+            }) if !self.read_only=> {
                 session.outdent();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -815,7 +853,7 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
-            }) => {
+            }) if !self.read_only=> {
                 session.delete();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -824,7 +862,7 @@ impl CodeEditor {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
-            }) => {
+            }) if !self.read_only=> {
                 session.backspace();
                 self.redraw(cx);
                 keyboard_moved_cursor = true;
@@ -834,7 +872,7 @@ impl CodeEditor {
                 *ce.response.borrow_mut() = Some(session.copy());
                 keyboard_moved_cursor = true;
             }
-            Hit::TextCut(ce) => {
+            Hit::TextCut(ce) if !self.read_only=> {
                 *ce.response.borrow_mut() = Some(session.copy());
                 session.delete();
                 keyboard_moved_cursor = true;
@@ -849,13 +887,15 @@ impl CodeEditor {
                         ..
                     },
                 ..
-            }) => {
+            }) if !self.read_only => {
                 if session.undo() {
                     cx.redraw_all();
                     actions.push(CodeEditorAction::TextDidChange);
                     keyboard_moved_cursor = true;
                 }
             }
+            
+            
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers:
@@ -865,7 +905,7 @@ impl CodeEditor {
                         ..
                     },
                 ..
-            }) => {
+            }) if !self.read_only => {
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);
@@ -895,8 +935,8 @@ impl CodeEditor {
                         match tap_count {
                             1 => SelectionMode::Simple,
                             2 => SelectionMode::Word,
-                            3 => SelectionMode::Line,
-                            _ => SelectionMode::All,
+                            _ => SelectionMode::Line,
+                            //_ => SelectionMode::All,
                         }
                     },
                     NewGroup::Yes
@@ -978,7 +1018,7 @@ impl CodeEditor {
         actions
     }
 
-    fn draw_gutter(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_gutter(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
         let mut buf = String::new();
@@ -990,7 +1030,14 @@ impl CodeEditor {
                 BlockElement::Line { line, .. } => {
                     self.draw_gutter.font_scale = line.scale();
                     buf.clear();
-                    let _ = write!(buf, "{: >4}", line_index + 1);
+                    match self.gutter_chars{
+                        0|1=>write!(buf, "{: >0}", line_index + 1).unwrap(),
+                        2=>write!(buf, "{: >1}", line_index + 1).unwrap(),
+                        3=>write!(buf, "{: >2}", line_index + 1).unwrap(),
+                        4=>write!(buf, "{: >3}", line_index + 1).unwrap(),
+                        5=>write!(buf, "{: >4}", line_index + 1).unwrap(),
+                        _=>write!(buf, "{: >5}", line_index + 1).unwrap(),
+                    }
                     self.draw_gutter.draw_abs(
                         cx,
                         DVec2 {
@@ -1015,7 +1062,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().line(self.line_start).y();
@@ -1137,7 +1184,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
             .layout()
@@ -1175,7 +1222,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_decoration = None;
         let decorations = session.document().decorations();
         let mut decorations = decorations.iter();
@@ -1200,7 +1247,7 @@ impl CodeEditor {
         .draw_decoration_layer(cx, session)
     }
 
-    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -1225,7 +1272,7 @@ impl CodeEditor {
         .draw_selection_layer(cx, session)
     }
 
-    fn pick(&self, session: &Session, position: DVec2) -> ((Position, Affinity), bool) {
+    fn pick(&self, session: &CodeSession, position: DVec2) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
         
         if position.y < 0.0 {
@@ -1450,7 +1497,7 @@ struct DrawDecorationLayer<'a> {
 }
 
 impl<'a> DrawDecorationLayer<'a> {
-    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.code_editor.line_start;
         let mut origin_y = session.layout().line(line_index).y();
         for block in session
@@ -1644,7 +1691,7 @@ struct DrawSelectionLayer<'a> {
 }
 
 impl<'a> DrawSelectionLayer<'a> {
-    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &Session) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.code_editor.line_start;
         let mut origin_y = session.layout().line(line_index).y();
         for block in session
@@ -1659,7 +1706,7 @@ impl<'a> DrawSelectionLayer<'a> {
                     let mut byte_index = 0;
                     let mut row_index = 0;
                     let mut column_index = 0;
-                    self.handle_event(
+                    self.draw_selection_event(
                         cx,
                         line_index,
                         line,
@@ -1676,7 +1723,7 @@ impl<'a> DrawSelectionLayer<'a> {
                                 text,
                             } => {
                                 for grapheme in text.graphemes() {
-                                    self.handle_event(
+                                    self.draw_selection_event(
                                         cx,
                                         line_index,
                                         line,
@@ -1688,7 +1735,7 @@ impl<'a> DrawSelectionLayer<'a> {
                                     );
                                     byte_index += grapheme.len();
                                     column_index += grapheme.column_count();
-                                    self.handle_event(
+                                    self.draw_selection_event(
                                         cx,
                                         line_index,
                                         line,
@@ -1724,7 +1771,7 @@ impl<'a> DrawSelectionLayer<'a> {
                             }
                         }
                     }
-                    self.handle_event(
+                    self.draw_selection_event(
                         cx,
                         line_index,
                         line,
@@ -1757,7 +1804,7 @@ impl<'a> DrawSelectionLayer<'a> {
         }
     }
 
-    fn handle_event(
+    fn draw_selection_event(
         &mut self,
         cx: &mut Cx2d,
         line_index: usize,

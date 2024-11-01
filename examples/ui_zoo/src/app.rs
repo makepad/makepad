@@ -110,8 +110,9 @@ live_design!{
                     }
                     <View> {
                         width: Fill, height: Fit,
+                        align: { x: 0., y: 0.}
                         flow: Right,
-                        spacing: (THEME_SPACE_1)
+                        spacing: (THEME_SPACE_2)
                         <P> { text: "TestButton", width: Fit}
                         <LinkLabel> { text: "TestButton", width: Fit}
                         <CheckBox> { text: "TestButton"}
@@ -231,7 +232,6 @@ live_design!{
                             width: Fit, height: Fit,
                             flow: Down,
                             show_bg: false,
-                            spacing: 10
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
                             <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}

@@ -40,6 +40,11 @@ impl Widget for Label {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
         let walk = walk.with_add_padding(self.padding);
         cx.begin_turtle(walk, Layout::default());
+        // here we need to check if the text is empty, if so we need to set it to a space
+        // or the text draw will not work(seems like lazy drawtext bug)
+        let _ = self.text.as_ref().is_empty().then(|| {
+            let _ = self.set_text(" ");
+        });
         self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
@@ -54,8 +59,17 @@ impl Widget for Label {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+                
+        match event.hit_designer(cx, self.area){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
+        
         if self.hover_actions_enabled {
-            let uid = self.widget_uid();
+            
             match event.hits_with_capture_overload(cx, self.area, true) {
                 Hit::FingerHoverIn(fh) => {
                     cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));
@@ -89,6 +103,12 @@ impl LabelRef {
             }
         } else {
             false
+        }
+    }
+    
+    pub fn set_text_with<F:FnOnce(&mut String)>(&self, f:F) {
+        if let Some(mut inner) = self.borrow_mut(){
+            f(inner.text.as_mut())
         }
     }
 }

@@ -1,7 +1,7 @@
 use {
     crate::{
         char::CharExt,
-        document::Document,
+        document::CodeDocument,
         history::{EditKind,NewGroup},
         layout::{BlockElement, Layout, WrappedElement},
         selection::{Affinity, Cursor, SelectionSet},
@@ -22,10 +22,10 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Session {
+pub struct CodeSession {
     id: SessionId,
     settings: Rc<Settings>,
-    document: Document,
+    document: CodeDocument,
     layout: RefCell<SessionLayout>,
     selection_state: RefCell<SelectionState>,
     wrap_column: Cell<Option<usize>>,
@@ -33,8 +33,8 @@ pub struct Session {
     edit_receiver: Receiver<(Option<SelectionSet>, Vec<Edit>)>,
 }
 
-impl Session {
-    pub fn new(document: Document) -> Self {
+impl CodeSession {
+    pub fn new(document: CodeDocument) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (edit_sender, edit_receiver) = mpsc::channel();
@@ -81,7 +81,7 @@ impl Session {
         &self.settings
     }
 
-    pub fn document(&self) -> &Document {
+    pub fn document(&self) -> &CodeDocument {
         &self.document
     }
 
@@ -192,6 +192,7 @@ impl Session {
     }
 
     pub fn set_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode, new_group:NewGroup) {
+        let position = self.clamp_position(position);
         let selection = grow_selection(
             Selection::from(Cursor {
                 position,
@@ -212,6 +213,21 @@ impl Session {
         if let NewGroup::Yes = new_group{
             self.document().force_new_group();
         }
+    }
+    
+    fn clamp_position(&self, mut position: Position) -> Position {
+        let text = self.document().as_text();
+        let lines = text.as_lines();
+        if position.line_index >= lines.len() {
+            position.line_index = lines.len().saturating_sub(1);
+            position.byte_index = lines[position.line_index].len();
+        } else {
+            let line_len = lines[position.line_index].len();
+            if position.byte_index > line_len {
+                position.byte_index = line_len;
+            }
+        }
+        position
     }
 
     pub fn add_selection(&self, position: Position, affinity: Affinity, mode: SelectionMode) {
@@ -1002,7 +1018,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for CodeSession {
     fn drop(&mut self) {
         self.document.remove_session(self.id);
     }

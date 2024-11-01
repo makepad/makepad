@@ -3,6 +3,7 @@ use {
         io::prelude::*,
         fs::File,
         rc::Rc,
+        time::{SystemTime}
     },
     crate::{
         cx::{Cx},
@@ -34,8 +35,15 @@ impl Cx {
             }
             else{
                 println!("Could not load resource {}", path);
-                dep.data = Some(Err("File open failed".to_string()));
+                dep.data = Some(Err("File! open failed".to_string()));
             }
         }
+    }
+    
+    pub fn time_now()->f64{
+        if let Ok(elapsed) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH){
+            return elapsed.as_secs_f64();
+        }
+        return 0.0
     }
 }

@@ -4,6 +4,7 @@ use {
     },
     makepad_rustybuzz::Direction,
     unicode_segmentation::UnicodeSegmentation,
+    std::borrow::Cow,
 };
 
 const ZBIAS_STEP: f32 = 0.00001;
@@ -71,9 +72,9 @@ live_design!{
             let s = sample2d(self.tex, pos).x;
             let curve = 0.5; 
             //if (self.sdf_radius != 0.0) {
-                // HACK(eddyb) harcoded atlas size (see asserts below).
-                let texel_coords = pos.xy * 4096.0;
-                s = clamp((s - (1.0 - sdf_cutoff)) * sdf_radius / scale + 0.5, 0.0, 1.0);
+            // HACK(eddyb) harcoded atlas size (see asserts below).
+            let texel_coords = pos.xy * 4096.0;
+            s = clamp((s - (1.0 - sdf_cutoff)) * sdf_radius / scale + 0.5, 0.0, 1.0);
             //} else {
             //    s = pow(s, curve);
             //}
@@ -154,8 +155,9 @@ pub struct TextStyle {
     //#[live(0.5)] pub curve: f32,
     #[live(0.88)] pub line_scale: f64,
     #[live(1.4)] pub line_spacing: f64,
-    #[live(1.1)] pub top_drop: f64,
+    //#[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
+    #[live] pub is_secret: bool
 }
 
 #[derive(Clone, Live, LiveHook, PartialEq)]
@@ -171,6 +173,7 @@ pub enum TextWrap {
 pub struct DrawText {
     #[rust] pub many_instances: Option<ManyInstances>,
     
+
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
     #[live] pub wrap: TextWrap,
@@ -255,7 +258,6 @@ impl DrawText {
         //    .map_or((0.0, 0.0), |sdf| (sdf.params.radius, sdf.params.cutoff));
         //self.draw_vars.user_uniforms[0] = sdf_radius;
         //self.draw_vars.user_uniforms[1] = sdf_cutoff;
-        //println!("{}, {}", sdf_radius, sdf_cutoff);
     }
     
     pub fn get_line_spacing(&self) -> f64 {
@@ -397,6 +399,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_text(
             &mut position,
+            self.text_style.is_secret,
             text,
             font_ids,
             font_size,
@@ -520,6 +523,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_text(
             &mut position,
+            self.text_style.is_secret,
             text,
             font_ids,
             font_size,
@@ -638,6 +642,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_text(
             &mut position,
+            self.text_style.is_secret,
             text,
             font_ids,
             font_size,
@@ -720,6 +725,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_line(
             &mut position,
+            self.text_style.is_secret,
             line,
             0,
             line.len(),
@@ -816,6 +822,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_text(
             &mut position,
+            self.text_style.is_secret,
             text,
             font_ids,
             font_size,
@@ -860,6 +867,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_text(
             &mut position,
+            self.text_style.is_secret,
             text,
             font_ids,
             font_size,
@@ -957,6 +965,7 @@ impl DrawText {
         let mut position = DVec2::new();
         layout_text(
             &mut position,
+            self.text_style.is_secret,
             text,
             font_ids,
             font_size,
@@ -971,6 +980,7 @@ impl DrawText {
                         glyph_infos,
                         ..
                     } => {
+                        cx.set_turtle_wrap_spacing(line_spacing - line_height);
                         let rect = cx.walk_turtle(Walk {
                             abs_pos: None,
                             margin: Margin::default(),
@@ -1168,6 +1178,7 @@ impl Default for Affinity {
 
 fn layout_text(
     position: &mut DVec2,
+    is_secret: bool,
     text: &str,
     font_ids: &[usize],
     font_size: f64,
@@ -1189,6 +1200,7 @@ fn layout_text(
         }
         if layout_line(
             position,
+            is_secret,
             text,
             line_start,
             line_end,
@@ -1208,6 +1220,7 @@ fn layout_text(
 
 fn layout_line(
     position: &mut DVec2,
+    is_secret: bool,
     text: &str,
     line_start: usize,
     line_end: usize,
@@ -1225,6 +1238,7 @@ fn layout_line(
         let word_end = word_start + word.len();
         if layout_word(
             position,
+            is_secret,
             index == 0,
             text,
             word_start,
@@ -1245,6 +1259,7 @@ fn layout_line(
 
 fn layout_word(
     position: &mut DVec2,
+    is_secret: bool,
     is_first: bool,
     text: &str,
     word_start: usize,
@@ -1258,7 +1273,7 @@ fn layout_word(
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
 ) -> bool {
     let word = &text[word_start..word_end];
-    let glyph_infos = shape(word, font_ids, font_atlas, shape_cache);
+    let glyph_infos = shape(is_secret, word, font_ids, font_atlas, shape_cache);
     let width: f64 = glyph_infos.iter().map(|glyph_info| {
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
     }).sum();
@@ -1275,6 +1290,7 @@ fn layout_word(
             let grapheme_end = grapheme_start + grapheme.len();
             if layout_grapheme(
                 position,
+                is_secret,
                 index == 0,
                 text,
                 grapheme_start,
@@ -1294,7 +1310,7 @@ fn layout_word(
         if f(*position, word_start, LayoutEvent::Chunk {
             width,
             string: word,
-            glyph_infos
+            glyph_infos: &glyph_infos,
         }, font_atlas) {
             return true;
         }
@@ -1305,6 +1321,7 @@ fn layout_word(
 
 fn layout_grapheme(
     position: &mut DVec2,
+    is_secret: bool,
     is_first: bool,
     text: &str,
     grapheme_start: usize,
@@ -1318,7 +1335,7 @@ fn layout_grapheme(
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
 ) -> bool {
     let grapheme = &text[grapheme_start..grapheme_end];
-    let glyph_infos = shape(grapheme, font_ids, font_atlas, shape_cache);
+    let glyph_infos = shape(is_secret, grapheme, font_ids, font_atlas, shape_cache);
     let width: f64 = glyph_infos.iter().map(|glyph_info| {
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas)
     }).sum();
@@ -1332,7 +1349,7 @@ fn layout_grapheme(
     if f(*position, grapheme_start, LayoutEvent::Chunk {
         width,
         string: grapheme,
-        glyph_infos
+        glyph_infos: &glyph_infos
     }, font_atlas) {
         return true;
     }
@@ -1424,12 +1441,14 @@ fn units_to_lpxs(units: f64, units_per_em: f64, font_size: f64) -> f64 {
 }
 
 fn shape<'a>(
+    is_secret: bool,
     string: &str,
     font_ids: &[usize],
-    font_atlas: &CxFontAtlas,
+    font_atlas: &mut CxFontAtlas,
     shape_cache: &'a mut CxShapeCache,
-) -> &'a [font_atlas::GlyphInfo] {
+) -> Cow<'a, [font_atlas::GlyphInfo]> {
     shape_cache.shape(
+        is_secret,
         Direction::LeftToRight,
         string,
         font_ids,

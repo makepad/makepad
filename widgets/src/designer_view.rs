@@ -4,7 +4,7 @@ use crate::{
     makepad_platform::studio::*,
     designer_data::*,
     turtle_step::*,
-    view::View,
+    view::*,
     widget::*,
 };
 use std::collections::BTreeMap;
@@ -15,7 +15,6 @@ live_design!{
     
     DesignerContainerBase = {{DesignerContainer}}{
     }
-    
 }
 
 #[derive(Clone, Debug, DefaultNone)]
@@ -109,7 +108,7 @@ impl Widget for DesignerContainer {
             data.component.draw_all(cx, &mut Scope::empty());
         }
         
-       DrawStep::done()
+        DrawStep::done()
     }
 }
 
@@ -118,7 +117,8 @@ enum FingerMove{
     Pan{start_pan: DVec2},
     DragBody{ptr: LivePtr},
     DragEdge{edge: Edge, rect:Rect, id: LiveId},
-    DragAll{rects:BTreeMap<LiveId,Rect>}
+    DragAll{rects:BTreeMap<LiveId,Rect>},
+    DragSubComponentOrder(SelectedSubcomponent)
 }
 
 #[derive(Live, Widget)]
@@ -137,29 +137,42 @@ pub struct DesignerView {
     #[live] draw_outline: DrawQuad,
     #[rust] view_file: Option<LiveId>,
     #[rust] selected_component: Option<LiveId>,
-    #[rust] selected_subcomponent: Option<WidgetRef>,
+    #[rust] selected_subcomponent: Option<SelectedSubcomponent>,
     #[rust] containers: ComponentMap<LiveId, ContainerData>,
     #[redraw] #[rust(DrawList2d::new(cx))] draw_list: DrawList2d,
     #[rust(Pass::new(cx))] pass: Pass,
     #[rust] color_texture: Option<Texture>,
 }
 
+#[derive(Clone, Debug)]
+struct SelectedSubcomponent{
+    parent:Option<WidgetRef>,
+    component:WidgetRef
+}
+
 impl LiveHook for DesignerView {
     fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
+        
         // find a bit cleaner way to do this
         self.reapply = true;
     }
 }
 
 impl DesignerView{
-    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str){
-        let registry = cx.live_registry.clone();
-        let registry = registry.borrow();
-        let rect = if let Some(info) =  registry.ptr_to_design_info(ptr){
-            rect(info.dx, info.dy, info.dw, info.dh)
+    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str, pos: &mut Vec<DesignerComponentPosition>){
+        
+        let rect = if let Some(v) = pos.iter().find(|v| v.id == id){
+            rect(v.left, v.top, v.width, v.height)
         }
         else{
-            rect(50.0,50.0,200.0,300.0)
+            pos.push(DesignerComponentPosition{
+                id,
+                left: 50.0,
+                top: 50.0,
+                width: 200.0,
+                height: 200.00
+            });
+            return self.draw_container(cx, id, ptr, name, pos);
         };
                                     
         let container_ptr = self.container.unwrap();
@@ -205,10 +218,41 @@ impl DesignerView{
         self.selected_component = what_id;
     }
     
-    fn patch_design_info(&mut self, cx:&mut Cx, id: LiveId, rect:Rect){
+    fn sync_zoom_pan(&self, _cx:&mut Cx){
+        Cx::send_studio_message(AppToStudio::DesignerZoomPan(
+            DesignerZoomPan{
+                zoom: self.zoom,
+                pan_x: self.pan.x,
+                pan_y: self.pan.y
+            }
+        ));
+    }
+    
+    fn get_component_rect(&self, cx:&mut Cx, comp:&WidgetRef)->Rect{
+        let mut rect = self.area().rect(cx);
+        let cr = comp.area().rect(cx);
+        rect.pos += (cr.pos - self.pan)/self.zoom;
+        rect.size = cr.size;
+        rect.size /= self.zoom;
+        rect
+    }
+    
+    fn update_rect(&mut self, cx:&mut Cx, id: LiveId, rect:Rect, pos:&mut Vec<DesignerComponentPosition>){
         if let Some(container) = self.containers.get_mut(&id){
             container.container.redraw(cx);
             container.rect = rect;
+            // lets send the info over
+            if let Some(v) = pos.iter_mut().find(|v| v.id == id){
+                v.left = rect.pos.x;
+                v.top = rect.pos.y;
+                v.width = rect.size.x;
+                v.height = rect.size.y;
+                // alright lets send it over
+                Cx::send_studio_message(AppToStudio::DesignerComponentMoved(v.clone()));
+            }
+            // ok first we have to build a
+            
+            /*
             // alright lets send over the rect to the editor
             // we need to find out the text position
             let registry = cx.live_registry.clone();
@@ -234,7 +278,7 @@ impl DesignerView{
                     replace
                 }));
                 //self.finger_move = Some(FingerMove::Pan{start_pan:dvec2(0.0,0.0)});
-            }
+            }*/
         }
     }
 }
@@ -245,7 +289,7 @@ impl Widget for DesignerView {
         // alright so. our widgets dont have any 'event' flow here
         // so what can we do.
         // 
-        
+        let data = scope.data.get_mut::<DesignerData>().unwrap();
         match event.hits(cx, self.area) {
             Hit::FingerHoverOver(fh) =>{
                 // lets poll our widget structure with a special event
@@ -253,6 +297,7 @@ impl Widget for DesignerView {
                 //let corner_inner:f64  = 10.0 * self.zoom;
                 //let corner_outer:f64  = 10.0 * self.zoom;
                 // lets send a designer pick into all our widgets
+                self.selected_subcomponent = None;
                 for (_id, cd) in self.containers.iter(){
                     // ok BUT our mouse pick is not dependent on the container
                     // ok so we are in a pass. meaning 0,0 origin
@@ -267,19 +312,38 @@ impl Widget for DesignerView {
                         if let Some(action) = action.as_widget_action(){
                             match action.cast(){
                                 WidgetDesignAction::PickedBody=>{
-                                    println!("{:?}", action);
                                     // alright so lets draw a quad on top
                                     // alright our widget got clicked.
-                                    let comp = cd.component.uid_to_widget(action.widget_uid);
+                                    let mut cs = action.widgets.iter();
+                                    // scan for the parent with more than one child node
+                                    // and then make our subcomponent/parent those widgets
+                                    let mut component = cs.next();
+                                    let mut parent = cs.next();
+                                    while parent.is_some(){
+                                        let p = parent.unwrap();
+                                        if let Some(p) = p.as_view().borrow(){
+                                            if p.child_count()>1{
+                                                break;
+                                            }
+                                        }
+                                        component = parent;
+                                        parent = cs.next();
+                                    }
+                                    
                                     self.selected_subcomponent = Some(
-                                        comp
+                                        SelectedSubcomponent{
+                                            component: component.unwrap().clone(),
+                                            parent: parent.cloned(),
+                                        }
                                     );
-                                    self.draw_list.redraw(cx);
+                                    //println!("{:?}", self.selected_subcomponent);
+                                    break
                                 }
                                 _=>()
                             }
                         }
                     }
+                    self.draw_list.redraw(cx);
                 }
                 
                 let mut cursor = None;
@@ -316,26 +380,33 @@ impl Widget for DesignerView {
                         self.finger_move = Some(FingerMove::DragAll{rects})
                     }
                     else{
-                        for (id, cd) in self.containers.iter(){
-                            match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
-                                Some(edge)=>{
-                                    self.finger_move = Some(FingerMove::DragEdge{
-                                        rect: cd.rect,
-                                        id: *id,
-                                        edge
-                                    });
-                                    // lets send out a click on this containter
-                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Selected{
-                                        id:*id, 
-                                        tap_count: fe.tap_count , 
-                                        km:fe.modifiers
-                                    });
-                                    // set selected component
-                                    // unselect all other components
-                                    self.select_component(cx, Some(*id));
-                                    break;
+                        if fe.modifiers.logo || self.selected_subcomponent.is_none(){
+                            for (id, cd) in self.containers.iter(){
+                                match cd.get_edge(fe.abs -fe.rect.pos, self.zoom, self.pan){
+                                    Some(edge)=>{
+                                        self.finger_move = Some(FingerMove::DragEdge{
+                                            rect: cd.rect,
+                                            id: *id,
+                                            edge
+                                        });
+                                        // lets send out a click on this containter
+                                        cx.widget_action(uid, &scope.path, DesignerViewAction::Selected{
+                                            id:*id, 
+                                            tap_count: fe.tap_count , 
+                                            km:fe.modifiers
+                                        });
+                                        // set selected component
+                                        // unselect all other components
+                                        self.select_component(cx, Some(*id));
+                                        break;
+                                    }
+                                    None=>()
                                 }
-                                None=>()
+                            }
+                        }
+                        else{
+                            if let Some(sc) = &self.selected_subcomponent{
+                                self.finger_move = Some(FingerMove::DragSubComponentOrder(sc.clone()));
                             }
                         }
                     }
@@ -368,13 +439,55 @@ impl Widget for DesignerView {
                 // we should keep it in the same place
                 
                 self.pan += pan1 - pan2;
-                
+                self.sync_zoom_pan(cx);
                 self.redraw(cx);
             }
             Hit::FingerMove(fe) => {
                 match self.finger_move.as_ref().unwrap(){
+                    FingerMove::DragSubComponentOrder(cs)=>{
+                        // ok how do we do this.
+                        // lets compare our rect to the mouse
+                        // and if we are below ask the parent component view to move down
+                        if let Some(parent) = &cs.parent{
+                            let vw = parent.as_view();
+                            if let Some(mut vw) = vw.borrow_mut(){
+                                
+                                // we need to be below the 'next item' in the list
+                                let index = vw.child_index(&cs.component).unwrap();
+                                if let Some(next_child) = vw.child_at_index(index+1){
+                                    let rect = self.get_component_rect(cx, &next_child);
+                                    if let Flow::Down = vw.layout.flow{
+                                        if fe.abs.y > rect.pos.y + 0.6* rect.size.y{
+                                            vw.swap_child(index, index + 1);
+                                        }     
+                                    }
+                                    else{
+                                        if fe.abs.x > rect.pos.x + 0.6* rect.size.x{
+                                            vw.swap_child(index, index + 1);
+                                        }   
+                                    } 
+                                }
+                                if index > 0{
+                                    if let Some(prev_child) = vw.child_at_index(index-1){
+                                        let rect = self.get_component_rect(cx, &prev_child);
+                                        if let Flow::Down = vw.layout.flow{
+                                            if fe.abs.y < rect.pos.y + 0.6 *rect.size.y{
+                                                vw.swap_child(index, index - 1);
+                                            }
+                                        }else{
+                                            if fe.abs.x < rect.pos.x + 0.6 *rect.size.x{
+                                                vw.swap_child(index, index - 1);
+                                            }
+                                        }
+                                    }
+                                }                                   
+                            }
+                            vw.redraw(cx);
+                        }
+                    }
                     FingerMove::Pan{start_pan} =>{
                         self.pan= *start_pan - (fe.abs - fe.abs_start) * self.zoom;
+                        self.sync_zoom_pan(cx);
                         self.redraw(cx);
                     }
                     FingerMove::DragAll{rects}=>{
@@ -385,7 +498,7 @@ impl Widget for DesignerView {
                                 pos: rect.pos + delta,
                                 size: rect.size
                             };
-                            self.patch_design_info(cx, id, r);
+                            self.update_rect(cx, id, r, &mut data.positions);
                         }
                     }
                     FingerMove::DragEdge{edge, rect, id}=>{
@@ -412,7 +525,7 @@ impl Widget for DesignerView {
                                  size: rect.size
                              }
                         };
-                        self.patch_design_info(cx, *id, rect);
+                        self.update_rect(cx, *id, rect, &mut data.positions);
                     }
                     FingerMove::DragBody{ptr:_}=>{
                         
@@ -453,7 +566,7 @@ impl Widget for DesignerView {
     
             cx.begin_pass_sized_turtle_no_clip(Layout::flow_down());
             
-            let data = scope.props.get::<DesignerData>().unwrap();
+            let data = scope.data.get_mut::<DesignerData>().unwrap();
             
             // lets draw the component container windows and components
             
@@ -462,8 +575,23 @@ impl Widget for DesignerView {
                 match data.node_map.get(view_file){
                     Some(OutlineNode::File{children,..})=>{
                         for child in children{
+                            // alright so. we need to use a path entry in our
+                            // datastructure
                             if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(child){
-                                self.draw_container(cx, *child, *ptr, name);
+                                if name == "App=<App>"{ // we need to skip inwards to 
+                                    if let Some(child) = data.get_node_by_path(*child, "ui:/main_window=/body="){
+                                        if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(&child){
+                                            // lets fetch the position of this thing
+                                            
+                                            self.draw_container(cx, child, *ptr, name, &mut data.positions);
+                                        }
+                                    }
+                                }
+                                else{
+                                    // lets fetch the position of this thing
+                                    
+                                    self.draw_container(cx, *child, *ptr, name, &mut data.positions);
+                                }
                             }
                         }
                     }
@@ -482,25 +610,21 @@ impl Widget for DesignerView {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_bg.draw_abs(cx, rect);
         // lets draw all the outlines on top
-        if let Some(component) = self.selected_component{
-           if let Some(container) = self.containers.get(&component){
-               let mut rect = rect;
-               rect.pos += (container.rect.pos - self.pan)/self.zoom;
-               rect.size = container.rect.size;
-               rect.size /= self.zoom;
-               self.draw_outline.draw_abs(cx, rect);
-           } 
-        }
+        
         // alright and now we need to highlight a component
-        if let Some(component) = &self.selected_subcomponent{
-            let area = component.area();
-            let mut rect = rect;
-            let component_rect = area.rect(cx);
-            rect.pos += (component_rect.pos - self.pan)/self.zoom;
-            rect.size = component_rect.size;
-            rect.size /= self.zoom;
+        if let Some(cs) = &self.selected_subcomponent{
+            let rect = self.get_component_rect(cx, &cs.component);
             self.draw_outline.draw_abs(cx, rect);
         } 
+        else if let Some(component) = self.selected_component{
+            if let Some(container) = self.containers.get(&component){
+                let mut rect = rect;
+                rect.pos += (container.rect.pos - self.pan)/self.zoom;
+                rect.size = container.rect.size;
+                rect.size /= self.zoom;
+                self.draw_outline.draw_abs(cx, rect);
+            } 
+        }
         cx.set_pass_area_with_origin(
             &self.pass,
             self.area,
@@ -520,7 +644,7 @@ impl DesignerViewRef{
         }
     }
     
-    pub fn view_file_and_redraw(&self, cx:&mut Cx, file_id:LiveId) -> Option<(LivePtr,KeyModifiers)> {
+    pub fn view_file_and_redraw(&self, cx:&mut Cx, file_id:LiveId){
         if let Some(mut inner) = self.borrow_mut(){
             if inner.view_file != Some(file_id){
                 inner.containers.clear();
@@ -528,7 +652,22 @@ impl DesignerViewRef{
                 inner.redraw(cx);
             }
         }
-        None
+    }
+    
+    pub fn set_zoom_pan (&self, cx:&mut Cx, zp:&DesignerZoomPan){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.zoom = zp.zoom;
+            inner.pan.x = zp.pan_x;
+            inner.pan.y = zp.pan_y;
+            inner.redraw(cx);
+        }
+    }
+    
+    pub fn reload_view(&self, cx:&mut Cx) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.containers.clear();
+            inner.redraw(cx);
+        }
     }
     
     pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers,u32)> {

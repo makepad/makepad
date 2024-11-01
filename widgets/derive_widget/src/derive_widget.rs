@@ -72,8 +72,8 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         }
         
         if let Some(action_data_field) = &action_data_field{
-            tb.add("    fn set_action_data(&mut self, action_data:Box<dyn WidgetActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
-            tb.add("    fn action_data(&mut self)->Option<Box<dyn WidgetActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
+            tb.add("    fn set_action_data(&mut self, action_data:std::sync::Arc<dyn ActionTrait>) { self.").ident(action_data_field).add(".set_box(action_data)}");
+            tb.add("    fn action_data(&self)->Option<std::sync::Arc<dyn ActionTrait>> { self.").ident(action_data_field).add(".clone_data()}");
         }
         
         if let Some(wrap_field) = &wrap_field{
@@ -151,41 +151,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
     parser.unexpected()
 }
 
-pub fn derive_default_none_impl(input: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new();
-    let mut parser = TokenParser::new(input);
-    let _main_attribs = parser.eat_attributes();
-    parser.eat_ident("pub");
-    if parser.eat_ident("enum") {
-        if let Some(enum_name) = parser.eat_any_ident() {
-            let generic = parser.eat_generic();
-            let where_clause = parser.eat_where_clause(None);
-            /*
-            tb.add("impl Into<Box<dyn WidgetAction>> for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
-            tb.add("{");
-            tb.add("    fn into(self)->Box<dyn WidgetAction>{");
-            tb.add("        Box::new(self)");
-            tb.add("    }");
-            tb.add("}");*/
-/*
-            tb.add("impl ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
-            tb.add("{");
-            tb.add("    fn into_action(self, uid:WidgetUid)->WidgetActionItem{");
-            tb.add("        WidgetActionItem::new(self.into(), uid)");
-            tb.add("    }");
-            tb.add("}");*/
-            tb.add("impl").stream(generic.clone());
-            tb.add("Default for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
-            tb.add("    fn default()->Self{Self::None}");
-            tb.add("}");
-            
-            return tb.end();
-        }
-    }
-
-    parser.unexpected()
-}
-
+ 
 pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
@@ -325,6 +291,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
 
             //let frame_ext = format!("{}ViewRefExt", clean_name);
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
+            let actions_ext = format!("{}WidgetActionsExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
             let get_fn = snake_name.to_string();
             let as_fn = format!("as_{}", snake_name);
@@ -333,13 +300,23 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add(";");
             tb.add("}");
-
+            
+            tb.add("pub trait").ident(&actions_ext).add("{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
+            tb.add("}");
+            
             tb.add("impl ").ident(&widget_ref_ext).add(" for WidgetRef{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.clone())");
+            tb.add("    }");
+            tb.add("}");
+            
+            tb.add("impl ").ident(&actions_ext).add(" for Actions{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
+            tb.add("        ").ident(&ref_name).add("(self.widget(path))");
             tb.add("    }");
             tb.add("}");
             
@@ -366,6 +343,13 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
             
+            /*                        
+            tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
+            tb.add("    type Target = WidgetRef;");
+            tb.add("    fn deref(&self)->&WidgetRef{&self.0}");
+            tb.add("}");
+            */
+                        
             return tb.end();
         }
     }
@@ -468,7 +452,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("    type Item = ").ident(&ref_name).add(";");
             tb.add("    fn next(&mut self)->Option<Self::Item>{");
             tb.add("        if let Some(next) = self.iter.next(){");
-            tb.add("            return Some(").ident(&ref_name).add("(next))");
+            tb.add("            return Some(").ident(&ref_name).add("(next.clone()))");
             tb.add("        }");
             tb.add("        None");
             tb.add("    }");

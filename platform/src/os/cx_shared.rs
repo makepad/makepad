@@ -49,6 +49,11 @@ impl Cx {
         loop { // loop untill we don't propagate anymore
             let mut altered = false;
             for pass_id in self.passes.id_iter(){
+                if self.demo_time_repaint {
+                    if self.passes[pass_id].main_draw_list_id.is_some(){
+                        self.passes[pass_id].paint_dirty = true;
+                    }
+                }
                 if self.passes[pass_id].paint_dirty {
                     let other = match self.passes[pass_id].parent {
                         CxPassParent::Pass(parent_pass_id) => {
@@ -97,11 +102,11 @@ impl Cx {
                 }
             }
         }
-        
+        self.demo_time_repaint = false;
     }
     
     pub (crate) fn need_redrawing(&self) -> bool {
-        self.new_draw_event.will_redraw()
+        self.new_draw_event.will_redraw() 
     }
     
     
@@ -170,6 +175,7 @@ impl Cx {
             self.inner_key_focus_change();
             if counter > 100 {
                 crate::error!("Action feedback loop detected");
+                crate::error!("New actions {:#?}", self.new_actions);
                 break
             }
         }

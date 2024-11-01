@@ -8,7 +8,7 @@ live_design! {
     THEME_COLOR_CONTRAST = 1.0
     THEME_COLOR_TINT = #f00
     THEME_COLOR_TINT_AMOUNT = 0.0
-    THEME_SPACE_FACTOR = 8.5 // Increase for a less dense layout
+    THEME_SPACE_FACTOR = 6. // Increase for a less dense layout
     THEME_CORNER_RADIUS = 2.5
     THEME_BEVELING = 0.75
     THEME_FONT_SIZE_BASE = 7.5
@@ -323,7 +323,9 @@ live_design! {
 
     P = <Label> {
         width: Fill,
-        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: 0.,
+        padding: 0.,
+        // margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -413,14 +415,13 @@ live_design! {
 
 
     LinkLabel = <LinkLabelBase> {
-        // TODO: adda  focus states
+        // TODO: add a focus states
         instance hover: 0.0
         instance pressed: 0.0
 
         width: Fit, height: Fit,
-        padding: { top: (THEME_SPACE_2), bottom: 2. }
-        spacing: 7.5,
-        align: {x: 0., y: 0.}
+        margin: <THEME_MSPACE_2> {}
+        padding: 0.,
 
         label_walk: { width: Fit, height: Fit, },
 
@@ -576,7 +577,6 @@ live_design! {
         height:Fit,
         padding: <THEME_MSPACE_1> {}
 
-        line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         font_color: (THEME_COLOR_TEXT_DEFAULT),
 
@@ -784,7 +784,6 @@ live_design! {
         height:Fit,
         padding: 0
         
-        line_spacing: (THEME_FONT_LINE_SPACING),
         font_size: (THEME_FONT_SIZE_P),
         font_color: (THEME_COLOR_TEXT_DEFAULT),
         
@@ -1043,11 +1042,12 @@ live_design! {
         width:Fill, height:Fit,
         flow: RightWrap,
         padding: <THEME_MSPACE_1> {}
-
-        line_spacing: (THEME_FONT_LINE_SPACING),
-        font_size: (THEME_FONT_SIZE_P),
-        paragraph_spacing: 16,
         
+        font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
+
+        paragraph_spacing: 16,
+        pre_code_spacing: 8,
         inline_code_padding: <THEME_MSPACE_1> {},
         inline_code_margin: <THEME_MSPACE_1> {},
         
@@ -1381,11 +1381,12 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
+            color: (THEME_COLOR_TEXT_DEFAULT)
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return THEME_COLOR_TEXT_DEFAULT
+                return self.color
             }
         }
 
@@ -1574,10 +1575,10 @@ live_design! {
 
     ButtonFlatter = <ButtonIcon> {
         height: Fit, width: Fit,
-        padding: <THEME_MSPACE_2> {}
-        margin: 0.
-        align: { x: 0.5, y: 0.5 }
-        icon_walk: { width: 12. }
+        padding: <THEME_MSPACE_2> {},
+        margin: <THEME_MSPACE_2> {},
+        align: { x: 0.5, y: 0.5 },
+        icon_walk: { width: 12. },
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -1650,12 +1651,13 @@ live_design! {
     }
 
     CheckBox = <CheckBoxBase> {
-        width: Fit, height: 20,
-        margin: { top: (THEME_SPACE_1), bottom: (THEME_SPACE_1) }
-        align: { x: 0.0, y: 0.5 }
+        width: Fit, height: Fit,
+        padding: <THEME_MSPACE_2> {}
+        align: { x: 0., y: 0. }
+
         label_walk: {
             width: Fit, height: Fit,
-            margin: { left: 20., right: (THEME_SPACE_2) }
+            margin: <THEME_MSPACE_H_1> { left: 12.5 }
         }
 
         draw_check: {
@@ -1665,11 +1667,15 @@ live_design! {
                 match self.check_type {
                     CheckType::Check => {
                         let left = 1;
-                        let sz = self.size - 0.5;
+                        let sz = self.size - 1.0;
+                        let offset_x = 0.0;
+                        let offset_y = -1.0;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5);
+
+                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5 + offset_y);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
                         sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
+
                         let szs = sz * 0.5;
                         let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
@@ -1683,7 +1689,7 @@ live_design! {
                     }
                     CheckType::Radio => {
                         let sz = self.size;
-                        let left = sz + 1.;
+                        let left = 0.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
@@ -1704,7 +1710,7 @@ live_design! {
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
-                        let left = sz + 1.;
+                        let left = 0.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
 
@@ -1846,9 +1852,11 @@ live_design! {
     }
 
     CheckBoxToggle = <CheckBox> {
-        margin: { left: -8. }
+        align: { x: 0., y: 0. }
         draw_check: { check_type: Toggle }
-        label_walk: { margin: <THEME_MSPACE_H_1> { left: 35.} }
+        label_walk: {
+            margin: <THEME_MSPACE_H_1> { left: 22.5 }
+        }
 
         animator: {
             hover = {
@@ -2302,7 +2310,7 @@ live_design! {
                 )
                 sdf.fill_keep(
                     mix(
-                        THEME_COLOR_D_2 * 0.75,
+                        THEME_COLOR_D_2 * 0.64,
                         THEME_COLOR_DOCK_TAB_SELECTED,
                         self.selected
                     )
@@ -2368,6 +2376,7 @@ live_design! {
         }
 
         width: Fill, height: (THEME_TAB_HEIGHT)
+        margin: { top: 0.5, right: 0.5, bottom: 0.0, left: 0.5 }
 
         scroll_bars: <ScrollBarsTabs> {
             show_scroll_x: true
@@ -2568,10 +2577,13 @@ live_design! {
     }
 
     DockToolbar = <RectShadowView> {
-        margin: { top: -1. }
-        padding: <THEME_MSPACE_1> {}
         width: Fill, height: 38.,
-        align: { x: 0., y: 1.0 }
+        flow: Down,
+        align: { x: 0., y: 0. }
+        margin: { top: -1. }
+        padding: <THEME_MSPACE_2> {}
+        spacing: 0.,
+
         draw_bg: {
             border_width: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
@@ -2580,10 +2592,14 @@ live_design! {
             shadow_offset: vec2(0.0, 0.0)
             color: (THEME_COLOR_FG_APP),
         }
+
         content = <View> {
+            flow: Right,
+            width: Fill, height: Fill,
             margin: 0.
             padding: 0.
-            width: Fill, height: Fill,
+            align: { x: 0., y: 0. }
+            spacing: (THEME_SPACE_3)
         }
     }
                 
@@ -2726,7 +2742,8 @@ live_design! {
     DropDown = <DropDownBase> {
         // TODO: utilize the existing focus state
         width: Fit, height: Fit,
-        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2), right: 22.5 }
+        margin: 0.,
+        padding: <THEME_MSPACE_2> { right: 22.5 }
         align: {x: 0., y: 0.}
 
         draw_text: {
@@ -2810,12 +2827,13 @@ live_design! {
 
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 3.;
+                let sz = 2.5;
                 let offset = 1.;
+                let offset_x = 2.;
 
-                sdf.move_to(c.x - sz, c.y - sz + offset);
-                sdf.line_to(c.x + sz, c.y - sz + offset);
-                sdf.line_to(c.x, c.y + sz * 0.25 + offset);
+                sdf.move_to(c.x - sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x + sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
 
                 sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
@@ -2826,7 +2844,8 @@ live_design! {
 
         popup_menu: <PopupMenu> {}
 
-        selected_item: 0
+        selected_item: 0,
+
         animator: {
             hover = {
                 default: off,
@@ -2873,6 +2892,53 @@ live_design! {
                         draw_text: {focus: 1.0}
                     }
                 }
+            }
+        }
+    }
+
+    DropDownFlat = <DropDown> {
+        draw_bg: {
+            instance hover: 0.0
+            instance focus: 0.0
+            instance pressed: 0.0
+            instance open: 0.0
+            
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), self.bodybottom, self.focus);
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+
+                sdf.stroke(
+                    THEME_COLOR_U_HIDDEN,
+                    THEME_BEVELING * 1.5
+                )
+
+                // lets draw a little triangle in the corner
+                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                let sz = 2.5;
+                let offset = 1.;
+                let offset_x = 2.;
+
+                sdf.move_to(c.x - sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x + sz - offset_x, c.y - sz + offset);
+                sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
+                sdf.close_path();
+
+                sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+
+                return sdf.result
             }
         }
     }
@@ -2936,7 +3002,6 @@ live_design! {
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
-                top_drop: 1.2,
             }
         }
 
@@ -4219,7 +4284,7 @@ live_design! {
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
-                top_drop: 1.2,
+                //top_drop: 1.2,
             }
         }
 
@@ -4394,7 +4459,7 @@ live_design! {
     DesignerOutline = <DesignerOutlineBase>{ }
 
     Vr = <View> {
-        width: Fit, height: 27.,
+        width: Fit, height: Fill,
         flow: Right,
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
@@ -4418,7 +4483,7 @@ live_design! {
         <DockToolbar> {
             content = {
                 align: { x: 0., y: 0.5 }
-                spacing: (THEME_SPACE_3)
+                spacing: (THEME_SPACE_3 * 1.5)
                 <ButtonFlat> {
                     width: 32.
                     text: ""
@@ -4433,29 +4498,69 @@ live_design! {
                     width: Fit,
                     flow: Right,
                     spacing: (THEME_SPACE_1)
-                    <Pbold> { width: Fit, text: "Font" }
-                    <P> { width: Fit, text: "Noto Sans" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Font",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "Noto Sans",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 }
                 <View> {
                     width: Fit,
                     spacing: (THEME_SPACE_1)
                     flow: Right,
-                    <Pbold> { width: Fit, text: "Weight" }
-                    <P> { width: Fit, text: "Bold" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Weight",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "bold",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 }
                 <View> {
                     width: Fit,
                     spacing: (THEME_SPACE_1)
                     flow: Right,
-                    <Pbold> { width: Fit, text: "Size" }
-                    <P> { width: Fit, text: "11 pt" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Size",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "11 pt",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 } 
                 <View> {
                     width: Fit,
                     spacing: (THEME_SPACE_1)
                     flow: Right,
-                    <Pbold> { width: Fit, text: "Line height" }
-                    <P> { width: Fit, text: "1.2" }
+                    <Pbold> {
+                        width: Fit,
+                        text: "Line height",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "1.2",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                    }
                 } 
                 <Vr> {}
                 <View> {
@@ -4762,7 +4867,7 @@ live_design! {
         }
         view = <RoundedView>{
             draw_bg:{
-                color:#3,
+                color:#4,
                 border_width:2
                 border_color:#5
             }
@@ -4839,12 +4944,22 @@ live_design! {
     }
 
     DesignerView = <DesignerViewBase>{
-        clear_color: #333333
+        clear_color: #3
         draw_outline:{
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p)
                 sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
-                sdf.stroke(#fff, 1.0);
+                
+                let line_width = 0.58;
+                let dash_length = 10;
+                let pos = p.x + p.y;//+self.time*10.0 ;
+                let dash_pattern = fract(pos / dash_length);
+                let alpha = step(dash_pattern, line_width);
+                
+                let c = vec4(mix(#c, #555f, alpha))
+                
+                sdf.stroke(c, 2.5);
                 return sdf.result;
                 //return vec4(self.color.xyz * self.color.w, self.color.w)
             }
@@ -4879,13 +4994,16 @@ live_design! {
                     flow: Down,
                     <DockToolbar> {
                         content = {
+                            margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
                             align: { x: 0., y: 0.0 }
                             spacing: (THEME_SPACE_3)
                             <Pbold> {
                                 width: Fit,
-                                margin: {left: (THEME_SPACE_1) },
-                                text: "Filter"
+                                text: "Filter",
+                                margin: 0.,
+                                padding: <THEME_MSPACE_V_1> {}
                             }
+
                             <View> {
                                 width: Fit
                                 flow: Right,

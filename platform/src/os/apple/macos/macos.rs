@@ -26,7 +26,7 @@ use {
                     macos_window::MacosWindow
                 },
                 apple_classes::init_apple_classes_global,
-                url_session::{make_http_request},
+                url_session::AppleHttpRequests,
             },
             metal_xpc::start_xpc_service,
             apple_media::CxAppleMedia,
@@ -217,8 +217,10 @@ impl Cx {
     
     pub (crate) fn handle_networking_events(&mut self) {
         let mut out = Vec::new();
-        while let Ok(event) = self.os.network_response.receiver.try_recv() {
-            out.push(event);
+        while let Ok(item) = self.os.network_response.receiver.try_recv() {
+            // remove the request object on error or end
+            self.os.http_requests.handle_response_item(&item);
+            out.push(item);
         }
         if out.len()>0 {
             self.call_event_handler(&Event::NetworkResponses(out))
@@ -274,7 +276,6 @@ impl Cx {
             }
             _ => ()
         }
-        
         //self.process_desktop_pre_event(&mut event);
         match event {
             MacosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
@@ -301,6 +302,7 @@ impl Cx {
             }
             MacosEvent::WindowGeomChange(mut re) => { // do this here because mac
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                    self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
                     if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
                         re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
                         re.new_geom.dpi_factor = dpi_override;
@@ -341,11 +343,12 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 // ok here we send out to all our childprocesses
-                
+                //self.demo_time_repaint = false;
                 self.handle_repaint(metal_windows, metal_cx);
                 
             }
-            MacosEvent::MouseDown(e) => {
+            MacosEvent::MouseDown(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.fingers.process_tap_count(
                     e.abs,
                     e.time
@@ -353,21 +356,25 @@ impl Cx {
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            MacosEvent::MouseMove(e) => {
+            MacosEvent::MouseMove(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            MacosEvent::MouseUp(e) => {
+            MacosEvent::MouseUp(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            MacosEvent::Scroll(e) => {
+            MacosEvent::Scroll(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::Scroll(e.into()))
             }
-            MacosEvent::WindowDragQuery(e) => {
+            MacosEvent::WindowDragQuery(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::WindowDragQuery(e))
             }
             MacosEvent::WindowCloseRequested(e) => {
@@ -427,6 +434,10 @@ impl Cx {
         } else {
             EventFlow::Wait
         }
+    }
+    
+    fn dpi_override_scale(&self, pos:&mut DVec2, window_id:WindowId){
+        *pos = self.windows[window_id].remap_dpi_override(*pos)
     }
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {
@@ -514,7 +525,10 @@ impl Cx {
                     get_macos_app_global().update_macos_menu(&menu)
                 },
                 CxOsOp::HttpRequest {request_id, request} => {
-                    make_http_request(request_id, request, self.os.network_response.sender.clone());
+                    self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
+                },
+                CxOsOp::CancelHttpRequest {request_id} => {
+                    self.os.http_requests.cancel_http_request(request_id);
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
                     crate::log!("Show clipboard actions not supported yet");
@@ -578,6 +592,10 @@ impl CxOsApi for Cx {
             self.start_disk_live_file_watcher(100);
         }
         self.live_scan_dependencies();
+
+        #[cfg(apple_bundle)]
+        self.apple_bundle_load_dependencies();
+        #[cfg(not(apple_bundle))]
         self.native_load_dependencies();
     }
     
@@ -617,5 +635,6 @@ pub struct CxOs {
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) stdin_timers: PollTimers,
     pub (crate) start_time: Option<Instant>,
+    pub (crate) http_requests: AppleHttpRequests,
     pub metal_device: Option<ObjcId>,
 }

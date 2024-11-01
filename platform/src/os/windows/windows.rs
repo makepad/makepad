@@ -78,23 +78,12 @@ impl Cx {
         }
         
         let mut paint_dirty = false;
-        match &event{
+        /*match &event{
             Win32Event::Timer(time) =>{
-                if time.timer_id == 0{
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        self.handle_media_signals();
-                        self.call_event_handler(&Event::Signal);
-                    }
-                    if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
-                    self.handle_networking_events();
-                    return EventFlow::Poll;
-                }
+                
             }
             _=>{}
-        }
+        }*/
 
         //self.process_desktop_pre_event(&mut event);
         match event {
@@ -246,6 +235,13 @@ impl Cx {
                     self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
                 }
+                self.handle_action_receiver();
+                if self.handle_live_edit() {
+                    self.call_event_handler(&Event::LiveEdit);
+                    self.redraw_all();
+                }
+                self.handle_networking_events();
+                return EventFlow::Poll;
             }
         }
         
@@ -295,6 +291,7 @@ impl Cx {
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx) -> EventFlow {
         let mut ret = EventFlow::Poll;
+        let mut geom_changes = Vec::new();
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -310,6 +307,11 @@ impl Cx {
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
+                    geom_changes.push(WindowGeomChangeEvent{
+                        window_id,
+                        old_geom: window.window_geom.clone(),
+                        new_geom: window.window_geom.clone()
+                    });
                 },
                 CxOsOp::CloseWindow(window_id) => {
                     if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
@@ -393,6 +395,9 @@ impl Cx {
 
                     //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
+                CxOsOp::CancelHttpRequest {request_id:_} => {
+                    todo!();
+                }
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
@@ -405,6 +410,12 @@ impl Cx {
                 CxOsOp::SelectFileDialog(_) =>  todo!(),
                 CxOsOp::SaveFolderDialog(_) =>  todo!(),
                 CxOsOp::SelectFolderDialog(_) =>  todo!(),
+            }
+        }
+        if geom_changes.len()>0{
+            self.redraw_all();
+            for geom_change in geom_changes{
+                self.call_event_handler(&Event::WindowGeomChange(geom_change));
             }
         }
         ret

@@ -4,7 +4,8 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::base::*;
     import makepad_widgets::theme_desktop_dark::*;
-    import makepad_studio::studio_editor::StudioEditor;
+    import makepad_studio::studio_editor::StudioCodeEditor;
+    import makepad_studio::ai_chat::ai_chat_view::AiChatView;
     import makepad_studio::studio_file_tree::StudioFileTree;
     import makepad_studio::run_view::RunView;
     import makepad_studio::log_list::LogList;
@@ -52,20 +53,23 @@ live_design!{
     }
 
     DockSettings = <View> {
-        align: { x: 0.0, y: 0. }
-        padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
+        align: { x: 0., y: 0. }
         spacing: (THEME_SPACE_2)
         <Filler> {}
-        <P> { width: Fit, text: "Open here"}
+        <P> {
+            width: Fit,
+            text: "",
+            margin: 0.,
+            padding: <THEME_MSPACE_1> {}
+        }
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
-            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
-            icon_walk: {width: 13.}
+            icon_walk: {width: 11., margin: {top: 1.75, right: 3. }}
+            padding: { right: 0, left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                // color_active: (STUDIO_PALETTE_4),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
             }
@@ -73,12 +77,11 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Designer"
-            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
-            icon_walk: {width: 14.}
+            icon_walk: {width: 12., margin: {top: 1.0 }}
+            padding: { right: 0, left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                // color_active: (STUDIO_PALETTE_3),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
             }
@@ -87,12 +90,11 @@ live_design!{
             text:""
             // text:"Editor"
             width: 13.
-            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
-            icon_walk: {width: 7.}
+            icon_walk: {width: 6., margin: {top: 0.5, left: 3. }}
+            padding: { right: 0., left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                // color_active: (STUDIO_PALETTE_6),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
             }
@@ -100,12 +102,11 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Scene"
-            align: { x: 0.5, y: 0.5 }
             draw_check: { check_type: None }
-            icon_walk: {width: 13.}
+            icon_walk: {width: 11.5, margin: {top: 1.5 } }
+            padding: { right: 5., left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                // color_active: (STUDIO_PALETTE_1),
                 color_active: (THEME_COLOR_TEXT_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
             }
@@ -114,8 +115,13 @@ live_design!{
 
     AppUI =  <Window> {
         margin: 5.
-        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad Studio"}} },
-        window: { inner_size: vec2(1600, 900) },
+        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad"}} 
+        preset_1 = <Button>{text:"A"}
+        preset_2 = <Button>{text:"C"}
+        preset_3 = <Button>{text:"D"}
+        preset_4 = <Button>{text:"P"}
+    },
+        window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
         show_bg: true,
         draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
         window_menu = {
@@ -171,8 +177,8 @@ live_design!{
                 OutlineFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 11.
-                        margin: { top: 4. }
+                        width: 10.
+                        margin: { top: 5. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_1)
@@ -182,19 +188,30 @@ live_design!{
                 EditFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 6.
-                        margin: { top: 3. }
+                        width: 5.
+                        margin: { top: 5. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_6)
                         svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
                     }
                 }
+                AiFirstTab = <IconTab> {
+                    spacing: (THEME_SPACE_2)
+                    icon_walk: {
+                        width: 8.
+                        margin: { top: 5.5 }
+                    }
+                    draw_icon: {
+                        color: (STUDIO_PALETTE_6)
+                        svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
+                    }
+                }
                 DesignFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 13.
-                        margin: { top: 2. }
+                        width: 11.
+                        margin: { top: 4. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_3)
@@ -204,7 +221,7 @@ live_design!{
                 FilesFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 10.,
+                        width: 8.5,
                         margin: { top: 4. }
                     }
                     draw_icon: {
@@ -215,8 +232,8 @@ live_design!{
                 RunFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 13.,
-                        margin: { top: 4. }
+                        width: 11.,
+                        margin: { top: 6. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_4)
@@ -226,8 +243,8 @@ live_design!{
                 RunListTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 9.
-                        margin: { top: 4. }
+                        width: 7.
+                        margin: { top: 5. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_5)
@@ -237,8 +254,8 @@ live_design!{
                 LogTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk:{
-                        width: 12.5
-                        margin: { top: 5. }
+                        width: 9.5
+                        margin: { top: 7. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_2)
@@ -248,8 +265,8 @@ live_design!{
                 ProfilerTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 11.
-                        margin: { top: 2. }
+                        width: 9.
+                        margin: { top: 4. }
                     }
                     draw_icon: {
                         color: (STUDIO_PALETTE_7)
@@ -259,7 +276,7 @@ live_design!{
                 SearchFirstTab = <IconTab> {
                     spacing: (THEME_SPACE_2)
                     icon_walk: {
-                        width: 13.,
+                        width: 10.5,
                         margin: { top: 4. }
                     }
                     draw_icon: {
@@ -334,7 +351,7 @@ live_design!{
             }
 
             run_tabs = Tabs {
-                tabs: [run_first],
+                tabs: [run_first,ai_first],
                 selected: 0
             }
             /*
@@ -356,25 +373,29 @@ live_design!{
             }
 
             run_first = Tab {
-                name: "App >"
+                name: ""
                 template: RunFirstTab,
                 kind: RunFirst
             }
 
             design_first = Tab {
-                name: "Design >"
+                name: ""
                 template: DesignFirstTab,
                 kind: DesignFirst
             }
 
             edit_first = Tab {
-                name: "Code >"
+                name: ""
                 template: EditFirstTab,
                 kind: EditFirst
             }
-
+            ai_first = Tab {
+                name: ""
+                template: AiFirstTab,
+                kind: AiFirst
+            }
             outline_first = Tab {
-                name: "Scene >"
+                name: ""
                 template: OutlineFirstTab,
                 kind: OutlineFirst
             }
@@ -384,13 +405,7 @@ live_design!{
                 template: RunListTab,
                 kind: RunList
             }
-
-            file1 = Tab {
-                name: "app.rs",
-                template: PermanentTab,
-                kind: StudioEditor
-            }
-
+            
             log_list_tab = Tab {
                 name: "Log",
                 template: LogTab,
@@ -403,12 +418,10 @@ live_design!{
                 kind: Profiler
             }
 
-
-            StudioEditor = <View> {
+            CodeEditor = <View> {
                 flow: Down,
                 <DockToolbar> {
                     content = {
-                        align: { x: 0., y: 0.5}
                         height: Fit, width: Fill,
                         spacing: (THEME_SPACE_1)
                         flow: Right,
@@ -419,11 +432,16 @@ live_design!{
                         <ButtonFlat> { width: Fit, text: "Search"}
                         <ButtonFlat> { width: Fit, text: "Debug"}
                         <Filler> {}
-                        <ButtonFlat> { width: Fit, text: "Docs"}
+                        <LinkLabel> { width: Fit, text: "Docs", url: "https://publish.obsidian.md/makepad-docs"}
                     }
                 }
-                editor = <StudioEditor> {} 
+                editor = <StudioCodeEditor> {} 
             }
+            
+            AiChat = <AiChatView> {
+                flow: Down,
+            }
+            
             EditFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,
@@ -435,6 +453,7 @@ live_design!{
                         align: { x: 0.5, y: 0.5 }
                         <Logo> {}
                     }
+                    
                     // <H3> {
                     //     width: Fit,
                     //     text: "Welcome to \nMakepad \n\n欢迎来到\nMakepad"
@@ -467,6 +486,18 @@ live_design!{
                     }
                 }
             }
+            AiFirst = <RectView> {
+                <View> {
+                    width: Fill, height: Fill
+                    flow: Down
+                    <DockToolbar> { content = <DockSettings> {} }
+                    <View> {
+                        width: Fill, height: Fill,
+                        align: { x: 0.5, y: 0.5 }
+                        <Logo> {}
+                    }
+                }
+            }
             RunFirst = <RectView> {
                 <View> {
                     width: Fill, height: Fill,
@@ -481,13 +512,17 @@ live_design!{
             }
             RunList = <View> {
                 flow: Down,
+                margin: 0.,
+                padding: 0.,
                 <DockToolbar> {
                     content = {
-                        align: { x: 0.0, y: 0. }
-                        padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_2) }
-                        spacing: (THEME_SPACE_2)
-                        <Pbold> { width: Fit, text: "Types" } 
-                        <CheckBoxToggle> { text: "Release"}
+                        <Pbold> {
+                            width: Fit,
+                            text: "Types",
+                            margin: 0.,
+                            padding: <THEME_MSPACE_1> {}
+                        }
+                        <CheckBoxToggle> { text: "Release", }
                         <CheckBoxToggle> { text: "Debug"}
                     }
                 }
@@ -497,15 +532,16 @@ live_design!{
             flow: Down,
                 <DockToolbar> {
                     content = {
-                        padding: { right: (THEME_SPACE_2) }
                         spacing: (THEME_SPACE_2)
+                        align: { y: 0.5 }
                         <TextInput> {
                             width: Fill,
                             empty_message: "Search",
                         }
 
                         <CheckBoxCustom> {
-                            text:""
+                            padding: 0.
+                            text: ""
                             draw_check: { check_type: None }
                             icon_walk: {width: 14.}
                             draw_icon: {
@@ -515,6 +551,7 @@ live_design!{
                             }
                         }
                         <CheckBoxCustom> {
+                            padding: 0.
                             text:""
                             draw_check: { check_type: None }
                             icon_walk: {width: 16.}
@@ -525,6 +562,7 @@ live_design!{
                             }
                         }
                         <CheckBoxCustom> {
+                            padding: 0.
                             text:""
                             draw_check: { check_type: None }
                             icon_walk: {width: 12.}
@@ -585,15 +623,16 @@ live_design!{
                 <DockToolbar> {
                     content = {
                         align: { x: 0., y: 0.5 }
-                        spacing: (THEME_SPACE_1)
                         <View> {
                             width: Fit
                             flow: Right,
-                            spacing: (THEME_SPACE_2)
+                            spacing: (THEME_SPACE_1)
                             <CheckBoxCustom> {
                                 margin: {left: (THEME_SPACE_1)}
                                 text:"Error"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -603,7 +642,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Warning"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -613,7 +654,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Log"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -623,7 +666,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Wait"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -633,7 +678,9 @@ live_design!{
                             }
                             <CheckBoxCustom> {
                                 text:"Panic"
+                                align: { y: 0.5 }
                                 draw_check: { check_type: None }
+                                spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
                                     color: (THEME_COLOR_D_2),
@@ -656,8 +703,6 @@ live_design!{
                 flow: Down,
                 <DockToolbar> {
                     content = {
-                        align: { x: 0., y: 0.5 }
-                        spacing: (THEME_SPACE_1)
                         <ButtonFlat> {
                             text: "Start"
                             icon_walk: { width: 8. }
@@ -684,13 +729,16 @@ live_design!{
                             spacing: 0.,
                             <Pbold> {
                                 width: Fit,
-                                text: "Last"
+                                text: "Last ",
+                                margin: 0.,
+                                padding: <THEME_MSPACE_V_1> {}
                                 draw_text: { color: (THEME_COLOR_D_4) }
-                                margin: { left: 10, right: 3. }
                             }
                             <P> {
                                 width: Fit,
-                                text: "500 ms"
+                                text: "500 ms",
+                                margin: 0.,
+                                padding: <THEME_MSPACE_V_1> {}
                                 draw_text: { color: (THEME_COLOR_D_4) }
                             }
                         }

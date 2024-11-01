@@ -63,6 +63,8 @@ pub struct Button {
 
     #[live]
     pub text: ArcStringMut,
+    
+    #[action_data] #[rust] action_data: WidgetActionData,
 }
 
 impl Widget for Button {
@@ -71,7 +73,14 @@ impl Widget for Button {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
-
+        
+        match event.hit_designer(cx, self.draw_bg.area()){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action_with_data(&self.action_data, uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
+        
         if self.visible {
             // The button only handles hits when it's visible and enabled.
             // If it's not enabled, we still show the button, but we set
@@ -81,7 +90,7 @@ impl Widget for Button {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
-                    cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                     self.animator_play(cx, id!(hover.pressed));
                 }
                 Hit::FingerHoverIn(_) => {
@@ -97,7 +106,7 @@ impl Widget for Button {
                 }
                 Hit::FingerUp(fe) if self.enabled => {
                     if fe.is_over {
-                        cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                         if self.reset_hover_on_click {
                             self.animator_cut(cx, id!(hover.off));
                         } else if fe.device.has_hovers() {
@@ -107,7 +116,7 @@ impl Widget for Button {
                             self.animator_play(cx, id!(hover.off));
                         }
                     } else {
-                        cx.widget_action(uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
                         self.animator_play(cx, id!(hover.off));
                     }
                 }
@@ -173,8 +182,8 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
+        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+            Some(*m)
         } else {
             None
         }
@@ -184,8 +193,8 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
+        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+            Some(*m)
         } else {
             None
         }
@@ -196,8 +205,8 @@ impl Button {
     ///
     /// See [`ButtonAction`] for more details.
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast() {
-            Some(m)
+        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+            Some(*m)
         } else {
             None
         }

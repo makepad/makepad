@@ -209,6 +209,11 @@ impl Cx {
                 else{
                     self.call_event_handler(&Event::Timer(e))
                 }
+
+                if self.handle_live_edit() {
+                    self.call_event_handler(&Event::LiveEdit);
+                    self.redraw_all();
+                }
             }
         }
         
@@ -340,6 +345,9 @@ impl Cx {
                 CxOsOp::HttpRequest{request_id:_, request:_} => {
                     todo!()
                 },
+                CxOsOp::CancelHttpRequest {request_id:_} => {
+                    todo!();
+                }
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
                 CxOsOp::PauseVideoPlayback(_) => todo!(),
@@ -366,6 +374,9 @@ impl CxOsApi for Cx {
             self.live_registry.borrow_mut().package_root = Some(item.to_string());
         }
         self.live_expand();
+        if !Self::has_studio_web_socket() {
+            self.start_disk_live_file_watcher(100);
+        }
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }

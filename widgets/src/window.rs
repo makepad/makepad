@@ -182,6 +182,17 @@ impl Window {
     }
 }
 
+impl WindowRef{
+    pub fn get_inner_size(&self, cx:&Cx)->DVec2{
+        if let Some(inner) = self.borrow(){
+            inner.window.get_inner_size(cx)
+        }
+        else{
+            dvec2(0.0,0.0)
+        }
+    }
+}
+
 impl Widget for Window {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();

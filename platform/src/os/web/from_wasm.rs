@@ -170,7 +170,11 @@ pub struct FromWasmHTTPRequest {
     pub body: WasmDataU8,
 }
 
-
+#[derive(FromWasm)]
+pub struct FromWasmCancelHTTPRequest {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+}
 
 // WebGL API
 

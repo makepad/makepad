@@ -61,10 +61,25 @@ pub type AChoreographer_vsyncCallback = unsafe extern "C" fn(
     data: *mut c_void,
 );
 
+/// The function type for posting callbacks to the AChoreographer
+pub type AChoreographerPostCallbackFn = unsafe extern "C" fn(
+    *mut AChoreographer,
+    Option<unsafe extern "C" fn(*mut AChoreographerFrameCallbackData, *mut std::ffi::c_void)>,
+    *mut std::ffi::c_void,
+) -> i32;
+
+#[cfg(not(no_android_choreographer))]
 extern "C" {
     pub fn AChoreographer_getInstance() -> *mut AChoreographer;
-
+    // Android SDK >= 33
     pub fn AChoreographer_postVsyncCallback(
+        choreographer: *mut AChoreographer,
+        callback: Option<AChoreographer_vsyncCallback>,
+        data: *mut c_void,
+    ) -> i32;
+
+    // Android SDK < 33 && >= 29
+    pub fn AChoreographer_postFrameCallback64(
         choreographer: *mut AChoreographer,
         callback: Option<AChoreographer_vsyncCallback>,
         data: *mut c_void,

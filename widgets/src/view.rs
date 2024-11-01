@@ -2,7 +2,6 @@ use {
     crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
     std::{
         cell::RefCell,
-        collections::HashMap,
     },
 };
 
@@ -158,7 +157,7 @@ pub struct View {
     design_mode: bool,
 
     #[rust]
-    find_cache: RefCell<HashMap<u64, WidgetSet>>,
+    find_cache: RefCell<SmallVec<[(u64, WidgetSet);3]>>,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
@@ -173,11 +172,13 @@ pub struct View {
     #[rust]
     texture_cache: Option<ViewTextureCache>,
     #[rust]
-    defer_walks: Vec<(LiveId, DeferWalk)>,
+    defer_walks: SmallVec<[(LiveId, DeferWalk);1]>,
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
-    children: Vec<(LiveId, WidgetRef)>,
+    children: SmallVec<[(LiveId, WidgetRef);2]>,
+    #[rust]
+    live_update_order: SmallVec<[LiveId;1]>,
     //#[rust]
     //draw_order: Vec<LiveId>,
 
@@ -201,6 +202,7 @@ impl LiveHook for View {
     ) {
         if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             //self.draw_order.clear();
+            self.live_update_order.clear();
             self.find_cache.get_mut().clear();
         }
     }
@@ -208,10 +210,22 @@ impl LiveHook for View {
     fn after_apply(
         &mut self,
         cx: &mut Cx,
-        _applyl: &mut Apply,
+        apply: &mut Apply,
         _index: usize,
         _nodes: &[LiveNode],
     ) {
+        if apply.from.is_update_from_doc(){//livecoding
+            // update/delete children list
+            for (idx, id) in self.live_update_order.iter().enumerate(){
+                // lets remove this id from the childlist
+                if let Some(pos) = self.children.iter().position(|(i,_v)| *i == *id){
+                    // alright so we have the position its in now, and the position it should be in
+                    self.children.swap(idx, pos);
+                }
+            }
+            // if we had more truncate
+            self.children.truncate(self.live_update_order.len());
+        }
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -243,6 +257,9 @@ impl LiveHook for View {
             }
             ApplyFrom::NewFromDoc { .. } | ApplyFrom::UpdateFromDoc { .. } => {
                 if nodes[index].is_instance_prop() {
+                    if apply.from.is_update_from_doc(){//livecoding
+                        self.live_update_order.push(id);
+                    }
                     //self.draw_order.push(id);
                     if let Some((_,node)) = self.children.iter_mut().find(|(id2,_)| *id2 == id){
                         node.apply(cx, apply, index, nodes)
@@ -543,13 +560,24 @@ impl WidgetNode for View {
             WidgetCache::Yes | WidgetCache::Clear => {
                 if let WidgetCache::Clear = cached {
                     self.find_cache.borrow_mut().clear();
+                    if path.len() == 0{
+                        return
+                    }
                 }
                 let mut hash = 0u64;
                 for i in 0..path.len() {
                     hash ^= path[i].0
                 }
-                if let Some(widget_set) = self.find_cache.borrow().get(&hash) {
+                if let Some((_,widget_set)) = self.find_cache.borrow().iter().find(|(h,_v)| h == &hash) {
                     results.extend_from_set(widget_set);
+                    /*#[cfg(not(ignore_query))]
+                    if results.0.len() == 0{
+                        log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
+                    }
+                    #[cfg(panic_query)]
+                    if results.0.len() == 0{
+                        panic!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
+                    }*/
                     return;
                 }
                 let mut local_results = WidgetSet::empty();
@@ -566,7 +594,15 @@ impl WidgetNode for View {
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-                self.find_cache.borrow_mut().insert(hash, local_results);
+                #[cfg(not(ignore_query))]
+                if local_results.0.len() == 0{
+                    log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
+                }
+                #[cfg(panic_query)]
+                if local_results.0.len() == 0{
+                    panic!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
+                }
+                self.find_cache.borrow_mut().push((hash, local_results));
             }
             WidgetCache::No => {
                  if let Some((_,child)) = self.children.iter().find(|(id,_)| *id == path[0]) {
@@ -629,7 +665,14 @@ impl Widget for View {
                 }
             }
         }
-
+                
+        match event.hit_designer(cx, self.area()){
+            HitDesigner::DesignerPick(_e)=>{
+                cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
+            }
+            _=>()
+        }
+        
         if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
@@ -923,6 +966,28 @@ enum DrawState {
 }
 
 impl View {
+    pub fn swap_child(&mut self, pos_a: usize, pos_b: usize){
+        self.children.swap(pos_a, pos_b);
+    }
+    
+    pub fn child_index(&mut self, comp:&WidgetRef)->Option<usize>{
+        if let Some(pos) = self.children.iter().position(|(_,w)|{w == comp}){
+            Some(pos)
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn child_at_index(&mut self, index:usize)->Option<&WidgetRef>{
+        if let Some(f) = self.children.get(index){
+            Some(&f.1)
+        }
+        else{
+            None
+        }
+    }
+    
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.set_scroll_pos(cx, v);

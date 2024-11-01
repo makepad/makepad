@@ -63,7 +63,7 @@ pub use makepad_wasm_bridge;
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use ::makepad_windows as windows;
+pub use ::windows as windows;
 
 pub use makepad_futures;
  
@@ -157,6 +157,8 @@ pub use {
             HttpRequest,
             HttpResponse,
             HttpMethod,
+            HttpProgress,
+            HttpError,
             NetworkResponse,
             NetworkResponsesEvent,
             Margin,
@@ -211,12 +213,14 @@ pub use {
             Actions,
             ActionsBuf, 
             ActionCast,
-            ActionTrait
+            ActionCastRef,
+            ActionTrait,
+            ActionDefaultRef
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
-        window::WindowHandle,
+        window::{WindowHandle,CxWindowPool},
         pass::{
             PassId,
             CxPassParent,
