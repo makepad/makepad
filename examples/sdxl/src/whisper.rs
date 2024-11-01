@@ -29,7 +29,7 @@ impl WhisperProcess{
         let bin = "/Users/me/whisper.cpp/stream";
         
         #[cfg(target_os = "windows")]
-        let model="C:/Users/me/whisper.cpp/models/ggml-base-en.bin";
+        let model="C:/Users/me/whisper.cpp/models/ggml-base.en.bin";
         #[cfg(target_os = "windows")]
         let bin = "C:/Users/me/whisper.cpp/stream.exe";
         
