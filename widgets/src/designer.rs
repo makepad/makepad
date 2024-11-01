@@ -83,9 +83,11 @@ impl WidgetMatchEvent for Designer{
         for action in actions{
             if let StudioToApp::DesignerSelectFile{file_name} = action.cast_ref(){
                 let path_ids = DesignerData::path_str_to_path_ids(&file_name);
-                outline_tree.select_and_show_node(cx, &path_ids);
-                designer_view.select_component_and_redraw(cx, None);
-                designer_view.view_file_and_redraw(cx, *path_ids.last().unwrap());
+                if path_ids.len() > 0{
+                    outline_tree.select_and_show_node(cx, &path_ids);
+                    designer_view.select_component_and_redraw(cx, None);
+                    designer_view.view_file_and_redraw(cx, *path_ids.last().unwrap());
+                }
             }
              if let StudioToApp::DesignerLoadState{positions, zoom_pan} = action.cast_ref(){
                  self.data.positions = positions.clone();
