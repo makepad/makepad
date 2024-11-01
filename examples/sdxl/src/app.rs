@@ -227,7 +227,9 @@ impl App {
         let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
         let ws = ws.replace("\"cfg\": 3", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
         let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
-        
+        let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", prompt_state.prompt.preset.width));
+        let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", prompt_state.prompt.preset.height));
+                
         request.set_metadata_id(machine.id);
         request.set_body(ws.as_bytes().to_vec());
             
@@ -455,8 +457,8 @@ impl App {
     fn save_preset(&self) -> PromptPreset {
         PromptPreset { 
             workflow: self.ui.drop_down(id!(workflow_dropdown)).selected_label(),
-            width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
-            height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
+            width: self.ui.text_input(id!(settings_width)).text().parse::<u32>().unwrap_or(1344),
+            height: self.ui.text_input(id!(settings_height)).text().parse::<u32>().unwrap_or(768),
             steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
             cfg: self.ui.text_input(id!(settings_cfg.input)).text().parse::<f64>().unwrap_or(1.8),
             denoise: self.ui.text_input(id!(settings_denoise.input)).text().parse::<f64>().unwrap_or(1.0),
@@ -465,8 +467,8 @@ impl App {
     
     fn load_preset(&self, preset: &PromptPreset) {
         self.ui.drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
-        self.ui.text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
-        self.ui.text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
+        self.ui.text_input(id!(settings_width)).set_text(&format!("{}", preset.width));
+        self.ui.text_input(id!(settings_height)).set_text(&format!("{}", preset.height));
         self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
         self.ui.text_input(id!(settings_cfg.input)).set_text(&format!("{}", preset.cfg));
         self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
@@ -1070,6 +1072,17 @@ impl MatchEvent for App {
                 }
                 _ => ()
             }
+        }
+        
+        if let Some(true) = self.ui.check_box(id!(render_check_box)).changed(&actions) {
+            self.render(cx);
+        }
+        
+        if let Some(_x) = self.ui.drop_down(id!(resolution)).selected(&actions){
+            let label = self.ui.drop_down(id!(resolution)).selected_label();
+            let mut split = label.split("x");
+            self.ui.text_input(id!(settings_width)).set_text_and_redraw(cx, split.next().unwrap());
+            self.ui.text_input(id!(settings_height)).set_text_and_redraw(cx, split.next().unwrap());
         }
         
         let chat = self.ui.text_input(id!(chat));
