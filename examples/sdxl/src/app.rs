@@ -355,6 +355,15 @@ impl App {
         self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}", self.last_seed));
     }
     
+    fn set_prompt(&mut self, cx: &mut Cx, prompt:&str) {
+        self.ui.text_input(id!(positive)).set_text_and_redraw(cx, prompt);
+    }
+    
+    fn add_prompt(&mut self, cx: &mut Cx, prompt:&str) {
+        let positive = self.ui.text_input(id!(positive)).text();
+        self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}", positive,prompt));
+    }
+        
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
             self.ui.text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
@@ -1111,6 +1120,21 @@ impl MatchEvent for App {
             }
         }
         
+       if self.ui.button(id!(prompt_1)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_2)).clicked(&actions) { self.set_prompt(cx, "Museum night");}
+       if self.ui.button(id!(prompt_3)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_4)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_5)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_6)).clicked(&actions) { self.set_prompt(cx, "");}
+       
+       if self.ui.button(id!(keyword_1)).clicked(&actions) { self.add_prompt(cx, "Drawing");}
+       if self.ui.button(id!(keyword_2)).clicked(&actions) { self.add_prompt(cx, "Photo Photorealistic");}
+       if self.ui.button(id!(keyword_3)).clicked(&actions) { self.add_prompt(cx, "Intricate");}
+       if self.ui.button(id!(keyword_4)).clicked(&actions) { self.add_prompt(cx, "Cinematic");}
+       if self.ui.button(id!(keyword_5)).clicked(&actions) { self.add_prompt(cx, "Disney Pixar");}
+       if self.ui.button(id!(keyword_6)).clicked(&actions) { self.add_prompt(cx, "Colorful Bright");}
+                      
+                      
         if self.ui.button(id!(trim_button)).clicked(&actions) {
             let positive = self.ui.text_input(id!(positive)).text();
             self.llm_chat.clear();
