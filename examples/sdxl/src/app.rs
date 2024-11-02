@@ -215,7 +215,8 @@ impl App {
         let url = format!("http://{}/prompt", machine.ip);
         let mut request = HttpRequest::new(url, HttpMethod::POST);
         self.ui.text_input(id!(last_sent)).set_text_and_redraw(cx, &prompt_state.prompt.positive);
-        self.ui.label(id!(progress)).set_text_and_redraw(cx, "Prompted");
+        self.ui.label(id!(progress)).set_text_and_redraw(cx, &format!("Step 0/{}", prompt_state.prompt.preset.steps));
+        
         request.set_header("Content-Type".to_string(), "application/json".to_string());
 
         let ws = fs::read_to_string("examples/sdxl/workspace_flux.json").unwrap();
@@ -1051,11 +1052,13 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
         for action in actions{
             if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
-                if *clear{
-                    self.ui.text_input(id!(positive)).set_text("");
+                if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).selected(cx){
+                    if *clear{
+                        self.ui.text_input(id!(positive)).set_text("");
+                    }
+                    let t = self.ui.text_input(id!(positive)).text();
+                    self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}",t, text));
                 }
-                let t = self.ui.text_input(id!(positive)).text();
-                self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}",t, text));
             }
         }
         
