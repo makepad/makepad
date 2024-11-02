@@ -884,18 +884,67 @@ live_design!{
                             color: (COLOR_TEXT_INPUT)
                         }
                     }
-                    last_sent = <TextInput> {
-                        is_read_only: true,
-                        width: Fill,
+                    <View>{
                         height: Fill,
-                        margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
-                        text: "Positive"
-                        draw_text: {
-                            text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
+                        width: Fill
+                        flow:Down
+                        <View>{
+                            height: Fit,
+                            width: Fill
+                            prompt_1 = <BarButton> {
+                                text: "Empty"
+                            }
+                            prompt_2 = <BarButton> {
+                                text: "MuseumN8"
+                            }
+                            prompt_3 = <BarButton> {
+                                text: ".."
+                            }
+                            prompt_4 = <BarButton> {
+                                text: ".."
+                            }
+                            prompt_5 = <BarButton> {
+                                text: ".."
+                            }
+                            prompt_6 = <BarButton> {
+                                text: ".."
+                            }
                         }
-                        draw_bg: {
-                            fn pixel(self)->vec4{
-                                return #4
+                        <View>{
+                            height: Fit,
+                            width: Fill
+                            keyword_1 = <BarButton> {
+                                text: "Drawing"
+                            }
+                            keyword_2 = <BarButton> {
+                                text: "Photo"
+                            }
+                            keyword_3 = <BarButton> {
+                                text: "Intricate"
+                            }
+                            keyword_4 = <BarButton> {
+                                text: "Cinematic"
+                            }
+                            keyword_5 = <BarButton> {
+                                text: "Disney"
+                            }
+                            keyword_6 = <BarButton> {
+                                text: "Colorful"
+                            }
+                        }
+                        last_sent = <TextInput> {
+                            is_read_only: true,
+                            width: Fill,
+                            height: Fill,
+                            margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
+                            text: "Positive"
+                            draw_text: {
+                                text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
+                            }
+                            draw_bg: {
+                                fn pixel(self)->vec4{
+                                    return #4
+                                }
                             }
                         }
                     }
