@@ -9,3 +9,4 @@ pub mod app;
 pub mod app_ui;
 pub mod database;
 pub mod comfyui;
+pub mod whisper;

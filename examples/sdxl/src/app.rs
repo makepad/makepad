@@ -10,6 +10,7 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::cell::RefCell;
 use std::sync::{Arc,Mutex};
+use crate::whisper::*;
    
 live_design!{
     import makepad_widgets::base::*;
@@ -26,6 +27,7 @@ live_design!{
                 body = <AppUI>{}
             }
             <Window> {
+               hide_caption_on_fullscreen:true
                 window: {inner_size: vec2(960, 540)},
                 body = <AppWindow>{}
             }
@@ -45,7 +47,7 @@ struct Machine {
 #[derive(Debug)]
 enum MachineRunning{
     Stopped,
-    UploadingImage{
+    _UploadingImage{
         photo_name: String,
         prompt_state: PromptState,
     },
@@ -99,13 +101,13 @@ pub struct App {
     #[rust(10000u64)] last_seed: u64,
     
     #[rust] current_image: Option<ImageId>,
-    #[rust] current_photo_name: Option<String>,
+    #[rust] _current_photo_name: Option<String>,
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
     #[rust] llm_chat: Vec<(LLMMsg,String)>,
-    
+    #[rust] voice_input: Option<WhisperProcess>,
     #[rust] delay_timer: Timer,
 }
 
@@ -200,9 +202,9 @@ impl App {
 
         request.set_body(body);
         cx.http_request(live_id!(camera), request);
-        self.current_photo_name = Some(photo_name.clone());
+        self._current_photo_name = Some(photo_name.clone());
         
-        machine.running = MachineRunning::UploadingImage{
+        machine.running = MachineRunning::_UploadingImage{
             photo_name,
             prompt_state: prompt_state.clone(),
         };
@@ -213,7 +215,8 @@ impl App {
         let url = format!("http://{}/prompt", machine.ip);
         let mut request = HttpRequest::new(url, HttpMethod::POST);
         self.ui.text_input(id!(last_sent)).set_text_and_redraw(cx, &prompt_state.prompt.positive);
-        self.ui.label(id!(progress)).set_text_and_redraw(cx, "Prompted");
+        self.ui.label(id!(progress)).set_text_and_redraw(cx, &format!("Step 0/{}", prompt_state.prompt.preset.steps));
+        
         request.set_header("Content-Type".to_string(), "application/json".to_string());
 
         let ws = fs::read_to_string("examples/sdxl/workspace_flux.json").unwrap();
@@ -225,7 +228,9 @@ impl App {
         let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
         let ws = ws.replace("\"cfg\": 3", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
         let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
-        
+        let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", prompt_state.prompt.preset.width));
+        let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", prompt_state.prompt.preset.height));
+                
         request.set_metadata_id(machine.id);
         request.set_body(ws.as_bytes().to_vec());
             
@@ -350,6 +355,15 @@ impl App {
         self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}", self.last_seed));
     }
     
+    fn set_prompt(&mut self, cx: &mut Cx, prompt:&str) {
+        self.ui.text_input(id!(positive)).set_text_and_redraw(cx, prompt);
+    }
+    
+    fn add_prompt(&mut self, cx: &mut Cx, prompt:&str) {
+        let positive = self.ui.text_input(id!(positive)).text();
+        self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}", positive,prompt));
+    }
+        
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
             self.ui.text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
@@ -453,8 +467,8 @@ impl App {
     fn save_preset(&self) -> PromptPreset {
         PromptPreset { 
             workflow: self.ui.drop_down(id!(workflow_dropdown)).selected_label(),
-            width: self.ui.text_input(id!(settings_width.input)).text().parse::<u32>().unwrap_or(1344),
-            height: self.ui.text_input(id!(settings_height.input)).text().parse::<u32>().unwrap_or(768),
+            width: self.ui.text_input(id!(settings_width)).text().parse::<u32>().unwrap_or(1344),
+            height: self.ui.text_input(id!(settings_height)).text().parse::<u32>().unwrap_or(768),
             steps: self.ui.text_input(id!(settings_steps.input)).text().parse::<u32>().unwrap_or(20),
             cfg: self.ui.text_input(id!(settings_cfg.input)).text().parse::<f64>().unwrap_or(1.8),
             denoise: self.ui.text_input(id!(settings_denoise.input)).text().parse::<f64>().unwrap_or(1.0),
@@ -463,8 +477,8 @@ impl App {
     
     fn load_preset(&self, preset: &PromptPreset) {
         self.ui.drop_down(id!(workflow_dropdown)).set_selected_by_label(&preset.workflow);
-        self.ui.text_input(id!(settings_width.input)).set_text(&format!("{}", preset.width));
-        self.ui.text_input(id!(settings_height.input)).set_text(&format!("{}", preset.height));
+        self.ui.text_input(id!(settings_width)).set_text(&format!("{}", preset.width));
+        self.ui.text_input(id!(settings_height)).set_text(&format!("{}", preset.height));
         self.ui.text_input(id!(settings_steps.input)).set_text(&format!("{}", preset.steps));
         self.ui.text_input(id!(settings_cfg.input)).set_text(&format!("{}", preset.cfg));
         self.ui.text_input(id!(settings_denoise.input)).set_text(&format!("{}", preset.denoise));
@@ -542,10 +556,30 @@ impl App {
             }
         });
     }
+    
+    pub fn start_voice_input(&mut self, cx:&mut Cx){
+        if self.voice_input.is_some(){
+            self.stop_voice_input(cx);
+        }
+        match WhisperProcess::new(){
+            Ok(wp)=>{
+                self.voice_input = Some(wp);
+            }
+            Err(e)=>{
+                log!("Cannot start whisper {e}");
+            }
+        }
+    }
+    
+    pub fn stop_voice_input(&mut self, _cx:&mut Cx){
+        if let Some(voice_input) = self.voice_input.take(){
+            voice_input.stop();
+        }
+    }
 }
 
 impl MatchEvent for App {
-    fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+    fn handle_midi_ports(&mut self, _cx: &mut Cx, _ports: &MidiPortsEvent) {
         //cx.use_midi_inputs(&ports.all_inputs());
     }
     
@@ -878,7 +912,7 @@ impl MatchEvent for App {
                         live_id!(camera) => {
                             // move to next step
                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
-                                if let MachineRunning::UploadingImage{photo_name, prompt_state} = &machine.running{
+                                if let MachineRunning::_UploadingImage{photo_name, prompt_state} = &machine.running{
                                                                                     
                                     let photo_name = photo_name.clone();
                                     let prompt_state = prompt_state.clone();
@@ -1018,13 +1052,25 @@ impl MatchEvent for App {
         }
     }
     
-    fn handle_video_inputs(&mut self, cx: &mut Cx, devices:&VideoInputsEvent){
-        log!("{:?}", devices);
-        let input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
-        cx.use_video_input(&input);
+    fn handle_video_inputs(&mut self, _cx: &mut Cx, devices:&VideoInputsEvent){
+        //log!("{:?}", devices);
+        let _input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
+        //cx.use_video_input(&input);
     }
     
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
+        for action in actions{
+            if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
+                if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).selected(cx){
+                    if *clear{
+                        self.ui.text_input(id!(positive)).set_text("");
+                    }
+                    let t = self.ui.text_input(id!(positive)).text();
+                    self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}",t, text));
+                }
+            }
+        }
+        
         let image_list = self.ui.portal_list(id!(image_list));
         if let Some(ke) = self.ui.view_set(ids!(image_view, big_image)).key_down(&actions) {
             match ke.key_code {
@@ -1038,6 +1084,17 @@ impl MatchEvent for App {
                 }
                 _ => ()
             }
+        }
+        
+        if let Some(true) = self.ui.check_box(id!(render_check_box)).changed(&actions) {
+            self.render(cx);
+        }
+        
+        if let Some(_x) = self.ui.drop_down(id!(resolution)).selected(&actions){
+            let label = self.ui.drop_down(id!(resolution)).selected_label();
+            let mut split = label.split("x");
+            self.ui.text_input(id!(settings_width)).set_text_and_redraw(cx, split.next().unwrap());
+            self.ui.text_input(id!(settings_height)).set_text_and_redraw(cx, split.next().unwrap());
         }
         
         let chat = self.ui.text_input(id!(chat));
@@ -1054,12 +1111,35 @@ impl MatchEvent for App {
             self.render(cx);
         }
         
-        if self.ui.button(id!(trim_button)).clicked(&actions) {
-            if self.llm_chat.len()>2{
-                let last = self.llm_chat.len().max(2)-1;
-                self.llm_chat.drain(2..last);
-                self.ui.widget(id!(llm_chat)).redraw(cx);
+        if let Some(voice) = self.ui.check_box(id!(voice_check_box)).changed(&actions) {
+            if voice{
+                self.start_voice_input(cx);
             }
+            else{
+                self.stop_voice_input(cx);
+            }
+        }
+        
+       if self.ui.button(id!(prompt_1)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_2)).clicked(&actions) { self.set_prompt(cx, "Museum night");}
+       if self.ui.button(id!(prompt_3)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_4)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_5)).clicked(&actions) { self.set_prompt(cx, "");}
+       if self.ui.button(id!(prompt_6)).clicked(&actions) { self.set_prompt(cx, "");}
+       
+       if self.ui.button(id!(keyword_1)).clicked(&actions) { self.add_prompt(cx, "Drawing");}
+       if self.ui.button(id!(keyword_2)).clicked(&actions) { self.add_prompt(cx, "Photo Photorealistic");}
+       if self.ui.button(id!(keyword_3)).clicked(&actions) { self.add_prompt(cx, "Intricate");}
+       if self.ui.button(id!(keyword_4)).clicked(&actions) { self.add_prompt(cx, "Cinematic");}
+       if self.ui.button(id!(keyword_5)).clicked(&actions) { self.add_prompt(cx, "Disney Pixar");}
+       if self.ui.button(id!(keyword_6)).clicked(&actions) { self.add_prompt(cx, "Colorful Bright");}
+                      
+                      
+        if self.ui.button(id!(trim_button)).clicked(&actions) {
+            let positive = self.ui.text_input(id!(positive)).text();
+            self.llm_chat.clear();
+            self.llm_chat.push((LLMMsg::AI, positive));
+            self.ui.widget(id!(llm_chat)).redraw(cx);
         }
         
         if self.ui.button(id!(clear_button)).clicked(&actions) {

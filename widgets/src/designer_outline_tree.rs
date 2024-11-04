@@ -399,6 +399,9 @@ impl DesignerOutlineTree {
     }
     
     pub fn select_and_show_node(&mut self, cx:&mut Cx, id_path:&[LiveId])  {
+        if id_path.len() == 0{
+            return
+        }
         for i in 0..id_path.len()-1{
             let id = id_path[i];
             self.open_nodes.insert(id);
