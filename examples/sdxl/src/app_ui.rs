@@ -713,31 +713,20 @@ live_design!{
                     <BarLabel> {
                         text: "Workflow"
                     }*/
-                    
-                    settings_cfg = <SettingsSlider> {visible: false, input = {text: "Config", default: 4.0, min:1.0, max:8.0, step:0.01}}
-                    
-                    settings_steps = <SettingsSlider> {input = {text: "Steps", default: 4.0, min:1, max: 10, step:1}}
-                                                
-                    settings_denoise = <SettingsSlider> {visible: false, input = {text: "Denoise", default: 1.0, min:0.2, max:1.0, step:0.01}}
-                    
-                    settings_delay = <SettingsSlider> {input = {text: "Delay", default: 0., min:0., max:5.0, step:0.01}} 
-                    
                     resolution = <DropDownFlat> { 
                         width: Fit, 
+                        margin:{left:0},
                         popup_menu_position: BelowInput 
+                        labels: ["1920x1088","1440x816","960x544","1088x1920","2048x1448","768x1024"]
+                                                
                     }
-                    <BarLabel> {
-                        text: "width:"
-                    }
+                    
                     settings_width = <TextInput> {
                         draw_text: {text_style: <TEXT_BOLD> {}}
                         text: "1920",
                         height: Fit,
                         width: Fit,
                         margin: {bottom: 0, left: 0}
-                    }
-                    <BarLabel> {
-                        text: "height:"
                     }
                     settings_height = <TextInput> {
                         draw_text: {text_style: <TEXT_BOLD> {}}
@@ -746,40 +735,57 @@ live_design!{
                         width: Fit,
                         margin: {bottom: 0, left: 0}
                     }
+                    
+                    settings_cfg = <SettingsSlider> {visible: false, input = {text: "Config", default: 4.0, min:1.0, max:8.0, step:0.01}}
+                                          
+                    settings_denoise = <SettingsSlider> {visible: false, input = {text: "Denoise", default: 1.0, min:0.2, max:1.0, step:0.01}}
+                    /*
+                    settings_delay = <SettingsSlider> {input = {text: "Delay", default: 0., min:0., max:5.0, step:0.01}} 
+                    single_check_box = <SdxlCheckBox> {
+                        text: "Sync"
+                    }*/
+                    
+                    
                      
                     //workflow_dropdown = <SdxlDropDown> {}
-                    random_check_box = <SdxlCheckBox> {
-                        text: "Random"
-                    }
-                                    
+                    
                     render_check_box = <SdxlCheckBox> {
                         text: "Render"
                     }
-                    single_check_box = <SdxlCheckBox> {
-                        text: "Single"
+                    
+                    voice_check_box = <SdxlCheckBox> {
+                        text: "Voice"
                     }
-                    trim_button = <BarButton> {
-                        text: "Trim"
+                    mute_check_box = <SdxlCheckBox> {
+                        text: "Mute"
                     }
-                    clear_button = <BarButton> {
-                        text: "Clear"
-                    }
+                                        
+                    settings_steps = <SettingsSlider> {input = {text: "Steps", default: 4.0, min:1, max: 20, step:1}}
+                                              
                     <BarLabel> {
+                        text: "Progress:  "
+                    }
+                    progress = <BarLabel> {
+                         margin: {bottom: 0, left: 0}
+                        text: "Off"
+                    }
+                                        
+                    <BarLabel> {
+                                                
                         text: "Seed:"
+                    }
+                    random_check_box = <SdxlCheckBox> {
+                        text: "*"
+                        animator:{selected={default:on}}
                     }
                     seed_input = <TextInput> {
                         draw_text: {text_style: <TEXT_BOLD> {}}
                         height: Fit,
                         width: Fit,
                         margin: {bottom: 0, left: 0}
-                    }
+                    }      
                     
-                    <BarLabel> {
-                        text: "Progress:"
-                    }
-                    progress = <BarLabel> {
-                        text: "1/1"
-                    }
+                    
                     <FillerH> {}
                 }
                 <View> {
@@ -827,33 +833,41 @@ live_design!{
                                 }
                             }
                         }
-                       
-                        chat = <TextInput> {
+                        <View>{
                             height: Fit,
-                            width: Fill,
-                            margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
-                            margin: {bottom: 0}
-                            empty_message: "Talk here"
-                            draw_bg: {
-                                color: (COLOR_TEXT_INPUT)
+                            trim_button = <BarButton> {
+                                text: "Ask"
                             }
-                            draw_text: {
-                                text_style: {font_size: (TEXT_BIG)}
-                                fn get_color(self) -> vec4 {
-                                    return
-                                    mix(
+                            clear_button = <BarButton> {
+                                text: "Clear"
+                            }
+                            chat = <TextInput> {
+                                height: Fit,
+                                width: Fill,
+                                margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
+                                margin: {bottom: 0}
+                                empty_message: "Chat here"
+                                draw_bg: {
+                                    color: (COLOR_TEXT_INPUT)
+                                }
+                                draw_text: {
+                                    text_style: {font_size: (TEXT_BIG)}
+                                    fn get_color(self) -> vec4 {
+                                        return
                                         mix(
                                             mix(
-                                                #xFFFFFF55,
-                                                #xFFFFFF88,
-                                                self.hover
+                                                mix(
+                                                    #xFFFFFF55,
+                                                    #xFFFFFF88,
+                                                    self.hover
+                                                ),
+                                                #xFFFFFFCC,
+                                                self.focus
                                             ),
-                                            #xFFFFFFCC,
-                                            self.focus
-                                        ),
-                                        #xFFFFFF66,
-                                        self.is_empty
-                                    )
+                                            #xFFFFFF66,
+                                            self.is_empty
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -870,18 +884,67 @@ live_design!{
                             color: (COLOR_TEXT_INPUT)
                         }
                     }
-                    last_sent = <TextInput> {
-                        is_read_only: true,
-                        width: Fill,
+                    <View>{
                         height: Fill,
-                        margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
-                        text: "Positive"
-                        draw_text: {
-                            text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
+                        width: Fill
+                        flow:Down
+                        <View>{
+                            height: Fit,
+                            width: Fill
+                            prompt_1 = <BarButton> {
+                                text: "Empty"
+                            }
+                            prompt_2 = <BarButton> {
+                                text: "MuseumN8"
+                            }
+                            prompt_3 = <BarButton> {
+                                text: ".."
+                            }
+                            prompt_4 = <BarButton> {
+                                text: ".."
+                            }
+                            prompt_5 = <BarButton> {
+                                text: ".."
+                            }
+                            prompt_6 = <BarButton> {
+                                text: ".."
+                            }
                         }
-                        draw_bg: {
-                            fn pixel(self)->vec4{
-                                return #4
+                        <View>{
+                            height: Fit,
+                            width: Fill
+                            keyword_1 = <BarButton> {
+                                text: "Drawing"
+                            }
+                            keyword_2 = <BarButton> {
+                                text: "Photo"
+                            }
+                            keyword_3 = <BarButton> {
+                                text: "Intricate"
+                            }
+                            keyword_4 = <BarButton> {
+                                text: "Cinematic"
+                            }
+                            keyword_5 = <BarButton> {
+                                text: "Disney"
+                            }
+                            keyword_6 = <BarButton> {
+                                text: "Colorful"
+                            }
+                        }
+                        last_sent = <TextInput> {
+                            is_read_only: true,
+                            width: Fill,
+                            height: Fill,
+                            margin: {top: 0.0, left: 5.0, bottom: 0.0, right: 0.0},
+                            text: "Positive"
+                            draw_text: {
+                                text_style: <THEME_FONT_LABEL> {font_size: (TEXT_BIG)}
+                            }
+                            draw_bg: {
+                                fn pixel(self)->vec4{
+                                    return #4
+                                }
                             }
                         }
                     }
@@ -961,7 +1024,7 @@ live_design!{
                         row1 = <ImageTile> {}
                     }
                 }
-                <RoundedView>{
+                /*<RoundedView>{
                     draw_bg:{
                         color:#2
                     }
@@ -977,7 +1040,7 @@ live_design!{
                         video_input0 = <VideoFrame>{}
                         video_input1 = <VideoFrame>{}
                     }
-                }
+                }*/
                 
             }
         }
@@ -1009,7 +1072,7 @@ live_design!{
             flow: Overlay,
             align: {x: 0.5, y: 0.5}
             image1 = <ImageBlend> {
-                breathe: true,
+                breathe: false,
                 fit: Smallest,
                 width: Fill,
                 height: Fill
@@ -1024,7 +1087,7 @@ live_design!{
                     height: Fit
                     draw_text: {
                         wrap: Word
-                        text_style: <TEXT_BOLD> {font_size: 20}
+                        text_style: <TEXT_BOLD> {font_size: 15}
                                                                                                     
                         color: #c
                     },
@@ -1034,3 +1097,4 @@ live_design!{
         }
     }
 }
+ 
