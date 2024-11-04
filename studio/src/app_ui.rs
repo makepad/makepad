@@ -593,17 +593,17 @@ live_design!{
                             flow: Right,
                             spacing: 0.,
                             <ButtonFlat> {
-                                width: 32.
+                                width: 25.
                                 text: ""
-                                icon_walk: { width: 14. }
+                                icon_walk: { width: 12. }
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/icons/icon_filetree_folder_create.svg"),
                                 }
                             }
                             <ButtonFlat> {
-                                width: 32.
+                                width: 25.
                                 text: ""
-                                icon_walk: { width: 11. }
+                                icon_walk: { width: 9.5 }
                                 draw_icon: {
                                     svg_file: dep("crate://self/resources/icons/icon_filetree_file_create.svg"),
                                 }
