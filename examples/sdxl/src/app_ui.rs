@@ -320,7 +320,7 @@ live_design!{
         margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
         width: Fill,
         height: Fit
-            <RectView> {
+        <RectView> {
             height: 2,
             width: Fill,
             margin: 0.0
