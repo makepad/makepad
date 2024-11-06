@@ -782,7 +782,7 @@ impl Widget for View {
                                 initial: true,
                             },
                         );
-                        texture_cache.pass.add_color_texture(
+                        texture_cache.pass.set_color_texture(
                             cx,
                             &texture_cache.color_texture,
                             PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
