@@ -551,6 +551,19 @@ impl CodeEditor {
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
+    
+    pub fn set_selection_and_scroll(
+        &mut self,
+        cx: &mut Cx,
+        start: Position,
+        end: Position,
+        session: &mut CodeSession,
+    ) {
+        session.set_selection(start, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        session.move_to(end, Affinity::Before, NewGroup::Yes);
+        self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
+        self.redraw(cx);
+    }
 
     pub fn reset_font_size(&mut self) {
         self.draw_gutter.text_style.font_size = 9.0;
