@@ -1,6 +1,7 @@
 pub use crate::register_widget;
 use {
     crate::makepad_draw::*,
+    crate::designer_data::DesignerDataToWidget,
     std::any::TypeId,
     std::cell::RefCell,
     std::collections::BTreeMap,
@@ -639,7 +640,16 @@ impl WidgetRef {
         self.redraw(cx);
     }
     
-    
+    fn store_designer_backref(&self, cx:&mut Cx, apply:&mut Apply, index:usize){
+        if let Some(scope) = &mut apply.scope{
+            if let Some(file_id) = apply.from.file_id(){
+                if let Some(dd) = scope.data.get_mut::<DesignerDataToWidget>(){
+                    let ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+                    dd.live_ptr_to_widget.insert(ptr, self.clone());
+                }
+            }                        
+        }
+    }
     fn apply(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut inner = self.0.borrow_mut();
         if let LiveValue::Class { live_type, .. } = nodes[index].value {
@@ -663,6 +673,7 @@ impl WidgetRef {
                     panic!()
                 }
                 *inner = Some(WidgetRefInner { widget: component });
+                self.store_designer_backref(cx, apply, index);
                 if let Some(component) = &mut *inner {
                     return component.widget.apply(cx, apply, index, nodes);
                 }
@@ -675,6 +686,7 @@ impl WidgetRef {
                 );
             }
         } else if let Some(component) = &mut *inner {
+            self.store_designer_backref(cx, apply, index);
             return component.widget.apply(cx, apply, index, nodes);
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);

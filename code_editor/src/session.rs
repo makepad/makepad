@@ -215,6 +215,7 @@ impl CodeSession {
         }
     }
     
+    
     fn clamp_position(&self, mut position: Position) -> Position {
         let text = self.document().as_text();
         let lines = text.as_lines();
