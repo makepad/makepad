@@ -294,7 +294,7 @@ live_design!{
     NewsFeed ={{NewsFeed}}{
         list = <PortalList>{
             TopSpace = <View> {height: 80}
-            Post = <CachedView>{<Post> {}}
+            Post = <Post> {}
             PostImage = <PostImage> {}
             BottomSpace = <View> {height: 100}
         }
