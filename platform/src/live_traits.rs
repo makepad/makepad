@@ -86,15 +86,23 @@ pub trait LiveNew: LiveApply {
         return ret
     }
     
-    fn apply_from_ptr(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>) {
+    fn update_from_ptr(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>) {
         if let Some(live_ptr) = live_ptr{
-            cx.get_nodes_from_live_ptr(live_ptr, |cx, _file_id, index, nodes|{
-                self.apply(cx, &mut ApplyFrom::Over.into(), index, nodes)
+            cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{
+                self.apply(cx, &mut ApplyFrom::UpdateFromDoc{file_id}.into(), index, nodes)
             });
         }
     }
     
-    fn new_from_ptr_with_scope<'a> (cx: &mut Cx, scope:&'a mut Scope, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
+    fn update_from_ptr_with_scope(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>, scope:&mut Scope) {
+        if let Some(live_ptr) = live_ptr{
+            cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{
+                self.apply(cx, &mut ApplyFrom::UpdateFromDoc{file_id}.with_scope(scope), index, nodes)
+            });
+        }
+    }
+    
+    fn new_from_ptr_with_scope(cx: &mut Cx, live_ptr: Option<LivePtr>, scope:&mut Scope) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         if let Some(live_ptr) = live_ptr{
             cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{
@@ -234,7 +242,6 @@ impl ApplyFrom{
 pub enum ApplyFrom {
     NewFromDoc {file_id: LiveFileId}, // newed from DSL
     UpdateFromDoc {file_id: LiveFileId}, // live DSL substantially updated
-        
     New, // Bare new without file info
     Animate, // from animate
     AnimatorInit,
