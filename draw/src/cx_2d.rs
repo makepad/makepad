@@ -118,9 +118,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn begin_pass(&mut self, pass: &Pass, dpi_override: Option<f64>) {
         let cxpass = &mut self.passes[pass.pass_id()];
-        
         cxpass.main_draw_list_id = None;
-        
         let dpi_factor = if let Some(dpi_override) = dpi_override {dpi_override}
         else {
             match cxpass.parent {
