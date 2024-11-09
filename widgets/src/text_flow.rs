@@ -435,7 +435,7 @@ impl TextFlow{
     pub fn item_with_scope(&mut self, cx: &mut Cx, scope: &mut Scope, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.as_mut().unwrap().get_or_insert(cx, entry_id, | cx | {
-                (WidgetRef::new_from_ptr_with_scope(cx, scope, Some(*ptr)), template)
+                (WidgetRef::new_from_ptr_with_scope(cx, Some(*ptr), scope), template)
             });
             return Some(entry.0.clone())
         }

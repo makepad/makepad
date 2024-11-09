@@ -185,6 +185,22 @@ impl Pass {
         })
     }
     
+    pub fn set_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
+        let cxpass = &mut cx.passes[self.pass_id()];
+        if cxpass.color_textures.len()!=0{
+            cxpass.color_textures[0] = CxPassColorTexture {
+                texture: texture.clone(),
+                clear_color: clear_color
+            }
+        }
+        else{
+            cxpass.color_textures.push(CxPassColorTexture {
+                texture: texture.clone(),
+                clear_color: clear_color
+            })
+        }
+    }
+        
     pub fn set_depth_texture(&self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.depth_texture = Some(texture.clone());

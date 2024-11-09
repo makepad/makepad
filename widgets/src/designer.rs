@@ -56,6 +56,23 @@ impl Designer{
         }
     }
     
+    fn studio_select_component(&self, cx:&Cx, component:LiveId){
+        if let Some(OutlineNode::Component{token_id,..}) =  self.data.node_map.get(&component){
+            let file_id = token_id.file_id().unwrap();
+            let live_registry = cx.live_registry.borrow();
+            let tid = live_registry.token_id_to_token(*token_id).clone();
+            let span = tid.span;
+            let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+            Cx::send_studio_message(AppToStudio::SelectInFile(SelectInFile{
+                file_name,
+                line_start: span.start.line,
+                column_start: span.start.column,
+                line_end: span.end.line,
+                column_end: span.end.column
+            }));
+        }
+    }
+    
     fn studio_jump_to_file(&self, cx:&Cx, file_id:LiveFileId){
         let file_name = cx.live_registry.borrow().file_id_to_file(file_id).file_name.clone();
         Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
@@ -74,10 +91,15 @@ impl WidgetMatchEvent for Designer{
             // select the right node in the filetree
             let path_ids = self.data.construct_path_ids(outline_id);
             outline_tree.select_and_show_node(cx, &path_ids);
+            
             // if we click with control
             if km.control || tap_count > 1{
-                self.studio_jump_to_component(cx, outline_id)
+                self.studio_select_component(cx, outline_id)
             }
+        }
+        
+        if designer_view.reorder(&actions){
+            outline_tree.redraw(cx);
         }
         // ok lets see if we have a designerselectfile action
         for action in actions{
@@ -90,7 +112,7 @@ impl WidgetMatchEvent for Designer{
                 }
             }
              if let StudioToApp::DesignerLoadState{positions, zoom_pan} = action.cast_ref(){
-                 self.data.positions = positions.clone();
+                 self.data.to_widget.positions = positions.clone();
                  designer_view.set_zoom_pan(cx,zoom_pan);
              }
         }

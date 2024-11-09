@@ -149,6 +149,10 @@ pub use crate::{
 
 
 pub fn live_design(cx: &mut Cx) {
+    // how about we allow code-generated files
+    //cx.bind_live_alias("theme","dark_theme");
+    // how do we override fonts 
+    
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
