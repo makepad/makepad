@@ -76,12 +76,22 @@ pub struct EditFile{
     pub replace: String
 }
 
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct SelectInFile{
+    pub file_name: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub column_start: u32,
+    pub column_end: u32,
+}
+
 #[derive(SerBin, DeBin, Debug)]
 pub enum AppToStudio{
     LogItem(StudioLogItem),
     EventSample(EventSample),
     GPUSample(GPUSample),
     JumpToFile(JumpToFile),
+    SelectInFile(SelectInFile),
     PatchFile(PatchFile),
     DesignerComponentMoved(DesignerComponentPosition),
     DesignerZoomPan(DesignerZoomPan),

@@ -73,7 +73,7 @@ live_design!{
     import crate::toggle_panel::*;
     import makepad_draw::shader::std::*;
     import makepad_draw::shader::draw_color::DrawColor;
-
+    
     SlidePanel = <SlidePanelBase>{
         animator: {
             closed = {
@@ -840,7 +840,7 @@ live_design!{
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);// + mix(#f00,#0f0,self.pos.y);
             }
         }
     }

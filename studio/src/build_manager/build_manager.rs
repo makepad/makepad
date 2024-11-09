@@ -490,6 +490,9 @@ impl BuildManager {
                         AppToStudio::JumpToFile(jt) => {
                             cx.action(AppAction::JumpTo(jt));
                         }
+                        AppToStudio::SelectInFile(jt) => {
+                            cx.action(AppAction::SelectInFile(jt));
+                        }
                         AppToStudio::DesignerComponentMoved(mv)=>{
                             self.designer_state.get_build_storage(build_id, |bs|{
                                 if let Some(v) =  bs.component_positions.iter_mut().find(|v| v.id == mv.id){

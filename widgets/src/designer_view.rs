@@ -20,6 +20,7 @@ live_design!{
 #[derive(Clone, Debug, DefaultNone)]
 pub enum DesignerViewAction {
     None,
+    Reorder,
     Selected{
         id:LiveId, 
         km:KeyModifiers,
@@ -159,30 +160,34 @@ impl LiveHook for DesignerView {
 }
 
 impl DesignerView{
-    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str, pos: &mut Vec<DesignerComponentPosition>){
+    fn draw_container(&mut self, cx:&mut Cx2d, id:LiveId, ptr: LivePtr, name:&str, to_widget: &mut DesignerDataToWidget){
         
-        let rect = if let Some(v) = pos.iter().find(|v| v.id == id){
+        let rect = if let Some(v) = to_widget.positions.iter().find(|v| v.id == id){
             rect(v.left, v.top, v.width, v.height)
         }
         else{
-            pos.push(DesignerComponentPosition{
+            to_widget.positions.push(DesignerComponentPosition{
                 id,
                 left: 50.0,
                 top: 50.0,
                 width: 200.0,
                 height: 200.00
             });
-            return self.draw_container(cx, id, ptr, name, pos);
+            return self.draw_container(cx, id, ptr, name, to_widget);
         };
-                                    
+        // lets put on our scope a reference map
+        
         let container_ptr = self.container.unwrap();
         let mut is_new = false;
+        
+        let mut scope = Scope::with_data(to_widget);
+        
         let cd = self.containers.get_or_insert(cx, id, | cx | {
             is_new = true;
             ContainerData{
                 ptr,
-                component :WidgetRef::new_from_ptr(cx, Some(ptr)),
-                container: WidgetRef::new_from_ptr(cx, Some(container_ptr)),
+                component :WidgetRef::new_from_ptr_with_scope(cx, Some(ptr), &mut scope),
+                container: WidgetRef::new_from_ptr_with_scope(cx, Some(container_ptr), &mut scope),
                 rect
             }
         });
@@ -190,8 +195,9 @@ impl DesignerView{
         cd.ptr = ptr;
         // fix up the livecoding of the
         if self.reapply{
-            cd.container.apply_from_ptr(cx, Some(self.container.unwrap()));
-            cd.component.apply_from_ptr(cx, Some(ptr));
+            cd.container.update_from_ptr(cx, Some(self.container.unwrap()));
+            // alright here the component is created
+            cd.component.update_from_ptr(cx, Some(ptr));
         }
         if self.reapply || is_new{
             cd.container.apply_over(cx, live!{
@@ -291,7 +297,7 @@ impl Widget for DesignerView {
         // 
         let data = scope.data.get_mut::<DesignerData>().unwrap();
         match event.hits(cx, self.area) {
-            Hit::FingerHoverOver(fh) =>{
+            Hit::FingerHoverOver(fe) =>{
                 // lets poll our widget structure with a special event
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
@@ -301,7 +307,7 @@ impl Widget for DesignerView {
                 for (_id, cd) in self.containers.iter(){
                     // ok BUT our mouse pick is not dependent on the container
                     // ok so we are in a pass. meaning 0,0 origin
-                    let abs = (fh.abs - fh.rect.pos) * self.zoom + self.pan;
+                    let abs = (fe.abs - fe.rect.pos) * self.zoom + self.pan;
                     // lets capture the actions
                     let actions = cx.capture_actions(|cx|{
                         cd.component.handle_event(cx, &Event::DesignerPick(DesignerPickEvent{
@@ -317,6 +323,8 @@ impl Widget for DesignerView {
                                     let mut cs = action.widgets.iter();
                                     // scan for the parent with more than one child node
                                     // and then make our subcomponent/parent those widgets
+                                    
+                                    // scan upwards
                                     let mut component = cs.next();
                                     let mut parent = cs.next();
                                     while parent.is_some(){
@@ -329,6 +337,14 @@ impl Widget for DesignerView {
                                         component = parent;
                                         parent = cs.next();
                                     }
+                                    // lets find the LivePtr that belongs to this widget
+                                    if let Some(id)  = data.find_component_by_widget_ref(component.as_ref().unwrap()){
+                                        cx.widget_action(uid, &scope.path, DesignerViewAction::Selected{
+                                            id, 
+                                            tap_count: 1 , 
+                                            km:fe.modifiers
+                                        });
+                                    }
                                     
                                     self.selected_subcomponent = Some(
                                         SelectedSubcomponent{
@@ -336,6 +352,8 @@ impl Widget for DesignerView {
                                             parent: parent.cloned(),
                                         }
                                     );
+                                    // alright. now we also need to sync the selection to the tree.
+                                    
                                     //println!("{:?}", self.selected_subcomponent);
                                     break
                                 }
@@ -348,7 +366,7 @@ impl Widget for DesignerView {
                 
                 let mut cursor = None;
                 for cd in self.containers.values(){
-                    match cd.get_edge(fh.abs -fh.rect.pos, self.zoom, self.pan){
+                    match cd.get_edge(fe.abs - fe.rect.pos, self.zoom, self.pan){
                         Some(edge)=> {
                             cursor = Some(match edge{
                                 Edge::Left|Edge::Right=>MouseCursor::EwResize,
@@ -454,16 +472,17 @@ impl Widget for DesignerView {
                                 
                                 // we need to be below the 'next item' in the list
                                 let index = vw.child_index(&cs.component).unwrap();
+                                let mut reorder:Option<isize> = None;
                                 if let Some(next_child) = vw.child_at_index(index+1){
                                     let rect = self.get_component_rect(cx, &next_child);
                                     if let Flow::Down = vw.layout.flow{
                                         if fe.abs.y > rect.pos.y + 0.6* rect.size.y{
-                                            vw.swap_child(index, index + 1);
+                                            reorder = Some(1);
                                         }     
                                     }
                                     else{
                                         if fe.abs.x > rect.pos.x + 0.6* rect.size.x{
-                                            vw.swap_child(index, index + 1);
+                                            reorder = Some(1);
                                         }   
                                     } 
                                 }
@@ -472,15 +491,21 @@ impl Widget for DesignerView {
                                         let rect = self.get_component_rect(cx, &prev_child);
                                         if let Flow::Down = vw.layout.flow{
                                             if fe.abs.y < rect.pos.y + 0.6 *rect.size.y{
-                                                vw.swap_child(index, index - 1);
+                                                reorder = Some(-1);
                                             }
                                         }else{
                                             if fe.abs.x < rect.pos.x + 0.6 *rect.size.x{
-                                                vw.swap_child(index, index - 1);
+                                                reorder = Some(-1);
                                             }
                                         }
                                     }
-                                }                                   
+                                }
+                                if let Some(dir) = reorder{
+                                    let next_index = (index as isize + dir) as usize;
+                                    vw.swap_child(index, next_index);
+                                    data.swap_child_refs(parent, index, next_index);
+                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Reorder);
+                                }
                             }
                             vw.redraw(cx);
                         }
@@ -498,7 +523,7 @@ impl Widget for DesignerView {
                                 pos: rect.pos + delta,
                                 size: rect.size
                             };
-                            self.update_rect(cx, id, r, &mut data.positions);
+                            self.update_rect(cx, id, r, &mut data.to_widget.positions);
                         }
                     }
                     FingerMove::DragEdge{edge, rect, id}=>{
@@ -525,7 +550,7 @@ impl Widget for DesignerView {
                                  size: rect.size
                              }
                         };
-                        self.update_rect(cx, *id, rect, &mut data.positions);
+                        self.update_rect(cx, *id, rect, &mut data.to_widget.positions);
                     }
                     FingerMove::DragBody{ptr:_}=>{
                         
@@ -583,14 +608,13 @@ impl Widget for DesignerView {
                                         if let Some(OutlineNode::Component{ptr,name,..}) = data.node_map.get(&child){
                                             // lets fetch the position of this thing
                                             
-                                            self.draw_container(cx, child, *ptr, name, &mut data.positions);
+                                            self.draw_container(cx, child, *ptr, name, &mut data.to_widget);
                                         }
                                     }
                                 }
                                 else{
                                     // lets fetch the position of this thing
-                                    
-                                    self.draw_container(cx, *child, *ptr, name, &mut data.positions);
+                                    self.draw_container(cx, *child, *ptr, name, &mut data.to_widget);
                                 }
                             }
                         }
@@ -677,5 +701,14 @@ impl DesignerViewRef{
             }
         }
         None
+    }
+    
+    pub fn reorder(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let DesignerViewAction::Reorder = item.cast() {
+                return true
+            }
+        }
+        false
     }
 }

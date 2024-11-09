@@ -52,12 +52,30 @@ impl OutlineNode{
     }
 }
 
+
+#[derive(Default)]
+pub struct DesignerDataToWidget{
+    pub positions: Vec<DesignerComponentPosition>,
+    pub live_ptr_to_widget: HashMap<LivePtr, WidgetRef>, 
+}
+
+impl DesignerDataToWidget{
+    pub fn find_ptr_by_widget_ref(&self, widget:&WidgetRef)->Option<LivePtr>{
+        for (ptr, wref) in &self.live_ptr_to_widget{
+            if wref == widget{
+                return Some(*ptr)
+            }
+        }
+        None
+    }
+}
+
 #[derive(Default)]
 pub struct DesignerData{
     pub root: LiveId,
     pub node_map: HashMap<LiveId, OutlineNode>,
     pub selected: Option<LiveId>,
-    pub positions: Vec<DesignerComponentPosition>
+    pub to_widget: DesignerDataToWidget,
 }
 
 impl DesignerData{
@@ -123,6 +141,15 @@ impl DesignerData{
                             // lets emit a class at our level
                             let id = nodes[index].id;
                             let class = live_registry.ptr_to_node(*class_parent).id;
+                            
+                            // skip the fluff
+                            if class == live_id!(Designer) || class == live_id!(PerformanceView) || 
+                            id == live_id!(caption_bar) && class == live_id!(SolidView) ||
+                            id == live_id!(window_menu) && class == live_id!(WindowMenu){
+                                index = nodes.skip_node(index);                          
+                                continue;
+                            }
+                            
                             let ptr = base_ptr.with_index(index);
                             let prop_type =  nodes[index].origin.prop_type();
                             let token_id = nodes[index].origin.token_id();
@@ -144,6 +171,7 @@ impl DesignerData{
                             parent_children.push(uid);
                             
                             let mut name = String::new();
+                            
                             if !id.is_unique(){
                                 if let LivePropType::Field = prop_type {
                                     write!(name, "{}: <{}>", id, class).unwrap();
@@ -155,7 +183,7 @@ impl DesignerData{
                             else {
                                 write!(name, "<{}>", class).unwrap();
                             }
-                            
+                                
                             map.insert(uid, OutlineNode::Component {
                                 id,
                                 name,
@@ -165,6 +193,7 @@ impl DesignerData{
                                 ptr,
                                 children
                             });
+                        
                             // find all the components that start with app_ and make sure the folder is visible
                             
                         }
@@ -261,6 +290,14 @@ impl DesignerData{
         }
     }
     
+    pub fn swap_child_refs(&mut self,parent:&WidgetRef, index:usize, index2:usize){
+        if let Some(id) = self.find_component_by_widget_ref(parent){
+            if let Some(OutlineNode::Component{children,..}) = self.node_map.get_mut(&id){
+                children.swap(index, index2);
+            }
+        }
+    }
+        
     pub fn find_component_by_ptr(&mut self, find_ptr:LivePtr)->Option<LiveId>{
         for (node_id, node) in &self.node_map{
             if let OutlineNode::Component{ptr,..} = node{
@@ -268,6 +305,14 @@ impl DesignerData{
                     return Some(*node_id)
                 }
             }
+        }
+        None
+    }
+    
+        
+    pub fn find_component_by_widget_ref(&mut self, wref:&WidgetRef)->Option<LiveId>{
+        if let Some(ptr) = self.to_widget.find_ptr_by_widget_ref(wref){
+            return self.find_component_by_ptr(ptr);
         }
         None
     }

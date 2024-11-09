@@ -287,7 +287,6 @@ impl Cx {
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
-        
         self.passes[pass_id].set_matrix(
             pass_rect.pos, 
             pass_rect.size
@@ -337,7 +336,6 @@ impl Cx {
         }
         else {
             for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
-
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
