@@ -41,13 +41,16 @@ Our native builds work on the stable Rust toolchain. However, some of the errors
 
 For the non standard build targets (apple ios, apple tvos, android, wasm) we have a buildtool called 'cargo-makepad' that you need to install.
 
-Install it from the repo:
+Install it from a local clone of the [repo](https://github.com/makepad/makepad):
 
 ```cargo install --path=./tools/cargo_makepad```
 
-Or install it from cargo (might be behind the repo)
+Or install it from crates.io (the last published version, it may be older than the repo):
 
 ```cargo install cargo-makepad```
+
+The way how you've installed `cargo-makepad` will affect how you will install Makepad studio, if you
+choose to use it (more later).
 
 Now this tool can be used to install toolchains per platform needed
 
@@ -64,9 +67,15 @@ Now this tool can be used to install toolchains per platform needed
 
 Makepad studio allows you to easily build and view the examples, and it uses cargo-makepad internally so be sure to install cargo-makepad as shown above.
 
-```cargo run -p makepad-studio --release```
+If you've installed `cargo-makepad` from a local clone of the repo, then either
+- build & run Makepad studio from the local clone:
+  
+  ```cargo run -p makepad-studio --release```
+- or install `makepad-studio` from the local clone:
+  
+  ```cargo install --path=./studio```
 
-Or install it from cargo (might be behind the repo)
+Or install it from crates.io (the last published version, it may be older than the repo)::
 
 ```cargo install makepad-studio```
 
