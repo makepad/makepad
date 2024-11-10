@@ -285,6 +285,39 @@ cargo makepad wasm install-toolchain
 cargo makepad wasm run -p makepad-example-simple --release
 ```
 
+### Cross-origin headers for WASM for browsers
+
+For WASM to work in browsers, your web server must
+
+- serve the MIME types correctly (as is common), and
+- set the following two headers.
+  ```
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Opener-Policy: same-origin
+  ```
+  This is NOT common on public web servers like GitHub Pages. And it can't be set with `<meta
+  http-equiv="..." content="..."></meta>` in `index.html`.
+  
+  A workaround - but possibly for non-private browser mode only: use
+  [gzuidhof/coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker):
+  
+  1. Let's say that you use Makepad's `experiments/html_experiment`. Build it with `cargo makepad
+     wasm build -p makepad-experiment-html`.
+  2. Copy
+     [coi-serviceworker.min.js](https://github.com/gzuidhof/coi-serviceworker/blob/master/coi-serviceworker.min.js)
+     (or
+     [coi-serviceworker.js](https://github.com/gzuidhof/coi-serviceworker/blob/master/coi-serviceworker.js))
+     to `target/makepad-wasm-app/debug/makepad-experiment-html`.
+  3. Edit `target/makepad-wasm-app/debug/makepad-experiment-html/index.html` and under `<head>` add:
+     `<script src="coi-serviceworker.min.js"></script>` (or `<script
+     src="coi-serviceworker.js"></script>`).
+  4. If use build a release with `cargo makepad wasm build -p makepad-experiment-html --release`,
+     then the build directory is `makepad/target/makepad-wasm-app/release/makepad-experiment-html`
+     instead.
+  5. If there is any initiation, it will be run twice. To control that, follow
+     [gzuidhof/coi-serviceworker#14](https://github.com/gzuidhof/coi-serviceworker/issues/14).
+  6. If this works well, incorporate it to Makepad's `tools/cargo_makepad/src/wasm/compile.rs` and
+     `platform/src/os/web/` and create a pull request.
 ---
 
 ## Makepad Commands Quick Reference
