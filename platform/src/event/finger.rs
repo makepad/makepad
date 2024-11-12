@@ -41,6 +41,19 @@ pub struct KeyModifiers {
 }
 
 impl KeyModifiers{
+    /// Returns true if the primary key modifier is active (pressed).
+    ///
+    /// The primary modifier is Logo key (Command ⌘) on macOS
+    /// and the Control key on all other platforms.
+    pub fn is_primary(&self) -> bool {
+        #[cfg(target_vendor = "apple")] {
+            self.logo
+        }
+        #[cfg(not(target_vendor = "apple"))] {
+            self.control
+        }
+    }
+
     fn any(&self)->bool{
         self.shift || self.control || self.alt || self.logo
     }
