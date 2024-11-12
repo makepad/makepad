@@ -353,19 +353,6 @@ impl Widget for TextInput {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
                 modifiers: KeyModifiers {
-                    shift: false,
-                    logo: false,
-                    alt: false,
-                    control: false
-                },
-                ..
-            }) => {
-                cx.hide_text_ime();
-                cx.widget_action(uid, &scope.path, TextInputAction::Return(self.text.clone()));
-            },
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::ReturnKey,
-                modifiers: KeyModifiers {
                     shift: true,
                     logo: false,
                     alt: false,
@@ -385,6 +372,21 @@ impl Widget for TextInput {
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
             }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                modifiers,
+                ..
+            }) => {
+                cx.hide_text_ime();
+                cx.widget_action(
+                    uid,
+                    &scope.path,
+                    TextInputAction::Return {
+                        text: self.text.clone(),
+                        modifiers,
+                    }
+                );
+            },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
@@ -858,7 +860,10 @@ fn prev_grapheme_boundary(string: &str, index: usize) -> Option<usize> {
 #[derive(Clone, Debug, PartialEq, DefaultNone)]
 pub enum TextInputAction {
     Change(String),
-    Return(String),
+    Return {
+        text: String,
+        modifiers: KeyModifiers,
+    },
     KeyDownUnhandled(KeyEvent),
     Escape,
     KeyFocus,
@@ -887,8 +892,17 @@ impl TextInputRef {
 
     pub fn returned(&self, actions: &Actions) -> Option<String> {
         for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
-            if let TextInputAction::Return(val) = action{
-                return Some(val);
+            if let TextInputAction::Return { text, .. } = action {
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    pub fn returned_with_modifiers(&self, actions: &Actions) -> Option<(String, KeyModifiers)> {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
+            if let TextInputAction::Return { text, modifiers } = action {
+                return Some((text, modifiers));
             }
         }
         None

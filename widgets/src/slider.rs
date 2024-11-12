@@ -181,8 +181,8 @@ impl Widget for Slider {
                 TextInputAction::KeyFocusLost => {
                     self.animator_play(cx, id!(focus.off));
                 }
-                TextInputAction::Return(value) => {
-                    if let Ok(v) = value.parse::<f64>() {
+                TextInputAction::Return { text, .. } => {
+                    if let Ok(v) = text.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input_and_redraw(cx);
