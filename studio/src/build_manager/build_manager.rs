@@ -493,6 +493,10 @@ impl BuildManager {
                         AppToStudio::SelectInFile(jt) => {
                             cx.action(AppAction::SelectInFile(jt));
                         }
+                        AppToStudio::SwapSelection(ss) => {
+                            // alright now what do we do
+                            cx.action(AppAction::SwapSelection(ss));
+                        }
                         AppToStudio::DesignerComponentMoved(mv)=>{
                             self.designer_state.get_build_storage(build_id, |bs|{
                                 if let Some(v) =  bs.component_positions.iter_mut().find(|v| v.id == mv.id){

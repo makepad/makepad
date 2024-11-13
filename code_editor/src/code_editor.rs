@@ -547,7 +547,7 @@ impl CodeEditor {
         pos: Position,
         session: &mut CodeSession,
     ) {
-        session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        session.set_selection(session.clamp_position(pos), Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
@@ -559,8 +559,9 @@ impl CodeEditor {
         end: Position,
         session: &mut CodeSession,
     ) {
-        session.set_selection(start, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
-        session.move_to(end, Affinity::Before, NewGroup::Yes);
+        
+        session.set_selection(session.clamp_position(start), Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        session.move_to(session.clamp_position(end), Affinity::Before, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }
