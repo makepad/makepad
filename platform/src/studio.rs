@@ -85,6 +85,21 @@ pub struct SelectInFile{
     pub column_end: u32,
 }
 
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct SwapSelection{
+    pub s1_file_name: String,
+    pub s1_line_start: u32,
+    pub s1_line_end: u32,
+    pub s1_column_start: u32,
+    pub s1_column_end: u32,
+    pub s2_file_name: String,
+    pub s2_line_start: u32,
+    pub s2_line_end: u32,
+    pub s2_column_start: u32,
+    pub s2_column_end: u32,
+}
+
+
 #[derive(SerBin, DeBin, Debug)]
 pub enum AppToStudio{
     LogItem(StudioLogItem),
@@ -100,6 +115,7 @@ pub enum AppToStudio{
     DesignerFileSelected{
         file_name:String,
     },
+    SwapSelection(SwapSelection),
     FocusDesign
 }
 

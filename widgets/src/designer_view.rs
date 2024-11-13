@@ -20,7 +20,10 @@ live_design!{
 #[derive(Clone, Debug, DefaultNone)]
 pub enum DesignerViewAction {
     None,
-    Reorder,
+    Reorder{
+        comp: LiveId,
+        next_comp: LiveId,
+    },
     Selected{
         id:LiveId, 
         km:KeyModifiers,
@@ -502,9 +505,17 @@ impl Widget for DesignerView {
                                 }
                                 if let Some(dir) = reorder{
                                     let next_index = (index as isize + dir) as usize;
+                                    
+                                    let comp = data.find_component_by_widget_ref(vw.child_at_index(index).unwrap()).unwrap();
+                                    let next_comp = data.find_component_by_widget_ref(vw.child_at_index(next_index).unwrap()).unwrap();
+                                    
                                     vw.swap_child(index, next_index);
                                     data.swap_child_refs(parent, index, next_index);
-                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Reorder);
+                                    // we need to find the ranges of these things
+                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Reorder{
+                                        comp,
+                                        next_comp
+                                    });
                                 }
                             }
                             vw.redraw(cx);
@@ -703,12 +714,12 @@ impl DesignerViewRef{
         None
     }
     
-    pub fn reorder(&self, actions: &Actions) -> bool {
+    pub fn reorder(&self, actions: &Actions) -> Option<(LiveId,LiveId)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesignerViewAction::Reorder = item.cast() {
-                return true
+            if let DesignerViewAction::Reorder{comp,next_comp} = item.cast() {
+                return Some((comp, next_comp))
             }
         }
-        false
+        None
     }
 }
