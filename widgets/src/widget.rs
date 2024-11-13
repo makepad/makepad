@@ -18,7 +18,7 @@ pub enum WidgetCache {
     Clear,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WidgetUid(pub u64);
 
 pub trait WidgetDesign: WidgetNode {}
