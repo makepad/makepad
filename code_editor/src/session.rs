@@ -102,7 +102,7 @@ impl CodeSession {
             selection_state.selections.as_selections()
         })
     }
-
+    
     pub fn last_added_selection_index(&self) -> Option<usize> {
         self.selection_state.borrow().last_added_selection_index
     }
@@ -216,7 +216,7 @@ impl CodeSession {
     }
     
     
-    fn clamp_position(&self, mut position: Position) -> Position {
+    pub fn clamp_position(&self, mut position: Position) -> Position {
         let text = self.document().as_text();
         let lines = text.as_lines();
         if position.line_index >= lines.len() {

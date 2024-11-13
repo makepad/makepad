@@ -149,6 +149,32 @@ impl LiveRegistry {
         (&doc.expanded, doc.expanded.resolve_ptr(live_ptr.index as usize))
     }
     
+    pub fn ptr_to_file_name_and_object_span(&self, ptr: LivePtr) -> (String, TextSpan){
+        let doc = self.ptr_to_doc(ptr);
+        let start_node = &doc.nodes[ptr.index as usize];
+        let end_index = doc.nodes.skip_node(ptr.index as usize) - 1;
+        let end_node = &doc.nodes[end_index];
+        
+        println!("START {:?} END {:?} {:?} ",
+            start_node.origin.token_id().unwrap(), 
+            end_node.origin.token_id().unwrap(),
+            end_node.value,
+        );
+                    
+        let start_token = self.token_id_to_token(start_node.origin.token_id().unwrap()).clone();
+        let end_token = self.token_id_to_token(end_node.origin.token_id().unwrap()).clone();
+        let start = start_token.span.start;
+        let end = end_token.span.end;
+        (
+            self.file_id_to_file(ptr.file_id).file_name.clone(),
+            TextSpan{
+                file_id: ptr.file_id,
+                start,
+                end
+            }
+        )
+    }
+    
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveExpanded {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation {
