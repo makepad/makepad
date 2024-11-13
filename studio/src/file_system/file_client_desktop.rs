@@ -210,9 +210,10 @@ fn spawn_local_request_handler(
     action_sender: Sender<FileClientMessage>,
 ) {
     thread::spawn(move || loop {
-        let request = request_receiver.recv().unwrap();
-        let response = connection.handle_request(request);
-        action_sender.send(FileClientMessage::Response(response)).unwrap();
-        action_signal.set()
+        if let Ok(request) = request_receiver.recv(){
+            let response = connection.handle_request(request);
+            action_sender.send(FileClientMessage::Response(response)).unwrap();
+            action_signal.set()
+        }
     });
 }
