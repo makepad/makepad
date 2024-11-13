@@ -8,6 +8,7 @@ use crate::{
     designer_outline_tree::*,
     widget::*,
     makepad_platform::studio::*,
+    makepad_platform::makepad_live_compiler::TextSpan,
 };
 
 live_design!{
@@ -42,27 +43,20 @@ impl LiveHook for Designer {
 
 impl Designer{
     fn studio_jump_to_component(&self, cx:&Cx, component:LiveId){
-        if let Some(OutlineNode::Component{token_id,..}) =  self.data.node_map.get(&component){
-            let file_id = token_id.file_id().unwrap();
-            let live_registry = cx.live_registry.borrow();
-            let tid = live_registry.token_id_to_token(*token_id).clone();
-            let span = tid.span.start;
-            let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+        if let Some(OutlineNode::Component{ptr,..}) =  self.data.node_map.get(&component){
+            let (file_name,span) = cx.live_registry.borrow().ptr_to_file_name_and_object_span(*ptr);
             Cx::send_studio_message(AppToStudio::JumpToFile(JumpToFile{
                 file_name,
-                line: span.line,
-                column: span.column
+                line: span.start.line,
+                column: span.start.column
             }));
         }
     }
     
     fn studio_select_component(&self, cx:&Cx, component:LiveId){
-        if let Some(OutlineNode::Component{token_id,..}) =  self.data.node_map.get(&component){
-            let file_id = token_id.file_id().unwrap();
-            let live_registry = cx.live_registry.borrow();
-            let tid = live_registry.token_id_to_token(*token_id).clone();
-            let span = tid.span;
-            let file_name = live_registry.file_id_to_file(file_id).file_name.clone();
+        if let Some(OutlineNode::Component{ptr,..}) =  self.data.node_map.get(&component){
+            let (file_name,span) = cx.live_registry.borrow().ptr_to_file_name_and_object_span(*ptr);
+            println!("{:?}", span);
             Cx::send_studio_message(AppToStudio::SelectInFile(SelectInFile{
                 file_name,
                 line_start: span.start.line,
@@ -70,6 +64,27 @@ impl Designer{
                 line_end: span.end.line,
                 column_end: span.end.column
             }));
+        }
+    }
+    
+    fn studio_swap_component(&self, cx:&Cx, c1:LiveId, c2:LiveId){
+        if let Some(OutlineNode::Component{ptr:ptr1,..}) =  self.data.node_map.get(&c1){
+            if let Some(OutlineNode::Component{ptr:ptr2,..}) =  self.data.node_map.get(&c2){
+                let (s1_file_name,s1_span) = cx.live_registry.borrow().ptr_to_file_name_and_object_span(*ptr1);
+                let (s2_file_name,s2_span) = cx.live_registry.borrow().ptr_to_file_name_and_object_span(*ptr2);
+                Cx::send_studio_message(AppToStudio::SwapSelection(SwapSelection{
+                    s1_file_name,
+                    s1_line_start: s1_span.start.line,
+                    s1_column_start: s1_span.start.column,
+                    s1_line_end: s1_span.end.line,
+                    s1_column_end: s1_span.end.column,
+                    s2_file_name,
+                    s2_line_start: s2_span.start.line,
+                    s2_column_start: s2_span.start.column,
+                    s2_line_end: s2_span.end.line,
+                    s2_column_end: s2_span.end.column,
+                }));
+            }
         }
     }
     
@@ -98,7 +113,8 @@ impl WidgetMatchEvent for Designer{
             }
         }
         
-        if designer_view.reorder(&actions){
+        if let Some((c1, c2)) = designer_view.reorder(&actions){
+            self.studio_swap_component(cx, c1, c2);
             outline_tree.redraw(cx);
         }
         // ok lets see if we have a designerselectfile action

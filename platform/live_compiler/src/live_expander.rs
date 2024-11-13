@@ -74,6 +74,13 @@ impl<'a> LiveExpander<'a> {
             match in_value {
                 
                 LiveValue::Close => {
+                    // inherit the close node origin so we can properly map to the original text range
+                    let close_index = out_doc.nodes.skip_node(current_parent.last().unwrap().1) - 1;
+                    let out_close = &mut out_doc.nodes[close_index];
+                    let mut origin = in_node.origin;
+                    origin.inherit_origin(out_close.origin);
+                    out_close.origin = origin;
+                    
                     current_parent.pop();
                     in_index += 1;
                     continue;

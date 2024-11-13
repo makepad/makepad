@@ -26,7 +26,7 @@ pub enum OutlineNode{
         id: LiveId,
         class: LiveId,
         prop_type: LivePropType,
-        token_id: LiveTokenId,
+        //token_id: LiveTokenId,
         ptr: LivePtr,
         children: SmallVec<[LiveId;4]>
     }
@@ -146,7 +146,7 @@ impl DesignerData{
                             if class == live_id!(Designer) || class == live_id!(PerformanceView) || 
                             id == live_id!(caption_bar) && class == live_id!(SolidView) ||
                             id == live_id!(window_menu) && class == live_id!(WindowMenu){
-                                index = nodes.skip_node(index);                          
+                                index = nodes.skip_node(index);
                                 continue;
                             }
                             
@@ -187,7 +187,6 @@ impl DesignerData{
                             map.insert(uid, OutlineNode::Component {
                                 id,
                                 name,
-                                token_id: token_id.unwrap(), 
                                 prop_type,
                                 class,
                                 ptr,

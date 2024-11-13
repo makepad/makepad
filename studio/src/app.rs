@@ -10,9 +10,9 @@ use crate::{
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
-    makepad_platform::studio::{JumpToFile,EditFile, SelectInFile, PatchFile},
+    makepad_platform::studio::{JumpToFile,EditFile, SelectInFile, PatchFile, SwapSelection},
     log_list::*,
-    makepad_code_editor::text::{Position},
+    makepad_code_editor::{CodeSession,text::{Position}},
     ai_chat::ai_chat_manager::AiChatManager,
     build_manager::{
         build_protocol::BuildProcess,
@@ -148,6 +148,7 @@ pub struct AppData{
 pub enum AppAction{
     JumpTo(JumpToFile),
     SelectInFile(SelectInFile),
+    SwapSelection(SwapSelection),
     RedrawLog,
     RedrawProfiler,
     RedrawFile(LiveId),
@@ -195,6 +196,44 @@ impl MatchEvent for App{
         let profiler = self.ui.view(id!(profiler));
         
         match action.cast(){
+            AppAction::SwapSelection(ss)=>{
+                let s1_start = Position{line_index: ss.s1_line_start as usize, byte_index:ss.s1_column_start as usize};
+                let s1_end = Position{line_index: ss.s1_line_end as usize, byte_index:ss.s1_column_end as usize};
+                let s2_start = Position{line_index: ss.s2_line_start as usize, byte_index:ss.s2_column_start as usize};
+                let s2_end = Position{line_index: ss.s2_line_end as usize, byte_index:ss.s2_column_end as usize};
+                if let Some(s1_file_id) = self.data.file_system.path_to_file_node_id(&ss.s1_file_name) {
+                    if let Some(s2_file_id) = self.data.file_system.path_to_file_node_id(&ss.s1_file_name) {
+                        if let Some(OpenDocument::Code(doc1)) = self.data.file_system.open_documents.get(&s1_file_id) {
+                            if let Some(OpenDocument::Code(doc2)) = self.data.file_system.open_documents.get(&s2_file_id) {
+                                // Create sessions
+                                let mut session1 = CodeSession::new(doc1.clone());
+                                let mut session2 = CodeSession::new(doc2.clone());
+            
+                                // Set selections in both sessions
+                                session1.set_selection(session1.clamp_position(s1_start), Affinity::After, SelectionMode::Simple, NewGroup::Yes);
+                                session1.move_to(session1.clamp_position(s1_end), Affinity::Before, NewGroup::Yes);
+                                
+                                session2.set_selection(session2.clamp_position(s2_start), Affinity::After, SelectionMode::Simple, NewGroup::Yes);
+                                session2.move_to(session2.clamp_position(s2_end), Affinity::Before, NewGroup::Yes);
+            
+                                // Get the selected text from both sessions
+                                let text1 = session1.copy();
+                                let text2 = session2.copy();
+                                                                            
+                                // Swap the text by pasting into each session
+                                session1.paste(text2.into());
+                                session1.handle_changes();
+                                session2.handle_changes();
+                                session2.paste(text1.into());
+                                session1.handle_changes();
+                                session2.handle_changes();
+                                                                            
+                                // Handle any pending changes and save the files
+                            }
+                        }
+                    }
+                }
+            }
             AppAction::SelectInFile(sf)=>{
                 let start = Position{line_index: sf.line_start as usize, byte_index:sf.column_start as usize};
                 let end = Position{line_index: sf.line_end as usize, byte_index:sf.column_end as usize};
@@ -237,8 +276,9 @@ impl MatchEvent for App{
                     }
                 }
             }
-            AppAction::PatchFile(ef)=>{
-                let start = Position{line_index: ef.line as usize, byte_index:ef.column_start as usize};
+            AppAction::PatchFile(_ef)=>{
+                panic!()
+                /*let start = Position{line_index: ef.line as usize, byte_index:ef.column_start as usize};
                 let end = Position{line_index: ef.line as usize, byte_index:ef.column_end as usize};
                 if let Some(file_id) = self.data.file_system.path_to_file_node_id(&ef.file_name) {
                     if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id){
@@ -265,7 +305,7 @@ impl MatchEvent for App{
                             self.data.file_system.request_save_file_for_file_node_id(file_id, true)
                         }
                     }
-                }
+                }*/
             }
             AppAction::EditFile(ef)=>{
                 let start = Position{line_index: ef.line_start as usize, byte_index:ef.column_start as usize};
