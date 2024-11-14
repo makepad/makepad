@@ -658,6 +658,7 @@ impl WidgetRef {
                     *inner = None; // type changed, drop old component
                     log!("TYPECHANGE {:?}", nodes[index]);
                 } else {
+                    self.store_designer_backref(cx, apply, index);
                     return component.widget.apply(cx, apply, index, nodes);
                 }
             }
