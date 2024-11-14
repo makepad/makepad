@@ -2,7 +2,7 @@ use crate::{
     makepad_draw::*,
     widget::*,
     makepad_platform::studio::DesignerComponentPosition,
-    makepad_live_compiler::LiveTokenId,
+    //makepad_live_compiler::LiveTokenId,
 };
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -153,7 +153,7 @@ impl DesignerData{
                             
                             let ptr = base_ptr.with_index(index);
                             let prop_type =  nodes[index].origin.prop_type();
-                            let token_id = nodes[index].origin.token_id();
+                            //let token_id = nodes[index].origin.token_id();
                             let uid = hash_id.bytes_append(&id.0.to_be_bytes());
                             let mut children = SmallVec::new();
                                                             
