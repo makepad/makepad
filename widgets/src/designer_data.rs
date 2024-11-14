@@ -72,6 +72,7 @@ impl DesignerDataToWidget{
 
 #[derive(Default)]
 pub struct DesignerData{
+    pub pending_revision: bool,
     pub root: LiveId,
     pub node_map: HashMap<LiveId, OutlineNode>,
     pub selected: Option<LiveId>,
@@ -102,7 +103,7 @@ impl DesignerData{
     
     pub fn update_from_live_registry(&mut self, cx:&mut Cx){
         self.node_map.clear();
-        
+        self.to_widget.live_ptr_to_widget.clear();
         let root_uid = live_id!(designer_root).into();
         self.root = root_uid;
         self.node_map.insert(root_uid, OutlineNode::Virtual{

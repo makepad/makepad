@@ -20,7 +20,7 @@ live_design!{
 #[derive(Clone, Debug, DefaultNone)]
 pub enum DesignerViewAction {
     None,
-    Reorder{
+    SwapComponents{
         comp: LiveId,
         next_comp: LiveId,
     },
@@ -155,8 +155,10 @@ struct SelectedSubcomponent{
 }
 
 impl LiveHook for DesignerView {
-    fn after_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
-        
+    fn after_new_from_doc(&mut self, _cx: &mut Cx){
+        println!("NEW DESIGNERVIEW")
+    }
+    fn after_update_from_doc(&mut self, _cx: &mut Cx){
         // find a bit cleaner way to do this
         self.reapply = true;
     }
@@ -184,8 +186,8 @@ impl DesignerView{
         let mut is_new = false;
         
         let mut scope = Scope::with_data(to_widget);
-        
         let cd = self.containers.get_or_insert(cx, id, | cx | {
+            println!("CREATING NEW WIDGET {:?}", id);
             is_new = true;
             ContainerData{
                 ptr,
@@ -198,14 +200,15 @@ impl DesignerView{
         cd.ptr = ptr;
         // fix up the livecoding of the
         if self.reapply{
-            cd.container.update_from_ptr(cx, Some(self.container.unwrap()));
+            cd.component.update_from_ptr_with_scope(cx, Some(ptr), &mut scope);
+            cd.container.update_from_ptr_with_scope(cx, Some(container_ptr), &mut scope);
             // alright here the component is created
-            cd.component.update_from_ptr(cx, Some(ptr));
         }
         if self.reapply || is_new{
             cd.container.apply_over(cx, live!{
                 widget_label = { label = {text:(name)}}
             });
+            //self.reapply = false;
         }
         // ok so we're going to draw the container with the widget inside
         cd.container.draw_all(cx, &mut Scope::with_props(cd))
@@ -471,6 +474,7 @@ impl Widget for DesignerView {
                         // and if we are below ask the parent component view to move down
                         if let Some(parent) = &cs.parent{
                             let vw = parent.as_view();
+                            
                             if let Some(mut vw) = vw.borrow_mut(){
                                 
                                 // we need to be below the 'next item' in the list
@@ -505,17 +509,25 @@ impl Widget for DesignerView {
                                 }
                                 if let Some(dir) = reorder{
                                     let next_index = (index as isize + dir) as usize;
-                                    
-                                    let comp = data.find_component_by_widget_ref(vw.child_at_index(index).unwrap()).unwrap();
-                                    let next_comp = data.find_component_by_widget_ref(vw.child_at_index(next_index).unwrap()).unwrap();
-                                    
-                                    vw.swap_child(index, next_index);
-                                    data.swap_child_refs(parent, index, next_index);
-                                    // we need to find the ranges of these things
-                                    cx.widget_action(uid, &scope.path, DesignerViewAction::Reorder{
-                                        comp,
-                                        next_comp
-                                    });
+                                    if !data.pending_revision{
+                                        let c1 = vw.child_at_index(index).unwrap();
+                                        /*println!("{:?}", data.to_widget.live_ptr_to_widget);
+                                        */
+                                        if let Some(comp) = data.find_component_by_widget_ref(c1){
+                                            let c2 = vw.child_at_index(next_index).unwrap();
+                                            let next_comp = data.find_component_by_widget_ref(c2).unwrap();
+                                            cx.widget_action(uid, &scope.path, DesignerViewAction::SwapComponents{
+                                                comp,
+                                                next_comp
+                                            });
+                                        }
+                                        else{
+                                            //println!("WIdget ref lost");
+                                        }
+                                    }
+                                    else{
+                                        println!("Component map invalid")
+                                    }
                                 }
                             }
                             vw.redraw(cx);
@@ -638,7 +650,7 @@ impl Widget for DesignerView {
             cx.end_pass_sized_turtle_no_clip();
             self.draw_list.end(cx);
             cx.end_pass(&self.pass);
-            self.containers.retain_visible()
+           // self.containers.retain_visible()
         }
         
         self.draw_bg.draw_vars.set_texture(0, self.color_texture.as_ref().unwrap());
@@ -714,9 +726,9 @@ impl DesignerViewRef{
         None
     }
     
-    pub fn reorder(&self, actions: &Actions) -> Option<(LiveId,LiveId)> {
+    pub fn swap_components(&self, actions: &Actions) -> Option<(LiveId,LiveId)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesignerViewAction::Reorder{comp,next_comp} = item.cast() {
+            if let DesignerViewAction::SwapComponents{comp,next_comp} = item.cast() {
                 return Some((comp, next_comp))
             }
         }
