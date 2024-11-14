@@ -3,7 +3,10 @@ mod wasm;
 mod utils;
 mod apple;
 mod check;
+mod open_harmony;
+
 use android::*;
+use open_harmony::*;
 use wasm::*;
 use apple::*;
 use check::*;
@@ -24,7 +27,7 @@ fn show_help(err: &str){
     println!();
     println!("    wasm install-toolchain                       Install the toolchain needed for wasm32 with rustup");
     println!("    wasm build <cargo args>                      Build a wasm project");
-println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8010");
+    println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8010");
     println!();
     println!("    [options] with its default value:");
     println!();
@@ -76,6 +79,20 @@ println!("    wasm [options] run <cargo args>              Build and run a wasm 
     println!("    android [options] expand-sdk");
     println!("    android [options] remove-sdk-sources");
     println!();
+    println!("Open Harmony commands:");
+    println!();
+    println!("    ohos [options] install-toolchain             Install the toolchain needed with rustup");
+    println!("    ohos [options] deveco <cargo args>           Create a DevEco project for Open Harmony OS");
+    println!("    ohos [options] build <cargo args>            Build  DevEco project and output the Hap package for the Open Harmony OS");
+    println!("    ohos [options] run <cargo args>              Run the Hap package on a open harmony device via hdc");
+    println!("    ohos [options] hilog <cargo args>            Get hilog from open harmony device via hdc");
+    println!("    ohos [options] cdylib <cargo args>           Build makepad shared library only");
+    println!("");
+    println!("    [options]:");
+    println!("");
+    println!("       --deveco-home=\"deveco_path\"             The path of DevEco program, this parameter can also be specified by environment variable \"DEVECO_HOME\"");
+    println!("       --remote=\"<hdcip:port>\"                 Remote hdc service, this parameter can also be specified by environment variable \"HDC_REMOTE\"");
+    println!();
     println!("Linux commands:");
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
@@ -109,6 +126,9 @@ fn main() {
             println!("Got error: {}", e);
         }
         "apple" => if let Err(e) = handle_apple(&args[1..]){
+            println!("Got error: {}", e);
+        }
+        "ohos" => if let Err(e) = handle_open_harmony(&args[1..]){
             println!("Got error: {}", e);
         }
         "check" => if let Err(e) = handle_check(&args[1..]){
