@@ -8,7 +8,7 @@ use crate::{
     designer_outline_tree::*,
     widget::*,
     makepad_platform::studio::*,
-    makepad_platform::makepad_live_compiler::TextSpan,
+    //makepad_platform::makepad_live_compiler::TextSpan,
 };
 
 live_design!{
