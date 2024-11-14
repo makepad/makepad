@@ -224,11 +224,19 @@ impl MatchEvent for App{
                                 session1.paste(text2.into());
                                 session1.handle_changes();
                                 session2.handle_changes();
+                                self.data.file_system.handle_sessions();
+                                
                                 session2.paste(text1.into());
                                 session1.handle_changes();
                                 session2.handle_changes();
-                                                                            
+                                self.data.file_system.handle_sessions();
+                                
+                                // lets draw any views file file 1 and 2
+                                cx.action(AppAction::RedrawFile(s1_file_id));
+                                cx.action(AppAction::RedrawFile(s2_file_id));
                                 // Handle any pending changes and save the files
+                                self.data.file_system.request_save_file_for_file_node_id(s1_file_id, false);
+                                //self.data.file_system.request_save_file_for_file_node_id(s2_file_id, false);
                             }
                         }
                     }
