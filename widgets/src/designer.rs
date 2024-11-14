@@ -33,6 +33,7 @@ impl LiveHook for Designer {
         designer_view.reload_view(cx);
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
         outline_tree.redraw(cx);
+        self.data.pending_revision = false;
     }
     
     fn after_new_from_doc(&mut self, _cx:&mut Cx){
@@ -67,11 +68,15 @@ impl Designer{
         }
     }
     
-    fn studio_swap_component(&self, cx:&Cx, c1:LiveId, c2:LiveId){
+    fn studio_swap_components(&mut self, cx:&Cx, c1:LiveId, c2:LiveId){
+        if self.data.pending_revision{
+            return 
+        }
         if let Some(OutlineNode::Component{ptr:ptr1,..}) =  self.data.node_map.get(&c1){
             if let Some(OutlineNode::Component{ptr:ptr2,..}) =  self.data.node_map.get(&c2){
                 let (s1_file_name,s1_span) = cx.live_registry.borrow().ptr_to_file_name_and_object_span(*ptr1);
                 let (s2_file_name,s2_span) = cx.live_registry.borrow().ptr_to_file_name_and_object_span(*ptr2);
+                self.data.pending_revision = true;
                 Cx::send_studio_message(AppToStudio::SwapSelection(SwapSelection{
                     s1_file_name,
                     s1_line_start: s1_span.start.line,
@@ -113,8 +118,8 @@ impl WidgetMatchEvent for Designer{
             }
         }
         
-        if let Some((c1, c2)) = designer_view.reorder(&actions){
-            self.studio_swap_component(cx, c1, c2);
+        if let Some((c1, c2)) = designer_view.swap_components(&actions){
+            self.studio_swap_components(cx, c1, c2);
             outline_tree.redraw(cx);
         }
         // ok lets see if we have a designerselectfile action
