@@ -29,8 +29,8 @@ impl LiveHook for Designer {
     }
     
     fn after_update_from_doc(&mut self, cx:&mut Cx){
-        let designer_view = self.ui.designer_view(id!(designer_view));
-        designer_view.reload_view(cx);
+        //let designer_view = self.ui.designer_view(id!(designer_view));
+        //designer_view.reload_view(cx);
         let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
         outline_tree.redraw(cx);
         self.data.pending_revision = false;
