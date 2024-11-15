@@ -15,13 +15,6 @@ live_design!{
                         x: 0.5,
                         y: 0.5
                     },
-                    label1 = <Label> {
-                        draw_text: {
-                            color: #f
-                        },
-                        text: "This is a label",
-                        width: 200.0,
-                    }
                     button1 = <Button> {
                         text: "Show/hide password"
                         draw_text:{color:#f00}
@@ -30,6 +23,13 @@ live_design!{
                         width: 100
                         text: "Your password here"
                         draw_text: { text_style: { is_secret: true } },
+                    }
+                    label1 = <Label> {
+                        draw_text: {
+                            color: #f
+                        },
+                        text: "This is a label",
+                        width: 200.0,
                     }
                 }
             }

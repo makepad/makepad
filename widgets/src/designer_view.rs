@@ -155,10 +155,7 @@ struct SelectedSubcomponent{
 }
 
 impl LiveHook for DesignerView {
-    fn after_new_from_doc(&mut self, _cx: &mut Cx){
-        println!("NEW DESIGNERVIEW")
-    }
-    fn after_update_from_doc(&mut self, _cx: &mut Cx){
+fn after_update_from_doc(&mut self, _cx: &mut Cx){
         // find a bit cleaner way to do this
         self.reapply = true;
     }
@@ -187,7 +184,7 @@ impl DesignerView{
         
         let mut scope = Scope::with_data(to_widget);
         let cd = self.containers.get_or_insert(cx, id, | cx | {
-            println!("CREATING NEW WIDGET {:?}", id);
+            
             is_new = true;
             ContainerData{
                 ptr,
@@ -526,7 +523,7 @@ impl Widget for DesignerView {
                                         }
                                     }
                                     else{
-                                        println!("Component map invalid")
+                                        // component map temporariliy invalid
                                     }
                                 }
                             }
@@ -709,13 +706,13 @@ impl DesignerViewRef{
             inner.redraw(cx);
         }
     }
-    
+    /*
     pub fn reload_view(&self, cx:&mut Cx) {
         if let Some(mut inner) = self.borrow_mut(){
             inner.containers.clear();
             inner.redraw(cx);
         }
-    }
+    }*/
     
     pub fn selected(&self, actions: &Actions) -> Option<(LiveId,KeyModifiers,u32)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
