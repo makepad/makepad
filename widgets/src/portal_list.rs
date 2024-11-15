@@ -77,9 +77,12 @@ pub struct PortalList {
     #[rust(false)] tail_range: bool,
     #[rust(false)] at_end: bool,
     #[rust(true)] not_filling_viewport: bool,
+    #[live(false)] reuse_items: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<usize, (LiveId, WidgetRef)>,
+    #[rust] reusable_items: Vec<(LiveId, WidgetRef)>,
+    
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
@@ -296,8 +299,17 @@ impl PortalList {
                 self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Horizontal, rect, dvec2(rect.size.x * total_views, 100.0));
             }
         }        
+        
         if !self.keep_invisible{
-            self.items.retain_visible();
+            if self.reuse_items{
+                let reusable_items = &mut self.reusable_items;
+                self.items.retain_visible_with(|_k,v|{
+                    reusable_items.push(v.clone());
+                });
+            }
+            else{
+                self.items.retain_visible();
+            }
         }
 
         cx.end_turtle_with_area(&mut self.area);
@@ -528,13 +540,23 @@ impl PortalList {
                     if occ.get().0 == template {
                         (occ.get().1.clone(), true)
                     } else {
-                        let widget_ref = WidgetRef::new_from_ptr(cx, Some(*ptr));
+                        let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.0 == template){
+                            self.reusable_items.remove(pos).1
+                        }
+                        else{
+                            WidgetRef::new_from_ptr(cx, Some(*ptr))
+                        };
                         occ.insert((template, widget_ref.clone()));
                         (widget_ref, false)
                     }
                 }
                 Entry::Vacant(vac) => {
-                    let widget_ref = WidgetRef::new_from_ptr(cx, Some(*ptr));
+                    let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.0 == template){
+                        self.reusable_items.remove(pos).1
+                    }
+                    else{
+                        WidgetRef::new_from_ptr(cx, Some(*ptr))
+                    };
                     vac.insert((template, widget_ref.clone()));
                     (widget_ref, false)
                 }
