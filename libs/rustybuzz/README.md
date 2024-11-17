@@ -45,7 +45,7 @@ and we do not do this for now.
 At the moment, performance isn't that great. We're 1.5-2x slower than harfbuzz.
 Also, rustybuzz doesn't support shaping plan caching at the moment.
 
-See [benches/README.md](./benches/README.md) for details.
+See [benches/README.md](../ttf-parser/benches/README.md) for details.
 
 ## Notes about the port
 
