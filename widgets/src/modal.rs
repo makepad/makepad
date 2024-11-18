@@ -119,6 +119,14 @@ impl Modal {
 }
 
 impl ModalRef {
+    pub fn is_open(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.opened
+        } else {
+            false
+        }
+    }
+
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.open(cx);
