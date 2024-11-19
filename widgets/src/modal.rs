@@ -72,21 +72,19 @@ impl Widget for Modal {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_list.begin_overlay_reuse(cx);
 
-        cx.begin_pass_sized_turtle(self.layout);
+        cx.begin_turtle(walk, self.layout);
         self.draw_bg.begin(cx, self.walk, self.layout);
 
         if self.opened {
             let _ = self
                 .bg_view
-                .draw_walk(cx, scope, walk.with_abs_pos(DVec2 { x: 0., y: 0. }));
+                .draw_walk(cx, scope, walk);
             let _ = self.content.draw_all(cx, scope);
         }
 
         self.draw_bg.end(cx);
-
-        cx.end_pass_sized_turtle();
+        cx.end_turtle();
         self.draw_list.end(cx);
-
         DrawStep::done()
     }
 }
