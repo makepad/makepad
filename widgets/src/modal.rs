@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_platform::{KeyCode, KeyEvent},
     view::*,
     widget::*
 };
@@ -56,16 +57,26 @@ impl Widget for Modal {
         self.content.handle_event(cx, event, scope);
         cx.sweep_lock(self.draw_bg.area());
 
-        // Check if there was a click outside of the content (bg), then close if true.
-        let content_rec = self.content.area().rect(cx);
-        if let Hit::FingerUp(fe) =
-            event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area())
-        {
-            if !content_rec.contains(fe.abs) {
-                self.close(cx);
-                let widget_uid = self.content.widget_uid();
-                cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
+        // A closure to check if a finger up event occurred in the modal's background area.
+        let mut is_finger_up_in_bg = || {
+            if let Hit::FingerUp(fe) = event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
+                !self.content.area().rect(cx).contains(fe.abs)
+            } else {
+                false
             }
+        };
+
+        // Close the modal if any of the following conditions occur:
+        // * If the Escape key was pressed
+        // * If the back navigational action/gesture on Android was triggered
+        // * If there was a click/press in the background area outside of the inner content
+        if matches!(event, Event::BackPressed)
+            || matches!(event, Event::KeyUp(KeyEvent { key_code: KeyCode::Escape, .. }))
+            || is_finger_up_in_bg()
+        {
+            self.close(cx);
+            let widget_uid = self.content.widget_uid();
+            cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
         }
     }
 
