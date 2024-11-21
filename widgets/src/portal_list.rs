@@ -9,6 +9,9 @@ live_design!{
     PortalListBase = {{PortalList}} {}
 }
 
+/// The maximum number of items that will be shown as part of a smooth scroll animation.
+const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
+
 #[derive(Clone,Copy)]
 struct ScrollSample{
     abs: f64,
@@ -1073,6 +1076,7 @@ impl PortalListRef {
         }
         false
     }
+
     /// Initiates a smooth scrolling animation to the specified target item in the list.
     ///
     /// ## Arguments
@@ -1093,23 +1097,26 @@ impl PortalListRef {
         if inner.items.is_empty() { return };
         if target_id < inner.range_start || target_id > inner.range_end { return };
 
-        let max_items_to_show = max_items_to_show.unwrap_or(20);
-        let (scroll_direction, starting_id) = if target_id > inner.first_id {
+        let max_items_to_show = max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW);
+        let scroll_direction: f64;
+        let starting_id: Option<usize>;
+        if target_id > inner.first_id {
             // Scrolling down to a larger item index
-            let starting_id = target_id
-                .saturating_sub(max_items_to_show)
-                .max(inner.first_id); // don't start before the current first_id
-            (-1, starting_id)
+            scroll_direction = -1.0;
+            starting_id = ((target_id - inner.first_id) > max_items_to_show)
+                .then_some(target_id - max_items_to_show);
         } else {
             // Scrolling up to a smaller item index
-            let starting_id = target_id
-                .saturating_add(max_items_to_show)
-                .min(inner.range_end); // don't start after the current range_end
-            (1, starting_id)
+            scroll_direction = 1.0;
+            starting_id = ((inner.first_id - target_id) > max_items_to_show)
+                .then_some(target_id + max_items_to_show);
         };
 
-        // First, we jump directly to the starting_id.
-        inner.first_id = starting_id;
+        // First, if the target_id was too far away, jump directly to a closer starting_id.
+        if let Some(start) = starting_id {
+            log!("smooth_scroll_to(): jumping from first ID {} to start ID {}", inner.first_id, start);
+            inner.first_id = start;
+        }
         // Then, we kick off the actual smooth scroll process.
         inner.scroll_state = ScrollState::ScrollingTo {
             target_id,
@@ -1151,7 +1158,7 @@ impl PortalListRef {
         if inner.items.is_empty() { return };
 
         let starting_id = inner.range_end
-            .saturating_sub(max_items_to_show.unwrap_or(20))
+            .saturating_sub(max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW))
             .max(inner.first_id); // don't start before the current first_id
 
         // First, we jump directly to the starting_id.

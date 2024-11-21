@@ -57,9 +57,10 @@ impl Widget for Modal {
         self.content.handle_event(cx, event, scope);
         cx.sweep_lock(self.draw_bg.area());
 
-        let is_finger_up_in_bg = || {
+        // A closure to check if a finger up event occurred in the modal's background area.
+        let mut is_finger_up_in_bg = || {
             if let Hit::FingerUp(fe) = event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
-                !content_rec.contains(fe.abs)
+                !self.content.area().rect(cx).contains(fe.abs)
             } else {
                 false
             }
@@ -69,7 +70,7 @@ impl Widget for Modal {
         // * If the Escape key was pressed
         // * If the back navigational action/gesture on Android was triggered
         // * If there was a click/press in the background area outside of the inner content
-        if event == Event::BackPressed
+        if matches!(event, Event::BackPressed)
             || matches!(event, Event::KeyUp(KeyEvent { key_code: KeyCode::Escape, .. }))
             || is_finger_up_in_bg()
         {
