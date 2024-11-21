@@ -110,9 +110,9 @@ impl StackNavigationView {
                 Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
                 _ => false,
             };
-            
+
             // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
-            if back_mouse_button_released || event == Event::BackPressed {
+            if back_mouse_button_released || matches!(event, Event::BackPressed) {
                 self.hide_stack_view(cx);
             }
         }
