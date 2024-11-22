@@ -1,9 +1,14 @@
 
 use crate::event::Event;
 use crate::cx::Cx;
+use crate::ui_runner::UiRunner;
 
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
+    fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
+        // This assumes there is only one `AppMain`, and that `0` is reserved for it.
+        UiRunner::new(0)
+    }
 }
 
 #[macro_export]
