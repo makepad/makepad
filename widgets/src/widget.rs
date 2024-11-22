@@ -139,6 +139,10 @@ pub trait Widget: WidgetNode {
     {
         LiveType::of::<Self>()
     }
+
+    fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
+        UiRunner::new(self.widget_uid().0 as usize)
+    }
 }
 
 #[derive(Clone, Copy)]
