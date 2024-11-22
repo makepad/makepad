@@ -12,7 +12,104 @@ use crate::{
 };
 
 live_design!{
+    use link::widgets::*;
+    use link::theme::*;
+    use crate::designer_outline::*;
+    use crate::designer_outline_tree::*;
+    use crate::designer_toolbox::*;
+    use crate::designer_view::*;
+    use crate::designer_theme::*;
+        
     DesignerBase = {{Designer}} {
+    }
+    
+    pub Designer = <DesignerBase>{
+        <Window> {
+            window: { kind_id: 2 }
+            body = <View> {
+                designer_outline = <DesignerOutline> {
+                    flow: Down,
+                    <DockToolbar> {
+                        content = {
+                            margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
+                            align: { x: 0., y: 0.0 }
+                            spacing: (THEME_SPACE_3)
+                            <Pbold> {
+                                width: Fit,
+                                text: "Filter",
+                                margin: 0.,
+                                padding: <THEME_MSPACE_V_1> {}
+                            }
+                            
+                            <View> {
+                                width: Fit
+                                flow: Right,
+                                spacing: (THEME_SPACE_2)
+                                <CheckBoxCustom> {
+                                    margin: {left: (THEME_SPACE_1)}
+                                    text: ""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 13.5 }
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_2),
+                                        svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
+                                    }
+                                }
+                                <CheckBoxCustom> {
+                                    text: ""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 12.}
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_6),
+                                        svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
+                                    }
+                                }
+                                <CheckBoxCustom> {
+                                    text: ""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 10.5}
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_1),
+                                        svg_file: dep("crate://self/resources/icons/icon_text.svg"),
+                                    }
+                                }
+                                <CheckBoxCustom> {
+                                    text:""
+                                    draw_check: { check_type: None }
+                                    icon_walk: {width: 13.}
+                                    draw_icon: {
+                                        color: (THEME_COLOR_D_3),
+                                        color_active: (STUDIO_PALETTE_5),
+                                        svg_file: dep("crate://self/resources/icons/icon_image.svg"),
+                                    }
+                                }
+                            }
+                            <TextInput> {
+                                width: Fill,
+                                empty_message: "Filter",
+                            }
+                        }
+                    }
+                    outline_tree = <DesignerOutlineTree>{
+                        
+                    }
+                }
+            }
+        }
+        <Window>{
+            window:{ kind_id: 1 }
+            body = <View>{
+                flow: Overlay
+                designer_view = <DesignerView> {
+                    width: Fill, height: Fill
+                }
+                toolbox = <DesignerToolbox>{
+                }
+            }
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use crate::{
   
   
 live_design! {
-    BirdSystem = {{BirdSystem}} {
+    pub BirdSystem = {{BirdSystem}} {
         width: Fill,
         height: Fill,
         

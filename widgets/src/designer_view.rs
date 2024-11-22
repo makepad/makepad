@@ -10,11 +10,162 @@ use crate::{
 use std::collections::BTreeMap;
 
 live_design!{
-    DesignerViewBase = {{DesignerView}}{
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    use link::widgets::*;
+    
+    pub DesignerViewBase = {{DesignerView}}{
     }
     
-    DesignerContainerBase = {{DesignerContainer}}{
+    pub DesignerContainerBase = {{DesignerContainer}}{
     }
+    
+    pub DesignerContainer = <DesignerContainerBase>{
+        width: 1200,
+        height: 1200,
+        flow: Overlay,
+        clip_x:false,
+        clip_y:false,
+        align:{x:1.0},
+        animator: {
+            select = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        view = {draw_bg:{border_color:#5}}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        view = {draw_bg:{border_color:#c}}
+                    }
+                }
+                
+            }
+        }
+        view = <RoundedView>{
+            draw_bg:{
+                color:#4,
+                border_width:2
+                border_color:#5
+            }
+            padding: 10
+            inner = <BareStep>{}
+        }
+        
+        widget_label = <RoundedShadowView>{
+            margin: { top: -35., right: 0. }
+            padding: 0.
+            width: Fit, height: Fit,
+            spacing: 0.,
+            align: { x: 1.0, y: 0.0 }
+            flow: Down,
+            clip_x: false, clip_y: false,
+            
+            draw_bg: {
+                border_width: 1.0
+                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                shadow_color: (THEME_COLOR_D_3)
+                shadow_radius: 5.0,
+                shadow_offset: vec2(0.0, 0.0)
+                radius: 2.5
+                color: (THEME_COLOR_FG_APP),
+            }
+            
+            label = <Button> {
+                padding: <THEME_MSPACE_2> {}
+                text:"Hello world"
+                
+                draw_bg: {
+                    instance hover: 0.0
+                    instance pressed: 0.0
+                    uniform border_radius: (THEME_CORNER_RADIUS)
+                    instance bodytop: (THEME_COLOR_FG_APP)
+                    instance bodybottom: #f00
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                        let grad_top = 5.0;
+                        let grad_bot = 2.0;
+                        let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                        
+                        let body_transp = vec4(body.xyz, 0.0);
+                        let top_gradient = mix(
+                            body_transp,
+                            mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                            max(0.0, grad_top - sdf.pos.y) / grad_top
+                        );
+                        let bot_gradient = mix(
+                            mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                            top_gradient,
+                            clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                        );
+                        
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x - 2.0,
+                            self.rect_size.y - 2.0,
+                            self.border_radius
+                        )
+                        sdf.fill_keep(body)
+                        
+                        sdf.stroke(
+                            bot_gradient,
+                            THEME_BEVELING
+                        )
+                        
+                        return sdf.result
+                    }
+                }
+            }
+        }
+    }
+    
+    pub DesignerView = <DesignerViewBase>{
+        clear_color: #3
+        draw_outline:{
+            fn pixel(self) -> vec4 {
+                let p = self.pos * self.rect_size;
+                let sdf = Sdf2d::viewport(p)
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                                
+                let line_width = 0.58;
+                let dash_length = 10;
+                let pos = p.x + p.y;//+self.time*10.0 ;
+                let dash_pattern = fract(pos / dash_length);
+                let alpha = step(dash_pattern, line_width);
+                                
+                let c = vec4(mix(#c, #555f, alpha))
+                                
+                sdf.stroke(c, 2.5);
+                return sdf.result;
+                //return vec4(self.color.xyz * self.color.w, self.color.w)
+            }
+        }
+                
+        draw_bg: {
+            texture image: texture2d
+            varying scale: vec2
+            varying shift: vec2
+            fn vertex(self) -> vec4 {
+                
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
+            }
+        }
+        container: <DesignerContainer>{
+        }
+    }
+    
 }
 
 #[derive(Clone, Debug, DefaultNone)]

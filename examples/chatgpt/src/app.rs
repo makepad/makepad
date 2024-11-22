@@ -5,7 +5,7 @@ use makepad_widgets::*;
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 live_design!{
-    import makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets::theme_desktop_dark::*;
         
     App = {{App}} {
         ui: <Window> {body = {

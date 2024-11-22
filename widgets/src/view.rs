@@ -6,7 +6,7 @@ use {
 };
 
 live_design! {
-    ViewBase = {{View}} {debug:None}
+    pub ViewBase = {{View}} {debug:None}
 }
 
 // maybe we should put an enum on the bools like

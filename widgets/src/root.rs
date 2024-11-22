@@ -8,7 +8,13 @@ use {
 };
 
 live_design!{
-    RootBase = {{Root}} {}
+    link widgets;
+    
+    use link::widgets::*;
+    use crate::designer::Designer;
+    
+    pub RootBase = {{Root}} {}
+    pub Root = <RootBase> { design_window = <Designer> {} }
 }
 
 #[derive(Live, LiveRegisterWidget, WidgetRef)]

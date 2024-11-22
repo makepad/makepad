@@ -2,9 +2,9 @@ use makepad_widgets::*;
 use std::net::UdpSocket;
     
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_draw::shader::std::*;
     
     VideoFrame = <Image> {
         height: All,

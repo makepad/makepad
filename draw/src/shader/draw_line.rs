@@ -10,7 +10,7 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
+    use makepad_draw::shader::std::*;
     DrawLine= {{DrawLine}} {
        
         fn stroke(self, side:float, progress: float) -> vec4{

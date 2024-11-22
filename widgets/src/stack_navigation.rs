@@ -9,9 +9,118 @@ use crate::{
     WindowAction,
 };
 
-live_design! {
-    StackNavigationViewBase = {{StackNavigationView}} {}
-    StackNavigationBase = {{StackNavigation}} {}
+live_design!{
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub StackNavigationViewBase = {{StackNavigationView}} {}
+    pub StackNavigationBase = {{StackNavigation}} {}
+    
+    // StackView DSL begin
+    
+    HEADER_HEIGHT = 80.0
+    
+    pub StackViewHeader = <View> {
+        width: Fill, height: (HEADER_HEIGHT),
+        padding: {bottom: 10., top: 50.}
+        show_bg: true
+        draw_bg: {
+            color: (THEME_COLOR_APP_CAPTION_BAR)
+        }
+        
+        content = <View> {
+            width: Fill, height: Fit,
+            flow: Overlay,
+            
+            title_container = <View> {
+                width: Fill, height: Fit,
+                align: {x: 0.5, y: 0.5}
+                
+                title = <H4> {
+                    width: Fit, height: Fit,
+                    margin: 0,
+                    text: "Stack View Title"
+                }
+            }
+            
+            button_container = <View> {
+                left_button = <Button> {
+                    width: Fit, height: 68,
+                    icon_walk: {width: 10, height: 68}
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/back.svg"),
+                        color: (THEME_COLOR_TEXT_DEFAULT);
+                        brightness: 0.8;
+                    }
+                }
+            }
+        }
+    }
+    
+    pub StackNavigationView = <StackNavigationViewBase> {
+        visible: false
+        width: Fill, height: Fill,
+        flow: Overlay
+        
+        show_bg: true
+        draw_bg: {
+            color: (THEME_COLOR_WHITE)
+        }
+        
+        // Empty slot to place a generic full-screen background
+        background = <View> {
+            width: Fill, height: Fill,
+            visible: false
+        }
+        
+        body = <View> {
+            width: Fill, height: Fill,
+            flow: Down,
+            
+            // THEME_SPACE between body and header can be adjusted overriding this margin
+            margin: {top: (HEADER_HEIGHT)},
+        }
+        
+        header = <StackViewHeader> {}
+        
+        offset: 4000.0
+        
+        animator: {
+            slide = {
+                default: hide,
+                hide = {
+                    redraw: true
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
+                    from: {all: Forward {duration: 5.0}}
+                    // Large enough number to cover several screens,
+                    // but we need a way to parametrize it
+                    apply: {offset: 4000.0}
+                }
+                
+                show = {
+                    redraw: true
+                    ease: ExpDecay {d1: 0.82, d2: 0.95}
+                    from: {all: Forward {duration: 0.5}}
+                    apply: {offset: 0.0}
+                }
+            }
+        }
+    }
+    
+    pub StackNavigation = <StackNavigationBase> {
+        width: Fill, height: Fill
+        flow: Overlay
+        
+        root_view = <View> {}
+    }
+    
 }
 
 #[derive(Clone, DefaultNone, Eq, Hash, PartialEq, Debug)]
