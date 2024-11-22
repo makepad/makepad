@@ -5,7 +5,79 @@ use crate::{
 };
 
 live_design!{
-    FoldButtonBase = {{FoldButton}} {}
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    
+    pub FoldButtonBase = {{FoldButton}} {}
+    
+    pub FoldButton = <FoldButtonBase> {
+        // TODO: adda  focus states
+        width: 12., height: 12.,
+        
+        draw_bg: {
+            instance open: 0.0
+            instance hover: 0.0
+            uniform fade: 1.0
+            
+            fn pixel(self) -> vec4 {
+                let sz = 2.5;
+                let c = vec2(5.0, 0.6 * self.rect_size.y);
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.clear(vec4(0.));
+                    
+                // we have 3 points, and need to rotate around its center
+                sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                sdf.move_to(c.x - sz, c.y + sz);
+                sdf.line_to(c.x, c.y - sz);
+                sdf.line_to(c.x + sz, c.y + sz);
+                sdf.close_path();
+                sdf.fill(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                ));
+                return sdf.result * self.fade;
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_bg: {hover: 0.0}}
+                }
+                
+                on = {
+                    from: {all: Snap}
+                    apply: {draw_bg: {hover: 1.0}}
+                }
+            }
+            
+            open = {
+                default: on
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.96, d2: 0.97}
+                    redraw: true
+                    apply: {
+                        open: 0.0
+                        draw_bg: {open: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.98, d2: 0.95}
+                    redraw: true
+                    apply: {
+                        open: 1.0
+                        draw_bg: {open: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook, Widget)]

@@ -1,16 +1,16 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
 
-    import makepad_experiments_homescreens::my_widget::MyWidget;
-    import makepad_experiments_homescreens::iconbutton::IconButton;
+    use makepad_experiments_homescreens::my_widget::MyWidget;
+    use makepad_experiments_homescreens::iconbutton::IconButton;
     
-    import makepad_experiments_homescreens::diffuse::DiffuseThing;
-    import makepad_experiments_homescreens::particles::ParticleSystem;
-    import makepad_experiments_homescreens::birds::BirdSystem;
+    use makepad_experiments_homescreens::diffuse::DiffuseThing;
+    use makepad_experiments_homescreens::particles::ParticleSystem;
+    use makepad_experiments_homescreens::birds::BirdSystem;
     ContainerStage = <ViewBase> {
         optimize: Texture,
         draw_bg: {

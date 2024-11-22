@@ -3,11 +3,11 @@ use makepad_platform::live_atomic::*;
 
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::vectorline::*;
-    import makepad_draw::shader::std::*;
-    import makepad_example_ui_zoo::demofiletree::*;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets::vectorline::*;
+    use makepad_draw::shader::std::*;
+    use makepad_example_ui_zoo::demofiletree::*;
 
     COLOR_CONTAINER = (THEME_COLOR_D_1)
     COLOR_ACCENT = (THEME_COLOR_MAKEPAD)

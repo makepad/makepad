@@ -8,8 +8,8 @@ st::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -143,8 +143,8 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -4026,8 +4026,8 @@ use {
 };
 
 live_design! {
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -4161,8 +4161,8 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -8044,8 +8044,8 @@ use {
 };
 
 live_design! {
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -8179,8 +8179,8 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -12062,8 +12062,8 @@ use {
 };
 
 live_design! {
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -12197,8 +12197,8 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -16080,8 +16080,8 @@ use {
 };
 
 live_design! {
-    import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -16215,8 +16215,8 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme::*;
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,

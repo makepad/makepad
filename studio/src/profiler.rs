@@ -11,9 +11,9 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    use link::theme::*;
     
     ProfilerEventChart = {{ProfilerEventChart}}{
         height: Fill, width: Fill,
@@ -52,7 +52,7 @@ live_design!{
         }
     }
     
-    Profiler = {{Profiler}}{
+    pub Profiler = {{Profiler}}{
         height: Fill, width: Fill
         <ProfilerEventChart>{ }
     }

@@ -7,7 +7,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
+    use makepad_draw::shader::std::*;
     
     DrawWave = {{DrawWave}} {
         texture wave_texture: texture2d

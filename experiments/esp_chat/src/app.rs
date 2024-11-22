@@ -4,10 +4,10 @@ use std::{env, str, time::Duration, thread};
 use serialport::SerialPort;
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
-    import crate::app_ui::AppUI;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_draw::shader::std::*;
+    use crate::app_ui::AppUI;
     App = {{App}} { 
         ui: <Root> {
             <Window> {

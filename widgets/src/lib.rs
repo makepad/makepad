@@ -62,6 +62,7 @@ pub mod performance_view;
 pub mod nav_control;
 
 pub mod view;
+pub mod view_ui;
 pub mod widget;
 pub mod widget_match_event;
 pub mod toggle_panel;
@@ -78,6 +79,7 @@ pub mod bare_step;
 pub mod turtle_step;
 
 pub mod designer;
+pub mod designer_theme;
 pub mod designer_outline_tree;
 pub mod designer_view;
 pub mod designer_outline;
@@ -149,6 +151,7 @@ pub use crate::{
 
 
 pub fn live_design(cx: &mut Cx) {
+    cx.link(live_id!(theme), live_id!(theme_desktop_dark));
     // how about we allow code-generated files
     //cx.bind_live_alias("theme","dark_theme");
     // how do we override fonts 
@@ -174,6 +177,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::popup_notification::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
+    crate::view_ui::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
     crate::link_label::live_design(cx);
@@ -212,6 +216,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::toggle_panel::live_design(cx);
     crate::cached_widget::live_design(cx);
     
+    crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_view::live_design(cx);
     crate::designer_outline::live_design(cx);

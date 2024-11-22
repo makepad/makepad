@@ -6,16 +6,16 @@ use crate::{
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design! {
-    import makepad_widgets::base::*
-    import makepad_widgets::theme_desktop_dark::*
-    import makepad_example_ironfish::app_desktop::AppDesktop
-    import makepad_example_ironfish::app_mobile::AppMobile
+    use makepad_widgets::base::*
+    use makepad_widgets::theme_desktop_dark::*
+    use makepad_example_ironfish::app_desktop::AppDesktop
+    use makepad_example_ironfish::app_mobile::AppMobile
 
-    import makepad_audio_graph::mixer::Mixer;
-    import makepad_audio_graph::instrument::Instrument;
-    import makepad_synth_ironfish::ironfish::IronFish;
+    use makepad_audio_graph::mixer::Mixer;
+    use makepad_audio_graph::instrument::Instrument;
+    use makepad_synth_ironfish::ironfish::IronFish;
     
-    import makepad_draw::shader::std::*;
+    use makepad_draw::shader::std::*;
 /*
     BlurStage = <ViewBase> {
         optimize: Texture,

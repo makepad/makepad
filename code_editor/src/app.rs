@@ -8,8 +8,8 @@ use {
 };
 
 live_design! {
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {

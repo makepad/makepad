@@ -133,7 +133,7 @@ impl DesignerData{
                 map: &mut HashMap<LiveId, OutlineNode>,
                 parent_children: &mut SmallVec<[LiveId;4]>) -> usize {
                                         
-                while index < nodes.len() - 1 { 
+                while index < nodes.len().saturating_sub(1) { 
                     if let LiveValue::Class {live_type, class_parent, ..} = &nodes[index].value {
                         // lets check if its a widget
                         let wr = live_registry.components.get::<WidgetRegistry>();

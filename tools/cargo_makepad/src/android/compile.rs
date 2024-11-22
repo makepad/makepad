@@ -93,7 +93,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->Stri
 fn main_java(url:&str)->String{
     format!(r#"
         package {url};
-        import dev.makepad.android.MakepadActivity;
+        use dev.makepad.android.MakepadActivity;
         public class MakepadApp extends MakepadActivity{{
         }}
     "#)

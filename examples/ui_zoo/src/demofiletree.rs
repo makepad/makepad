@@ -9,7 +9,7 @@ use crate::{
     };
 
 live_design!{
-    import makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets::theme_desktop_dark::*;
         
     DemoFileTree = {{DemoFileTree}}{
         file_tree: <FileTree>{}
