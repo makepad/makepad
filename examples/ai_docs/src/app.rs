@@ -2,8 +2,8 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*; 
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*; 
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{

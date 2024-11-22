@@ -1,9 +1,9 @@
 use makepad_widgets::*;
    
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_draw::shader::std::*;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")

@@ -6,7 +6,39 @@ use crate::{
 };
 
 live_design!{
+    link widgets;
+    use link::theme::*;
+    
     FoldHeaderBase = {{FoldHeader}} {}
+    FoldHeader = <FoldHeaderBase> {
+        width: Fill, height: Fit,
+        body_walk: { width: Fill, height: Fit}
+        
+        flow: Down,
+        
+        animator: {
+            open = {
+                default: on
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.96, d2: 0.97}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.98, d2: 0.95}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                    }
+                }
+            }
+        }
+    }
+    
 }
 
 #[derive(Live, LiveHook, Widget)]

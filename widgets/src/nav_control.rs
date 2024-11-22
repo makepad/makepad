@@ -2,9 +2,25 @@ use crate::makepad_draw::*;
 
 
 live_design!{
-    import makepad_draw::shader::std::*;
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+        
+    pub NavControlBase = {{NavControl}} {}
+    pub NavControl = <NavControlBase> {
+        draw_focus: {
+            fn pixel(self) -> vec4 {
+                return #000f
+            }
+        }
+        draw_text: {
+            text_style: {
+                font_size: 6
+            },
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+    }
     
-    NavControlBase = {{NavControl}} {}
 }
 
 #[derive(Live, LiveHook, LiveRegister)]

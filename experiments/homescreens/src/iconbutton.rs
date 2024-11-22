@@ -5,11 +5,11 @@ use {
 // the "IconButton" on the *left* hand side of the below is the name we will refer to the
 // widget in the app's live_design block
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
-   
-    IconButton = <View> {
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
+    
+    pub IconButton = <View> {
         align:{x:0.5,y:0.5}
         flow: Down,
         instance hover: 0.0

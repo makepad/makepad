@@ -2,12 +2,12 @@ use crate::makepad_live_id::*;
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
-    import crate::drawarc::VectorArc;  
-    import crate::drawarc::VectorCornerArc;
-    import makepad_widgets::vectorline::*;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_draw::shader::std::*;
+    use crate::drawarc::VectorArc;  
+    use crate::drawarc::VectorCornerArc;
+    use makepad_widgets::vectorline::*;
     
     App = {{App}} {
         ui: <Window> {

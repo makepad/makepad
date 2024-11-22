@@ -3,15 +3,15 @@ use makepad_audio_widgets::*;
 use makepad_widgets::*;
 
 live_design! {
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import crate::fish_patch_editor::*;
-    import crate::fish_block_editor::*;
-    import crate::homescreen::BigFishHomeScreen;
-    import crate::fish_theme::*;
-    import crate::fish_connection_widget::*;
-    import crate::fish_selector_widget::*;
-    import crate::lua_console::*;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use crate::fish_patch_editor::*;
+    use crate::fish_block_editor::*;
+    use crate::homescreen::BigFishHomeScreen;
+    use crate::fish_theme::*;
+    use crate::fish_connection_widget::*;
+    use crate::fish_selector_widget::*;
+    use crate::lua_console::*;
 
     App = {{App}} {
 

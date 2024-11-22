@@ -4,7 +4,26 @@ use crate::{
 };
 
 live_design!{
-    ScrollBarsBase = {{ScrollBars}} {}
+    link widgets;
+    use link::theme::*;
+    use link::widgets::*;
+    use makepad_draw::shader::std::*;
+    
+    pub ScrollBarsBase = {{ScrollBars}} {}
+    
+    pub ScrollBarsTabs = <ScrollBarsBase> {
+        show_scroll_x: true,
+        show_scroll_y: true,
+        scroll_bar_x: <ScrollBarTabs> {}
+        scroll_bar_y: <ScrollBarTabs> {}
+    }
+    
+    pub ScrollBars = <ScrollBarsBase> {
+        show_scroll_x: true,
+        show_scroll_y: true,
+        scroll_bar_x: <ScrollBar> {}
+        scroll_bar_y: <ScrollBar> {}
+    }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
