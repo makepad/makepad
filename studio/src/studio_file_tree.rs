@@ -8,9 +8,9 @@ use {
 };
 
 live_design!{
-    import makepad_widgets::theme_desktop_dark::*;
+    use link::widgets::*;
         
-    StudioFileTree = {{StudioFileTree}}{
+    pub StudioFileTree = {{StudioFileTree}}{
         file_tree: <FileTree>{}
     }
 }

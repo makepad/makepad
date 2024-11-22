@@ -5,8 +5,41 @@ use crate::{
     widget::*
 };
 
-live_design! {
-    ModalBase = {{Modal}} {}
+live_design!{
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub ModalBase = {{Modal}} {}
+    pub Modal = <ModalBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 0.5, y: 0.5}
+        
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+        
+        bg_view: <View> {
+            width: Fill
+            height: Fill
+            show_bg: true
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    return vec4(0., 0., 0., 0.7)
+                }
+            }
+        }
+        
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+        }
+    }
 }
 
 #[derive(Clone, Debug, DefaultNone)]

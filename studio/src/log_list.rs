@@ -16,10 +16,10 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_code_editor::code_view::CodeView;
+    use link::shaders::*;
+    use link::widgets::*;
+    use link::theme::*;
+    use makepad_code_editor::code_view::CodeView;
     
     Icon = <View> {
         width: 10, height: 10
@@ -191,7 +191,7 @@ live_design!{
         }
     }
     
-    LogList = {{LogList}}{
+    pub LogList = {{LogList}}{
         height: Fill, width: Fill,
         list = <PortalList> {
             capture_overload: false,

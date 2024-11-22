@@ -1,8 +1,165 @@
 use crate::makepad_draw::*;
 
 live_design!{
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
     DrawScrollBar= {{DrawScrollBar}} {}
-    ScrollBarBase= {{ScrollBar}} {}
+    
+    pub ScrollBarBase= {{ScrollBar}} {}
+    
+    pub ScrollBarTabs = <ScrollBarBase> {
+        bar_size: 10.0,
+        bar_side_margin: 3.0
+        min_handle_size: 30.0
+        draw_bar: {
+            //draw_depth: 5.0
+            uniform border_radius: 1.5
+            instance bar_width: 6.0
+            instance pressed: 0.0
+            instance hover: 0.0
+                                    
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                if self.is_vertical > 0.5 {
+                    sdf.box(
+                        1.,
+                        self.rect_size.y * self.norm_scroll,
+                        self.bar_width,
+                        self.rect_size.y * self.norm_handle,
+                        self.border_radius
+                    );
+                }
+                else {
+                    sdf.box(
+                        self.rect_size.x * self.norm_scroll,
+                        1.,
+                        self.rect_size.x * self.norm_handle,
+                        self.bar_width,
+                        self.border_radius
+                    );
+                }
+                return sdf.fill(THEME_COLOR_U_HIDDEN)
+            }
+        }
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bar: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                                                
+                on = {
+                    cursor: Default,
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bar: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                                                
+                pressed = {
+                    cursor: Default,
+                    from: {all: Snap}
+                    apply: {
+                        draw_bar: {
+                            pressed: 1.0,
+                            hover: 1.0,
+                        }
+                    }
+                }
+            }
+        }
+    }
+            
+    pub ScrollBar = <ScrollBarBase> {
+        bar_size: 10.0,
+        bar_side_margin: 3.0
+        min_handle_size: 30.0
+        draw_bar: {
+            //draw_depth: 5.0
+            uniform border_radius: 1.5
+            instance bar_width: 6.0
+            instance pressed: 0.0
+            instance hover: 0.0
+                        
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                if self.is_vertical > 0.5 {
+                    sdf.box(
+                        1.,
+                        self.rect_size.y * self.norm_scroll,
+                        self.bar_width,
+                        self.rect_size.y * self.norm_handle,
+                        self.border_radius
+                    );
+                }
+                else {
+                    sdf.box(
+                        self.rect_size.x * self.norm_scroll,
+                        1.,
+                        self.rect_size.x * self.norm_handle,
+                        self.bar_width,
+                        self.border_radius
+                    );
+                }
+                return sdf.fill( mix(
+                    THEME_COLOR_CTRL_DEFAULT,
+                    mix(
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
+                        self.pressed
+                    ),
+                    self.hover
+                ));
+            }
+        }
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bar: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                                
+                on = {
+                    cursor: Default,
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bar: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                                
+                pressed = {
+                    cursor: Default,
+                    from: {all: Snap}
+                    apply: {
+                        draw_bar: {
+                            pressed: 1.0,
+                            hover: 1.0,
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]

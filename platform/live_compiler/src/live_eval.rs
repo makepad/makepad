@@ -101,9 +101,9 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
         }
         LiveValue::Id(id) => { // look it up from start on up
             *index += 1;
-            if let LiveValue::Root {id_resolve} = &scope_nodes[0].value {
+            if let LiveValue::Root(root) = &scope_nodes[0].value {
                 // lets find the id
-                if let Some(ptr) = id_resolve.get(&id){
+                if let Some(ptr) = root.locals.get(&id){
                     match ptr{
                         LiveScopeTarget::LivePtr(ptr)=>{
                             let doc = live_registry.ptr_to_doc(*ptr);

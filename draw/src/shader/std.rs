@@ -7,18 +7,19 @@ pub use {
 };
 
 live_design!{
+    link shaders;
     
-    PI = 3.141592653589793
-    E = 2.718281828459045
-    LN2 = 0.6931471805599453
-    LN10 = 2.302585092994046
-    LOG2E = 1.4426950408889634
-    LOG10E = 0.4342944819032518
-    SQRT1_2 = 0.70710678118654757
-    TORAD = 0.017453292519943295
-    GOLDEN = 1.618033988749895
+    pub PI = 3.141592653589793
+    pub E = 2.718281828459045
+    pub LN2 = 0.6931471805599453
+    pub LN10 = 2.302585092994046
+    pub LOG2E = 1.4426950408889634
+    pub LOG10E = 0.4342944819032518
+    pub SQRT1_2 = 0.70710678118654757
+    pub TORAD = 0.017453292519943295
+    pub GOLDEN = 1.618033988749895
     
-    GaussShadow = {
+    pub GaussShadow = {
         // ported from https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/
         // License: CC0 (http://creativecommons.org/publicdomain/zero/1.0/)
         fn gaussian(x:float, sigma:float )->float{
@@ -83,7 +84,7 @@ live_design!{
         }
     }
     
-    Math = {
+    pub Math = {
         fn rotate_2d(v: vec2, a: float) -> vec2 {
             let ca = cos(a);
             let sa = sin(a);
@@ -95,7 +96,7 @@ live_design!{
         }
     }
     
-    Pal = {
+    pub Pal = {
         
         fn premul(v: vec4) -> vec4 {
             return vec4(v.x * v.w, v.y * v.w, v.z * v.w, v.w);
@@ -154,7 +155,7 @@ live_design!{
         }
     }
     
-    Sdf2d = struct {
+    pub Sdf2d = struct {
         field pos: vec2
         field result: vec4
         field last_pos: vec2

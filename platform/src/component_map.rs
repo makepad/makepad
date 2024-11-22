@@ -30,10 +30,17 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentMap<K,V>{
     }
     
     pub fn retain_visible_with<CB>(&mut self, mut cb:CB)
-    where CB: FnMut(&K, &V)
+    where CB: FnMut(V),
+          V: Default
     {
         let visible = &self.visible;
-        self.map.retain( | k, v | if visible.contains(&k){true}else{cb(k,v);false});
+        self.map.retain( | k, v | if visible.contains(&k){true}else
+        {
+            let mut v2 = V::default();
+            std::mem::swap(v, &mut v2);
+            cb(v2);
+            false
+        });
         self.visible.clear();
     } 
 

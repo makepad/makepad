@@ -2,9 +2,9 @@ use makepad_widgets::*;
 
 // Below is an application using the SDF api to make an icon with 2 overlaid filled boxes
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*; 
-    import makepad_draw::shader::std::*; // imprt needed for Sdf2d
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*; 
+    use makepad_draw::shader::std::*; // imprt needed for Sdf2d
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
