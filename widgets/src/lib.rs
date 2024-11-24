@@ -73,6 +73,9 @@ pub mod touch_gesture;
 pub mod data_binding;
 
 pub mod theme_desktop_dark;
+pub mod theme_desktop_light;
+pub mod theme_mobile_dark;
+pub mod theme_mobile_light;
 pub mod image_cache;
 pub mod bare_step;
 pub mod turtle_step;
@@ -154,10 +157,6 @@ pub use crate::{
 
 pub fn live_design(cx: &mut Cx) {
     cx.link(live_id!(theme), live_id!(theme_desktop_dark));
-    // how about we allow code-generated files
-    //cx.bind_live_alias("theme","dark_theme");
-    // how do we override fonts 
-    
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
@@ -165,6 +164,9 @@ pub fn live_design(cx: &mut Cx) {
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
     crate::theme_desktop_dark::live_design(cx);
+    crate::theme_desktop_light::live_design(cx);
+    crate::theme_mobile_dark::live_design(cx);
+    crate::theme_mobile_light::live_design(cx);
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
