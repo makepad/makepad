@@ -3,6 +3,7 @@ use makepad_widgets::*;
 
 live_design!{
     use link::theme::*;
+    use link::shaders::*;
     use link::widgets::*;
     
     App = {{App}} {
@@ -22,13 +23,17 @@ live_design!{
                             let uv = self.pos - center;
                             let radius = length(uv);
                             let angle = atan(uv.y, uv.x);
-                            let color1 = mix(#f00, #00f, 0.5 + 0.5 * cos(angle + self.time));
+                            let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
                             let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
                             return mix(color1, color2, radius);
                         }
                     }
                     button1 = <Button> {
-                        text: "Click me "
+                        text: "Click me 123"
+                        draw_text:{color:#fff}
+                    }
+                    button2 = <Button> {
+                        text: "Click me 345"
                         draw_text:{color:#fff}
                     }
                 }

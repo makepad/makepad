@@ -7,8 +7,9 @@ use std::fs::File;
 use std::io::Write;
 
 live_design!{ 
-    use makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*;
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
     App = {{App}} {
         
         ui: <Window> {

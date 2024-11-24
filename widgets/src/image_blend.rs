@@ -6,7 +6,79 @@ use crate::{
 };
 
 live_design!{
-    ImageBlendBase = {{ImageBlend}} {}
+    link widgets;
+    use link::shaders::*;
+    
+    pub ImageBlendBase = {{ImageBlend}} {}
+        
+    pub ImageBlend = <ImageBlendBase> {
+        width: 100
+        height: 100
+                        
+        draw_bg: {
+            texture image0: texture2d
+            texture image1: texture2d
+            instance opacity: 1.0
+            instance blend: 0.0
+            instance image_scale: vec2(1.0, 1.0)
+            instance image_pan: vec2(0.0, 0.0)
+            instance breathe: 0.0            
+            fn get_color_scale_pan(self, scale: vec2, pan: vec2) -> vec4 {
+                let b = 1.0 - 0.1*self.breathe;
+                let s = vec2(0.05*self.breathe);
+                return mix(
+                    sample2d(self.image0, self.pos * scale*b + pan+s).xyzw,
+                    sample2d(self.image1, self.pos * scale*b + pan+s).xyzw,
+                    self.blend
+                )
+            }
+                        
+            fn get_color(self) -> vec4 {
+                return self.get_color_scale_pan(self.image_scale, self.image_pan)
+            }
+                                    
+            fn pixel(self) -> vec4 {
+                let color = self.get_color();
+                return Pal::premul(vec4(color.xyz, color.w * self.opacity))
+            }
+        }
+                        
+        animator: {
+            blend = {
+                default: zero,
+                zero = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {blend: 0.0}
+                    }
+                }
+                one = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                    }
+                    apply: {
+                        draw_bg: {blend: 1.0}
+                    }
+                }
+            } 
+            breathe = {
+                default: off,
+                on = {
+                    from: {all: BounceLoop {duration: 10., end:1.0}}
+                    apply:{
+                        draw_bg:{breathe:[{time: 0.0, value: 0.0}, {time:1.0,value:1.0}]}
+                    }
+                }
+                off = {
+                    from: {all: Forward {duration: 1}}
+                    apply:{
+                        draw_bg:{breathe:0.0}
+                    }
+                }
+            }
+        }
+    }
+          
 } 
   
 #[derive(Live, Widget)]

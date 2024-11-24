@@ -72,7 +72,6 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
-pub mod base;
 pub mod theme_desktop_dark;
 pub mod image_cache;
 pub mod bare_step;
@@ -162,7 +161,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::performance_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
-    crate::base::live_design(cx);
     crate::theme_desktop_dark::live_design(cx);
     crate::slider::live_design(cx);
     crate::label::live_design(cx);

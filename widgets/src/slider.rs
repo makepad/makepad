@@ -10,7 +10,8 @@ use {
 live_design!{
     link widgets;
     use link::theme::*;
-    use makepad_draw::shader::std::*;
+    use link::shaders::*;
+    use link::widgets::*;
     
     DrawSlider = {{DrawSlider}} {}
     
