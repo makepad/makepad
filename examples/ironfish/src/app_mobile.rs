@@ -1,10 +1,10 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    use makepad_widgets::theme_desktop_dark::*;
-    use makepad_widgets::base::*;
-    use makepad_draw::shader::std::*;
-
+    use link::widgets::*
+    use link::theme::*
+    use link::shaders::*
+    
     use makepad_example_ironfish::sequencer::Sequencer;
     use makepad_audio_widgets::display_audio::DisplayAudio;
     use makepad_audio_widgets::piano::Piano;
@@ -1172,7 +1172,7 @@ live_design!{
         // <Pagination> {}
     }
     
-    AppMobile = <View> {
+    pub AppMobile = <View> {
         design_mode: false,
         width: Fill, height: Fill
         padding: 0, align: {x: 0.0, y: 0.0}

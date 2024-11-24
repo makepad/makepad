@@ -9,7 +9,7 @@ use {
 };
 
 live_design!{
-    BasicSynth= {{BasicSynth}} {
+    pub BasicSynth= {{BasicSynth}} {
         prop:1.0
     }
 }

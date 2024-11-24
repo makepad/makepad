@@ -13,11 +13,12 @@ use std::sync::{Arc,Mutex};
 use crate::whisper::*;
    
 live_design!{
-    use makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*;
-    use makepad_draw::shader::std::*;
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
     use crate::app_ui::AppUI;
     use crate::app_ui::AppWindow;
+    
     App = {{App}} { 
         ui: <Root> {
             <Window> {

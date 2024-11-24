@@ -214,7 +214,7 @@ impl LiveIdAsProp for LiveId {
     fn as_instance(&self) -> LiveProp {LiveProp(*self, LivePropType::Instance)}
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LiveNodeOrigin(u64);
 
 impl fmt::Debug for LiveNodeOrigin {

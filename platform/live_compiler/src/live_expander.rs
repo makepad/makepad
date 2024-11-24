@@ -508,7 +508,7 @@ impl<'a> LiveExpander<'a> {
             if node.value.is_dsl() {
                 node.value.set_dsl_expand_index_if_none(i);
             }
-            if level == 0 && in_doc.exports.contains(&node.id){
+            if level == 0 && in_doc.exports.get(&node.id).is_some(){
                 let id = node.id;
                 if let LiveValue::Root(root) = &mut out_doc.nodes[0].value{
                     root.exports.insert(id, i);

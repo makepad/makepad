@@ -6,8 +6,8 @@ use crate::{
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design! {
-    use makepad_widgets::base::*
-    use makepad_widgets::theme_desktop_dark::*
+    use link::widgets::*
+    use link::theme::*
     use makepad_example_ironfish::app_desktop::AppDesktop
     use makepad_example_ironfish::app_mobile::AppMobile
 

@@ -7,6 +7,7 @@ use crate::{
 live_design!{
     link widgets;
     use link::theme::*;
+    use link::widgets::*;
     use makepad_draw::shader::std::*;
     
     pub SlidesViewBase = {{SlidesView}} {

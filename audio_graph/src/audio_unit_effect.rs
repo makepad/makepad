@@ -11,7 +11,7 @@ use {
 };
 
 live_design!{
-    AudioUnitEffect= {{AudioUnitEffect}} {
+    pub AudioUnitEffect= {{AudioUnitEffect}} {
         plugin: "FM8"
     }
 }
