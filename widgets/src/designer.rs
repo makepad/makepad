@@ -12,6 +12,7 @@ use crate::{
 };
 
 live_design!{
+    link designer_real
     use link::widgets::*;
     use link::theme::*;
     use crate::designer_outline::*;

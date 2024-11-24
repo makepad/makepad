@@ -11,7 +11,7 @@ live_design!{
     link widgets;
     
     use link::widgets::*;
-    use crate::designer::Designer;
+    use link::designer::Designer;
     
     pub RootBase = {{Root}} {}
     pub Root = <RootBase> { design_window = <Designer> {} }
