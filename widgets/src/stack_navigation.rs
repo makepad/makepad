@@ -212,7 +212,8 @@ impl StackNavigationView {
         // If the back button was clicked, it will be handled there.
         self.widget_match_event(cx, event, scope);
 
-        // Clicking the "back" button on the mouse must also hide the active stack view.
+        // Hide the active stack view if the "back" button on the mouse is clicked,
+        // or if the Android back navigation "action"/gesture occurred.
         if self.state == StackNavigationViewState::Active {
             let back_mouse_button_released = match event {
                 Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
@@ -220,8 +221,7 @@ impl StackNavigationView {
             };
 
             // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
-
-            if back_mouse_button_released {
+            if back_mouse_button_released || matches!(event, Event::BackPressed) {
                 self.hide_stack_view(cx);
             }
         }
