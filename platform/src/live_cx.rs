@@ -307,7 +307,7 @@ impl Cx {
         //let dt = crate::profile_start();
         
         live_registry.expand_all_documents(&mut errs);
-        //crate::profile_end!(dt);
+       //crate::profile_end!(dt);
         
         // lets evaluate all expressions in the main module
        /* for file in &live_registry.live_files {

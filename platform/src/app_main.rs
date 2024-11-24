@@ -32,6 +32,9 @@ macro_rules!app_main {
             }))));
             $app::register_main_module(&mut *cx.borrow_mut());
             cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+            if std::env::args().find( | v | v == "--stdin-loop").is_some() {
+                cx.borrow_mut().in_makepad_studio = true;
+            }
             //cx.borrow_mut().init_websockets("");
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();

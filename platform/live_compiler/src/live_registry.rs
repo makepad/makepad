@@ -922,11 +922,11 @@ impl LiveRegistry {
         let fixup_file_id = self.path_str_to_file_id("draw/src/shader/draw_trapezoid.rs").unwrap();
         self.doc_original_raw_imports_to_resolved_recur(fixup_file_id, errors, &mut dep_order);
         
-        /*
-        for dep in &dep_order{
+        
+        /*for dep in &dep_order{
             println!("{}", self.file_id_to_file_name(*dep));
-        }
-        */
+        }*/
+        
         
         for file_id in dep_order.iter().rev() {
             /*
