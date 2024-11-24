@@ -2202,7 +2202,7 @@ impl Default for IronFishVoice {
 }
 
 live_design! {
-    IronFish = {{IronFish}} {
+    pub IronFish = {{IronFish}} {
         settings: {}
     }
 }

@@ -1,9 +1,10 @@
 use makepad_widgets::*;
 
 live_design!{
-import makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*;
-    use makepad_draw::shader::std::*;
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
+    
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     LOGO = dep("crate://self/resources/logo.svg")
@@ -823,12 +824,12 @@ import makepad_widgets::base::*;
             body = {
                 padding: { top: 10., right: 10., left: 10., bottom: 0. }
                 content = {
-                    meta = {
+                    /*meta = {
                         margin: {bottom: 30.0, top: 10.0}
                         draw_text: {
                             color: (COLOR_BRAND_DARK)
                         }
-                    }
+                    }*/
                 }
             }
         }

@@ -1,9 +1,9 @@
 use makepad_widgets::*;
 
 live_design!{
-    use makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*;
-    use makepad_draw::shader::std::*;
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
     
     VideoFrame = <Image> {
         height: All,

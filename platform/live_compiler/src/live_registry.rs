@@ -852,7 +852,7 @@ impl LiveRegistry {
             if node.origin.node_has_prefix(){
                 let prev_token = &doc.tokens[node.origin.first_def().unwrap().token_index()-1];
                 if prev_token.token == LiveToken::Ident(live_id!(pub)){
-                    doc.exports.insert(node.id);
+                    doc.exports.insert(node.id, node.origin);
                 }
             }
                                                 
@@ -883,13 +883,20 @@ impl LiveRegistry {
         }
     }
     
-    fn collect_combined_exports(&mut self){
+    fn collect_combined_exports(&mut self, errors: &mut Vec<LiveError>){
         for link_target in self.link_targets.values_mut(){
             let mut combined_exports = HashMap::new();
             for target in &link_target.targets{
                 // lets grab the file
-                let file = &self.live_files[target.to_index()];
-                for ident in &file.original.exports{
+                let doc = &self.live_files[target.to_index()];
+                for (ident,origin) in &doc.original.exports{
+                    if combined_exports.get(ident).is_some(){
+                        errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: doc.original.token_id_to_span(origin.token_id().unwrap()).into(),
+                            message: format!("Target already present in link set: {}",ident)
+                        });
+                    }
                     combined_exports.insert(*ident, *target);
                 }
             }
@@ -901,7 +908,7 @@ impl LiveRegistry {
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
         // ok so first off
         // we need to run over our link_connections to gather our combined_exports
-        self.collect_combined_exports();
+        self.collect_combined_exports(errors);
         
         // alright lets start at the main module
         // and then we have to hop from dependency to dependency

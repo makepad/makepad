@@ -19,8 +19,9 @@ use {
 // We dont have a UI yet 
 
 live_design!{
-    use makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*; 
+    use link::widgets::*;
+    use link::theme::*; 
+    
     App = {{App}} {
         ui: <Window>{
             show_bg: true

@@ -1,9 +1,9 @@
 use crate::makepad_widgets::*;
  
 live_design! {
-    use makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*;
-    use makepad_draw::shader::std::*;
+    use link::widgets::*
+    use link::theme::*
+    use link::shaders::*
 
     use makepad_example_ironfish::sequencer::Sequencer;
     use makepad_audio_widgets::display_audio::DisplayAudio;
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View>{
+    pub AppDesktop = <View>{
         flow: Right
         width: Fill,
         height: Fill

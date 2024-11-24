@@ -9,7 +9,7 @@ use {
 // the "MyWidget" on the *left* hand side of the below is the name we will refer to the
 // widget in the app's live_design block
 live_design!{
-    MyWidget = {{MyWidget}} {}
+    pub MyWidget = {{MyWidget}} {}
 }
 
 #[derive(Live, Widget)]
