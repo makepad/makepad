@@ -1,6 +1,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_platform::{KeyCode, KeyEvent},
     view::*,
     widget::*
 };
@@ -89,37 +90,45 @@ impl Widget for Modal {
         self.content.handle_event(cx, event, scope);
         cx.sweep_lock(self.draw_bg.area());
 
-        // Check if there was a click outside of the content (bg), then close if true.
-        let content_rec = self.content.area().rect(cx);
-        if let Hit::FingerUp(fe) =
-            event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area())
-        {
-            if !content_rec.contains(fe.abs) {
-                self.close(cx);
-                let widget_uid = self.content.widget_uid();
-                cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
+        // A closure to check if a finger up event occurred in the modal's background area.
+        let mut is_finger_up_in_bg = || {
+            if let Hit::FingerUp(fe) = event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
+                !self.content.area().rect(cx).contains(fe.abs)
+            } else {
+                false
             }
+        };
+
+        // Close the modal if any of the following conditions occur:
+        // * If the Escape key was pressed
+        // * If the back navigational action/gesture on Android was triggered
+        // * If there was a click/press in the background area outside of the inner content
+        if matches!(event, Event::BackPressed)
+            || matches!(event, Event::KeyUp(KeyEvent { key_code: KeyCode::Escape, .. }))
+            || is_finger_up_in_bg()
+        {
+            self.close(cx);
+            let widget_uid = self.content.widget_uid();
+            cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_list.begin_overlay_reuse(cx);
 
-        cx.begin_pass_sized_turtle(self.layout);
+        cx.begin_turtle(walk, self.layout);
         self.draw_bg.begin(cx, self.walk, self.layout);
 
         if self.opened {
             let _ = self
                 .bg_view
-                .draw_walk(cx, scope, walk.with_abs_pos(DVec2 { x: 0., y: 0. }));
+                .draw_walk(cx, scope, walk);
             let _ = self.content.draw_all(cx, scope);
         }
 
         self.draw_bg.end(cx);
-
-        cx.end_pass_sized_turtle();
+        cx.end_turtle();
         self.draw_list.end(cx);
-
         DrawStep::done()
     }
 }
@@ -152,6 +161,14 @@ impl Modal {
 }
 
 impl ModalRef {
+    pub fn is_open(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.opened
+        } else {
+            false
+        }
+    }
+
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.open(cx);
