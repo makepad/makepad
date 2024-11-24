@@ -619,11 +619,11 @@ live_design!{
                 flow: Down,
                 spacing: 15.,
 
-                inner = <View> {
-                    flow: Right,
-                    height: Fit, width: Fill,
-                    spacing: 5.,
-                    margin: { bottom: 10.0, top: 5.}
+				<View> {
+					flow: Right,
+					height: Fit, width: Fill,
+					spacing: 5.,
+					margin: { bottom: 10.0, top: 5.}
 
                     meta = <Pbold> {
                         width: Fit,
