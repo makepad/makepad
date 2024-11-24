@@ -9,9 +9,11 @@ use crate::{
     };
 
 live_design!{
-    use makepad_widgets::theme_desktop_dark::*;
-        
-    DemoFileTree = {{DemoFileTree}}{
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
+       
+    pub DemoFileTree = {{DemoFileTree}}{
         file_tree: <FileTree>{}
     }
 } 

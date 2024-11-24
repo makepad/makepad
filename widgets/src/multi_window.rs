@@ -9,7 +9,10 @@ use {
 };
 
 live_design!{
-    MultiWindowBase = {{MultiWindow}} {}
+    link widgets;
+    
+    pub MultiWindowBase = {{MultiWindow}} {}
+    pub MultiWindow = <MultiWindowBase> {}
 }
 
 #[derive(Live, LiveRegisterWidget, WidgetRef)]

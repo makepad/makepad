@@ -7,7 +7,7 @@ use {
 };
 
 live_design!{
-    Mixer = {{Mixer}} {
+    pub Mixer = {{Mixer}} {
     }
 }
 

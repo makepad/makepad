@@ -17,7 +17,7 @@ pub struct LiveOriginal {
     pub raw_imports: Vec<(LiveNodeOrigin, LiveImport)>,
     pub type_imports: BTreeSet<LiveFileId>,
     pub resolved_imports: Option<BTreeMap<LiveId, LiveFileId>>,
-    pub exports: BTreeSet<LiveId>,
+    pub exports: BTreeMap<LiveId, LiveNodeOrigin>,
     pub nodes: Vec<LiveNode >,
     pub edit_info: Vec<LiveNode>,
     pub tokens: Vec<TokenWithSpan>,
