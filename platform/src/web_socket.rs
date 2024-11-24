@@ -67,7 +67,7 @@ impl Drop for WebSocket{
     }
 }
 impl Cx{
-    pub(crate) fn has_studio_web_socket()->bool{ 
+    pub fn has_studio_web_socket()->bool{ 
        HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
     }
     

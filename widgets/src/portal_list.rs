@@ -177,7 +177,7 @@ impl PortalList {
 
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
-            if list.len()>0 {
+            if list.len() > 0 {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
                 let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
                 
