@@ -81,6 +81,7 @@ pub mod bare_step;
 pub mod turtle_step;
 
 pub mod designer;
+pub mod designer_dummy;
 pub mod designer_theme;
 pub mod designer_outline_tree;
 pub mod designer_view;
@@ -157,6 +158,13 @@ pub use crate::{
 
 pub fn live_design(cx: &mut Cx) {
     cx.link(live_id!(theme), live_id!(theme_desktop_dark));
+    if cx.in_makepad_studio() {
+        cx.link(live_id!(designer), live_id!(designer_real));
+    }
+    else{
+        cx.link(live_id!(designer), live_id!(designer_dummy));
+    }
+    
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
@@ -221,6 +229,7 @@ pub fn live_design(cx: &mut Cx) {
     
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
+    crate::designer_dummy::live_design(cx);
     crate::designer_view::live_design(cx);
     crate::designer_outline::live_design(cx);
     crate::designer_outline_tree::live_design(cx);
