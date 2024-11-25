@@ -11,6 +11,7 @@ use crate::{
 
 live_design!{
     link widgets;
+    use link::widgets::*;
     use link::theme::*;
     use makepad_draw::shader::std::*;
     
