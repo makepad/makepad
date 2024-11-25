@@ -627,7 +627,6 @@ impl Widget for View {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
         }
-        self.match_event(cx, event);
 
         if self.block_signal_event {
             if let Event::Signal = event {
@@ -640,6 +639,12 @@ impl Widget for View {
             if actions.len() > 0 {
                 cx.redraw_area_and_children(self.area);
             };
+        }
+
+        // If the UI tree has changed significantly (e.g. AdaptiveView varaints changed),
+        // we need to clear the cache and re-query widgets.
+        if cx.clear_query_cache.is_some() {
+            self.find_cache.borrow_mut().clear();
         }
 
         match &self.event_order {
@@ -958,21 +963,6 @@ impl Widget for View {
             }
         }
         DrawStep::done()
-    }
-}
-
-impl MatchEvent for View {
-    fn handle_action(&mut self, _cx: &mut Cx, action: &Action) {
-        match action.as_widget_action().cast() {
-            AdaptiveViewAction::InvalidateWidgetSearchCache => {
-                // If the AdaptiveView that dispatched this actions is a child of the current view,
-                // invalidate the widget search cache of the current view.
-                if self.children.iter().any(|(_, child)| action.as_widget_action().widget_uid_eq(child.widget_uid()).is_some()) {
-                    self.find_cache.borrow_mut().clear();
-                }
-            }
-            _ => (),
-        }
     }
 }
 

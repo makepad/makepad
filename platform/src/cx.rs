@@ -120,6 +120,15 @@ pub struct Cx {
     pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
+
+    /// Event ID that triggered a widget query cache invalidation.
+    /// When Some(event_id), indicates that widgets should clear their query caches
+    /// on the next event loop cycle. This ensures all views process the cache clear
+    /// before it's reset to None.
+    /// 
+    /// This is primarily used when adaptive views change their active variant,
+    /// as the widget hierarchy changes require parent views to rebuild their widget queries.
+    pub widget_query_invalidation_event: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -295,6 +304,8 @@ impl Cx {
 
             self_ref: None,
             performance_stats: Default::default(),
+
+            widget_query_invalidation_event: None,
         }
     }
 }
