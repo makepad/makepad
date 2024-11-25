@@ -223,6 +223,10 @@ impl TextInput {
         cx.set_key_focus(self.draw_bg.area());
     }
 
+    pub fn get_cursor(&self) -> &Cursor {
+        &self.cursor
+    }
+
     pub fn set_cursor(&mut self, cursor: Cursor) {
         self.cursor = cursor;
     }
