@@ -1,4 +1,3 @@
-
 use {
     std::collections::{HashSet, HashMap},
     crate::{
@@ -134,6 +133,16 @@ impl Cx {
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
             self.event_handler = Some(event_handler);
+        }
+
+        // Reset widget query invalidation after all views have processed it.
+        // We wait until event_id is at least 1 events past the invalidation event
+        // to ensure the cache clear has propagated through the widget hierarchy
+        // during the previous event cycle.
+        if let Some(event_id) = self.widget_query_invalidation_event {
+            if self.event_id > event_id + 1 {
+                self.widget_query_invalidation_event = None;
+            }
         }
     }
     

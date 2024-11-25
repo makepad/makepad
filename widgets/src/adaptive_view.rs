@@ -102,7 +102,7 @@ impl WidgetNode for AdaptiveView {
             active_widget.widget_ref.walk(cx)
         } else {
             // No active widget found, returning default walk. This should never happen
-            // because in after_apply_from we create a defaulta active widget.
+            // because in after_apply_from we create a default active widget.
             self.walk
         }
     }
@@ -279,14 +279,11 @@ impl AdaptiveView {
             return;
         }
 
-        // Since the active variant is changing, we want to invalidate the widget search cache.
-        // We dispatch InvalidateWidgetSearchCache because we need to inform upwards (the parent views), that
-        // they should discard their cache and re-query this widget next time.
-        cx.widget_action(
-            self.widget_uid(),
-     &HeapLiveIdPath::default(),
-            AdaptiveViewAction::InvalidateWidgetSearchCache,
-        );
+        // Invalidate widget query caches when changing the active variant.
+        // Parent views need to rebuild their widget queries since the widget
+        // hierarchy has changed. We use the event system to ensure all views
+        // process this invalidation in the next event cycle.
+        cx.widget_query_invalidation_event = Some(current_event_id);
 
         // Otherwise create a new widget from the template
         let template = self.templates.get(&template_id).unwrap();
