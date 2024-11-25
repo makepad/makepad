@@ -174,7 +174,7 @@ impl<'a> LiveExpander<'a> {
                     else if in_value.is_expr(){
                         
                         if !out_value.is_single_node(){
-                            panic!("overriding is_expr on not is_single_node ");
+                            panic!("overriding is_expr on not is_single_node in file {:?}", self.live_registry.file_id_to_file_name(self.in_file_id));
                         }
                         // lets expand it and output a single LiveValue instead
                         let mut index = in_index;
