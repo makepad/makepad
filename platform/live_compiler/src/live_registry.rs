@@ -252,6 +252,15 @@ impl LiveRegistry {
         None
     }
     
+    pub fn path_end_to_file_id(&self, path: &str) -> Option<LiveFileId> {
+        for (index, file) in self.live_files.iter().enumerate() {
+            if file.file_name.ends_with(path) {
+                return Some(LiveFileId(index as u16))
+            }
+        }
+        None
+    }
+    
     
     pub fn token_id_to_origin_doc(&self, token_id: LiveTokenId) -> &LiveOriginal {
         &self.live_files[token_id.file_id().unwrap().to_index()].original
@@ -919,7 +928,7 @@ impl LiveRegistry {
         self.doc_original_raw_imports_to_resolved_recur(main_file_id, errors, &mut dep_order);
         
         // FIX dont hardcode this, will fix it up with the icon refactor
-        let fixup_file_id = self.path_str_to_file_id("draw/src/shader/draw_trapezoid.rs").unwrap();
+        let fixup_file_id = self.path_end_to_file_id("draw_trapezoid.rs").unwrap();
         self.doc_original_raw_imports_to_resolved_recur(fixup_file_id, errors, &mut dep_order);
         
         
