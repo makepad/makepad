@@ -127,9 +127,12 @@ onmessage = async function(e) {
     let wasm = null;
     const doit = inner_wasm => {
         wasm = inner_wasm;
-        wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
+
         if(!thread_info.wasm_bindgen) {
+            wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+        } else {
+            wasm.exports.__wbindgen_start();
         }
         if(thread_info.timer > 0){
             this.setInterval(()=>{
