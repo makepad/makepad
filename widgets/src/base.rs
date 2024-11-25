@@ -417,7 +417,7 @@ live_design!{
     AdaptiveView = <AdaptiveViewBase> {
         width: Fill, height: Fill
     
-        Default = <View> {},
+        Default = <View> {}
         Mobile = <View> {}
         Desktop = <View> {}
     }
