@@ -7,8 +7,8 @@ live_design! {
     link widgets;
     use link::shaders::*;
     
-    VideoBase = {{Video}} {}
-    Video = <VideoBase> {
+    pub VideoBase = {{Video}} {}
+    pub Video = <VideoBase> {
         width: 100, height: 100
         
         draw_bg: {
