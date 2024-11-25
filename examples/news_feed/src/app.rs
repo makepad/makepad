@@ -808,7 +808,6 @@ live_design!{
     PostImage = <View> {
         width: Fill, height: Fit
         flow: Down,
-        padding: 0.0,
         spacing: 0.0
 
         hero = <Image> {
@@ -820,9 +819,9 @@ live_design!{
         }
 
         post = <Post> {
-            margin: {top: -30.0}
+            margin: { top: -30, right: 10., bottom: 10., left: 10. }
             body = {
-                padding: { top: 10., right: 10., left: 10., bottom: 0. }
+                padding: { top: 10., right: 10., left: 10., bottom: 10. }
                 content = {
                     /*meta = {
                         margin: {bottom: 30.0, top: 10.0}
@@ -835,9 +834,62 @@ live_design!{
         }
     }
 
+    myScrollBar = <ScrollBar> {
+		bar_size: 10.0,
+		bar_side_margin: 3.0
+		min_handle_size: 30.0
+		axis: Vertical
+		smoothing: 10.0
+		use_vertical_finger_scroll: false
+
+		draw_bar: {
+			instance pressed: 0.0
+			instance hover: 0.0
+			
+			instance color: #888,
+			instance color_hover: #999
+			instance color_pressed: #666
+			
+			uniform bar_width: 6.0
+			uniform border_radius: 1.5
+
+			fn pixel(self) -> vec4 {
+				let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+				if self.is_vertical > 0.5 {
+					sdf.box(
+						1.,
+						self.rect_size.y * self.norm_scroll,
+						self.bar_width,
+						self.rect_size.y * self.norm_handle,
+						self.border_radius
+					);
+				}
+				else {
+					sdf.box(
+						self.rect_size.x * self.norm_scroll,
+						1.,
+						self.rect_size.x * self.norm_handle,
+						self.bar_width,
+						self.border_radius
+					);
+				}
+				return sdf.fill(mix(
+					self.color, 
+					mix(
+						self.color_hover,
+						self.color_pressed,
+						self.pressed
+					),
+					self.hover
+				));
+			}
+		}
+    }
+
     NewsFeed ={{NewsFeed}}{
         list = <PortalList>{
-            TopSpace = <View> {height: 80}
+            scroll_bar: <myScrollBar> {}
+            TopSpace = <View> {height: 0}
             Post = <CachedView>{<Post> {}}
             PostImage = <PostImage> {}
             BottomSpace = <View> {height: 100}
@@ -863,7 +915,6 @@ live_design!{
                     y: 0.0
                 },
 
-                news_feed = <NewsFeed>{}
 
                 <View> {
                     flow: Down
@@ -871,6 +922,11 @@ live_design!{
                     <Filler> {}
                     <Menu> {}
                 }
+
+                news_feed = <NewsFeed> {
+                    padding: {top: 60., bottom: 90.}
+                }
+
             }
         }
     }
