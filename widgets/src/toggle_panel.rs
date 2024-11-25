@@ -10,9 +10,9 @@ live_design!{
     use crate::button::Button; 
     
     pub TogglePanelBase = {{TogglePanel}} {}
-    TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
-    TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
-    exportTogglePanel = <TogglePanelBase> {
+    pub TOGGLE_PANEL_CLOSE_ICON = dep("crate://self/resources/icons/close_left_panel.svg")
+    pub TOGGLE_PANEL_OPEN_ICON = dep("crate://self/resources/icons/open_left_panel.svg")
+    pub TogglePanel = <TogglePanelBase> {
         flow: Overlay,
         width: 300,
         height: Fill,
