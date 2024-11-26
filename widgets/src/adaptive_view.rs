@@ -9,8 +9,8 @@ const DEFAULT_MIN_DESKTOP_WIDTH: f64 = 860.;
 
 live_design! {
     link widgets;
+    use link::widgets::*;
     use link::theme::*;
-    use crate::view_ui::View;
 
     pub AdaptiveViewBase = {{AdaptiveView}} {}
     pub AdaptiveView = <AdaptiveViewBase> {
