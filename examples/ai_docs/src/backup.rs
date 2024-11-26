@@ -4,9 +4,9 @@ use makepad_widgets::*;
 // Live design contains the makepad UI DSL code, which is its own syntax. It is not Rust code but something different
 // Live design is 'deserialised' into Rust structures, the App below
 live_design!{
-    import makepad_widgets::base::*;
-    // and the theme_desktop_dark contains all the styled components
-    import makepad_widgets::theme_desktop_dark::*; 
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
     
     // App={{App}} binds this data to the App component below. Fields match up
     App = {{App}} {

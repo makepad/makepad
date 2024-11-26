@@ -11,9 +11,9 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    use link::theme::*;
      
     BuildItem = <View> {
         width: Fill, height: Fit,
@@ -89,8 +89,7 @@ live_design!{
         }
     }
     
-    
-    RunList = {{RunList}}{
+    pub RunList = {{RunList}}{
         width: Fill, height: Fill,
 
         list = <FlatList> {

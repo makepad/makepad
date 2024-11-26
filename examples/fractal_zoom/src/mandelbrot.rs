@@ -8,7 +8,7 @@ use {
 // Our live DSL to define the shader and UI def
 live_design!{
     // include shader standard library with the Pal object
-    import makepad_draw::shader::std::*;
+    use makepad_draw::shader::std::*;
     
     // the shader to draw the texture tiles
     DrawTile = {{DrawTile}} {

@@ -6,13 +6,13 @@ use crate::{
 };
 
 live_design! {
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::base::*;
-    import crate::fish_block_editor::*;
-    import crate::fish_theme::*;
-    import crate::fish_connection_widget::*;
-    import crate::fish_selector_widget::*;
-    import crate::block_connector_button::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets::base::*;
+    use crate::fish_block_editor::*;
+    use crate::fish_theme::*;
+    use crate::fish_connection_widget::*;
+    use crate::fish_selector_widget::*;
+    use crate::block_connector_button::*;
 
     FishPatchEditor = {{FishPatchEditor}} {
         width: Fill,

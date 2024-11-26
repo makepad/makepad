@@ -7,7 +7,19 @@ use crate::{
 };
 
 live_design!{
-    FlatListBase = {{FlatList}} {}
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    use crate::scroll_bars::ScrollBars;
+        
+    pub FlatListBase = {{FlatList}} {}
+    pub FlatList = <FlatListBase> {
+        width: Fill, height: Fill,
+        capture_overload: true
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+        flow: Down
+    }
+    
 }
 /*
 #[derive(Clone,Copy)]

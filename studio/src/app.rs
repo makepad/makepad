@@ -26,7 +26,7 @@ use std::fs::File;
 use std::io::Write;
 use std::env;
 live_design!{
-    import crate::app_ui::*;
+    use crate::app_ui::*;
 
     App = {{App}} {
         ui: <AppUI> {}

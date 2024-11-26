@@ -9,9 +9,11 @@ use crate::{
 const BULLET: &str = "•";
 
 live_design!{
-    import makepad_widgets::link_label::LinkLabelBase;
-
-    HtmlLinkBase = {{HtmlLink}} {
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub HtmlLinkBase = {{HtmlLink}} {
         link = {
             draw_text = {
                 // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
@@ -20,12 +22,223 @@ live_design!{
         }
     }
 
-    HtmlBase = {{Html}} {
+    pub HtmlBase = {{Html}} {
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
         ul_markers: ["•", "-"],
         ol_markers: [Numbers, LowerAlpha, LowerRoman],
         ol_separator: ".",
+    }
+    
+    pub HtmlLink = <HtmlLinkBase> {
+        width: Fit, height: Fit,
+        align: {x: 0., y: 0.}
+        
+        color: #x0000EE,
+        hover_color: #x00EE00,
+        pressed_color: #xEE0000,
+                
+        // instance hovered: 0.0
+        // instance pressed: 0.0
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
+                    apply: {
+                        hovered: 0.0,
+                        pressed: 0.0,
+                    }
+                }
+                
+                on = {
+                    redraw: true,
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
+                    }
+                }
+                
+                pressed = {
+                    redraw: true,
+                    from: {all: Forward {duration: 0.01}}
+                    apply: {
+                        hovered: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
+                    }
+                }
+            }
+        }
+    }
+    
+    pub Html = <HtmlBase> {
+        width: Fill, height: Fit,
+        flow: RightWrap,
+        width:Fill,
+        height:Fit,
+        padding: <THEME_MSPACE_1> {}
+        
+        font_size: (THEME_FONT_SIZE_P),
+        font_color: (THEME_COLOR_TEXT_DEFAULT),
+        
+        draw_normal: {
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_italic: {
+            text_style: <THEME_FONT_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_bold: {
+            text_style: <THEME_FONT_BOLD> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_bold_italic: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        draw_fixed: {
+            text_style: <THEME_FONT_CODE> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        
+        code_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        code_walk: { width: Fill, height: Fit }
+        
+        quote_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+        }
+        quote_walk: { width: Fill, height: Fit, }
+        
+        list_item_layout: {
+            flow: RightWrap,
+            padding: <THEME_MSPACE_1> {}
+        }
+        list_item_walk: {
+            height: Fit, width: Fill,
+        }
+        
+        inline_code_padding: <THEME_MSPACE_1> {},
+        inline_code_margin: <THEME_MSPACE_1> {},
+        
+        sep_walk: {
+            width: Fill, height: 4.
+            margin: <THEME_MSPACE_V_1> {}
+        }
+        
+        a = <HtmlLink> {}
+        
+        draw_block:{
+            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            sep_color: (THEME_COLOR_DIVIDER)
+            quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
+            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            code_color: (THEME_COLOR_BG_HIGHLIGHT)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                match self.block_type {
+                    FlowBlockType::Quote => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.quote_bg_color)
+                        sdf.box(
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            THEME_SPACE_1,
+                            self.rect_size.y - THEME_SPACE_2,
+                            1.5
+                        );
+                        sdf.fill(self.quote_fg_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Sep => {
+                        sdf.box(
+                            0.,
+                            1.,
+                            self.rect_size.x-1,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.sep_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Code => {
+                        sdf.box(
+                            0.,
+                            0.,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::InlineCode => {
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x-2.,
+                            self.rect_size.y-2.,
+                            2.
+                        );
+                        sdf.fill(self.code_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Underline => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y-2,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                    FlowBlockType::Strikethrough => {
+                        sdf.box(
+                            0.,
+                            self.rect_size.y * 0.45,
+                            self.rect_size.x,
+                            2.0,
+                            0.5
+                        );
+                        sdf.fill(self.line_color);
+                        return sdf.result;
+                    }
+                }
+                return #f00
+            }
+        }
     }
 }
 

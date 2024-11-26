@@ -153,6 +153,10 @@ impl Cx {
         let live_registry = self.live_registry.borrow();
         error!("{}", live_registry.live_error_to_live_file_error(err));
     }
+        
+    pub fn link(&mut self, from:LiveId, to:LiveId){
+        self.live_registry.borrow_mut().link(from, to);
+    }
     
     pub fn apply_error(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], message: String) {
         let live_registry = self.live_registry.borrow();
@@ -303,7 +307,7 @@ impl Cx {
         //let dt = crate::profile_start();
         
         live_registry.expand_all_documents(&mut errs);
-        //crate::profile_end!(dt);
+       //crate::profile_end!(dt);
         
         // lets evaluate all expressions in the main module
        /* for file in &live_registry.live_files {

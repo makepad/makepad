@@ -11,11 +11,11 @@ use {
 };
 
 live_design!{
-    import makepad_code_editor::code_view::CodeView;
-    import makepad_widgets::base::*;
-    import makepad_draw::shader::std::*;
-        
-    import makepad_widgets::theme_desktop_dark::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    use link::theme::*;
+    
+    use makepad_code_editor::code_view::CodeView;
 
     User = <RoundedView> {
         height: Fit,
@@ -183,7 +183,7 @@ live_design!{
         }
     }
     
-    AiChatView = {{AiChatView}}{
+    pub AiChatView = {{AiChatView}}{
         flow: Down,
         height: Fill, width: Fill,
         spacing: (THEME_SPACE_1),

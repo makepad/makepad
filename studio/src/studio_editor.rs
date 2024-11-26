@@ -12,9 +12,9 @@ use {
 };
 
 live_design!{
-    import makepad_code_editor::code_editor::CodeEditor;
+    use makepad_code_editor::code_editor::CodeEditor;
     
-    StudioCodeEditor = {{StudioCodeEditor}}{
+    pub StudioCodeEditor = {{StudioCodeEditor}}{
         editor: <CodeEditor>{
         }
     }

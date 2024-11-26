@@ -1,9 +1,14 @@
 
 use crate::event::Event;
 use crate::cx::Cx;
+use crate::ui_runner::UiRunner;
 
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
+    fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
+        // This assumes there is only one `AppMain`, and that `0` is reserved for it.
+        UiRunner::new(0)
+    }
 }
 
 #[macro_export]
@@ -27,6 +32,9 @@ macro_rules!app_main {
             }))));
             $app::register_main_module(&mut *cx.borrow_mut());
             cx.borrow_mut().init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
+            if std::env::args().find( | v | v == "--stdin-loop").is_some() {
+                cx.borrow_mut().in_makepad_studio = true;
+            }
             //cx.borrow_mut().init_websockets("");
             live_design(&mut *cx.borrow_mut());
             cx.borrow_mut().init_cx_os();

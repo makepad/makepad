@@ -5,8 +5,35 @@ use crate::{
     widget::*
 };
 
-live_design! {
-    PopupNotificationBase = {{PopupNotification}} {}
+live_design!{
+    link widgets;
+    use link::widgets::*;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub PopupNotificationBase = {{PopupNotification}} {}
+        
+    pub PopupNotification = <PopupNotificationBase> {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: {x: 1.0, y: 0.0}
+        
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+        
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+            
+            cursor: Default
+            capture_overload: true
+        }
+    }
 }
 
 
