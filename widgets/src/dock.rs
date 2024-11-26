@@ -9,8 +9,124 @@ use crate::{
 };
 
 live_design!{
-    DrawRoundCorner = {{DrawRoundCorner}} {}
-    DockBase = {{Dock}} {}
+    link widgets;
+    use link::theme::*;
+    use link::widgets::*;
+    use makepad_draw::shader::std::*;
+    use crate::view_ui::RectShadowView;
+    
+    /*
+    should not be here
+    RectView = <View> {
+        show_bg: true,
+        draw_bg: { color: (THEME_COLOR_DOCK_CONTAINER) }
+    }*/
+    
+    pub DrawRoundCorner = {{DrawRoundCorner}} {}
+    pub DockBase = {{Dock}} {}
+    pub Dock = <DockBase> {
+        flow: Down,
+        
+        round_corner: {
+            draw_depth: 20.0
+            border_radius: 20.
+            fn pixel(self) -> vec4 {
+                let pos = vec2(
+                    mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
+                    mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
+                )
+                
+                let sdf = Sdf2d::viewport(pos * self.rect_size);
+                sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
+                sdf.box(
+                    0.25,
+                    0.25,
+                    self.rect_size.x * 2.0,
+                    self.rect_size.y * 2.0,
+                    4.0
+                );
+                
+                sdf.subtract()
+                sdf.fill(THEME_COLOR_BG_APP)
+                return sdf.result
+            }
+        }
+        border_size: (THEME_DOCK_BORDER_SIZE)
+        
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
+        drag_quad: {
+            draw_depth: 10.0
+            color: (THEME_COLOR_DRAG_QUAD)
+        }
+        tab_bar: <TabBar> {}
+        splitter: <Splitter> {}
+    }
+    
+    pub DockMinimal = <DockBase> {
+        flow: Down,
+        
+        round_corner: {
+            draw_depth: 20.0
+            border_radius: 20.
+            fn pixel(self) -> vec4 {
+                let pos = vec2(
+                    mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
+                    mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
+                )
+                
+                let sdf = Sdf2d::viewport(pos * self.rect_size);
+                sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
+                sdf.box(
+                    0.25,
+                    0.25,
+                    self.rect_size.x * 2.0,
+                    self.rect_size.y * 2.0,
+                    4.0
+                );
+                
+                sdf.subtract()
+                return sdf.fill(THEME_COLOR_BG_APP)
+            }
+        }
+        border_size: (THEME_DOCK_BORDER_SIZE)
+        
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
+        drag_quad: {
+            draw_depth: 10.0
+            color: (THEME_COLOR_DRAG_QUAD)
+        }
+        tab_bar: <TabBarMinimal> {}
+        splitter: <Splitter> {}
+    }
+    
+    pub DockToolbar = <RectShadowView> {
+        width: Fill, height: 38.,
+        flow: Down,
+        align: { x: 0., y: 0. }
+        margin: { top: -1. }
+        padding: <THEME_MSPACE_2> {}
+        spacing: 0.,
+        
+        draw_bg: {
+            border_width: 0.0
+            border_color: (THEME_COLOR_BEVEL_LIGHT)
+            shadow_color: (THEME_COLOR_D_4)
+            shadow_radius: 7.5
+            shadow_offset: vec2(0.0, 0.0)
+            color: (THEME_COLOR_FG_APP),
+        }
+        
+        content = <View> {
+            flow: Right,
+            width: Fill, height: Fill,
+            margin: 0.
+            padding: 0.
+            align: { x: 0., y: 0. }
+            spacing: (THEME_SPACE_3)
+        }
+    }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]

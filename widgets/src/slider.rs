@@ -8,8 +8,274 @@ use {
 };
 
 live_design!{
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    
     DrawSlider = {{DrawSlider}} {}
-    SliderBase = {{Slider}} {}
+    
+    pub SliderBase = {{Slider}} {}
+    
+    pub Slider = <SliderBase> {
+        min: 0.0, max: 1.0,
+        step: 0.0,
+        label_align: { y: 0.0 }
+        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+        precision: 2,
+        height: Fit
+        
+        draw_slider: {
+            instance hover: float
+            instance focus: float
+            instance drag: float
+            
+            fn pixel(self) -> vec4 {
+                let slider_height = 3;
+                let nub_size = mix(3, 5, self.hover);
+                let nubbg_size = mix(0, 13, self.hover)
+                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                
+                let slider_bg_color = mix(mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_HOVER, self.hover), THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.focus);
+                let slider_color = mix(
+                    mix(THEME_COLOR_AMOUNT_DEFAULT, THEME_COLOR_AMOUNT_HOVER, self.hover),
+                THEME_COLOR_AMOUNT_ACTIVE,
+                self.focus);
+                    
+                let nub_color = (THEME_COLOR_SLIDER_NUB_DEFAULT);
+                let nubbg_color = mix(THEME_COLOR_SLIDER_NUB_HOVER, THEME_COLOR_SLIDER_NUB_ACTIVE, self.drag);
+                    
+                match self.slider_type {
+                    SliderType::Horizontal => {
+                        sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
+                        sdf.fill(slider_bg_color);
+                            
+                        sdf.rect(0, self.rect_size.y - slider_height * 0.5, self.rect_size.x, slider_height)
+                        sdf.fill(THEME_COLOR_BEVEL_LIGHT);
+                            
+                        sdf.rect(
+                            0,
+                            self.rect_size.y - slider_height * 1.25,
+                            self.slide_pos * (self.rect_size.x - nub_size) + nub_size,
+                            slider_height
+                        )
+                        sdf.fill(slider_color);
+                            
+                        let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
+                        sdf.rect(
+                            nubbg_x,
+                            self.rect_size.y - slider_height * 1.25,
+                            nubbg_size,
+                            slider_height
+                        )
+                        sdf.fill(nubbg_color);
+                            
+                        // the nub
+                        let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
+                        sdf.rect(
+                            nub_x,
+                            self.rect_size.y - slider_height * 1.25,
+                            nub_size,
+                            slider_height
+                        )
+                        sdf.fill(nub_color);
+                    }
+                    SliderType::Vertical => {
+                            
+                    }
+                    SliderType::Rotary => {
+                            
+                    }
+                }
+                return sdf.result
+            }
+        }
+            
+        draw_text: {
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+        }
+            
+        label_walk: { width: Fill, height: Fit }
+            
+        text_input: <TextInput> {
+            width: Fit, padding: 0.,
+            // cursor_margin_bottom: (THEME_SPACE_1),
+            // cursor_margin_top: (THEME_SPACE_1),
+            // select_pad_edges: 3.0
+            // cursor_size: 2.0,
+            empty_message: "0",
+            is_numeric_only: true,
+                
+            label_align: {y: 0.},
+            margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
+            draw_bg: {
+                instance radius: 1.0
+                instance border_width: 0.0
+                instance border_color: (#f00) // TODO: This appears not to do anything.
+                instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+                instance focus: 0.0,
+                color: (THEME_COLOR_D_HIDDEN)
+                instance color_selected: (THEME_COLOR_D_HIDDEN)
+                    
+                fn get_color(self) -> vec4 {
+                    return mix(self.color, self.color_selected, self.focus)
+                }
+                    
+                fn get_border_color(self) -> vec4 {
+                    return self.border_color
+                }
+                    
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    sdf.box(
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        max(1.0, self.radius)
+                    )
+                    sdf.fill_keep(self.get_color())
+                    if self.border_width > 0.0 {
+                        sdf.stroke(self.get_border_color(), self.border_width)
+                    }
+                    return sdf.result;
+                }
+            },
+        }
+            
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: OutQuad
+                    apply: {
+                        draw_slider: {hover: 0.0}
+                        // text_input: { draw_bg: { hover: 0.0}}
+                    }
+                }
+                on = {
+                    //cursor: Arrow,
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: {hover: 1.0}
+                        // text_input: { draw_bg: { hover: 1.0}}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_slider: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: {focus: 1.0}
+                    }
+                }
+            }
+            drag = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_slider: {drag: 0.0}}
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Snap}
+                    apply: {draw_slider: {drag: 1.0}}
+                }
+            }
+        }
+    }
+        
+    pub SliderBig = <Slider> {
+        height: 36
+        text: "CutOff1"
+        // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
+        text_input: {
+            // cursor_margin_bottom: (THEME_SPACE_1),
+            // cursor_margin_top: (THEME_SPACE_1),
+            // select_pad_edges: (THEME_SPACE_1),
+            // cursor_size: (THEME_SPACE_1),
+            empty_message: "0",
+            is_numeric_only: true,
+            draw_bg: {
+                color: (THEME_COLOR_D_HIDDEN)
+            },
+        }
+        draw_slider: {
+            instance line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG)
+            instance bipolar: 0.0
+            fn pixel(self) -> vec4 {
+                let nub_size = 3
+                    
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let top = 20.0;
+                    
+                sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
+                sdf.fill_keep(
+                    mix(
+                        mix((THEME_COLOR_INSET_PIT_TOP), (THEME_COLOR_INSET_PIT_BOTTOM) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((THEME_COLOR_INSET_PIT_TOP_HOVER) * 1.75, (THEME_COLOR_BEVEL_LIGHT) * 0.1, pow(self.pos.y, 1.0)),
+                        self.drag
+                    )
+                ) // Control backdrop gradient
+                    
+                sdf.stroke(mix(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_SHADOW * 1.25, self.drag), THEME_COLOR_BEVEL_LIGHT, pow(self.pos.y, 10.0)), 1.0) // Control outline
+                let in_side = 5.0;
+                let in_top = 5.0; // Ridge: vertical position
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.drag)); // Ridge color
+                let in_top = 7.0;
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 1.5);
+                sdf.fill(THEME_COLOR_BEVEL_LIGHT); // Ridge: Rim light catcher
+                    
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
+                sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
+                    
+                sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
+                sdf.stroke_keep(mix((THEME_COLOR_U_HIDDEN), self.line_color, self.drag), 1.5)
+                sdf.stroke(
+                    mix(mix(self.line_color * 0.85, self.line_color, self.hover), THEME_COLOR_AMOUNT_ACTIVE, self.drag),
+                    1.5
+                )
+                    
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 3) - 3;
+                sdf.box(nub_x + in_side, top + 1.0, 11, 11, 1.)
+                    
+                sdf.fill_keep(mix(
+                    mix(
+                        mix(THEME_COLOR_SLIDER_BIG_NUB_TOP, THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER, self.hover),
+                        mix(THEME_COLOR_SLIDER_BIG_NUB_BOTTOM, THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER, self.hover),
+                        self.pos.y
+                    ),
+                    mix(THEME_COLOR_SLIDER_BIG_NUB_BOTTOM, THEME_COLOR_SLIDER_BIG_NUB_TOP, pow(self.pos.y, 1.5)),
+                    self.drag
+                ))
+                
+                sdf.stroke(
+                    mix(
+                        mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_LIGHT * 1.2, self.hover),
+                        THEME_COLOR_BLACK,
+                        pow(self.pos.y, 1.)
+                    ),
+                    1.
+                ); // Nub outline gradient
+                
+                
+                return sdf.result
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook)]

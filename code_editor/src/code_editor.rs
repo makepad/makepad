@@ -17,9 +17,10 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme_desktop_dark::*;
-
+    use link::shaders::*;
+    use link::theme::*;
+    use link::widgets::*;
+    
     TokenColors = {{TokenColors}} {
         whitespace: #6E6E6E,
         delimiter: #a,
@@ -112,7 +113,7 @@ live_design! {
 
     DrawCodeText = {{DrawCodeText}} { }
 
-    CodeEditor = {{CodeEditor}} {
+    pub CodeEditor = {{CodeEditor}} {
         height: Fill, width: Fill,
         margin: 0,
         pad_left_top: vec2(10.0,10.0)

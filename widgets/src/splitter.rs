@@ -6,8 +6,96 @@ use crate::{
 };
 
 live_design!{
-    DrawSplitter= {{DrawSplitter}} {}
-    SplitterBase = {{Splitter}} {}
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub DrawSplitter= {{DrawSplitter}} {}
+    pub SplitterBase = {{Splitter}} {}
+    pub Splitter = <SplitterBase> {
+        draw_splitter: {
+            uniform border_radius: 1.0
+            uniform splitter_pad: 1.0
+            uniform splitter_grabber: 110.0
+            
+            instance pressed: 0.0
+            instance hover: 0.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.clear(THEME_COLOR_BG_APP); // TODO: This should be a transparent color instead.
+                
+                if self.is_vertical > 0.5 {
+                    sdf.box(
+                        self.splitter_pad,
+                        self.rect_size.y * 0.5 - self.splitter_grabber * 0.5,
+                        self.rect_size.x - 2.0 * self.splitter_pad,
+                        self.splitter_grabber,
+                        self.border_radius
+                    );
+                }
+                else {
+                    sdf.box(
+                        self.rect_size.x * 0.5 - self.splitter_grabber * 0.5,
+                        self.splitter_pad,
+                        self.splitter_grabber,
+                        self.rect_size.y - 2.0 * self.splitter_pad,
+                        self.border_radius
+                    );
+                }
+                return sdf.fill_keep(mix(
+                    THEME_COLOR_D_HIDDEN,
+                    mix(
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
+                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
+                        self.pressed
+                    ),
+                    self.hover
+                ));
+            }
+        }
+        split_bar_size: (THEME_SPLITTER_SIZE)
+        min_horizontal: (THEME_SPLITTER_MIN_HORIZONTAL)
+        max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
+        min_vertical: (THEME_SPLITTER_MIN_VERTICAL)
+        max_vertical: (THEME_SPLITTER_MAX_VERTICAL)
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_splitter: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        state_down: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_splitter: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                
+                pressed = {
+                    from: { all: Forward { duration: 0.1 }}
+                    apply: {
+                        draw_splitter: {
+                            pressed: [{time: 0.0, value: 1.0}],
+                            hover: 1.0,
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
 }
 
 

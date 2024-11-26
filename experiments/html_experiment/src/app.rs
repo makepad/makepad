@@ -4,9 +4,9 @@ use makepad_widgets::{
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*; 
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*; 
 
     // config copied from Robrix
     HTML_LINE_SPACING = 8.0

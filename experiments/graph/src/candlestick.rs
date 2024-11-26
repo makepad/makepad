@@ -7,7 +7,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
+    use makepad_draw::shader::std::*;
     
     DrawCandleStick = {{DrawCandleStick}} {
         fn pixel(self) -> vec4 {

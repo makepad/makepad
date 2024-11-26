@@ -6,7 +6,19 @@ use crate::{
 };
 
 live_design!{
-    PortalListBase = {{PortalList}} {}
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    use crate::scroll_bar::ScrollBar;
+    
+    pub PortalListBase = {{PortalList}} {}
+        
+    pub PortalList = <PortalListBase> {
+        width: Fill, height: Fill,
+        capture_overload: true
+        scroll_bar: <ScrollBar> {}
+        flow: Down
+    }
 }
 
 /// The maximum number of items that will be shown as part of a smooth scroll animation.
@@ -77,17 +89,27 @@ pub struct PortalList {
     #[rust] draw_align_list: Vec<AlignItem>,
     #[rust] detect_tail_in_draw: bool,
     #[live(false)] auto_tail: bool,
+    #[live(false)] draw_caching: bool,
+    
     #[rust(false)] tail_range: bool,
     #[rust(false)] at_end: bool,
     #[rust(true)] not_filling_viewport: bool,
     #[live(false)] reuse_items: bool,
     
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<usize, (LiveId, WidgetRef)>,
-    #[rust] reusable_items: Vec<(LiveId, WidgetRef)>,
+    #[rust] items: ComponentMap<usize, WidgetItem>,
+    #[rust] reusable_items: Vec<WidgetItem>,
+    #[rust] _draw_list_cache: Vec<DrawList>,
     
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
+}
+
+
+#[derive(Default)]
+struct WidgetItem{
+    widget: WidgetRef,
+    template: LiveId,
 }
 
 struct AlignItem {
@@ -111,9 +133,9 @@ impl LiveHook for PortalList {
                 let id = nodes[index].id;
                 self.templates.insert(id, live_ptr);
                 // lets apply this thing over all our childnodes with that template
-                for (_, (templ_id, node)) in self.items.iter_mut() {
-                    if *templ_id == id {
-                        node.apply(cx, apply, index, nodes);
+                for (_, item) in self.items.iter_mut() {
+                    if item.template == id {
+                        item.widget.apply(cx, apply, index, nodes);
                     }
                 }
             }
@@ -155,7 +177,7 @@ impl PortalList {
 
         if let Some(ListDrawState::End {viewport}) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
-            if list.len()>0 {
+            if list.len() > 0 {
                 list.sort_by( | a, b | a.index.cmp(&b.index));
                 let first_index = list.iter().position( | v | v.index == self.first_id).unwrap();
                 
@@ -306,8 +328,8 @@ impl PortalList {
         if !self.keep_invisible{
             if self.reuse_items{
                 let reusable_items = &mut self.reusable_items;
-                self.items.retain_visible_with(|_k,v|{
-                    reusable_items.push(v.clone());
+                self.items.retain_visible_with(|v|{
+                    reusable_items.push(v);
                 });
             }
             else{
@@ -318,7 +340,8 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
         self.visible_items = visible_items;
     }
-
+    
+    
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
@@ -540,27 +563,35 @@ impl PortalList {
         if let Some(ptr) = self.templates.get(&template) {
             match self.items.entry(entry_id) {
                 Entry::Occupied(mut occ) => {
-                    if occ.get().0 == template {
-                        (occ.get().1.clone(), true)
+                    if occ.get().template == template {
+                        (occ.get().widget.clone(), true)
                     } else {
-                        let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.0 == template){
-                            self.reusable_items.remove(pos).1
+                        let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.template == template){
+                            self.reusable_items.remove(pos).widget
                         }
                         else{
                             WidgetRef::new_from_ptr(cx, Some(*ptr))
                         };
-                        occ.insert((template, widget_ref.clone()));
+                        occ.insert(WidgetItem{
+                            template, 
+                            widget:widget_ref.clone(),
+                            ..Default::default()
+                        });
                         (widget_ref, false)
                     }
                 }
                 Entry::Vacant(vac) => {
-                    let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.0 == template){
-                        self.reusable_items.remove(pos).1
+                    let widget_ref =  if let Some(pos) = self.reusable_items.iter().position(|v| v.template == template){
+                        self.reusable_items.remove(pos).widget
                     }
                     else{
                         WidgetRef::new_from_ptr(cx, Some(*ptr))
                     };
-                    vac.insert((template, widget_ref.clone()));
+                    vac.insert(WidgetItem{
+                        template, 
+                        widget: widget_ref.clone(),
+                        ..Default::default()
+                    });
                     (widget_ref, false)
                 }
             }
@@ -586,8 +617,8 @@ impl PortalList {
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
         const ZEROED: Rect = Rect { pos: DVec2 { x: 0.0, y: 0.0 }, size: DVec2 { x: 0.0, y: 0.0 } };
 
-        if let Some((_, item)) = self.items.get(&entry_id) {
-            let item_rect = item.area().rect(cx);
+        if let Some(item) = self.items.get(&entry_id) {
+            let item_rect = item.widget.area().rect(cx);
             if item_rect == ZEROED {
                 return None;
             }
@@ -603,8 +634,13 @@ impl PortalList {
     }
     
     /// Returns a reference to the template and widget for the given `entry_id`.
-    pub fn get_item(&self, entry_id: usize) -> Option<&(LiveId, WidgetRef)> {
-        self.items.get(&entry_id)
+    pub fn get_item(&self, entry_id: usize) -> Option<(LiveId,WidgetRef)> {
+        if let Some(item) = self.items.get(&entry_id){
+            Some((item.template.clone(), item.widget.clone()))
+        }
+        else{
+            None
+        }
     }
     
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
@@ -691,10 +727,10 @@ impl Widget for PortalList {
             self.area.redraw(cx);
         }
         
-        for (_, item) in self.items.values_mut() {
-            let item_uid = item.widget_uid();
+        for item in self.items.values_mut() {
+            let item_uid = item.widget.widget_uid();
             cx.group_widget_actions(uid, item_uid, |cx|{
-                item.handle_event(cx, event, scope)
+                item.widget.handle_event(cx, event, scope)
             });
         }
         
@@ -1030,7 +1066,7 @@ impl PortalListRef {
     /// See [`PortalList::get_item()`].
     pub fn get_item(&self, entry_id: usize) -> Option<(LiveId, WidgetRef)> {
         let Some(inner) = self.borrow() else { return None };
-        inner.get_item(entry_id).cloned()
+        inner.get_item(entry_id)
     }
     
     pub fn position_of_item(&self, cx:&Cx, entry_id: usize) -> Option<f64>{
@@ -1051,9 +1087,9 @@ impl PortalListRef {
                 if let Some(action) = action.as_widget_action(){
                     if let Some(group) = &action.group{
                         if group.group_uid == uid{
-                            for (item_id, (_, item)) in inner.items.iter() {
-                                if group.item_uid == item.widget_uid(){
-                                    set.push((*item_id, item.clone()))
+                            for (item_id, item) in inner.items.iter() {
+                                if group.item_uid == item.widget.widget_uid(){
+                                    set.push((*item_id, item.widget.clone()))
                                 }
                             }
                         }

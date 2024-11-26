@@ -13,11 +13,254 @@ use {
 };
 
 live_design!{
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    use link::widgets::*;
+    use crate::designer_theme::*;
+        
     DrawNodeQuad = {{DrawNodeQuad}} {}
     DrawNodeText = {{DrawNodeText}} {}
     DrawNodeIcon = {{DrawNodeIcon}} {}
-    DesignerOutlineTreeNodeBase = {{DesignerOutlineTreeNode}} {}
-    DesignerOutlineTreeBase = {{DesignerOutlineTree}} {}
+    
+    pub DesignerOutlineTreeNodeBase = {{DesignerOutlineTreeNode}} {}
+    pub DesignerOutlineTreeBase = {{DesignerOutlineTree}} {}
+    
+    pub DesignerOutlineTreeNode = <DesignerOutlineTreeNodeBase> {
+        align: { y: 0.5 }
+        padding: { left: (THEME_SPACE_1) },
+        
+        indent_width: 10.0
+        min_drag_distance: 10.0
+        button_open_width: 24.0,
+        draw_eye: false,
+        
+        draw_bg: {
+            instance selected: 0.0
+            instance hover: 0.0
+            instance focussed: 0.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    -2.,
+                    self.rect_size.x,
+                    self.rect_size.y + 3.0,
+                    1.
+                )
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            THEME_COLOR_BG_EVEN,
+                            THEME_COLOR_BG_ODD,
+                            self.is_even
+                        ),
+                        THEME_COLOR_CTRL_SELECTED,
+                        self.selected
+                    )
+                )
+                return sdf.result
+            }
+        }
+        icon_walk:{
+            margin:{top:3,left:3,right:5}
+            width:12,
+            height:12,
+        }
+        draw_icon: {
+            instance selected: 0.0
+            instance hover: 0.0
+            instance focussed: 0.0
+            fn get_color(self) -> vec4 {
+                return self.color * self.scale;
+            }
+        }
+        
+        draw_name: {
+            instance selected: 0.0
+            instance hover: 0.0
+            instance focussed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT_SELECTED,
+                    self.selected
+                )
+            }
+            
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+                //top_drop: 1.2,
+            }
+        }
+        
+        button_open: <FoldButton> {
+            height: 25, width: 15,
+            margin: { left: (THEME_SPACE_2) }
+            animator: { open = { default: off } },
+            draw_bg: {
+                uniform size: 3.75;
+                instance open: 0.0
+                
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    let left = 2;
+                    let sz = self.size;
+                    let c = vec2(left + sz, self.rect_size.y * 0.5);
+                    
+                    // PLUS
+                    sdf.box(0.5, sz * 3.0, sz * 2.5, sz * 0.7, 1.0); // rounding = 3rd value
+                    // vertical
+                    sdf.fill_keep(mix(#8F, #FF, self.hover));
+                    sdf.box(sz * 1.0, sz * 2.125, sz * 0.7, sz * 2.5, 1.0); // rounding = 3rd value
+                    
+                    sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
+                    
+                    return sdf.result
+                }
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        hover: 0.0
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    cursor: Hand
+                    from: {all: Snap}
+                    apply: {
+                        hover: 1.0
+                        draw_bg: {hover: 1.0}
+                        draw_name: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    },
+                }
+            }
+            
+            focus = {
+                default: on
+                on = {
+                    from: {all: Snap}
+                    apply: {focussed: 1.0}
+                }
+                
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {focussed: 0.0}
+                }
+            }
+            
+            select = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        selected: 0.0
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        selected: 1.0
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
+                    }
+                }
+                
+            }
+        }
+    }
+    
+    STUDIO_PALETTE_1 = #B2FF64
+    STUDIO_PALETTE_2 = #80FFBF
+    STUDIO_PALETTE_3 = #80BFFF
+    STUDIO_PALETTE_4 = #BF80FF
+    STUDIO_PALETTE_5 = #FF80BF
+    STUDIO_PALETTE_6 = #FFB368
+    STUDIO_PALETTE_7 = #FFD864
+    
+    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT_DEFAULT)
+    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT_DEFAULT)
+    STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)
+    STUDIO_COLOR_WIDGET = (STUDIO_PALETTE_2)
+    STUDIO_COLOR_ASSET = (STUDIO_PALETTE_5)
+    STUDIO_COLOR_TEXT = (STUDIO_PALETTE_1)
+    
+    pub DesignerOutlineTree = <DesignerOutlineTreeBase> {
+        flow: Down,
+        
+        scroll_bars: <ScrollBars> {}
+        scroll_bars: {}
+        node_height: (THEME_DATA_ITEM_HEIGHT),
+        clip_x: true,
+        clip_y: true
+        
+        File = <DesignerOutlineTreeNode> {
+            draw_eye: true,
+            draw_icon: {
+                color: (STUDIO_COLOR_FILE)
+                svg_file: dep("crate://self/resources/icons/icon_file.svg"),
+            }
+        }
+        
+        Folder = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_FOLDER)
+                svg_file: dep("crate://self/resources/icons/icon_folder.svg"),
+            }
+        }
+        
+        Layout = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_LAYOUT)
+                svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
+            }
+        }
+        
+        Widget = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_WIDGET)
+                svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
+            }
+        }
+        
+        Asset = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_ASSET)
+                svg_file: dep("crate://self/resources/icons/icon_image.svg"),
+            }
+        }
+        
+        Text = <DesignerOutlineTreeNode> {
+            draw_icon: {
+                color: (STUDIO_COLOR_TEXT)
+                svg_file: dep("crate://self/resources/icons/icon_text.svg"),
+            }
+        }
+        
+        filler: {
+            fn pixel(self) -> vec4 {
+                return mix(
+                    THEME_COLOR_BG_EVEN,
+                    THEME_COLOR_BG_ODD,
+                    self.is_even
+                );
+            }
+        }
+    }
 }
 
 // TODO support a shared 'inputs' struct on drawshaders

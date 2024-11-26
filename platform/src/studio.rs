@@ -3,7 +3,6 @@ use crate::makepad_derive_live::*;
 use crate::LiveId;
 use crate::action::*;
 use crate::log::LogLevel;
-pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
 // communication enums for studio
 
 #[derive(SerBin, DeBin, Debug)]

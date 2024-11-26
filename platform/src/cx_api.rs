@@ -111,7 +111,6 @@ impl Cx {
         CxRef(self.self_ref.clone().unwrap())
     }
     
-        
     pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get_mut(path) {
             if let Some(data) = data.data.take() {

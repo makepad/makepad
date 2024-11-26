@@ -1,13 +1,13 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::base::*;
-    import makepad_draw::shader::std::*;
-
-    import makepad_example_ironfish::sequencer::Sequencer;
-    import makepad_audio_widgets::display_audio::DisplayAudio;
-    import makepad_audio_widgets::piano::Piano;
+    use link::widgets::*
+    use link::theme::*
+    use link::shaders::*
+    
+    use makepad_example_ironfish::sequencer::Sequencer;
+    use makepad_audio_widgets::display_audio::DisplayAudio;
+    use makepad_audio_widgets::piano::Piano;
     
     SPACING_OS = 40.0;
     SPACING_CONTROLS = 7.5;
@@ -1172,7 +1172,7 @@ live_design!{
         // <Pagination> {}
     }
     
-    AppMobile = <View> {
+    pub AppMobile = <View> {
         design_mode: false,
         width: Fill, height: Fill
         padding: 0, align: {x: 0.0, y: 0.0}

@@ -11,7 +11,7 @@ use {
 };
 
 live_design!{
-    AudioUnitInstrument= {{AudioUnitInstrument}} {
+    pub AudioUnitInstrument= {{AudioUnitInstrument}} {
         plugin: "FM8"
     }
 }

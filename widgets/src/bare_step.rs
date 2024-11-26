@@ -1,6 +1,7 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 live_design! {
-    BareStep = {{BareStep}} {}
+    link widgets;
+    pub BareStep = {{BareStep}} {}
 }
 
 #[derive(Live, LiveHook, LiveRegisterWidget, WidgetRef, WidgetSet)]
