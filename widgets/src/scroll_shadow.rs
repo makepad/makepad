@@ -1,7 +1,31 @@
 use crate::makepad_draw::*;
 
 live_design!{
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
     DrawScrollShadowBase = {{DrawScrollShadow}} {}
+    
+    DrawScrollShadow = <DrawScrollShadowBase> {
+        
+        shadow_size: 4.0,
+        
+        fn pixel(self) -> vec4 { // TODO: make the corner overlap properly with a distance field eq.
+            let is_viz = clamp(self.scroll * 0.1, 0., 1.);
+            let pos = self.pos;
+            let base = THEME_COLOR_BG_CONTAINER.xyz;
+            let alpha = 0.0;
+            if self.shadow_is_top > 0.5 {
+                alpha = pow(pos.y, 0.5);
+            }
+            else {
+                alpha = pow(pos.x, 0.5);
+            }
+            //turn vec4(base,is_viz);
+            return Pal::premul(mix(vec4(#000.xyz, is_viz), vec4(base, 0.), alpha));
+        }
+    }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]

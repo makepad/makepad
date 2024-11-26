@@ -4,9 +4,9 @@ use makepad_derive_widget::*;
 use crate::{label::*, makepad_draw::*, view::*, widget::*};
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::label::LabelBase;
-    import makepad_widgets::view::ViewBase;
+    use makepad_draw::shader::std::*;
+    use makepad_widgets::label::LabelBase;
+    use makepad_widgets::view::ViewBase;
 
     REGULAR_TEXT = {
         font_size: 10,

@@ -1,12 +1,12 @@
 use crate::makepad_widgets::*;
 
 live_design! {
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::base::*;
-    import makepad_draw::shader::std::*;
-    import crate::fish_theme::*;
-    import crate::block_header_button::*;
-    import crate::block_delete_button::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets::base::*;
+    use makepad_draw::shader::std::*;
+    use crate::fish_theme::*;
+    use crate::block_header_button::*;
+    use crate::block_delete_button::*;
 
     FishBlockEditor = <View>
     {

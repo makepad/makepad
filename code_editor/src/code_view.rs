@@ -11,9 +11,9 @@ use {
 };
 
 live_design!{
-    import crate::code_editor::CodeEditor;
+    use crate::code_editor::CodeEditor;
         
-    CodeView = {{CodeView}}{
+    pub CodeView = {{CodeView}}{
         editor: <CodeEditor>{
             pad_left_top: vec2(0.0,0.0)
             height:Fit

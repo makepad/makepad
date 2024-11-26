@@ -8,10 +8,9 @@ use crate::{
 };
 use std::collections::HashMap;
 
-
 live_design!{
-    DesignerOutlineBase = {{DesignerOutline}}{
-    }
+    pub DesignerOutlineBase = {{DesignerOutline}}{}
+    pub DesignerOutline = <DesignerOutlineBase>{ }    
 }
 
 #[derive(Live, Widget, LiveHook)]

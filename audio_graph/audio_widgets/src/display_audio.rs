@@ -7,7 +7,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
+    use link::shaders::*;
     
     DrawWave = {{DrawWave}} {
         texture wave_texture: texture2d
@@ -43,7 +43,7 @@ live_design!{
         }
     }
     
-    DisplayAudio = {{DisplayAudio}} {
+    pub DisplayAudio = {{DisplayAudio}} {
         width: Fill,
         height: Fill
     }

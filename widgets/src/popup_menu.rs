@@ -5,8 +5,148 @@ use {
 };
 
 live_design!{
-    PopupMenuItemBase = {{PopupMenuItem}} {}
-    PopupMenuBase = {{PopupMenu}} {}
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub PopupMenuItemBase = {{PopupMenuItem}} {}
+    pub PopupMenuBase = {{PopupMenu}} {}
+        
+    pub PopupMenuItem = <PopupMenuItemBase> {
+        width: Fill, height: Fit,
+        align: { y: 0.5 }
+        padding: <THEME_MSPACE_1> { left: 15. }
+        
+        draw_name: {
+            instance selected: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P),
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+            }
+        }
+        
+        draw_bg: {
+            instance selected: 0.0
+            instance hover: 0.0
+            instance color: (THEME_COLOR_FLOATING_BG)
+            instance color_selected: (THEME_COLOR_CTRL_HOVER)
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                
+                sdf.clear(mix(
+                    self.color,
+                    self.color_selected,
+                    self.hover
+                ))
+                
+                //
+                // we have 3 points, and need to rotate around its center
+                let sz = 3.;
+                let dx = 2.0;
+                let c = vec2(8.0, 0.5 * self.rect_size.y);
+                sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
+                sdf.line_to(c.x, c.y + sz);
+                sdf.line_to(c.x + sz, c.y - sz);
+                sdf.stroke(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_DEFAULT, self.selected), 1.0);
+                
+                return sdf.result;
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Hand
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {hover: 1.0}
+                        draw_name: {hover: 1.0}
+                    }
+                }
+            }
+            
+            select = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {selected: 0.0,}
+                        draw_name: {selected: 0.0,}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {selected: 1.0,}
+                        draw_name: {selected: 1.0,}
+                    }
+                }
+            }
+        }
+        indent_width: 10.0
+    }
+    
+    pub PopupMenu = <PopupMenuBase> {
+        width: 150., height: Fit,
+        flow: Down,
+        padding: <THEME_MSPACE_1> {}
+        
+        menu_item: <PopupMenuItem> {}
+        
+        draw_bg: {
+            instance color: (THEME_COLOR_FLOATING_BG)
+            instance border_width: 1.0,
+            instance inset: vec4(0.0, 0.0, 0.0, 0.0),
+            instance radius: 2.0
+            instance blur: 0.0
+            
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+            
+            fn get_border_color(self) -> vec4 {
+                return mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, pow(self.pos.y, 0.35))
+            }
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.blur = self.blur
+                sdf.box(
+                    self.inset.x + self.border_width,
+                    self.inset.y + self.border_width,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    max(1.0, self.radius)
+                )
+                sdf.fill_keep(self.get_color())
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), THEME_BEVELING)
+                }
+                return sdf.result;
+            }
+        }
+    }
+    
 }
 
 

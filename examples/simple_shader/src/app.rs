@@ -6,14 +6,14 @@ use makepad_widgets::*;
 // * creating a custom widget
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
-
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    
     // import our custom widget
     // note: to get a custom shader on screen, we could also simply override Window's draw_bg.
     // instead, we go the more elaborate route of overriding the shaders of a custom widget.
-    import makepad_example_simple_shader::my_widget::MyWidget;
+    use makepad_example_simple_shader::my_widget::MyWidget;
 
     App = {{App}} {
         ui: <Window>{
