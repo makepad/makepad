@@ -21,6 +21,7 @@ use {
         draw_matrix::CxDrawMatrixPool,
         os::{CxOs},
         debug::Debug,
+        display_context::DisplayContext,
         performance_stats::PerformanceStats,
         event::{
             DrawEvent,
@@ -109,6 +110,8 @@ pub struct Cx {
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
     pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
+
+    pub display_context: DisplayContext,
     
     pub debug: Debug,
 
@@ -304,6 +307,8 @@ impl Cx {
 
             self_ref: None,
             performance_stats: Default::default(),
+
+            display_context: Default::default(),
 
             widget_query_invalidation_event: None,
         }

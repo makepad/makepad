@@ -55,6 +55,8 @@ mod media_api;
 
 pub mod ui_runner;
 
+pub mod display_context;
+
 #[macro_use]
 mod app_main;
 
