@@ -2,45 +2,52 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
                 body = <ScrollXYView>{
-
                     flow: Down,
-                    spacing:10,
+                    spacing: 10,
                     align: {
                         x: 0.5,
                         y: 0.5
                     },
+                    show_bg: true,
+                    draw_bg:{
+                        fn pixel(self) -> vec4 {
+                            let center = vec2(0.5, 0.5);
+                            let uv = self.pos - center;
+                            let radius = length(uv);
+                            let angle = atan(uv.y, uv.x);
+                            let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
+                            let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
+                            return mix(color1, color2, radius);
+                        }
+                    }
                     button1 = <Button> {
-                        text: "Show/hide password"
-                        draw_text:{color:#f00}
+                        text: "Click me 123"
+                        draw_text:{color:#fff}
                     }
-                    input1 = <TextInput> {
-                        width: 100
-                        text: "Your password here"
-                        draw_text: { text_style: { is_secret: true } },
-                    }
-                    label1 = <Label> {
-                        draw_text: {
-                            color: #f
-                        },
-                        text: "This is a label",
-                        width: 200.0,
+                    button2 = <Button> {
+                        text: "Click me 345"
+                        draw_text:{color:#fff}
                     }
                 }
             }
         }
     }
-}
+}  
 
 app_main!(App); 
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
+    #[rust] counter: usize,
  }
  
 impl LiveRegister for App {
@@ -48,13 +55,11 @@ impl LiveRegister for App {
         crate::makepad_widgets::live_design(cx);
     }
 }
+
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
-            let text_input = self.ui.text_input(id!(input1));
-            let mut text_input = text_input.borrow_mut().unwrap();
-            text_input.draw_text.text_style.is_secret = !text_input.draw_text.text_style.is_secret;
-            text_input.redraw(cx);
+            self.counter += 1;
         }
     }
 }

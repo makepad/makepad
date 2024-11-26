@@ -18,7 +18,7 @@ use {
         span::{TextSpan, TextPos},
         live_error::{LiveError},
         live_document::LiveOriginal,
-        live_node::{LiveDesignInfo, LiveDesignInfoIndex, LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
+        live_node::{LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
     }
 };
 
@@ -29,23 +29,8 @@ pub struct LiveParser<'a> {
     pub live_type_infos: &'a [LiveTypeInfo],
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
+    pub ld: LiveOriginal,
     pub end: TextPos,
-}
-
-impl<'a> LiveParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan], live_type_infos: &'a [LiveTypeInfo], file_id: LiveFileId) -> Self {
-        let mut tokens_with_span = tokens.iter().cloned();
-        let token_with_span = tokens_with_span.next().unwrap();
-        LiveParser {
-            live_type_info_counter: 0,
-            file_id,
-            tokens_with_span,
-            live_type_infos,
-            token_with_span,
-            token_index: 0,
-            end: TextPos::default(),
-        }
-    }
 }
 
 impl<'a> LiveParser<'a> {
@@ -113,6 +98,7 @@ impl<'a> LiveParser<'a> {
     fn expect_ident(&mut self) -> Result<LiveId, LiveError> {
         match self.peek_token() {
             LiveToken::Ident(ident) => {
+                self.ld.identifiers.insert(ident);
                 self.skip_token();
                 Ok(ident)
             }
@@ -170,7 +156,7 @@ impl<'a> LiveParser<'a> {
         Ok(())
     }
     
-    fn expect_import(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_use(&mut self) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
         // if crate_id is capitalized, its a component.
@@ -210,7 +196,7 @@ impl<'a> LiveParser<'a> {
             last_id = self.expect_ident() ?;
         }
         
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
             id: last_id,
             value: LiveValue::Import(Box::new(LiveImport{
@@ -219,6 +205,12 @@ impl<'a> LiveParser<'a> {
             }))
         });
         
+        Ok(())
+    }
+    
+    fn expect_link(&mut self) -> Result<(), LiveError> {
+        let link_id = self.expect_ident() ?;
+        self.ld.link = Some(link_id);
         Ok(())
     }
     /*
@@ -244,14 +236,14 @@ impl<'a> LiveParser<'a> {
         Ok(())
     }*/
     
-    fn expect_fn(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_fn(&mut self) -> Result<(), LiveError> {
         let token_start = self.token_index - 1;
         let token_id = self.get_token_id();
         let prop_id = self.expect_ident() ?;
         //let token_start = self.token_index;
         let token_index = self.scan_to_token(LiveToken::Close(Delim::Brace)) ?;
         
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
             id: prop_id,
             value: LiveValue::DSL {
@@ -265,25 +257,25 @@ impl<'a> LiveParser<'a> {
     }
     
     
-    fn possible_edit_info(&mut self, ld: &mut LiveOriginal) -> Result<Option<LiveEditInfo>, LiveError> {
+    fn possible_edit_info(&mut self) -> Result<Option<LiveEditInfo>, LiveError> {
         // metadata is .{key:value}
         // lets align to the next index
         if self.accept_token(LiveToken::Punct(live_id!(.))) {
             self.expect_token(LiveToken::Open(Delim::Brace)) ?;
             
-            let fill_index = ld.edit_info.len() & 0xf;
+            let fill_index = self.ld.edit_info.len() & 0xf;
             if fill_index != 0 {
                 for _ in 0..(16 - fill_index) {
-                    ld.edit_info.push(LiveNode::empty())
+                    self.ld.edit_info.push(LiveNode::empty())
                 }
             }
-            let edit_info_index = ld.edit_info.len();
+            let edit_info_index = self.ld.edit_info.len();
             
             if edit_info_index > 0x3e0 {
                 return Err(self.error("Used more than 64 .{..} edit info fields in a file, we dont have the bitspace for that in our u64.".to_string(), live_error_origin!()))
             }
             
-            ld.edit_info.push(LiveNode {
+            self.ld.edit_info.push(LiveNode {
                 origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                 id: LiveId::empty(),
                 value: LiveValue::Object
@@ -294,7 +286,7 @@ impl<'a> LiveParser<'a> {
                 match self.peek_token() {
                     LiveToken::Close(Delim::Brace) => {
                         self.skip_token();
-                        ld.edit_info.push(LiveNode {
+                        self.ld.edit_info.push(LiveNode {
                             origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                             id: LiveId::empty(),
                             value: LiveValue::Close
@@ -308,7 +300,7 @@ impl<'a> LiveParser<'a> {
                         match self.peek_token() {
                             LiveToken::Bool(val) => {
                                 self.skip_token();
-                                ld.edit_info.push(LiveNode {
+                                self.ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
                                     value: LiveValue::Bool(val)
@@ -316,7 +308,7 @@ impl<'a> LiveParser<'a> {
                             },
                             LiveToken::Int(val) => {
                                 self.skip_token();
-                                ld.edit_info.push(LiveNode {
+                                self.ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
                                     value: LiveValue::Int64(val)
@@ -324,7 +316,7 @@ impl<'a> LiveParser<'a> {
                             },
                             LiveToken::Float(val) => {
                                 self.skip_token();
-                                ld.edit_info.push(LiveNode {
+                                self.ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
                                     value: LiveValue::Float64(val)
@@ -332,7 +324,7 @@ impl<'a> LiveParser<'a> {
                             },
                             LiveToken::Color(val) => {
                                 self.skip_token();
-                                ld.edit_info.push(LiveNode {
+                                self.ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
                                     value: LiveValue::Color(val)
@@ -340,7 +332,7 @@ impl<'a> LiveParser<'a> {
                             },
                             LiveToken::String(rcstring) => {
                                 self.skip_token();
-                                ld.edit_info.push(LiveNode {
+                                self.ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
                                     value: LiveValue::String(rcstring)
@@ -359,25 +351,25 @@ impl<'a> LiveParser<'a> {
         Ok(None)
     }
     
-    fn expect_node_with_prefix(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_node_with_prefix(&mut self) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let real_prop_id = self.expect_ident() ?;
-        let edit_info = self.possible_edit_info(ld) ?;
+        let edit_info = self.possible_edit_info() ?;
         let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info).with_node_has_prefix(true);
         
         if self.accept_token(LiveToken::Punct(live_id!(:))) {
-            self.expect_live_value(real_prop_id, origin.with_prop_type(LivePropType::Field), ld) ?;
+            self.expect_live_value(real_prop_id, origin.with_prop_type(LivePropType::Field)) ?;
         }
         else if self.accept_token(LiveToken::Punct(live_id!(=))) {
-            self.expect_live_value(real_prop_id, origin.with_prop_type(LivePropType::Instance), ld) ?;
+            self.expect_live_value(real_prop_id, origin.with_prop_type(LivePropType::Instance)) ?;
         }
         
         Ok(())
     }
     
-    fn expect_array(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_array(&mut self, prop_id: LiveId, origin: LiveNodeOrigin) -> Result<(), LiveError> {
         self.expect_token(LiveToken::Open(Delim::Bracket)) ?;
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin,
             id: prop_id,
             value: LiveValue::Array
@@ -385,7 +377,7 @@ impl<'a> LiveParser<'a> {
         let mut counter = 1;
         while self.peek_token() != LiveToken::Eof {
             if self.accept_token(LiveToken::Close(Delim::Bracket)) {
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                     id: LiveId::empty(),
                     value: LiveValue::Close
@@ -394,8 +386,7 @@ impl<'a> LiveParser<'a> {
             }
             self.expect_live_value(
                 LiveId(counter),
-                LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless),
-                ld
+                LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless)
             ) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
             counter += 1;
@@ -404,16 +395,16 @@ impl<'a> LiveParser<'a> {
     }
     
     
-    fn expect_tuple_enum(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, variant: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_tuple_enum(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, variant: LiveId) -> Result<(), LiveError> {
         self.expect_token(LiveToken::Open(Delim::Paren)) ?;
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin,
             id: prop_id,
             value: LiveValue::TupleEnum(variant)
         });
         while self.peek_token() != LiveToken::Eof {
             if self.accept_token(LiveToken::Close(Delim::Paren)) {
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                     id: prop_id,
                     value: LiveValue::Close
@@ -421,17 +412,17 @@ impl<'a> LiveParser<'a> {
                 return Ok(())
             }
             //let span = self.begin_span();
-            self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless), ld) ?;
+            self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless)) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
         }
         Err(self.error("Eof in object body".to_string(), live_error_origin!()))
     }
     
     
-    fn expect_named_enum(&mut self, prop_id: LiveId, origin: LiveNodeOrigin,variant: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_named_enum(&mut self, prop_id: LiveId, origin: LiveNodeOrigin,variant: LiveId) -> Result<(), LiveError> {
         self.expect_token(LiveToken::Open(Delim::Brace)) ?;
         
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin,
             id: prop_id,
             value: LiveValue::NamedEnum(variant)
@@ -439,7 +430,7 @@ impl<'a> LiveParser<'a> {
         
         while self.peek_token() != LiveToken::Eof {
             if self.accept_token(LiveToken::Close(Delim::Brace)) {
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                     id: prop_id,
                     value: LiveValue::Close
@@ -448,9 +439,9 @@ impl<'a> LiveParser<'a> {
             }
             let token_id = self.get_token_id();
             let prop_id = self.expect_ident() ?;
-            let edit_info = self.possible_edit_info(ld) ?;
+            let edit_info = self.possible_edit_info() ?;
             self.expect_token(LiveToken::Punct(live_id!(:))) ?;
-            self.expect_live_value(prop_id, LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info), ld) ?;
+            self.expect_live_value(prop_id, LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info)) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
         }
         Err(self.error("Eof in named enum".to_string(), live_error_origin!()))
@@ -459,7 +450,7 @@ impl<'a> LiveParser<'a> {
     fn get_token_id(&self) -> LiveTokenId {
         LiveTokenId::new(self.file_id, self.token_index)
     }
-    
+    /*
     fn expect_design_info(&mut self, ld: &mut LiveOriginal)->Result<LiveDesignInfoIndex, LiveError>{
         // lets parse key/values
         let mut info = LiveDesignInfo::default();
@@ -513,34 +504,33 @@ impl<'a> LiveParser<'a> {
             return Ok(id);
         }
         Ok(LiveDesignInfoIndex::invalid())
-    }
+    }*/
     
-    fn expect_live_value(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_live_value(&mut self, prop_id: LiveId, origin: LiveNodeOrigin) -> Result<(), LiveError> {
         // now we can have an array or a class instance
         match self.peek_token() {
             LiveToken::Punct(live_id!(<))=>{ // class instance
                 self.skip_token();
                 
                 let ident = self.expect_ident()?;
-                let design_info = self.expect_design_info(ld)?;
                 self.expect_token(LiveToken::Punct(live_id!(>))) ?;
                 self.expect_token(LiveToken::Open(Delim::Brace))?;
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::Clone{clone:ident, design_info}
+                    value: LiveValue::Clone{clone:ident}
                 });
-                self.expect_live_class(false, prop_id, ld) ?;
+                self.expect_live_class(false, prop_id) ?;
             }
             LiveToken::Ident(live_id!(struct)) => { // key/value map
                 self.skip_token();
                 self.expect_token(LiveToken::Open(Delim::Brace)) ?;
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::Clone{clone:live_id!(struct), design_info:LiveDesignInfoIndex::invalid()}
+                    value: LiveValue::Clone{clone:live_id!(struct)}
                 });
-                self.expect_live_class(false, prop_id, ld) ?;
+                self.expect_live_class(false, prop_id) ?;
             },
             
             LiveToken::Open(Delim::Brace) => { // key/value map
@@ -567,50 +557,48 @@ impl<'a> LiveParser<'a> {
                         self.skip_token();
                         let ident = self.expect_ident()?;
                         self.expect_token(LiveToken::Punct(live_id!(>))) ?;
-                        ld.nodes.push(LiveNode {
+                        self.ld.nodes.push(LiveNode {
                             origin,
                             id: prop_id,
                             value: LiveValue::Deref{
                                 live_type: self.live_type_infos[val].live_type,
                                 clone: ident,
-                                design_info:LiveDesignInfoIndex::invalid()
                             }
                         });
                     }
                     else{
-                        ld.nodes.push(LiveNode {
+                        self.ld.nodes.push(LiveNode {
                             origin,
                             id: prop_id,
                             value: LiveValue::Class {
                                 live_type: self.live_type_infos[val].live_type,
                                 class_parent: LivePtr::invalid(),
-                                design_info:LiveDesignInfoIndex::invalid()
                             }
                         });
                     }
                     
                     self.expect_token(LiveToken::Open(Delim::Brace)) ?;
-                    self.expect_live_class(false, prop_id, ld) ?;
+                    self.expect_live_class(false, prop_id) ?;
                     
                     return Ok(());
                 }
                 
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
                     value: LiveValue::Object
                 });
-                self.expect_live_class(false, prop_id, ld) ?;
+                self.expect_live_class(false, prop_id) ?;
             },
             LiveToken::Open(Delim::Paren) => { // expression
-                self.expect_expression(prop_id, origin, ld) ?;
+                self.expect_expression(prop_id, origin) ?;
             },
             LiveToken::Open(Delim::Bracket) => { // array
-                self.expect_array(prop_id, origin, ld) ?;
+                self.expect_array(prop_id, origin) ?;
             },
             LiveToken::Bool(val) => {
                 self.skip_token();
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
                     value: LiveValue::Bool(val)
@@ -621,7 +609,7 @@ impl<'a> LiveParser<'a> {
                 match self.peek_token() {
                     LiveToken::Int(val) => {
                         self.skip_token();
-                        ld.nodes.push(LiveNode {
+                        self.ld.nodes.push(LiveNode {
                             origin,
                             id: prop_id,
                             value: LiveValue::Int64(-val)
@@ -629,7 +617,7 @@ impl<'a> LiveParser<'a> {
                     },
                     LiveToken::Float(val) => {
                         self.skip_token();
-                        ld.nodes.push(LiveNode {
+                        self.ld.nodes.push(LiveNode {
                             origin,
                             id: prop_id,
                             value: LiveValue::Float64(-val)
@@ -640,7 +628,7 @@ impl<'a> LiveParser<'a> {
             }
             LiveToken::Int(val) => {
                 self.skip_token();
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
                     value: LiveValue::Int64(val)
@@ -648,7 +636,7 @@ impl<'a> LiveParser<'a> {
             },
             LiveToken::Float(val) => {
                 self.skip_token();
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
                     value: LiveValue::Float64(val)
@@ -656,7 +644,7 @@ impl<'a> LiveParser<'a> {
             },
             LiveToken::Color(val) => {
                 self.skip_token();
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
                     value: LiveValue::Color(val)
@@ -664,7 +652,7 @@ impl<'a> LiveParser<'a> {
             },
             LiveToken::String(v) => {
                 self.skip_token();
-                ld.nodes.push(LiveNode {
+                self.ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
                     value: LiveValue::String(v)
@@ -674,7 +662,7 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_string() ?;
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Dependency(x)
@@ -682,7 +670,7 @@ impl<'a> LiveParser<'a> {
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
                 }
                 else {
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(live_id!(dep))
@@ -696,14 +684,14 @@ impl<'a> LiveParser<'a> {
                     self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let y = self.expect_float() ?;
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Vec2(Vec2 {x: x as f32, y: y as f32})
                     });
                 }
                 else {
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(live_id!(vec2))
@@ -719,14 +707,14 @@ impl<'a> LiveParser<'a> {
                     self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let z = self.expect_float() ?;
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Vec3(Vec3 {x: x as f32, y: y as f32, z: z as f32})
                     });
                 }
                 else {
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(live_id!(vec3))
@@ -744,14 +732,14 @@ impl<'a> LiveParser<'a> {
                     self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let w = self.expect_float() ?;
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Vec4(Vec4 {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
                     });
                 }
                 else {
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(live_id!(vec4))
@@ -768,7 +756,7 @@ impl<'a> LiveParser<'a> {
                             let ident = self.expect_ident()?;
                             id_path.push(ident);
                         }
-                        ld.nodes.push(LiveNode {
+                        self.ld.nodes.push(LiveNode {
                             origin,
                             id: prop_id,
                             value: LiveValue::IdPath(Arc::new(id_path))
@@ -776,21 +764,21 @@ impl<'a> LiveParser<'a> {
                         // loop till not id or =>
                     }
                     LiveToken::Open(Delim::Brace) => {
-                        self.expect_named_enum(prop_id, origin, variant, ld) ?;
+                        self.expect_named_enum(prop_id, origin, variant) ?;
                     }
                     LiveToken::Open(Delim::Paren) => {
-                        self.expect_tuple_enum(prop_id, origin, variant, ld) ?;
+                        self.expect_tuple_enum(prop_id, origin, variant) ?;
                     }
                     _ => {
                         if variant.as_string(|v| v.unwrap().chars().next().unwrap().is_uppercase()){
-                            ld.nodes.push(LiveNode {
+                            self.ld.nodes.push(LiveNode {
                                 origin,
                                 id: prop_id,
                                 value: LiveValue::BareEnum(variant)
                             })
                         }
                         else{
-                            ld.nodes.push(LiveNode {
+                            self.ld.nodes.push(LiveNode {
                                 origin,
                                 id: prop_id,
                                 value: LiveValue::Id(variant)
@@ -812,6 +800,9 @@ impl<'a> LiveParser<'a> {
             match self.peek_token() {
                 LiveToken::Open(_) => {
                     stack_depth += 1;
+                }
+                LiveToken::Ident(id)=>{
+                    self.ld.identifiers.insert(id);
                 }
                 LiveToken::Close(_) => {
                     if stack_depth == 0 {
@@ -854,7 +845,7 @@ impl<'a> LiveParser<'a> {
         Err(self.error("Expected value literal".to_string(), live_error_origin!()))
     }
     
-    fn expect_live_class(&mut self, root: bool, prop_id: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_live_class(&mut self, root: bool, prop_id: LiveId) -> Result<(), LiveError> {
         let mut nameless_id = 1;
         while self.peek_token() != LiveToken::Eof {
             match self.peek_token() {
@@ -864,7 +855,7 @@ impl<'a> LiveParser<'a> {
                     }
                     let token_id = self.get_token_id();
                     self.skip_token();
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id),
                         id: prop_id,
                         value: LiveValue::Close
@@ -875,16 +866,15 @@ impl<'a> LiveParser<'a> {
                     let token_id = self.get_token_id();
                     self.skip_token();
                     let ident = self.expect_ident()?;
-                    let design_info = self.expect_design_info(ld)?;
                     self.expect_token(LiveToken::Punct(live_id!(>))) ?;
                     self.expect_token(LiveToken::Open(Delim::Brace))?;
-                    ld.nodes.push(LiveNode {
+                    self.ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Instance),
                         id: LiveId(nameless_id),
-                        value: LiveValue::Clone{clone:ident, design_info}
+                        value: LiveValue::Clone{clone:ident}
                     });
                     nameless_id += 1;
-                    self.expect_live_class(false, prop_id, ld) ?;
+                    self.expect_live_class(false, prop_id) ?;
                 }
                 LiveToken::Ident(prop_id) => {
                     let token_id = self.get_token_id();
@@ -896,24 +886,28 @@ impl<'a> LiveParser<'a> {
                     if let LiveToken::Ident(_) = self.peek_token() {
                         match prop_id {
                             live_id!(fn) => {
-                                self.expect_fn(ld) ?;
+                                self.expect_fn() ?;
                                 self.accept_optional_delim();
                             }
-                            live_id!(import) => {
-                                self.expect_import(ld) ?;
+                            live_id!(use) => {
+                                self.expect_use() ?;
+                                self.accept_optional_delim();
+                            }
+                            live_id!(link) => {
+                                self.expect_link() ?;
                                 self.accept_optional_delim();
                             }
                             _ => {
                                 let token_id = self.get_token_id();
                                 let real_prop_id = self.expect_ident() ?;
-                                let edit_info = self.possible_edit_info(ld) ?;
+                                let edit_info = self.possible_edit_info() ?;
                                 let prop_type = self.expect_prop_type()?;
                                 let origin = LiveNodeOrigin::from_token_id(token_id)
                                     .with_edit_info(edit_info)
                                     .with_node_has_prefix(true)
                                     .with_prop_type(prop_type);
                                 
-                                self.expect_live_value(real_prop_id, origin, ld) ?;
+                                self.expect_live_value(real_prop_id, origin) ?;
                                 //self.expect_node_with_prefix(ld) ?;
                                 self.accept_optional_delim();
                             }
@@ -921,13 +915,13 @@ impl<'a> LiveParser<'a> {
                     }
                     else { // has to be key:value
                         // if we get a . metadata follows
-                        let edit_info = self.possible_edit_info(ld) ?;
+                        let edit_info = self.possible_edit_info() ?;
                   
                         let assign_type = self.expect_prop_type()?;
                         let origin = LiveNodeOrigin::from_token_id(token_id)
                             .with_edit_info(edit_info)
                             .with_prop_type(assign_type);
-                        self.expect_live_value(prop_id, origin, ld) ?;
+                        self.expect_live_value(prop_id, origin) ?;
 
                         self.accept_optional_delim();
                     }
@@ -964,21 +958,33 @@ impl<'a> LiveParser<'a> {
         }
     }
     
-    pub fn parse_live_document(&mut self) -> Result<LiveOriginal, LiveError> {
-        let mut ld = LiveOriginal::new();
-        ld.nodes.push(LiveNode {
-            origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+    pub fn parse_live_document(tokens: &'a [TokenWithSpan], live_type_infos: &'a [LiveTypeInfo], file_id: LiveFileId) -> Result<LiveOriginal, LiveError> {
+        let mut tokens_with_span = tokens.iter().cloned();
+        let token_with_span = tokens_with_span.next().unwrap();
+        let mut lp = LiveParser {
+            live_type_info_counter: 0,
+            file_id,
+            ld: LiveOriginal::default(),
+            tokens_with_span,
+            live_type_infos,
+            token_with_span,
+            token_index: 0,
+            end: TextPos::default(),
+        };
+        //let mut ld = LiveOriginal::new();
+        lp.ld.nodes.push(LiveNode {
+            origin: LiveNodeOrigin::from_token_id(lp.get_token_id()),
             id: LiveId::empty(),
             value: LiveValue::Object
         });
-        self.expect_live_class(true, LiveId::empty(), &mut ld) ?;
-        ld.nodes.push(LiveNode {
-            origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+        lp.expect_live_class(true, LiveId::empty()) ?;
+        lp.ld.nodes.push(LiveNode {
+            origin: LiveNodeOrigin::from_token_id(lp.get_token_id()),
             id: LiveId::empty(),
             value: LiveValue::Close
         });
         // we should s
-        Ok(ld)
+        Ok(lp.ld)
     }
     
     
@@ -990,11 +996,11 @@ impl<'a> LiveParser<'a> {
     
     
     
-    fn expect_expression(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_expression(&mut self, prop_id: LiveId, origin: LiveNodeOrigin) -> Result<(), LiveError> {
         
         let expr = self.expect_prim_expr() ?;
         
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin,
             id: prop_id,
             value: LiveValue::Expr 
@@ -1075,9 +1081,9 @@ impl<'a> LiveParser<'a> {
             }
         }
         
-        recur_walk(expr, ld);
+        recur_walk(expr, &mut self.ld);
         
-        ld.nodes.push(LiveNode {
+        self.ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
             id: prop_id,
             value: LiveValue::Close
@@ -1239,7 +1245,10 @@ impl<'a> LiveParser<'a> {
                         let arg_exprs = self.expect_arg_exprs() ?;
                         Ok(Expr::Call {token_id, ident, arg_exprs})
                     }
-                    _ => Ok(Expr::Var {token_id, ident}),
+                    _ => {
+                        self.ld.identifiers.insert(ident);
+                        Ok(Expr::Var {token_id, ident})
+                    }
                 }
             }
             LiveToken::Bool(v) => {

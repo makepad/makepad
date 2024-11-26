@@ -8,7 +8,36 @@ use crate::{
 };
 
 live_design!{
-    SlidePanelBase = {{SlidePanel}} {}
+    link widgets
+    pub SlidePanelBase = {{SlidePanel}} {}
+    pub SlidePanel = <SlidePanelBase>{
+        animator: {
+            closed = {
+                default: off,
+                on = {
+                    redraw: true,
+                    from: {
+                        all: Forward {duration: 0.5}
+                    }
+                    ease: InQuad
+                    apply: {
+                        closed: 1.0
+                    }
+                }
+                                
+                off = {
+                    redraw: true,
+                    from: {
+                        all: Forward {duration: 0.5}
+                    }
+                    ease: OutQuad
+                    apply: {
+                        closed: 0.0
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook, Widget)]

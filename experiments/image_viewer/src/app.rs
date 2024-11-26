@@ -4,9 +4,9 @@ use std::path::Path;
 use crate::state::State;
 
 live_design!(
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import crate::ui::Ui;
+    use makepad_widgets::base::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use crate::ui::Ui;
 
     App = {{App}} {
         ui: <Ui> {}

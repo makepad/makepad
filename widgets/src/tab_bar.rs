@@ -9,7 +9,60 @@ use {
 };
 
 live_design!{
-    TabBarBase = {{TabBar}} {}
+    link widgets;
+    use link::theme::*;
+    use link::widgets::*;
+    use makepad_draw::shader::std::*;
+    
+    pub TabBarBase = {{TabBar}} {}
+    pub TabBar = <TabBarBase> {
+        CloseableTab = <Tab> {closeable:true}
+        PermanentTab = <Tab> {closeable:false}
+        
+        draw_drag: {
+            draw_depth: 10
+            color: (THEME_COLOR_BG_CONTAINER)
+        }
+        draw_fill: {
+            color: (THEME_COLOR_D_1)
+        }
+        
+        width: Fill, height: (THEME_TAB_HEIGHT)
+        margin: { top: 0.5, right: 0.5, bottom: 0.0, left: 0.5 }
+        
+        scroll_bars: <ScrollBarsTabs> {
+            show_scroll_x: true
+            show_scroll_y: false
+            scroll_bar_x: {
+                draw_bar: {bar_width: 3.0}
+                bar_size: 4
+                use_vertical_finger_scroll: true
+            }
+        }
+    }
+    
+    pub TabBarMinimal = <TabBarBase> {
+        tab: <TabMinimal> {}
+        draw_drag: {
+            draw_depth: 10
+            color: (THEME_COLOR_BG_CONTAINER)
+        }
+        draw_fill: {
+            color: (THEME_COLOR_U_HIDDEN)
+        }
+        
+        width: Fill, height: (THEME_TAB_HEIGHT)
+        
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true
+            show_scroll_y: false
+            scroll_bar_x: {
+                draw_bar: {bar_width: 3.0}
+                bar_size: 4
+                use_vertical_finger_scroll: true
+            }
+        }
+    }
 }
 
 #[derive(Live, Widget)]

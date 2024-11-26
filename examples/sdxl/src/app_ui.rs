@@ -1,10 +1,10 @@
 use makepad_widgets::*;
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
-    
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
+        
     TEXT_BIG = 12.0
     
     COLOR_UP_0 = #xFFFFFF00
@@ -132,7 +132,7 @@ live_design!{
         }
     }
     
-    BarLabel = <Label dx:-103.6 dy:393.8 dw:400.0 dh:300.0> {
+    BarLabel = <Label> {
         margin: {left: 10},
         text: "Workflow",
         draw_text: {
@@ -143,7 +143,7 @@ live_design!{
         }
     }
     
-    BarButton = <Button dx:279.6 dy:-136.8 dw:400.0 dh:300.0> {
+    BarButton = <Button> {
         padding: {top: 5.0, right: 7.5, bottom: 5.0, left: 7.5}
         margin: {top: 5.0, right: 5.0, bottom: 5.0, left: 5.0}
         text: "Cancel"
@@ -285,7 +285,7 @@ live_design!{
         }
     }
     
-    SettingsSlider = <View dx:210.7 dy:304.6 dw:400.0 dh:300.0> {
+    SettingsSlider = <View> {
         width: 130,
         height: Fit,
         margin: {top: 0},
@@ -303,7 +303,7 @@ live_design!{
         }
     }
     
-    FillerH = <View dx:303.1 dy:271.4 dw:400.0 dh:300.0> {
+    FillerH = <View> {
         width: Fill,
         height: Fit
     }
@@ -314,7 +314,7 @@ live_design!{
     }
     
     
-    DividerV = <View dx:-313.3 dy:119.9 dw:400.0 dh:300.0> {
+    DividerV = <View> {
         flow: Down,
         spacing: 0.0
         margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}
@@ -413,7 +413,7 @@ live_design!{
         text: "Slideshow"
     }
     
-    ProgressCircle = <View dx:-194.2 dy:-240.4 dw:400.0 dh:300.0> {
+    ProgressCircle = <View> {
         show_bg: true,
         width: 24,
         height: 24
@@ -604,7 +604,7 @@ live_design!{
         }
     }
     
-    VideoFrame = <Image dx:-22.8 dy:313.4 dw:400.0 dh:300.0> {
+    VideoFrame = <Image> {
         height: 160,
         width: 90,
         width_scale: 2.0,
@@ -642,7 +642,8 @@ live_design!{
             }
         }
     }
-    AppUI = <View> {
+    
+    pub AppUI = <View> {
                             
         flow: Overlay,
                             
@@ -1063,7 +1064,7 @@ live_design!{
         }
     }
     
-    AppWindow = <View>{
+    pub AppWindow = <View>{
         
         second_image = <RectView> {
             draw_bg: {color: #0}

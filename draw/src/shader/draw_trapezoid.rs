@@ -21,8 +21,7 @@ pub use {
 };
 
 live_design!{
-    DrawTrapezoidVector= {{DrawTrapezoidVector}} {
-        
+    pub DrawTrapezoidVector= {{DrawTrapezoidVector}} {
         varying v_p0: vec2;
         varying v_p1: vec2;
         varying v_p2: vec2;

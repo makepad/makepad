@@ -6,7 +6,120 @@ use crate::{
 };
 
 live_design!{
-    LinkLabelBase = {{LinkLabel}} {}
+    link widgets;
+    
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub LinkLabelBase = {{LinkLabel}} {}
+    pub LinkLabel = <LinkLabelBase> {
+        // TODO: add a focus states
+        instance hover: 0.0
+        instance pressed: 0.0
+        
+        width: Fit, height: Fit,
+        margin: <THEME_MSPACE_2> {}
+        padding: 0.,
+        
+        label_walk: { width: Fit, height: Fit, },
+        
+        draw_bg: {
+            instance pressed: 0.0
+            instance hover: 0.0
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                ), mix(.7, 1., self.hover));
+            }
+        }
+        
+        draw_text: {
+            wrap: Word
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            instance color_hover: (THEME_COLOR_TEXT_HOVER),
+            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
+            instance pressed: 0.0
+            instance hover: 0.0
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_pressed,
+                    self.pressed
+                )
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+        }
+        
+    }
+    
+    pub LinkLabelIcon = <LinkLabel> {
+        padding: { bottom: 2. }
+        label_walk: { margin: { left: -5. }},
+        draw_icon: {
+            instance focus: 0.0
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        mix(self.color, #f, 0.5),
+                        self.hover
+                    ),
+                    self.color * 0.75,
+                    self.pressed
+                )
+            }
+        }
+    }
 }
 
 /// A clickable label widget that opens a URL when clicked.

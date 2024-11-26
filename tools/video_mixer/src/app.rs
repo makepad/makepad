@@ -16,16 +16,16 @@ use {
 
 
 live_design!{
-    import makepad_widgets::frame::*;
-    import makepad_widgets::image::Image;
-    import makepad_widgets::slides_view::Slide;
-    import makepad_widgets::slides_view::SlidesView;
-    import makepad_widgets::slides_view::SlideBody;
-    import makepad_draw::shader::std::*;
+    use makepad_widgets::frame::*;
+    use makepad_widgets::image::Image;
+    use makepad_widgets::slides_view::Slide;
+    use makepad_widgets::slides_view::SlidesView;
+    use makepad_widgets::slides_view::SlideBody;
+    use makepad_draw::shader::std::*;
     
-    import makepad_widgets::desktop_window::DesktopWindow
-    import makepad_widgets::multi_window::MultiWindow
-    import makepad_audio_widgets::display_audio::DisplayAudio
+    use makepad_widgets::desktop_window::DesktopWindow
+    use makepad_widgets::multi_window::MultiWindow
+    use makepad_audio_widgets::display_audio::DisplayAudio
     
     VideoFrame = <View> {
         show_bg: true,

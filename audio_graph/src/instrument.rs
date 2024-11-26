@@ -7,7 +7,7 @@ use {
 };
 
 live_design!{
-    Instrument= {{Instrument}} {
+    pub Instrument= {{Instrument}} {
     }
 }
 

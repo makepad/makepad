@@ -10,8 +10,8 @@ use {
 const ZBIAS_STEP: f32 = 0.00001;
 
 live_design!{
-    
-    DrawText = {{DrawText}} {
+    use link::shaders::*;
+    pub DrawText = {{DrawText}} {
         //debug: true;
         color: #fff
         

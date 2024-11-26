@@ -6,7 +6,9 @@ use crate::{
 };
 
 live_design!{
-    KeyboardViewBase = {{KeyboardView}} {}
+    link widgets;
+    pub KeyboardViewBase = {{KeyboardView}} {}
+    pub KeyboardView = <KeyboardViewBase>{}
 }
 
 

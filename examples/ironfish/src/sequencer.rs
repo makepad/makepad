@@ -7,7 +7,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
+    use link::shaders::*;
     
     DrawButton = {{DrawButton}} {
         
@@ -63,7 +63,7 @@ live_design!{
         }
     }
     
-    Sequencer = {{Sequencer}} {
+    pub Sequencer = {{Sequencer}} {
         current_step: 0,
         button: <SeqButton> {}
         button_size: vec2(25.0, 25.0),

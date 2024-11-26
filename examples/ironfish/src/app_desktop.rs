@@ -1,13 +1,13 @@
 use crate::makepad_widgets::*;
  
 live_design! {
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_draw::shader::std::*;
+    use link::widgets::*
+    use link::theme::*
+    use link::shaders::*
 
-    import makepad_example_ironfish::sequencer::Sequencer;
-    import makepad_audio_widgets::display_audio::DisplayAudio;
-    import makepad_audio_widgets::piano::Piano;
+    use makepad_example_ironfish::sequencer::Sequencer;
+    use makepad_audio_widgets::display_audio::DisplayAudio;
+    use makepad_audio_widgets::piano::Piano;
 
     FONT_SIZE_H2 = 9.5
 
@@ -2457,7 +2457,7 @@ live_design! {
         preset_list = <PresetList> {}
     }*/
     
-    AppDesktop = <View>{
+    pub AppDesktop = <View>{
         flow: Right
         width: Fill,
         height: Fill

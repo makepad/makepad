@@ -1,6 +1,293 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*,};
+
 live_design! {
-    ButtonBase = {{Button}} {}
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    
+    pub ButtonBase = {{Button}} {}
+    pub Button = <ButtonBase> {
+        // TODO: NEEDS FOCUS STATE
+        
+        width: Fit, height: Fit,
+        spacing: 7.5,
+        align: {x: 0.5, y: 0.5},
+        padding: <THEME_MSPACE_2> {}
+        label_walk: { width: Fit, height: Fit },
+        
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            color: (THEME_COLOR_TEXT_DEFAULT)
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+        }
+        
+        icon_walk: {
+            width: (THEME_DATA_ICON_WIDTH), height: Fit,
+        }
+        
+        draw_icon: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        mix(self.color, #f, 0.5),
+                        self.hover
+                    ),
+                    self.color * 0.75,
+                    self.pressed
+                )
+            }
+        }
+        
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+                let bot_gradient = mix(
+                    mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+                
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+                
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING
+                )
+                
+                return sdf.result
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
+                        draw_text: {pressed: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+        }
+    }
+    
+    pub ButtonIcon = <Button> {
+        icon_walk: {
+            width: 12.
+            margin: { left: 0. }
+        }
+    }
+    
+    pub ButtonFlat = <ButtonIcon> {
+        height: Fit, width: Fit,
+        padding: <THEME_MSPACE_2> {}
+        margin: 0.
+        align: { x: 0.5, y: 0.5 }
+        icon_walk: { width: 12. }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.fill(#f00)
+                return sdf.result
+            }
+        }
+        
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                )
+            }
+        }
+        
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+                let bot_gradient = mix(
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+                
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+                
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING
+                )
+                
+                return sdf.result
+            }
+        }
+        
+    }
+    
+    pub ButtonFlatter = <ButtonIcon> {
+        height: Fit, width: Fit,
+        padding: <THEME_MSPACE_2> {},
+        margin: <THEME_MSPACE_2> {},
+        align: { x: 0.5, y: 0.5 },
+        icon_walk: { width: 12. },
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.fill(#f00)
+                return sdf.result
+            }
+        }
+        
+        draw_text: {
+            instance hover: 0.0,
+            instance pressed: 0.0,
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT_HOVER,
+                        self.hover
+                    ),
+                    THEME_COLOR_TEXT_PRESSED,
+                    self.pressed
+                )
+            }
+        }
+        
+        draw_bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_U_HIDDEN)
+            instance bodybottom: (THEME_COLOR_U_HIDDEN)
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 2.0;
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_HIDDEN, self.pressed);
+                
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(
+                    body_transp,
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.pressed),
+                    max(0.0, grad_top - sdf.pos.y) / grad_top
+                );
+                let bot_gradient = mix(
+                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+                
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(body)
+                
+                sdf.stroke(
+                    bot_gradient,
+                    THEME_BEVELING
+                )
+                
+                return sdf.result
+            }
+        }
+        
+    }
+    
+    
 }
 
 /// Actions emitted by a button widget, including the key modifiers

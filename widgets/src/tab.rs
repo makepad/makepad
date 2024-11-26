@@ -6,7 +6,184 @@ use {
 };
 
 live_design!{
-    TabBase = {{Tab}} {}
+    link widgets;
+    use link::theme::*;
+    use link::widgets::*;
+    use makepad_draw::shader::std::*;
+    
+    pub TabBase = {{Tab}} {}
+    pub Tab = <TabBase> {
+        width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
+        
+        align: {x: 0.0, y: 0.5}
+        padding: <THEME_MSPACE_3> { }
+        
+        close_button: <TabCloseButton> {}
+        draw_name: {
+            text_style: <THEME_FONT_REGULAR> {}
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_INACTIVE,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+            }
+        }
+        
+        draw_bg: {
+            instance hover: float
+            instance selected: float
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    -1.,
+                    -1.,
+                    self.rect_size.x + 2,
+                    self.rect_size.y + 2,
+                    1.
+                )
+                sdf.fill_keep(
+                    mix(
+                        THEME_COLOR_D_2 * 0.64,
+                        THEME_COLOR_DOCK_TAB_SELECTED,
+                        self.selected
+                    )
+                )
+                return sdf.result
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    cursor: Hand,
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {hover: [{time: 0.0, value: 1.0}]}
+                        draw_name: {hover: [{time: 0.0, value: 1.0}]}
+                    }
+                }
+            }
+            
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.3}}
+                    apply: {
+                        close_button: {draw_button: {selected: 0.0}}
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        close_button: {draw_button: {selected: 1.0}}
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                    }
+                }
+            }
+        }
+    }
+    
+    pub TabMinimal = <TabBase> {
+        width: Fit, height: Fill, //Fixed((THEME_TAB_HEIGHT)),
+        align: {x: 0.0, y: 0.5}
+        padding: <THEME_MSPACE_3> { }
+        
+        close_button: <TabCloseButton> {}
+        draw_name: {
+            text_style: <THEME_FONT_REGULAR> {}
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        THEME_COLOR_TEXT_INACTIVE,
+                        THEME_COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    THEME_COLOR_TEXT_HOVER,
+                    self.hover
+                )
+            }
+        }
+        
+        draw_bg: {
+            instance hover: float
+            instance selected: float
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let marker_height = 2.5
+                
+                sdf.rect(0, self.rect_size.y - marker_height, self.rect_size.x, marker_height)
+                sdf.fill(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL), self.selected));
+                return sdf.result
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    cursor: Hand,
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {hover: [{time: 0.0, value: 1.0}]}
+                        draw_name: {hover: [{time: 0.0, value: 1.0}]}
+                    }
+                }
+            }
+            
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.3}}
+                    apply: {
+                        close_button: {draw_button: {selected: 0.0}}
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        close_button: {draw_button: {selected: 1.0}}
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
