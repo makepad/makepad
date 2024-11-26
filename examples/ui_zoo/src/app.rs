@@ -73,7 +73,7 @@ live_design!{
             caption_bar = {
                 visible: true,
                 margin: {left: -100},
-                caption_label = { label = {text: "Makepad UI Zoo"} }
+                caption_label = { label = {text: "Makepad UI Zoo "} }
             },
 
             body = <View> {
