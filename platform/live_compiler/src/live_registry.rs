@@ -738,27 +738,35 @@ impl LiveRegistry {
     }
     
     fn doc_original_raw_imports_to_resolved_recur(&mut self, file_id: LiveFileId, errors: &mut Vec<LiveError>, dep_order: &mut Vec<LiveFileId>){
+        
         // lets see if we are already in the dep order, and ifso put us at the end
         if dep_order.iter().find(|v| **v == file_id).is_some(){
-            fn recur_dep_order(file_id:LiveFileId, dep_order: &mut Vec<LiveFileId>, docs:&[LiveFile]){
+            
+            fn recur_dep_order(file_id:LiveFileId, dep_order: &mut Vec<LiveFileId>, docs:&[LiveFile], recur_block: &mut Vec<LiveFileId>){
+                if recur_block.contains(&file_id){
+                    for recur in recur_block{
+                        println!("Dependency recursion in: {:?}", docs[recur.to_index()].file_name);
+                    }
+                    return
+                }
+                recur_block.push(file_id);
                 let doc = &docs[file_id.to_index()];
                 let imports = &doc.original.resolved_imports.as_ref().unwrap();
                 let pos = dep_order.iter().position(|v| *v == file_id).unwrap();
                 dep_order.remove(pos);
                 dep_order.push(file_id);
                 for import in imports.values(){
-                    if *import == file_id{
-                        panic!("Recursive import {:?}", doc.file_name);
-                    }
-                    else{
-                        recur_dep_order(*import, dep_order, docs)
+                    recur_dep_order(*import, dep_order, docs, recur_block)
+                }
+                for type_file_id in &doc.original.type_imports{
+                    if file_id != *type_file_id{
+                        recur_dep_order(*type_file_id, dep_order, docs, recur_block)
                     }
                 }
-                for file_id in &doc.original.type_imports{
-                    recur_dep_order(*file_id, dep_order, docs)
-                }
+                recur_block.pop();
             }
-            recur_dep_order(file_id, dep_order, &mut self.live_files);
+            let mut recur_block = Vec::new();
+            recur_dep_order(file_id, dep_order, &mut self.live_files, &mut recur_block);
             return;
         }
         else{
