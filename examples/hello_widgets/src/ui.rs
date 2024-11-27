@@ -5,7 +5,7 @@ live_design!(
     use link::shaders::*;
     use link::widgets::*;
 
-    Ui = {{Ui}} {
+    pub Ui = {{Ui}} {
         align: {x: 0.5, y: 0.5}
         body = <Label> {
             text: "Hello, world!"
