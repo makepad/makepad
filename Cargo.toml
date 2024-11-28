@@ -43,6 +43,9 @@ workspace.members = [
     # "comp_demo",
     "tools/cargo_makepad",
     "tools/auto_version",
+    "libs/array_vec",
+    "libs/btree",
+    "libs/btree_vec", "experiments/scroll",
 ]
 
 workspace.exclude = [

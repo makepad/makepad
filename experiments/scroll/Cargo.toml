@@ -1,0 +1,7 @@
+[package]
+name = "scroll"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btree_vec = { path = "../../libs/btree_vec" }
