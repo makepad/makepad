@@ -7,7 +7,9 @@ use crate::{
 };
 
 live_design! {
-    CachedWidgetBase = {{CachedWidget}} {}
+    link widgets;
+    
+    pub CachedWidget = {{CachedWidget}} {}
 }
 
 /// A Singleton wrapper widget that caches and reuses its child widget across multiple instances.
