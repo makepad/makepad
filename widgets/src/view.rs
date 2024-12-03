@@ -1,8 +1,6 @@
 use {
     crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
-    std::{
-        cell::RefCell,
-    },
+    std::cell::RefCell,
 };
 
 live_design! {
@@ -638,6 +636,12 @@ impl Widget for View {
             if actions.len() > 0 {
                 cx.redraw_area_and_children(self.area);
             };
+        }
+
+        // If the UI tree has changed significantly (e.g. AdaptiveView varaints changed),
+        // we need to clear the cache and re-query widgets.
+        if cx.widget_query_invalidation_event.is_some() {
+            self.find_cache.borrow_mut().clear();
         }
 
         match &self.event_order {
