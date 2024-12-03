@@ -1300,6 +1300,8 @@ let web_cursor_map = [
     "nwse-resize", //NwseResize=>21,
     "col-resize", //ColResize=>22,
     "row-resize", //RowResize=>23,
+    "grab", //Grab=>24
+    "grabbing", //Grabbing=>25    
 ]
 
 //var firefox_logo_key = false;
