@@ -590,6 +590,10 @@ impl Cx {
         self.platform_ops.push(CxOsOp::SelectFolderDialog(FileDialog::new()));
 
     }
+
+    pub fn event_id(&self) -> u64 {
+        self.event_id
+    }
 }
 
 #[macro_export]
