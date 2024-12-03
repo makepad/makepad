@@ -425,8 +425,9 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
         MouseCursor::Text => load_native_cursor("IBeamCursor"),
         MouseCursor::NotAllowed /*| MouseCursor::NoDrop*/ => load_native_cursor("operationNotAllowedCursor"),
         MouseCursor::Crosshair => load_native_cursor("crosshairCursor"),
+        MouseCursor::Grab => load_native_cursor("openHandCursor"), 
+        MouseCursor::Grabbing => load_native_cursor("closedHandCursor"), 
         /*
-        MouseCursor::Grabbing | MouseCursor::Grab => load_native_cursor("closedHandCursor"),
         MouseCursor::VerticalText => load_native_cursor("IBeamCursorForVerticalLayout"),
         MouseCursor::Copy => load_native_cursor("dragCopyCursor"),
         MouseCursor::Alias => load_native_cursor("dragLinkCursor"),
