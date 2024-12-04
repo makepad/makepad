@@ -29,8 +29,8 @@ pub struct WasmConfig{
 pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
     let init = if config.bindgen {
         format!("
-            use {{init_env}} from './makepad_wasm_bridge/wasm_bridge.js'
-            use init from './bindgen.js';
+            import {{init_env}} from './makepad_wasm_bridge/wasm_bridge.js'
+            import init from './bindgen.js';
     
             let env = {{}};
             let set_wasm = init_env(env);
@@ -45,7 +45,7 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
             ")
     } else {
         format!("
-            use {{WasmWebGL}} from './makepad_platform/web_gl.js'
+            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
                 './{wasm}.wasm'
             );
