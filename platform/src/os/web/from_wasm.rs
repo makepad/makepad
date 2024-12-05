@@ -87,6 +87,8 @@ impl FromWasmSetMouseCursor {
                 MouseCursor::NwseResize => 21,
                 MouseCursor::ColResize => 22,
                 MouseCursor::RowResize => 23,
+                MouseCursor::Grab => 24,
+                MouseCursor::Grabbing => 25,
             }
         }
     }
