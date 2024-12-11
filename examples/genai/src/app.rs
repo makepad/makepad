@@ -166,8 +166,7 @@ impl App {
             
             match model{
                 live_id!(flux)=>{
-                    println!("FLUX");
-                    let steps = self.ui.slider(id!((machine.id).flux.steps_slider)).value().unwrap_or(8.0) as usize;
+                    let steps = self.ui.slider(id!((machine.id).(model).steps_slider)).value().unwrap_or(8.0) as usize;
                     // lets check which workspace we are in
                     let ws = fs::read_to_string("examples/genai/workspace_flux.json").unwrap();
                     let ws = ws.replace("CLIENT_ID", "1234");
@@ -176,6 +175,24 @@ impl App {
                     let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", steps));
                     let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", width));
                     let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", height));
+                    request.set_body(ws.as_bytes().to_vec());
+                }
+                live_id!(fluxhd)=>{
+                    
+                    let lora = self.ui.drop_down(id!((machine.id).(model).lora)).selected_label();
+                    let lora_power = self.ui.slider(id!((machine.id).(model).lora_slider)).value().unwrap_or(0.0);
+                    
+                    let steps = self.ui.slider(id!((machine.id).(model).steps_slider)).value().unwrap_or(30.0) as usize;
+                    // lets check which workspace we are in
+                    let ws = fs::read_to_string("examples/genai/workspace_fluxhd.json").unwrap();
+                    let ws = ws.replace("CLIENT_ID", "1234");
+                    let ws = ws.replace("PROMPT", &prompt.replace("\n", "").replace("\"", ""));
+                    let ws = ws.replace("11223344", &format!("{}", seed));
+                    let ws = ws.replace("\"steps\": 50", &format!("\"steps\": {}", steps));
+                    let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", width));
+                    let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", height));
+                    let ws = ws.replace("FantasyWizardWitchesFluxV2-000001", &lora);
+                    let ws = ws.replace("0.23", &format!("{}", lora_power));
                     request.set_body(ws.as_bytes().to_vec());
                 }
                 live_id!(hunyuan)=>{
@@ -189,6 +206,7 @@ impl App {
                     let ws = ws.replace("\"height\": 720", &format!("\"height\": {}", height));
                     request.set_body(ws.as_bytes().to_vec());
                 }
+                
                 _=>()
             }
             
@@ -344,7 +362,7 @@ impl App {
     
     fn update_textures(&mut self, cx: &mut Cx) {
         if let Some(current_image) = &self.current_image {
-            let tex = self.db.image_texture(current_image);
+            let tex = self.db.image_texture(cx, current_image);
             if tex.is_some() {
                 self.ui.image_blend(id!(image_view.image)).set_texture(cx, tex.clone());
                 //self.ui.image_blend(id!(big_image.image1)).set_texture(cx, tex.clone());
@@ -677,7 +695,7 @@ impl MatchEvent for App {
                                     }
                                                                                     
                                     self.filtered.filter_db(&self.db, "", false);
-                                    if self.db.image_texture(&image_id).is_some() {
+                                    if self.db.image_texture(cx, &image_id).is_some() {
                                         self.ui.redraw(cx);
                                     }
                                     self.set_current_image(cx, image_id);
@@ -753,7 +771,7 @@ impl MatchEvent for App {
                                 for (index, row) in rows.iter().enumerate() {
                                     if index >= *image_count {break}
                                     // alright we need to query our png cache for an image.
-                                    let tex = self.db.image_texture(&image_files[index]);
+                                    let tex = self.db.image_texture(cx, &image_files[index]);
                                     row.image(id!(img)).set_texture(cx, tex);
                                 }
                                 item.draw_all_unscoped(cx);

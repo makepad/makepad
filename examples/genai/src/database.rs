@@ -64,7 +64,7 @@ pub struct PromptFile {
 
 #[allow(dead_code)]
 pub struct TextureItem {
-    pub last_seen: Instant,
+    pub last_seen: u64,
     pub texture: Texture
 }
 
@@ -151,7 +151,7 @@ impl Database {
                     let index = self.in_flight.iter().position( | v | *v == image_id).unwrap();
                     self.in_flight.remove(index);
                     self.textures.insert(image_id, TextureItem {
-                        last_seen: Instant::now(),
+                        last_seen: cx.event_id(),
                         texture: image_buffer.into_new_texture(cx)
                     });
                     updates = true;
@@ -165,16 +165,17 @@ impl Database {
         updates
     }
     
-    pub fn image_texture(&mut self, image_id: &ImageId) -> Option<Texture> {
+    pub fn image_texture(&mut self, cx:&Cx, image_id: &ImageId) -> Option<Texture> {
         
         if let Some(texture) = self.textures.get_mut(&image_id) {
-            texture.last_seen = Instant::now();
+            texture.last_seen = cx.event_id();
             return Some(texture.texture.clone());
         }
         //let image_file = &self.image_files[*self.image_index.get(&image_id).unwrap()];
         // lets see if we have too many images
-        let now = Instant::now();
-        while self.textures.len()>20{
+        //println!("TEXTURES")
+        let now = cx.event_id();
+        while self.textures.len()>40{
             if let Some((image_id,_)) = self.textures.iter().max_by(|(_,a),(_,b)|{
                 (now-a.last_seen).cmp(&(now-b.last_seen))
             }){
@@ -185,7 +186,9 @@ impl Database {
                 break;
             }
         }
-        
+        if self.in_flight.contains(&image_id){
+            return None
+        }
         // request decode
         let image_path = self.image_path.clone();
         let to_ui = self.to_ui.sender();
