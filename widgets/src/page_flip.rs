@@ -6,7 +6,10 @@ use crate::{
 };
 
 live_design!{
-    PageFlipBase = {{PageFlip}} {}
+    link widgets;
+    pub PageFlipBase = {{PageFlip}} {}
+    pub PageFlip = <PageFlipBase>{
+    }
 }
 
 #[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]

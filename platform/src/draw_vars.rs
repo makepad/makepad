@@ -436,6 +436,37 @@ impl DrawVars {
         }
     }
     
+    pub fn update_instance_area_value(&mut self, cx: &mut Cx,  id: &[LiveId]) {
+        if let Some(draw_shader) = self.draw_shader {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
+                    return;
+                }
+                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                                
+                let repeat = inst.instance_count;
+                let stride = sh.mapping.instances.total_slots;
+                let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
+                let slice = self.as_slice();
+                for input in &sh.mapping.instances.inputs {
+                    if input.id == id[0] {
+                        for j in 0..repeat {
+                            for k in 0..input.slots{
+                                instances[input.offset + k + j * stride] = slice[input.offset + k];
+                            }
+                        }
+                    }
+                }
+                draw_call.instance_dirty = true;
+                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+            }
+        }
+    }
+        
+    /*
     pub fn update_area_with_value(&mut self, cx: &mut Cx, id: LiveId, v: &[f32], start: usize, count: usize) {
         if let Some(draw_shader) = self.draw_shader {
             if let Some(inst) = self.area.valid_instance(cx) {
@@ -453,7 +484,6 @@ impl DrawVars {
                 
                 cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                 
-                // lets iterate the /*
                 for input in &sh.mapping.live_instances.inputs {
                     if input.id == id {
                         for j in start..(start + repeat) {
@@ -476,7 +506,7 @@ impl DrawVars {
                 }
             }
         }
-    }
+    }*/
     
     pub fn get_instance(&self, cx: &mut Cx, inst: &[LiveId], value: &mut [f32]){
         if let Some(draw_shader) = self.draw_shader {

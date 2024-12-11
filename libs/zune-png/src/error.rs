@@ -7,8 +7,8 @@
  */
 
 //! Errors possible during png operations
-
-use core::fmt::{Debug, Formatter};
+use alloc::string::String;
+use core::fmt::{Debug, Display, Formatter};
 
 /// Errors possible during decoding
 pub enum PngDecodeErrors {
@@ -21,7 +21,7 @@ pub enum PngDecodeErrors {
     /// Calculated CRC does not match expected crc
     BadCrc(u32, u32),
     /// error decoding zlib stream
-    ZlibDecodeErrors(makepad_zune_inflate::errors::InflateDecodeErrors),
+    ZlibDecodeErrors(zune_inflate::errors::InflateDecodeErrors),
     /// Palette is empty yet was expected
     EmptyPalette,
     /// Unsupported Animated PNG
@@ -29,6 +29,15 @@ pub enum PngDecodeErrors {
     /// Too small output slice
     TooSmallOutput(usize, usize)
 }
+
+impl Display for PngDecodeErrors {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for PngDecodeErrors {}
 
 impl Debug for PngDecodeErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
@@ -68,8 +77,8 @@ impl From<String> for PngDecodeErrors {
     }
 }
 
-impl From<makepad_zune_inflate::errors::InflateDecodeErrors> for PngDecodeErrors {
-    fn from(val: makepad_zune_inflate::errors::InflateDecodeErrors) -> Self {
+impl From<zune_inflate::errors::InflateDecodeErrors> for PngDecodeErrors {
+    fn from(val: zune_inflate::errors::InflateDecodeErrors) -> Self {
         Self::ZlibDecodeErrors(val)
     }
 }

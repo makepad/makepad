@@ -53,9 +53,17 @@ pub fn id(item: TokenStream) -> TokenStream {
     fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
         tb.add("&[");
         loop{
-            let ident = parser.expect_any_ident()?;
-            let id = from_str_unchecked(&ident);
-            tb.add("LiveId (").suf_u64(id).add("),");
+            // if its a {} insert it as code
+            if parser.open_paren(){
+                tb.stream(Some(parser.eat_level()));
+                tb.add(",");
+            }
+            else{
+                let ident = parser.expect_any_ident()?;
+                let id = from_str_unchecked(&ident);
+                tb.add("LiveId (").suf_u64(id).add("),");
+            }
+                
             if parser.eat_eot(){
                 tb.add("]");
                 return Ok(())

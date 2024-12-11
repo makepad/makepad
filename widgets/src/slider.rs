@@ -353,12 +353,12 @@ pub enum SliderAction {
 impl Slider {
     
     fn to_external(&self) -> f64 {
-        let val = self.relative_value * (self.max - self.min) + self.min;
+        let val = self.relative_value * (self.max - self.min);
         if self.step != 0.0{
-            return (val / self.step).floor()* self.step
+            return (val / self.step).floor()* self.step + self.min
         }
         else{
-            val
+            val  + self.min
         }
     }
     

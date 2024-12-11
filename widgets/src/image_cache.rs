@@ -1,13 +1,13 @@
 use crate::{makepad_draw::*};
 use std::collections::HashMap;
-use makepad_zune_jpeg::JpegDecoder;
-use makepad_zune_png::PngDecoder;
+use zune_jpeg::JpegDecoder;
+use makepad_zune_png::{PngDecoder,post_process_image};
 use std::fmt;
 use std::io::prelude::*;
 use std::fs::File;
 
 pub use makepad_zune_png::error::PngDecodeErrors;
-pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
+pub use zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
@@ -26,6 +26,7 @@ pub struct ImageBuffer {
     pub width: usize,
     pub height: usize,
     pub data: Vec<u32>,
+    pub animation: Option<TextureAnimation>,
 }
 
 impl ImageBuffer {
@@ -56,7 +57,7 @@ impl ImageBuffer {
             1 => for i in 0..pixels {
                 let r = in_data[i];
                 out[i] = ((0xff as u32)<<24) | ((r as u32)<<16) | ((r as u32)<<8) | ((r as u32)<<0);
-            }   
+            }
             unsupported => {
                 error!("ImageBuffer::new Image buffer pixel alignment of {unsupported} is unsupported.");
                 return Err(ImageError::InvalidPixelAlignment(unsupported));
@@ -65,7 +66,8 @@ impl ImageBuffer {
         Ok(ImageBuffer {
             width,
             height,
-            data: out
+            data: out,
+            animation: None
         })
     }
     
@@ -76,6 +78,7 @@ impl ImageBuffer {
             data: Some(self.data),
             updated: TextureUpdated::Full,
         });
+        texture.set_animation(cx, self.animation);
         texture
     }
     
@@ -83,19 +86,94 @@ impl ImageBuffer {
         data: &[u8]
     ) -> Result<Self, ImageError> {
         let mut decoder = PngDecoder::new(data);
-        match decoder.decode() {
-            Ok(image) => {
-                if let Some(data) = image.u8() {
-                    let (width,height) = decoder.get_dimensions().unwrap();
-                    ImageBuffer::new(&data, width as usize, height as usize)
+        
+        decoder.decode_headers().unwrap();
+        
+        if decoder.is_animated(){
+            let colorspace = decoder.get_colorspace().unwrap();
+            let info = decoder.get_info().unwrap().clone();
+            let (width,height) = decoder.get_dimensions().unwrap();
+            let components = colorspace.num_components();
+            let mut output =
+            vec![0; info.width * info.height * components];
+            
+            let fits_horizontal = Cx::max_texture_width() / info.width;
+            let total_width = fits_horizontal * info.width;
+            
+            let actl_info = decoder.actl_info().unwrap();
+            let total_height = ((actl_info.num_frames as usize / fits_horizontal) + 1) * info.height;
+            
+            let mut final_buffer = ImageBuffer::default();
+            final_buffer.data.resize(total_width * total_height, 0);
+            final_buffer.width = total_width;
+            final_buffer.height = total_height;
+            let mut cx = 0;
+            let mut cy = 0;
+            final_buffer.animation = Some(TextureAnimation{
+                width,
+                height,
+                num_frames: actl_info.num_frames as usize
+            });
+                        
+            while decoder.more_frames() {
+                // decoding a video
+                // decode the header, in case we haven't processed a frame header
+                decoder.decode_headers().unwrap();
+                // then decode the current frame information,
+                // NB: Frame information is for current frame hence should be accessed before decoding the frame
+                // as it will change on subsequent frames
+                let frame = decoder.frame_info().unwrap();
+                // decode the raw pixels, even on smaller frames, we only allocate frame_info.width*frame_info.height
+                let pix = decoder.decode_raw().unwrap();
+                // call post process
+                post_process_image(
+                    &info,
+                    colorspace,
+                    &frame,
+                    &pix,
+                    None,
+                    &mut output,
+                    None
+                ).unwrap();
+                match components {
+                    3 =>  {
+                        // copy output in
+                        for y in 0..height{
+                            for x in 0..width{
+                                let r = output[y * width * 3 + x * 3 + 0];
+                                let g = output[y * width * 3 + x * 3 + 1];
+                                let b = output[y * width * 3 + x * 3 + 2];
+                                final_buffer.data[(y+cy) * total_width + (x+cx)] = 0xff000000 | ((r as u32)<<16) | ((g as u32)<<8) | ((b as u32)<<0);
+                            }
+                        }
+                    }
+                    _=> {
+                        return Err(ImageError::InvalidPixelAlignment(components));
+                    }     
                 }
-                else{
-                    error!("Error decoding PNG: image data empty");
-                    Err(ImageError::EmptyData)
-                }
+                cx += width;
+                if cx >= total_width{
+                    cy += height;
+                    cx = 0
+                } 
             }
-            Err(err) => {
-                Err(ImageError::PngDecode(err))
+            return Ok(final_buffer)
+        }
+        else{
+            match decoder.decode() {
+                Ok(image) => {
+                    if let Some(data) = image.u8() {
+                        let (width,height) = decoder.get_dimensions().unwrap();
+                        ImageBuffer::new(&data, width as usize, height as usize)
+                    }
+                    else{
+                        error!("Error decoding PNG: image data empty");
+                        Err(ImageError::EmptyData)
+                    }
+                }
+                Err(err) => {
+                    Err(ImageError::PngDecode(err))
+                }
             }
         }
     }

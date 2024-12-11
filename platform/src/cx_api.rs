@@ -44,6 +44,7 @@ pub trait CxOsApi {
     
     fn default_window_size(&self)->DVec2{dvec2(800.,600.)}
     
+    fn max_texture_width()->usize{4096}
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -103,6 +104,10 @@ pub enum CxOsOp {
 }
 
 impl Cx {
+    pub fn in_draw_event(&self)->bool{
+        self.in_draw_event
+    }
+
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities
     }

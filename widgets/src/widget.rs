@@ -103,6 +103,10 @@ pub trait Widget: WidgetNode {
         while self.draw(cx, scope).is_step() {}
     }
     
+    fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
+       self.draw(cx, &mut Scope::empty())
+    }
+    
     fn draw_all_unscoped(&mut self, cx: &mut Cx2d) {
         self.draw_all(cx, &mut Scope::empty());
     }
@@ -300,6 +304,10 @@ impl WidgetSet {
             widget_set: self,
             index: 0
         }
+    }
+    
+    pub fn filter_actions<'a>(&'a self, actions:&'a Actions)-> impl Iterator<Item = &'a WidgetAction>{
+        actions.filter_widget_actions_set(self)
     }
 }
 
@@ -509,14 +517,22 @@ impl WidgetRef {
         }
         WidgetRef::empty()
     }
-
+    
+    // depricate this one
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.widgets(paths);
         }
         WidgetSet::default()
     }
-
+    
+    pub fn widget_set(&self, paths: &[&[LiveId]]) -> WidgetSet {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.widgets(paths);
+        }
+        WidgetSet::default()
+    }
+    
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
@@ -538,6 +554,18 @@ impl WidgetRef {
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw(cx, scope).step() {
+                if nd.is_empty() {
+                    return DrawStep::make_step_here(self.clone());
+                }
+                return DrawStep::make_step_here(nd);
+            }
+        }
+        DrawStep::done()
+    }
+    
+    pub fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            if let Some(nd) = inner.widget.draw(cx, &mut Scope::empty()).step() {
                 if nd.is_empty() {
                     return DrawStep::make_step_here(self.clone());
                 }
@@ -579,6 +607,10 @@ impl WidgetRef {
             return inner.widget.action_data()
         }
         None
+    }
+        
+    pub fn filter_actions<'a>(&'a self, actions:&'a Actions)-> impl Iterator<Item = &'a WidgetAction>{
+        actions.filter_widget_actions(self.widget_uid())
     }
     
     pub fn draw_all_unscoped(&self, cx: &mut Cx2d) {
@@ -892,6 +924,8 @@ pub trait WidgetActionsApi {
         ) -> impl Iterator<Item = &T>
         where
         T: Clone;
+        
+    fn filter_widget_actions_set(&self, set: &WidgetSet) -> impl Iterator<Item = &WidgetAction>;
 }
 
 pub trait WidgetActionOptionApi {
@@ -984,7 +1018,7 @@ impl WidgetActionsApi for Actions {
         }
         None
     }
-
+    
     fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(
         &self,
         widget_uid: WidgetUid,
@@ -1007,6 +1041,7 @@ impl WidgetActionsApi for Actions {
                 .and_then(|action| (action.widget_uid == widget_uid).then_some(action))
         })
     }
+    
 
     fn filter_widget_actions_cast<T: WidgetActionTrait >(
         &self,
@@ -1042,6 +1077,16 @@ impl WidgetActionsApi for Actions {
                     None
                 }
             })
+        })
+    }
+        
+    fn filter_widget_actions_set(&self, set:&WidgetSet) -> impl Iterator<Item = &WidgetAction> {
+        self.iter().filter_map(move |action| {
+            action
+            .downcast_ref::<WidgetAction>()
+            .and_then(|action| (
+                set.iter().any(|w| action.widget_uid == w.widget_uid())
+            ).then_some(action))
         })
     }
 }
