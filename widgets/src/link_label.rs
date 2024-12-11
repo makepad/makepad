@@ -101,7 +101,9 @@ live_design!{
     
     pub LinkLabelIcon = <LinkLabel> {
         padding: { bottom: 2. }
-        label_walk: { margin: { left: -5. }},
+        label_walk: {
+            margin: { left: 5. }
+        },
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0

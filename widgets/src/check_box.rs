@@ -288,7 +288,8 @@ live_design!{
         
     pub CheckBoxCustom = <CheckBox> {
         draw_check: { check_type: None }
-        label_walk: { margin: <THEME_MSPACE_H_1> {} }
+        align: { x: 0.0, y: 0.5}
+        label_walk: { margin: <THEME_MSPACE_H_2> {} }
     }
 }
 
