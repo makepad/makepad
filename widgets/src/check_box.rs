@@ -46,7 +46,7 @@ live_design!{
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
                         sdf.stroke(mix(
-                            mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_CTRL_HOVER, self.hover),
+                            THEME_COLOR_U_HIDDEN,
                             THEME_COLOR_TEXT_ACTIVE,
                             self.selected), 1.25
                         );
@@ -288,7 +288,8 @@ live_design!{
         
     pub CheckBoxCustom = <CheckBox> {
         draw_check: { check_type: None }
-        label_walk: { margin: <THEME_MSPACE_H_1> {} }
+        align: { x: 0.0, y: 0.5}
+        label_walk: { margin: <THEME_MSPACE_H_2> {} }
     }
 }
 
