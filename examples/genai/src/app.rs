@@ -23,7 +23,7 @@ live_design!{
         ui: <Root> {
             <Window> {
                 window: {inner_size: vec2(2000, 1024)},
-                caption_bar = {visible: true, caption_label = {label = {text: "SDXL Surf"}}},
+                caption_bar = {visible: true, caption_label = {label = {text: "GenAI"}}},
                 hide_caption_on_fullscreen: true,
                 body = <AppUI>{}
             }
@@ -77,35 +77,25 @@ impl Machine {
     }}
 }
 
-struct Workflow {
-    name: String,
-}
-impl Workflow {
-    fn new(name: &str) -> Self {Self {name: name.to_string()}}
-}
  
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-       Machine::new("10.0.0.123:8188", id_lut!(m1)),
-        //Machine::new("192.168.8.231:8188", id_lut!(m1)),
+       Machine::new("10.0.0.124:8188", live_id!(m1)),
+       Machine::new("10.0.0.107:8188", live_id!(m2)),
+       //Machine::new("192.168.8.231:8188", id_lut!(m1)),
     ])] machines: Vec<Machine>,
-    
-    #[rust(vec![
-        Workflow::new("turbo")
-    ])] workflows: Vec<Workflow>,
     
     #[rust(Database::new(cx))] db: Database,
     
     #[rust] filtered: FilteredDb,
-    #[rust(10000u64)] last_seed: u64,
+    //#[rust(10000u64)] last_seed: u64,
     
     #[rust] current_image: Option<ImageId>,
     #[rust] _current_photo_name: Option<String>,
     #[rust([Texture::new(cx)])] video_input: [Texture; 1],
     #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
-    #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust] remote_screens: Arc<Mutex<RefCell<Vec<(u64, Ipv4Addr,mpsc::Sender<Vec<u8>>)>>>>,
     #[rust] llm_chat: Vec<(LLMMsg,String)>,
     #[rust] voice_input: Option<WhisperProcess>,
@@ -126,52 +116,7 @@ impl LiveRegister for App{
 }
      
 impl App {
-    pub fn start_video_inputs(&mut self, cx: &mut Cx) {
-        let video_sender = self.video_recv.sender();
-        cx.video_input(0, move | img | { 
-            let _ = video_sender.send((0, img.to_buffer()));
-        });
-    }
-    
-    fn _get_camera_frame_jpeg(&mut self,  cx: &mut Cx, width:usize, height: usize)->Vec<u8>{
-        //let mut buf = Vec::new();
-        let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
-        let img_width = img_width * 2;
-        let buf = self.video_input[0].take_vec_u32(cx);
-        // alright we have the buffer // now lets cut a 1344x768 out of the center
-        let mut out = Vec::new();
-        VideoPixelFormat::NV12.buffer_to_rgb_8(
-            &buf,
-            &mut out,
-            img_width,
-            img_height,
-            (img_width-width)/2,
-            (img_height-height) / 2,
-            width,
-            height
-        );
-        // lets fix the pixels
-        for y in 0..height{
-            for x in 0..width{
-                // lets grab rgb into a Vec4
-                let r = out[y*width*3 + x*3 + 0];
-                let g = out[y*width*3 + x*3 + 1];
-                let b = out[y*width*3 + x*3 + 2];
-                let c = Vec4{x:r as f32 / 255.0, y:g as f32 / 255.0,z:b as f32 / 255.0,w:1.0};
-                //let c = Vec4::from_lerp(vec4(c.x,c.x,c.x,1.0), c, 1.0 - self.dial2);
-                out[y*width*3 + x*3 + 0] = (c.x * 255.0).min(255.0).max(0.0) as u8;
-                out[y*width*3 + x*3 + 1] = (c.y * 255.0).min(255.0).max(0.0) as u8;
-                out[y*width*3 + x*3 + 2] = (c.z * 255.0).min(255.0).max(0.0) as u8;
-            }
-        }
-        self.video_input[0].put_back_vec_u32(cx, buf, None);
-        // lets encode it
-        let mut jpeg = Vec::new();
-        let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
-        encoder.encode(&out, width as u16, height as u16, jpeg_encoder::ColorType::Rgb).unwrap();
-        jpeg
-    }
-    
+    /*
     fn get_free_machine(&self)->Option<LiveId>{
         for machine in &self.machines {
             if machine.running.is_running() {
@@ -180,67 +125,88 @@ impl App {
             return Some(machine.id)
         }
         None
-    }
+    }*/
     
-    fn _send_camera_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, prompt_state: PromptState){
-        let jpeg = self._get_camera_frame_jpeg(cx, prompt_state.prompt.preset.width as usize,prompt_state.prompt.preset.height as usize);
-        let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
-        let url = format!("http://{}/upload/image", machine.ip);
-        let mut request = HttpRequest::new(url, HttpMethod::POST);
+    fn check_to_render(&mut self, cx: &mut Cx) {
+        for machine in &mut self.machines {
+            if machine.running.is_running() {
+                continue
+            }
+            
+            if !self.ui.check_box(id!((machine.id).render_check_box)).selected(cx){
+                continue
+            }
+            
+            let prompt = self.ui.text_input(id!(prompt_input)).text();
+            let seed = if self.ui.check_box(id!(random_check_box)).selected(cx) {
+                let seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
+                self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}",seed));
+                seed
+            }
+            else{ // read seed from box
+                self.ui.text_input(id!(seed_input)).text().parse::<u64>().unwrap_or(0)
+            };
+            
+            let url = format!("http://{}/prompt", machine.ip);
+            let mut request = HttpRequest::new(url, HttpMethod::POST);
                         
-        request.set_header("Content-Type".to_string(), "multipart/form-data; boundary=Boundary".to_string());
-        let photo_name = format!("{}", LiveId::from_str(&format!("{:?}", Instant::now())).0);
-        // alright lets write things
-        let form_top = format!("--Boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", photo_name);
-        let form_bottom = format!("\r\n--Boundary--\r\n");
-
-        request.set_metadata_id(machine.id);
-        let mut body = Vec::new();
-        body.extend_from_slice(form_top.as_bytes());
-        body.extend_from_slice(&jpeg);
-        body.extend_from_slice(form_bottom.as_bytes());
-        //request.set_header("Content-Length".to_string(), format!("{}", body.len()));
-
-        request.set_body(body);
-        cx.http_request(live_id!(camera), request);
-        self._current_photo_name = Some(photo_name.clone());
-        
-        machine.running = MachineRunning::_UploadingImage{
-            photo_name,
-            prompt_state: prompt_state.clone(),
-        };
-    }
-    
-    fn send_prompt_to_machine(&mut self, cx: &mut Cx, machine_id: LiveId, photo_name:String, prompt_state: PromptState) {
-        let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
-        let url = format!("http://{}/prompt", machine.ip);
-        let mut request = HttpRequest::new(url, HttpMethod::POST);
-        self.ui.text_input(id!(last_sent)).set_text_and_redraw(cx, &prompt_state.prompt.positive);
-        self.ui.label(id!(progress)).set_text_and_redraw(cx, &format!("Step 0/{}", prompt_state.prompt.preset.steps));
-        
-        request.set_header("Content-Type".to_string(), "application/json".to_string());
-
-        let ws = fs::read_to_string("examples/sdxl/workspace_flux.json").unwrap();
-        let ws = ws.replace("CLIENT_ID", "1234");
-        let ws = ws.replace("POSITIVE_INPUT", &prompt_state.prompt.positive.replace("\n", "").replace("\"", ""));
-        let ws = ws.replace("NEGATIVE_INPUT", &format!("children, child, {}", prompt_state.prompt.negative.replace("\n", "").replace("\"", "")));
-        let ws = ws.replace("11223344", &format!("{}", prompt_state.seed));
-        let ws = ws.replace("example.png", &format!("{}.jpg",photo_name));
-        let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", prompt_state.prompt.preset.steps));
-        let ws = ws.replace("\"cfg\": 3", &format!("\"cfg\": {}", prompt_state.prompt.preset.cfg));
-        let ws = ws.replace("\"denoise\": 1", &format!("\"denoise\": {}", prompt_state.prompt.preset.denoise));
-        let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", prompt_state.prompt.preset.width));
-        let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", prompt_state.prompt.preset.height));
+            let model = LiveId::from_str(&self.ui.drop_down(&[machine.id, live_id!(model)]).selected_label().to_lowercase());
+            self.ui.label(id!((machine.id).last_set)).set_text_and_redraw(cx, &prompt);
+            let res = self.ui.drop_down(id!((machine.id).(model).resolution)).selected_label();
+            let (width,height) = split_res(&res);
+            
+            fn split_res(label:&str)->(&str,&str){
+                let mut split = label.split(" ").next().unwrap().split("x");
+                let width = split.next().unwrap();
+                let height = split.next().unwrap();
+                (width,height)
+            }
                 
-        request.set_metadata_id(machine.id);
-        request.set_body(ws.as_bytes().to_vec());
+            request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-        cx.http_request(live_id!(prompt), request);
+            match model{
+                live_id!(flux)=>{
+                    println!("FLUX");
+                    let steps = self.ui.slider(id!((machine.id).flux.steps_slider)).value().unwrap_or(8.0) as usize;
+                    // lets check which workspace we are in
+                    let ws = fs::read_to_string("examples/genai/workspace_flux.json").unwrap();
+                    let ws = ws.replace("CLIENT_ID", "1234");
+                    let ws = ws.replace("PROMPT", &prompt.replace("\n", "").replace("\"", ""));
+                    let ws = ws.replace("11223344", &format!("{}", seed));
+                    let ws = ws.replace("\"steps\": 10", &format!("\"steps\": {}", steps));
+                    let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", width));
+                    let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", height));
+                    request.set_body(ws.as_bytes().to_vec());
+                }
+                live_id!(hunyuan)=>{
+                    let frames = self.ui.slider(id!((machine.id).hunyuan.frames_slider)).value().unwrap_or(9.0) as usize;
+                    let ws = fs::read_to_string("examples/genai/workspace_hunyuan.json").unwrap();
+                    let ws = ws.replace("CLIENT_ID", "1234");
+                    let ws = ws.replace("PROMPT", &prompt.replace("\n", "").replace("\"", ""));
+                    let ws = ws.replace("11223344", &format!("{}", seed));
+                    let ws = ws.replace("\"num_frames\": 17", &format!("\"num_frames\": {}", frames));
+                    let ws = ws.replace("\"width\": 1280", &format!("\"width\": {}", width));
+                    let ws = ws.replace("\"height\": 720", &format!("\"height\": {}", height));
+                    request.set_body(ws.as_bytes().to_vec());
+                }
+                _=>()
+            }
             
-        machine.running = MachineRunning::RunningPrompt{
-            photo_name,
-            prompt_state: prompt_state.clone(),
-        };
+            self.ui.label(id!((machine.id).progress)).set_text_and_redraw(cx, &format!("Started:"));
+           
+            request.set_metadata_id(machine.id);
+            cx.http_request(live_id!(prompt), request);
+                
+            machine.running = MachineRunning::RunningPrompt{
+                photo_name: "".to_string(),
+                prompt_state: PromptState {
+                    prompt: Prompt {
+                        prompt: prompt.clone(),
+                    },
+                    seed
+                },
+            };
+        }
     }
     
     fn send_query_to_llm(&mut self, cx: &mut Cx) {
@@ -294,29 +260,24 @@ impl App {
                     
         cx.http_request(live_id!(llm), request);
     }
-    /*
-    fn clear_todo(&mut self, cx: &mut Cx) {
-        for _ in 0..2 {
-            self.todo.clear();
-            for machine in &mut self.machines {
-                let url = format!("http://{}/queue", machine.ip);
-                let mut request = HttpRequest::new(url, HttpMethod::POST);
-                let ws = "{\"clear\":true}";
-                request.set_metadata_id(machine.id);
-                request.set_body_string(ws);
-                cx.http_request(live_id!(clear_queue), request);
+    
+    fn cancel_machine(&mut self, cx: &mut Cx, machine_id:LiveId) {
+        let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
+        self.ui.label(id!((machine.id).progress)).set_text_and_redraw(cx, &format!("Stopping:"));
+        
+        let url = format!("http://{}/queue", machine.ip);
+        let mut request = HttpRequest::new(url, HttpMethod::POST);
+        let ws = "{\"clear\":true}";
+        request.set_metadata_id(machine.id);
+        request.set_body_string(ws);
+        cx.http_request(live_id!(clear_queue), request);
                 
-                let url = format!("http://{}/interrupt", machine.ip);
-                let mut request = HttpRequest::new(url, HttpMethod::POST);
-                request.set_metadata_id(machine.id);
-                cx.http_request(live_id!(interrupt), request);
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        for machine in &mut self.machines {
-            machine.running = MachineRunning::Stopped;
-        }
-    }*/
+        let url = format!("http://{}/interrupt", machine.ip);
+        let mut request = HttpRequest::new(url, HttpMethod::POST);
+        request.set_metadata_id(machine.id);
+        cx.http_request(live_id!(interrupt), request);
+        //machine.running = MachineRunning::Stopping;
+    }
     
     fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
         let machine = self.machines.iter().find( | v | v.id == machine_id).unwrap();
@@ -337,8 +298,10 @@ impl App {
     fn load_seed_from_current_image(&mut self, cx: &mut Cx) {
         if let Some(current_image) = &self.current_image {
             if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
-                self.last_seed = image.seed;
-                self.update_seed_display(cx);
+                //self.last_seed = image.seed;
+                //self.update_seed_display(cx);
+                self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}",image.seed));
+                
             }
         }
     }
@@ -351,32 +314,30 @@ impl App {
         }
         LiveId(0)
     }
-    
+    /*
     fn update_seed_display(&mut self, cx: &mut Cx) {
         self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}", self.last_seed));
-    }
-    
+    }*/
+    /*
     fn set_prompt(&mut self, cx: &mut Cx, prompt:&str) {
-        self.ui.text_input(id!(positive)).set_text_and_redraw(cx, prompt);
-    }
-    
+        self.ui.text_input(id!(prompt)).set_text_and_redraw(cx, prompt);
+    }*/
+    /*
     fn add_prompt(&mut self, cx: &mut Cx, prompt:&str) {
         let positive = self.ui.text_input(id!(positive)).text();
         self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}", positive,prompt));
-    }
+    }*/
         
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.text_input(id!(positive)).set_text(&prompt_file.prompt.positive);
-            self.ui.text_input(id!(negative)).set_text(&prompt_file.prompt.negative);
+            self.ui.text_input(id!(prompt_input)).set_text(&prompt_file.prompt.prompt);
             self.ui.redraw(cx);
-            self.load_preset(&prompt_file.prompt.preset)
         }
     }
     
     fn load_last_sent_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.text_input(id!(last_sent)).set_text(&prompt_file.prompt.positive);
+            self.ui.text_input(id!(last_sent)).set_text(&prompt_file.prompt.prompt);
             self.ui.redraw(cx);
         }
     }
@@ -428,7 +389,7 @@ impl App {
         let prompt_hash = self.prompt_hash_from_current_image();
         
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.positive);
+            self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.prompt);
         }
     }
     
@@ -464,7 +425,7 @@ impl App {
             //self.last_flip = Instant::now();
         }
     }
-    
+    /*
     fn save_preset(&self) -> PromptPreset {
         PromptPreset { 
             workflow: self.ui.drop_down(id!(workflow_dropdown)).selected_label(),
@@ -495,32 +456,8 @@ impl App {
     fn next_render_delay(&mut self, cx:&mut Cx){
         let delay = self.ui.text_input(id!(settings_delay.input)).text().parse::<f64>().unwrap_or(1.0);
         self.delay_timer = cx.start_timeout(delay);
-    }
+    }*/
         
-    fn render(&mut self, cx: &mut Cx) {
-        let randomise = self.ui.check_box(id!(random_check_box)).selected(cx);
-        let positive = self.ui.text_input(id!(positive)).text();
-        let negative = self.ui.text_input(id!(negative)).text();
-        if randomise {
-            self.last_seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
-            self.update_seed_display(cx);
-        }
-        let prompt_state = PromptState {
-            //total_steps: self.ui.get_text_input(id!(settings_total.input)).get_text().parse::<usize>().unwrap_or(32),
-            prompt: Prompt {
-                positive: positive.clone(),
-                negative: negative.clone(),
-                preset: self.save_preset()
-            },
-            //workflow: workflow.clone(),
-            seed: self.last_seed as u64
-        };
-        if let Some(machine_id) = self.get_free_machine(){
-            self.send_prompt_to_machine(cx, machine_id, "".to_string(), prompt_state);
-            //self.send_camera_to_machine(cx, machine_id, prompt_state);
-        }
-    }
-    
     pub fn start_http_server(&mut self) {
         let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), 8009);
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
@@ -588,18 +525,14 @@ impl MatchEvent for App {
         self.open_web_socket();
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
-        let workflows = self.workflows.iter().map( | v | v.name.clone()).collect();
-        let dd = self.ui.drop_down(id!(workflow_dropdown));
-        dd.set_labels(workflows);
-        cx.start_interval(0.016);
-        self.update_seed_display(cx);
-        self.start_video_inputs(cx);
+        self.delay_timer = cx.start_interval(0.016);
+        //self.update_seed_display(cx);
         self.start_http_server();
     }
     
     fn handle_timer(&mut self, cx: &mut Cx, e:&TimerEvent){
         if self.delay_timer.is_timer(e).is_some(){
-            self.next_render(cx);
+            self.check_to_render(cx);
         }
     }
     
@@ -613,10 +546,16 @@ impl MatchEvent for App {
             if let Some(socket) = self.machines[m].web_socket.as_mut(){
                 match socket.try_recv(){
                     Ok(WebSocketMessage::String(s))=>{
-                        if s.contains("execution_interrupted") || s.contains("crystools.monitor") {
+                        if s.contains("execution_interrupted"){
+                            self.machines[m].running = MachineRunning::Stopped;
+                            self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx,"Ready:");
+                        } 
+                        else if s.contains("crystools.monitor") {
                                                                                      
                         }
                         else if s.contains("execution_error") { // i dont care to expand the json def for this one
+                            self.machines[m].running = MachineRunning::Stopped;
+                            self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx,"Ready:");
                             log!("Got execution error for {} {}", self.machines[m].id, s);
                         }
                         else {
@@ -641,21 +580,16 @@ impl MatchEvent for App {
                                                     self.machines[m].running = MachineRunning::Stopped;
                                                     //self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     //Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
+                                                    self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx,"Ready:");
+                                                    
                                                     self.fetch_image(cx, self.machines[m].id, &image.filename);
-                                                    self.next_render_delay(cx);
                                                 }
                                             }
                                         }
                                     }
                                     else if data._type == "progress"{
-                                        self.ui.label(id!(progress)).set_text_and_redraw(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)));
-                                        // draw the progress bar / progress somewhere
-                                        //let id =self.machines[m].id;
-                                        //if let Some(running) = &mut self.machines[m].running {
-                                            //    running.steps_counter += 1;
-                                            //Self::update_progress(cx, &self.ui, id, true, running.steps_counter, //running.prompt_state.prompt.preset.total_steps as usize);
-                                            //}
-                                            //self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
+                                        // lets check which machine it is
+                                        self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx, &format!("Step: {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)));
                                     }
                                 }
                                 Err(err) => {
@@ -671,163 +605,6 @@ impl MatchEvent for App {
             }
         }
         
-        while let Some((_, data)) = self.midi_input.receive() {
-            match data.decode() {
-                MidiEvent::Note(n) if n.is_on=>{
-                    fn toggle_block(inp:&str, what:&str)->String{
-                        let mut out = inp.to_string();
-                        if let Some(start) = inp.find(&format!(" ({}",what)){
-                            if let Some(stop) = inp[start..].find(")"){
-                                out.replace_range(start..(stop+start+1),""); 
-                                return out;
-                            }
-                        }
-                        format!("{} ({}:1.0)", out, what)
-                    }
-                    let pad_table = [
-                        "esoteric", //1
-                        "hermetism",
-                        "ecological",
-                        "color explosions",
-                        "psychedelic colours",
-                        "parametric",
-                        "nature",
-                        "fractals",
-                    ];
-                    let note_table = [
-                        "mushrooms",
-                        "slime mold",
-                        "jewelry",
-                        "ouroboros",
-                        "space chicken",
-                        "books",
-                        "architecture",
-                        "underwater creatures",
-                        "consciousness",
-                        "amsterdam",
-                        "robert fludd",
-                        "dante's inferno",
-                        "western esotericism",
-                        "rembrandt",
-                        "rome",
-                        "sacred geometry",
-                        "athens",
-                        "classical egypt",
-                        "classical greece",
-                        "pythagoras",
-                        "cornelius drebbel",
-                        "cymatics",
-                        "spider web",
-                    ];
-                    let pads = [
-                        43,48,50,49,36,38,42,46
-                    ];
-                    let notes = [
-                        48,50,52,53,55,57,59,60,62,64,65,67,69,71,
-                        49,51,54,56,58,61,63,66,68,70,
-                    ];
-                    let shift = 48;
-                    
-                    if let Some(pos) = notes.iter().position(|v| *v- shift == n.note_number ){
-                        if pos < note_table.len(){
-                            let text = self.ui.text_input(id!(positive)).text();
-                            let text = toggle_block(&text, note_table[pos]);
-                            self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
-                        }
-                    }
-                    if let Some(pos) = pads.iter().position(|v| *v == n.note_number ){
-                        if pos < pad_table.len(){
-                            let text = self.ui.text_input(id!(positive)).text();
-                            let text = toggle_block(&text, pad_table[pos]);
-                            self.ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
-                        }
-                    }
-                    if n.note_number == 72 - shift{
-                       self.ui.widget(id!(positive)).set_text_and_redraw(cx, "");
-                    }
-                }
-                MidiEvent::ControlChange(cc) => {
-                    fn replace_number(inp:&str, id:usize, repl:&str)->String{
-                        let mut in_num = false;
-                        let mut found = None;
-                        let mut out = String::new();
-                        for c in inp.chars(){
-                            if c.is_numeric() || in_num && c == '.'{
-                                if !in_num{
-                                    if let Some(v) = found{
-                                        found = Some(v+1);
-                                    }
-                                    else{
-                                        found = Some(0);
-                                    }
-                                }
-                                in_num = true;
-                                if found.unwrap() != id{
-                                    out.push(c);
-                                }
-                            }
-                            else{
-                                if in_num{ // end of the number
-                                    if found.unwrap() == id{
-                                        for c in repl.chars(){
-                                            out.push(c);
-                                        }
-                                    }
-                                }
-                                out.push(c);
-                                in_num = false;
-                            }
-                        }
-                        if in_num{ // end of the number
-                            if found.unwrap() == id{
-                                for c in repl.chars(){
-                                    out.push(c);
-                                }
-                            }
-                        }
-                        out
-                    }
-                    
-                    fn weight(ui:&WidgetRef, id:usize, value:u8, cx:&mut Cx){
-                        let text = ui.text_input(id!(positive)).text();
-                        let number = format!("{:.2}", ((value as f32 / 127.0)*2.0));
-                        let text = replace_number(&text, id, &number);
-                        ui.widget(id!(positive)).set_text_and_redraw(cx, &text);
-                    }
-                    
-                    match cc.param{
-                        20=>{
-                            self.ui.widget(id!(settings_denoise.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*0.8+0.2));
-                        }
-                        21=>{
-                            self.ui.widget(id!(settings_cfg.input)).set_text_and_redraw(cx, &format!("{}", (cc.value as f32 / 127.0)*7.0+1.0));
-                        }
-                        22=>{
-                            self.ui.widget(id!(settings_steps.input)).set_text_and_redraw(cx, &format!("{}", ((cc.value as f32 / 127.0)*9.0+1.0).floor()));
-                        }
-                        24=>{
-                            weight(&self.ui, 0, cc.value, cx);
-                        }
-                        25=>{
-                            weight(&self.ui, 1, cc.value, cx);
-                        }
-                        26=>{
-                            weight(&self.ui, 2, cc.value, cx);
-                        }
-                        27=>{
-                            //let val = cc.value as f32 / 127.0;
-                            //weight(&self.ui, 3, cc.value, cx);
-                        }
-                        23=>{
-                            //let val = cc.value as f32 / 127.0;
-                        }
-                        _=>()
-                    }
-                }
-                _=>()
-            }
-        }
-
         while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
             let (img_width, img_height) = self.video_input[0].get_format(cx).vec_width_height().unwrap();
             if img_width != vfb.format.width / 2 || img_height != vfb.format.height {
@@ -870,7 +647,7 @@ impl MatchEvent for App {
                                         let val = val.strip_prefix("assistant").unwrap_or(val);
                                         let val = val.to_string().replace("\"","");
                                         let val = val.trim();
-                                        self.ui.text_input(id!(positive)).set_text(&val);
+                                        self.ui.text_input(id!(prompt_input)).set_text(&val);
                                         self.llm_chat.push((LLMMsg::AI,val.into()));
                                         self.ui.widget(id!(llm_chat)).redraw(cx);
                                     }
@@ -911,6 +688,7 @@ impl MatchEvent for App {
                         live_id!(clear_queue) => {}
                         live_id!(interrupt) => {}
                         live_id!(camera) => {
+                            /*
                             // move to next step
                             if let Some(machine) = self.machines.iter_mut().find( | v | {v.id == res.metadata_id}) {
                                 if let MachineRunning::_UploadingImage{photo_name, prompt_state} = &machine.running{
@@ -920,7 +698,7 @@ impl MatchEvent for App {
                                     let machine_id = machine.id;
                                     self.send_prompt_to_machine(cx, machine_id, photo_name, prompt_state)
                                 }
-                            }
+                            }*/
                         }
                         _ => panic!()
                     }
@@ -937,7 +715,7 @@ impl MatchEvent for App {
         let image_list = self.ui.portal_list(id!(image_list));
         let llm_chat = self.ui.portal_list(id!(llm_chat));
                 
-        while let Some(next) = self.ui.draw(cx, &mut Scope::empty()).step() {
+        while let Some(next) = self.ui.draw_unscoped(cx).step() {
            if let Some(mut llm_chat) = llm_chat.has_widget(&next).borrow_mut() {
                 llm_chat.set_item_range(cx, 0, self.llm_chat.len());
                 while let Some(item_id) = llm_chat.next_visible_item(cx) {
@@ -952,7 +730,7 @@ impl MatchEvent for App {
                     };
                     let item = llm_chat.item(cx, item_id, template);
                     item.set_text(msg);
-                    item.draw_all(cx, &mut Scope::empty());
+                    item.draw_all_unscoped(cx);
                 }
             }
             if let Some(mut image_list) = image_list.has_widget(&next).borrow_mut() {
@@ -966,7 +744,7 @@ impl MatchEvent for App {
                             ImageListItem::Prompt {prompt_hash} => {
                                 let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
                                 let item = image_list.item(cx, item_id, live_id!(PromptGroup));
-                                item.label(id!(prompt)).set_text(&group.prompt.positive);
+                                item.label(id!(prompt)).set_text(&group.prompt.prompt);
                                 item.draw_all(cx, &mut Scope::empty());
                             }
                             ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
@@ -978,7 +756,7 @@ impl MatchEvent for App {
                                     let tex = self.db.image_texture(&image_files[index]);
                                     row.image(id!(img)).set_texture(cx, tex);
                                 }
-                                item.draw_all(cx, &mut Scope::empty());
+                                item.draw_all_unscoped(cx);
                             }
                         }
                     }
@@ -1064,10 +842,10 @@ impl MatchEvent for App {
             if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
                 if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).selected(cx){
                     if *clear{
-                        self.ui.text_input(id!(positive)).set_text("");
+                        self.ui.text_input(id!(prompt_input)).set_text("");
                     }
-                    let t = self.ui.text_input(id!(positive)).text();
-                    self.ui.text_input(id!(positive)).set_text_and_redraw(cx, &format!("{} {}",t, text));
+                    let t = self.ui.text_input(id!(prompt_input)).text();
+                    self.ui.text_input(id!(prompt_input)).set_text_and_redraw(cx, &format!("{} {}",t, text));
                 }
             }
         }
@@ -1086,18 +864,7 @@ impl MatchEvent for App {
                 _ => ()
             }
         }
-        
-        if let Some(true) = self.ui.check_box(id!(render_check_box)).changed(&actions) {
-            self.render(cx);
-        }
-        
-        if let Some(_x) = self.ui.drop_down(id!(resolution)).selected(&actions){
-            let label = self.ui.drop_down(id!(resolution)).selected_label();
-            let mut split = label.split("x");
-            self.ui.text_input(id!(settings_width)).set_text_and_redraw(cx, split.next().unwrap());
-            self.ui.text_input(id!(settings_height)).set_text_and_redraw(cx, split.next().unwrap());
-        }
-        
+
         let chat = self.ui.text_input(id!(chat));
         if let Some(val) = chat.returned(&actions){
             chat.set_text_and_redraw(cx, "");
@@ -1107,11 +874,25 @@ impl MatchEvent for App {
             self.ui.widget(id!(llm_chat)).redraw(cx);
             self.send_query_to_llm(cx);
         }
-                    
+        
+        /*
         if let Some(true) = self.ui.check_box(id!(render_check_box)).changed(&actions) {
             self.render(cx);
-        }
+        }*/
         
+        for action in self.ui.widget_set(ids!(model)).filter_actions(&actions){
+            if let Some(label) = action.widget().as_drop_down().changed_label(&actions){
+                let id = LiveId::from_str(&label.to_lowercase());
+                let group = action.path.from_end(2);
+                self.ui.page_flip(id!((group).page_flip)).set_active_page_and_redraw(cx, id);
+            }
+        }
+        for action in self.ui.widget_set(ids!(cancel_button)).filter_actions(&actions){
+            if action.widget().as_button().clicked(&actions){
+                let machine = action.path.from_end(2);
+                self.cancel_machine(cx, machine);
+            }
+        }
         if let Some(voice) = self.ui.check_box(id!(voice_check_box)).changed(&actions) {
             if voice{
                 self.start_voice_input(cx);
@@ -1121,21 +902,6 @@ impl MatchEvent for App {
             }
         }
         
-       if self.ui.button(id!(prompt_1)).clicked(&actions) { self.set_prompt(cx, "");}
-       if self.ui.button(id!(prompt_2)).clicked(&actions) { self.set_prompt(cx, "Museum night");}
-       if self.ui.button(id!(prompt_3)).clicked(&actions) { self.set_prompt(cx, "");}
-       if self.ui.button(id!(prompt_4)).clicked(&actions) { self.set_prompt(cx, "");}
-       if self.ui.button(id!(prompt_5)).clicked(&actions) { self.set_prompt(cx, "");}
-       if self.ui.button(id!(prompt_6)).clicked(&actions) { self.set_prompt(cx, "");}
-       
-       if self.ui.button(id!(keyword_1)).clicked(&actions) { self.add_prompt(cx, "Drawing");}
-       if self.ui.button(id!(keyword_2)).clicked(&actions) { self.add_prompt(cx, "Photo Photorealistic");}
-       if self.ui.button(id!(keyword_3)).clicked(&actions) { self.add_prompt(cx, "Intricate");}
-       if self.ui.button(id!(keyword_4)).clicked(&actions) { self.add_prompt(cx, "Cinematic");}
-       if self.ui.button(id!(keyword_5)).clicked(&actions) { self.add_prompt(cx, "Disney Pixar");}
-       if self.ui.button(id!(keyword_6)).clicked(&actions) { self.add_prompt(cx, "Colorful Bright");}
-                      
-                      
         if self.ui.button(id!(trim_button)).clicked(&actions) {
             let positive = self.ui.text_input(id!(positive)).text();
             self.llm_chat.clear();
@@ -1153,19 +919,7 @@ impl MatchEvent for App {
             self.ui.redraw(cx);
             image_list.set_first_id_and_scroll(0, 0.0);
         }
-        
-        /*if let Some(e) = self.ui.view(id!(image_view)).finger_down(&actions) {
-            if e.tap_count >1 {
-                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, true);
-            }
-        }*/
-                    
-        /*if let Some(e) = self.ui.view(id!(big_image)).finger_down(&actions) {
-            if e.tap_count >1 {
-                self.ui.view(id!(big_image)).set_visible_and_redraw(cx, false);
-            }
-        }*/
-                    
+
         for (item_id, item) in image_list.items_with_actions(&actions) {
             // check for actions inside the list item
             let rows = item.view_set(ids!(row1, row2));

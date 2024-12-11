@@ -33,7 +33,7 @@ workspace.members = [
     "examples/simple",
     "examples/simple_shader",
     "examples/chatgpt",
-    "examples/sdxl",
+    "examples/genai",
     "examples/slides",
     #"examples/graph",
     #"examples/image_viewer",

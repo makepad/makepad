@@ -115,6 +115,13 @@ pub enum TextureFormat {
     VideoRGB,
 }
 
+#[derive(Default, Clone)] 
+pub struct TextureAnimation {
+    pub width: usize,
+    pub height: usize,
+    pub num_frames: usize
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TextureAlloc{
     pub category: TextureCategory,
@@ -502,6 +509,14 @@ impl Texture {
         texture
     }
     
+    pub fn set_animation(&self, cx: &mut Cx, animation: Option<TextureAnimation>) {
+        cx.textures[self.texture_id()].animation = animation;
+    }
+        
+    pub fn animation<'a>(&self,cx: &'a mut Cx) -> &'a Option<TextureAnimation> {
+        &cx.textures[self.texture_id()].animation
+    }
+        
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
         &mut cx.textures[self.texture_id()].format
     }
@@ -575,6 +590,7 @@ impl Texture {
 pub struct CxTexture {
     pub (crate) format: TextureFormat,
     pub (crate) alloc: Option<TextureAlloc>,
+    pub (crate) animation: Option<TextureAnimation>,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
 }

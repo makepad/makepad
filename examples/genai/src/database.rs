@@ -25,33 +25,13 @@ pub struct PromptState {
 }
 
 #[derive(Default, Debug, Clone, DeJson, SerJson)]
-pub struct PromptPreset {
-    pub workflow: String,
-    pub width: u32,
-    pub height: u32,
-    pub steps: u32,
-    pub cfg: f64,
-    pub denoise: f64,
-}
-
-
-#[derive(Default, Debug, Clone, DeJson, SerJson)]
 pub struct Prompt {
-    pub positive: String,
-    pub negative: String,
-    pub preset: PromptPreset
+    pub prompt: String,
 }
 
 impl Prompt {
     fn hash(&self) -> LiveId {
-        LiveId::from_str(&self.positive)
-            .str_append(&self.negative)
-            .str_append(&self.preset.workflow)
-            .bytes_append(&self.preset.width.to_be_bytes())
-            .bytes_append(&self.preset.height.to_be_bytes())
-            .bytes_append(&self.preset.steps.to_be_bytes())
-            .bytes_append(&self.preset.cfg.to_be_bytes())
-            .bytes_append(&self.preset.denoise.to_be_bytes())
+        LiveId::from_str(&self.prompt)
     }
 }
 
@@ -121,7 +101,7 @@ impl FilteredDb {
         for image in &db.image_files {
             if search.len() == 0 || 
             (if let Some(prompt_file) = db.prompt_files.iter().find( | g | g.prompt_hash == image.prompt_hash) {
-                prompt_file.prompt.positive.contains(search) || prompt_file.prompt.negative.contains(search) 
+                prompt_file.prompt.prompt.contains(search) || prompt_file.prompt.prompt.contains(search) 
             }else{false}){
                 self.flat.push(image.image_id.clone());
                 /*if let Some(pos) = self.list.iter().find(|v|{if let ImageListItem::Prompt{prompt_hash} = v {*prompt_hash == image.prompt_hash}else{false} }).is_none(){
@@ -155,7 +135,7 @@ impl Database {
             textures: HashMap::new(),
             in_flight: Vec::new(),
             thread_pool: TagThreadPool::new(cx, use_cores),
-            image_path: "./local/sdxl_images".to_string(),
+            image_path: "./local/genai".to_string(),
             image_files: Vec::new(),
             prompt_files: Vec::new(),
             //image_index: HashMap::new(),

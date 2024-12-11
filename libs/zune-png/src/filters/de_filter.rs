@@ -3,13 +3,26 @@
  *
  * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
-
+#![allow(dead_code)]
+#[cfg(feature = "portable-simd")]
+use crate::filters::portable_simd;
 #[allow(clippy::manual_memcpy)]
 pub fn handle_avg(
     prev_row: &[u8], raw: &[u8], current: &mut [u8], components: usize, use_sse4: bool
 ) {
     if raw.len() < components || current.len() < components {
         return;
+    }
+
+    #[cfg(feature = "portable-simd")]
+    {
+        match components {
+            3 => return portable_simd::defilter_avg_generic::<3>(prev_row, raw, current),
+            4 => return portable_simd::defilter_avg_generic::<4>(prev_row, raw, current),
+            6 => return portable_simd::defilter_avg_generic::<6>(prev_row, raw, current),
+            8 => return portable_simd::defilter_avg_generic::<8>(prev_row, raw, current),
+            _ => ()
+        }
     }
 
     #[cfg(feature = "sse")]
@@ -60,6 +73,16 @@ pub fn handle_sub(raw: &[u8], current: &mut [u8], components: usize, use_sse2: b
     if current.len() < components || raw.len() < components {
         return;
     }
+    #[cfg(feature = "portable-simd")]
+    {
+        match components {
+            3 => return portable_simd::defilter_sub_generic::<3>(raw, current),
+            4 => return portable_simd::defilter_sub_generic::<4>(raw, current),
+            6 => return portable_simd::defilter_sub_generic::<6>(raw, current),
+            8 => return portable_simd::defilter_sub_generic::<8>(raw, current),
+            _ => ()
+        }
+    }
     #[cfg(feature = "sse")]
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -92,6 +115,33 @@ pub fn handle_paeth(
 ) {
     if raw.len() < components || current.len() < components {
         return;
+    }
+
+    #[cfg(feature = "portable-simd")]
+    {
+        match components {
+            3 => {
+                return crate::filters::portable_simd::defilter_paeth_generic::<3>(
+                    prev_row, raw, current
+                )
+            }
+            4 => {
+                return crate::filters::portable_simd::defilter_paeth_generic::<4>(
+                    prev_row, raw, current
+                )
+            }
+            6 => {
+                return crate::filters::portable_simd::defilter_paeth_generic::<6>(
+                    prev_row, raw, current
+                )
+            }
+            8 => {
+                return crate::filters::portable_simd::defilter_paeth_generic::<8>(
+                    prev_row, raw, current
+                )
+            }
+            _ => ()
+        }
     }
 
     #[cfg(feature = "sse")]

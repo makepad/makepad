@@ -7,7 +7,6 @@ A fast, correct and safe png decoder
 - This decoder (currently) expands images with less than 8 bpp to be 8 bits(one byte)
   automatically.
   This may or may not be desired depending on your use cases.
-- No support for the non-standard [APNG](https://en.wikipedia.org/wiki/APNG) (animation) extension.
 
 ## Features
 
@@ -15,6 +14,7 @@ A fast, correct and safe png decoder
 - Vectorized filters and bit manipulation
 - Memory friendly (few allocations)
 - Zero unsafe outside of platform specific intrinsics
+- Support for animated image decoding up until the post-processing.
 
 ## Usage
 
