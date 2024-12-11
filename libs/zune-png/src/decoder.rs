@@ -4,16 +4,17 @@
  * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
+use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::cmp::min;
 
-//use log::trace;
-use makepad_zune_core::bit_depth::{BitDepth, ByteEndian};
-use makepad_zune_core::bytestream::{ZByteReader, ZReaderTrait};
-use makepad_zune_core::colorspace::ColorSpace;
-use makepad_zune_core::options::DecoderOptions;
-use makepad_zune_core::result::DecodingResult;
-use makepad_zune_inflate::DeflateOptions;
+use zune_core::bit_depth::{BitDepth, ByteEndian};
+use zune_core::bytestream::{ZByteReader, ZReaderTrait};
+use zune_core::colorspace::ColorSpace;
+use zune_core::log::trace;
+use zune_core::options::DecoderOptions;
+use zune_core::result::DecodingResult;
+use zune_inflate::DeflateOptions;
 
 use crate::apng::{ActlChunk, FrameInfo, SingleFrame};
 use crate::constants::PNG_SIGNATURE;
@@ -25,8 +26,8 @@ use crate::filters::de_filter::{
 };
 use crate::options::default_chunk_handler;
 use crate::utils::{
-    add_alpha, convert_be_to_target_endian_u16, expand_bits_to_byte, expand_palette, expand_trns,
-    is_le
+    add_alpha, convert_be_to_target_endian_u16, convert_u16_to_u8_slice, expand_bits_to_byte,
+    expand_palette, expand_trns, is_le
 };
 
 /// A palette entry.
@@ -160,20 +161,21 @@ pub struct PngDecoder<T>
 where
     T: ZReaderTrait
 {
-    pub(crate) stream:          ZByteReader<T>,
-    pub(crate) options:         DecoderOptions,
-    pub(crate) png_info:        PngInfo,
-    pub(crate) palette:         Vec<PLTEEntry>,
-    pub(crate) frames:          Vec<SingleFrame>,
-    pub(crate) actl_info:       Option<ActlChunk>,
-    pub(crate) previous_stride: Vec<u8>,
-    pub(crate) trns_bytes:      [u16; 4],
-    pub(crate) seen_hdr:        bool,
-    pub(crate) seen_ptle:       bool,
-    pub(crate) seen_headers:    bool,
-    pub(crate) seen_trns:       bool,
-    pub(crate) seen_iend:       bool,
-    pub(crate) current_frame:   usize
+    pub(crate) stream:                  ZByteReader<T>,
+    pub(crate) options:                 DecoderOptions,
+    pub(crate) png_info:                PngInfo,
+    pub(crate) palette:                 Vec<PLTEEntry>,
+    pub(crate) frames:                  Vec<SingleFrame>,
+    pub(crate) actl_info:               Option<ActlChunk>,
+    pub(crate) previous_stride:         Vec<u8>,
+    pub(crate) trns_bytes:              [u16; 4],
+    pub(crate) seen_hdr:                bool,
+    pub(crate) seen_ptle:               bool,
+    pub(crate) seen_headers:            bool,
+    pub(crate) seen_trns:               bool,
+    pub(crate) seen_iend:               bool,
+    pub(crate) current_frame:           usize,
+    pub(crate) called_from_decode_into: bool
 }
 
 impl<T: ZReaderTrait> PngDecoder<T> {
@@ -204,30 +206,35 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     #[allow(unused_mut, clippy::redundant_field_names)]
     pub fn new_with_options(data: T, options: DecoderOptions) -> PngDecoder<T> {
         PngDecoder {
-            seen_hdr:        false,
-            stream:          ZByteReader::new(data),
-            options:         options,
-            palette:         Vec::new(),
-            png_info:        PngInfo::default(),
-            actl_info:       None,
-            previous_stride: vec![],
-            frames:          vec![],
-            seen_ptle:       false,
-            seen_trns:       false,
-            seen_headers:    false,
-            seen_iend:       false,
-            trns_bytes:      [0; 4],
-            current_frame:   0
+            seen_hdr:                false,
+            stream:                  ZByteReader::new(data),
+            options:                 options,
+            palette:                 Vec::new(),
+            png_info:                PngInfo::default(),
+            actl_info:               None,
+            previous_stride:         vec![],
+            frames:                  vec![],
+            seen_ptle:               false,
+            seen_trns:               false,
+            seen_headers:            false,
+            seen_iend:               false,
+            trns_bytes:              [0; 4],
+            current_frame:           0,
+            called_from_decode_into: true
         }
     }
 
     /// Get image dimensions or none if they aren't decoded
     ///
+    /// In case image is animated, this doesn't return the current frame's dimension
+    /// rather the image dimension, for that use `frame_info()` and access the correct
+    /// struct value to get the dimensions
+    ///
     /// # Returns
     /// - `Some((width,height))`
     /// - `None`: The image headers haven't been decoded
     ///   or there was an error decoding them
-    pub const fn get_dimensions(&self) -> Option<(usize, usize)> {
+    pub fn get_dimensions(&self) -> Option<(usize, usize)> {
         if !self.seen_hdr {
             return None;
         }
@@ -308,14 +315,19 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     /// There are functions provided that allow you to further process
     /// such chunks to get the animated frames
     pub fn is_animated(&self) -> bool {
-        self.actl_info.is_some() && self.frames.len() > 1
+        self.actl_info.is_some() && self.frames.len() > self.current_frame
     }
 
     /// Return true if image has more frames available
     pub fn more_frames(&self) -> bool {
-        self.frames.len() > self.current_frame
+        self.actl_info.is_some() && self.frames.len() > self.current_frame
     }
-
+    
+    /// Return true if image has more frames available
+    pub fn actl_info(&self) -> Option<ActlChunk> {
+        self.actl_info.clone()
+    }
+    
     pub(crate) fn read_chunk_header(&mut self) -> Result<PngChunk, PngDecodeErrors> {
         // Format is length - chunk type - [data] -  crc chunk, load crc chunk now
         let chunk_length = self.stream.get_u32_be_err()? as usize;
@@ -506,20 +518,42 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         }
 
         let info = &self.png_info;
-        let bytes = if info.depth == 16 { 2 } else { 1 };
+        let bytes = if info.depth == 16 && !self.options.png_get_strip_to_8bit() { 2 } else { 1 };
 
-        let out_n = self.get_colorspace().unwrap().num_components();
+        let out_n = self.get_colorspace()?.num_components();
+        let dims = self.get_dimensions().unwrap();
 
-        let new_len = info
-            .width
-            .checked_mul(info.height)
-            .unwrap()
-            .checked_mul(out_n)
-            .unwrap()
+        dims.0
+            .checked_mul(dims.1)?
+            .checked_mul(out_n)?
             .checked_mul(bytes)
-            .unwrap();
+    }
+    /// Return the number of bytes required to hold a decoded image frame
+    /// decoded without regard to the given input transformations
+    ///
+    /// # Returns
+    ///  - `Some(usize)`: Minimum size for a buffer needed to decode the image
+    ///  - `None`: Indicates the image headers was not decoded.
+    ///
+    /// # Panics
+    /// In case `width*height*colorspace` calculation may overflow a usize
+    fn inner_buffer_size(&self) -> Option<usize> {
+        if !self.seen_hdr {
+            return None;
+        }
 
-        Some(new_len)
+        let info = self.frame_info()?;
+        let p_info = &self.png_info;
+        // only difference with output is here we don't care about
+        // stripping 16 bit to 8 bit
+        let bytes = if p_info.depth == 16 { 2 } else { 1 };
+
+        let out_n = self.get_colorspace()?.num_components();
+
+        info.width
+            .checked_mul(info.height)?
+            .checked_mul(out_n)?
+            .checked_mul(bytes)
     }
 
     /// Get png information which was extracted from the headers
@@ -558,6 +592,10 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     /// - `out`: The slice which we will write our values into.
     ///         If the slice length is smaller than [`output_buffer_size`](Self::output_buffer_size), it's an error
     ///
+    /// # Converting 16 bit to 8 bit images
+    /// When indicated by  [`DecoderOptions::png_set_strip_to_8bit`](zune_core::options::DecoderOptions::png_get_strip_to_8bit)
+    /// the library will implicitly convert 16 bit to 8 bit by discarding the lower 8 bits
+    ///
     /// # Endianness
     ///
     /// - In case the image is a 16 bit PNG, endianness of the samples may be retrieved
@@ -566,11 +604,37 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     /// - PNG uses Big Endian while most machines today are Little Endian (x86 and mainstream Arm),
     ///   hence if the configured endianness is little endian the library will implicitly convert
     ///   samples to little endian
+    ///
     pub fn decode_into(&mut self, out: &mut [u8]) -> Result<(), PngDecodeErrors> {
         // decode headers
-        if !self.seen_headers || !self.seen_iend {
-            self.decode_headers()?;
+        self.decode_headers()?;
+
+        // in case we are to decode from 16 bit to 8 bit, allocate separate and decode
+        if self.called_from_decode_into
+            && self.png_info.depth == 16
+            && self.options.png_get_strip_to_8bit()
+        {
+            let image_len = self.output_buffer_size().unwrap();
+
+            if out.len() < image_len {
+                return Err(PngDecodeErrors::TooSmallOutput(image_len, out.len()));
+            }
+            // allocate new size
+            let mut temp_alloc = vec![0; self.inner_buffer_size().unwrap()];
+            self.decode_into_inner(&mut temp_alloc)?;
+
+            let out = &mut out[..image_len];
+            // then convert it to 8 bit by taking top bit
+            for (input, output) in temp_alloc.chunks_exact(2).zip(out) {
+                *output = input[0];
+            }
+            return Ok(());
         }
+        self.decode_into_inner(out)
+    }
+    fn decode_into_inner(&mut self, out: &mut [u8]) -> Result<(), PngDecodeErrors> {
+        // decode headers
+        self.decode_headers()?;
 
         trace!("Input Colorspace: {:?} ", self.png_info.color);
         trace!("Output Colorspace: {:?} ", self.get_colorspace().unwrap());
@@ -585,7 +649,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
 
         let png_info = self.png_info.clone();
 
-        let image_len = self.output_buffer_size().unwrap();
+        let image_len = self.inner_buffer_size().unwrap();
 
         if out.len() < image_len {
             return Err(PngDecodeErrors::TooSmallOutput(image_len, out.len()));
@@ -603,8 +667,9 @@ impl<T: ZReaderTrait> PngDecoder<T> {
 
         if png_info.interlace_method == InterlaceMethod::Standard {
             // allocate out to be enough to hold raw decoded bytes
+            let dims = self.frame_info().unwrap();
 
-            self.create_png_image_raw(&deflate_data, info.width, info.height, out, &png_info)?;
+            self.create_png_image_raw(&deflate_data, dims.width, dims.height, out, &png_info)?;
         } else if png_info.interlace_method == InterlaceMethod::Adam7 {
             self.decode_interlaced(&deflate_data, out, &png_info, &info)?;
         }
@@ -618,25 +683,85 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         Ok(())
     }
 
-    /// Decode data returning it into `Vec<u8>`, endianness of
-    /// returned bytes in case of image being 16 bits is given
+    /// Decode data returning it into `Vec<u8>`.
+    ///
+    /// Endianness of
+    /// returned bytes in case of image being 16 bits and the decoder
+    /// not converting 16 bit images to 8 bit images is given by
     /// [`byte_endian()`](Self::byte_endian) method
     ///
+    /// # Converting 16 bit to 8 bit images
+    /// When indicated by  [`DecoderOptions::png_set_strip_to_8bit`](zune_core::options::DecoderOptions::png_get_strip_to_8bit)
+    /// the library will implicitly convert 16 bit to 8 bit by discarding the lower 8 bits
     ///
     /// returns: `Result<Vec<u8, Global>, PngErrors>`
     ///
     pub fn decode_raw(&mut self) -> Result<Vec<u8>, PngDecodeErrors> {
-        if !self.seen_headers {
-            self.decode_headers()?;
-        }
+        self.decode_headers()?;
+        self.called_from_decode_into = false;
 
         // allocate
         let new_len = self.output_buffer_size().unwrap();
-        let mut out: Vec<u8> = vec![0; new_len];
+        let t = self.inner_buffer_size().unwrap();
+        let mut out: Vec<u8> = vec![0; t];
         //decode
         self.decode_into(&mut out)?;
+        if self.options.png_get_strip_to_8bit() && self.png_info.depth == 16 {
+            // in case we are to convert from 16 bit to 8 bit, we can do it here
+            // we optimize it by using the same buffer the 16 bit data is stored in
+            // and implicitly converting it to 8 bit.
+            //
+            // Do note that to convert it, we only take the top 8 bits of a 16 bit.
+            // so to run [a,a,b,b,c,b,d,b] => [a,b,c,d], the write never catches on the read
+            // hence no override. which works for us
+            //
+            // then convert to 8 bit in place
+            let mut i = 0;
+            let mut j = 0;
+            while j < out.len() {
+                out[i] = out[j];
+                i += 1;
+                j += 2;
+            }
+            out.truncate(new_len);
+        }
 
         Ok(out)
+    }
+
+    /// Return the **yet to be decoded** frame's frame information
+    ///
+    /// This contains information about the yet do be decoded frame after
+    /// reading the headers
+    ///
+    /// Once any function that decodes raw pixels is called (`decode`,`decode_raw`,`decode_into`)
+    /// this will point to the next frame to be decoded.
+    /// # Example
+    ///
+    /// This example gets frame information of an animated image
+    /// ```no_run
+    /// use zune_png::PngDecoder;
+    /// let mut decoder = PngDecoder::new(&[]);
+    ///
+    /// // decode the headers to get the information
+    /// decoder.decode_headers().unwrap();
+    ///
+    ///if decoder.is_animated(){
+    ///     while decoder.more_frames(){
+    ///         // multiple calls is okay, the library will handle it correctly
+    ///         decoder.decode_headers().unwrap();
+    ///         // get information, MUST BE before calling (decode,decode_headers,decode_raw)
+    ///         let info = decoder.frame_info().unwrap();
+    ///         // decode the frame
+    ///         let data = decoder.decode().unwrap();
+    ///     }
+    /// }
+    /// ```
+    pub fn frame_info(&self) -> Option<FrameInfo> {
+        if let Some(frame) = self.frames.get(self.current_frame) {
+            return frame.fctl_info;
+        }
+        None
     }
 
     fn decode_interlaced(
@@ -715,11 +840,18 @@ impl<T: ZReaderTrait> PngDecoder<T> {
     }
 
     /// Decode PNG encoded images and return the vector of raw pixels but for 16-bit images
-    /// represent them in a `Vec<u16>`
+    /// represent them in a `Vec<u16>` if  [`DecoderOptions::png_set_strip_to_8bit`](zune_core::options::DecoderOptions::png_get_strip_to_8bit)
+    /// returns false
     ///
     ///
     /// This returns an enum type [`DecodingResult`](zune_core::result::DecodingResult) which
     /// one can de-sugar to extract actual values.
+    ///
+    /// # Converting 16 bit to 8 bit images
+    /// When indicated by  [`DecoderOptions::png_set_strip_to_8bit`](zune_core::options::DecoderOptions::png_get_strip_to_8bit)
+    /// the library will implicitly convert 16 bit to 8 bit by discarding the lower 8 bits
+    ///
+    /// If such is specified, this routine will always return [`DecodingResult::U8`](zune_core::result::DecodingResult::U8)
     ///
     /// # Example
     ///
@@ -754,6 +886,11 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         if !self.seen_headers || !self.seen_iend {
             self.decode_headers()?;
         }
+        // in case we are to strip 16 bit to 8 bit, use decode_raw which does that for us
+        if self.options.png_get_strip_to_8bit() && self.png_info.depth == 16 {
+            let bytes = self.decode_raw()?;
+            return Ok(DecodingResult::U8(bytes));
+        }
         // configure that the decoder converts samples to native endian
         if is_le()
         {
@@ -769,21 +906,17 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         let new_len = info.width * info.height * out_n;
 
         let mut out_u8: Vec<u8> = vec![0; new_len * usize::from(info.depth != 16)];
-        //let mut out_u16: Vec<u16> = vec![0; new_len * usize::from(info.depth == 16)];
+        let mut out_u16: Vec<u16> = vec![0; new_len * usize::from(info.depth == 16)];
 
         // use either out_u8 or out_u16 depending on the expected type for the output
         let out = if bytes == 1
         {
             &mut out_u8
         } else {
-            /*let (a, b, c) = bytemuck::pod_align_to_mut::<u16, u8>(&mut out_u16);
+            let b = convert_u16_to_u8_slice(&mut out_u16);
 
-            // a and c should be empty since we do not expect slop bytes on either edge
-            assert!(a.is_empty());
-            assert!(c.is_empty());
             assert_eq!(b.len(), new_len * 2); // length should be twice that of u8
-            b*/
-            panic!()
+            b
         };
         self.decode_into(out)?;
 
@@ -794,8 +927,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
 
         if self.png_info.depth == 16
         {
-            panic!();
-            //return Ok(DecodingResult::U16(out_u16));
+            return Ok(DecodingResult::U16(out_u16));
         }
 
         Err(PngDecodeErrors::GenericStatic("Not implemented"))
@@ -891,7 +1023,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
 
             current = &mut current[0..out_chunk_size];
 
-            // get the previous row.
+            // get the previlet (w,h)ous row.
             //Set this to a dummy to handle special case of first row, if we aren't in the first
             // row, we actually take the real slice a line down
             let mut prev_row: &[u8] = &[0_u8];
@@ -1182,7 +1314,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             .set_limit(size_hint + 4 * (self.png_info.height))
             .set_confirm_checksum(self.options.inflate_get_confirm_adler());
 
-        let mut decoder = makepad_zune_inflate::DeflateDecoder::new_with_options(&flat_data.fdat, option);
+        let mut decoder = zune_inflate::DeflateDecoder::new_with_options(&flat_data.fdat, option);
 
         decoder
             .decode_zlib()

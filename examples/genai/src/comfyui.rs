@@ -49,6 +49,7 @@ pub struct ComfyUIStatus {
 #[derive(DeJson, Debug)]
 pub struct ComfyUIOutput {
     pub images: Vec<ComfyUIImage>,
+    pub animated: Option<Vec<bool>>
 }
 
 #[allow(dead_code)]

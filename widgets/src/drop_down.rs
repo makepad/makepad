@@ -542,6 +542,7 @@ impl DropDownRef {
         }
     }
     
+    //DEPRICATED
     pub fn selected(&self, actions: &Actions) -> Option<usize> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let DropDownAction::Select(id, _) = item.cast() {
@@ -551,6 +552,25 @@ impl DropDownRef {
         None
     }
     
+    pub fn changed(&self, actions: &Actions) -> Option<usize> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let DropDownAction::Select(id, _) = item.cast() {
+                return Some(id)
+            }
+        }
+        None
+    }
+        
+    pub fn changed_label(&self, actions: &Actions) -> Option<String> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let DropDownAction::Select(id, _) = item.cast() {
+                 if let Some(inner) = self.borrow() {
+                    return Some(inner.labels[id].clone())
+                }
+            }
+        }
+        None
+    }
     pub fn set_selected_item(&self, item: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.selected_item = item.min(inner.labels.len().max(1) - 1)
@@ -598,5 +618,4 @@ impl DropDownRef {
             }
         }
     }
-    
 }

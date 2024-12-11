@@ -6,9 +6,9 @@
 
 use alloc::{format, vec};
 
-//use log::{trace, warn};
-use makepad_zune_core::bytestream::ZReaderTrait;
-use makepad_zune_inflate::DeflateDecoder;
+use zune_core::bytestream::ZReaderTrait;
+use zune_core::log::{trace, warn};
+use zune_inflate::DeflateDecoder;
 
 use crate::apng::{ActlChunk, BlendOp, DisposeOp, FrameInfo, SingleFrame};
 use crate::decoder::{ItxtChunk, PLTEEntry, PngChunk, TextChunk, TimeInfo, ZtxtChunk};
@@ -78,7 +78,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 return Err(PngDecodeErrors::Generic(format!(
                     "Unknown bit depth {}",
                     self.png_info.depth
-                )))
+                )));
             }
         }
 
@@ -122,15 +122,16 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         self.seen_hdr = true;
 
         let frame_info = FrameInfo {
-            _seq_number:  0,
-            width:       self.png_info.width,
-            height:      self.png_info.height,
-            _x_offset:    0,
-            _y_offset:    0,
-            _delay_num:   0,
-            _delay_denom: 0,
-            _dispose_op:  DisposeOp::None,
-            _blend_op:    BlendOp::Source
+            seq_number:     -1,
+            width:          self.png_info.width,
+            height:         self.png_info.height,
+            x_offset:       0,
+            y_offset:       0,
+            delay_num:      0,
+            delay_denom:    0,
+            dispose_op:     DisposeOp::None,
+            blend_op:       BlendOp::Source,
+            is_part_of_seq: false
         };
 
         self.frames.push(SingleFrame::new(vec![], Some(frame_info)));
@@ -245,12 +246,12 @@ impl<T: ZReaderTrait> PngDecoder<T> {
             self.stream.skip(chunk.length + 4);
         }
         // extract num_frames
-        let _num_frames = self.stream.get_u32_be();
-        let _num_plays = self.stream.get_u32_be();
+        let num_frames = self.stream.get_u32_be();
+        let num_plays = self.stream.get_u32_be();
 
         let actl = ActlChunk {
-            _num_frames,
-            _num_plays
+            num_frames,
+            num_plays
         };
         self.actl_info = Some(actl);
 
@@ -313,7 +314,7 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                     "[strict-mode]: Invalid exif chunk"
                 ));
             } else {
-                warn!("Invalid exif chunk, it doesn't start with the magic bytes");
+                warn!("Invalid exif chunk, it doesn't start with the magic bytes")
             }
             // do not parse
             self.stream.skip(chunk.length + 4);
@@ -513,16 +514,21 @@ impl<T: ZReaderTrait> PngDecoder<T> {
                 }
                 // get frame data
                 // skip four  bytes since it's usually sequence number
-                //
                 let stream = &self.stream.peek_at(0, next_header.length)?[4..];
                 self.frames.last_mut().unwrap().push_chunk(stream);
                 // skip crc
                 self.stream.skip(next_header.length + 4);
             } else {
-                // this can recurse
-                // this is the function that called us
-                // we are calling it again :)
+                warn!(
+                    "Found marker {:?} in between fctl when it shouldn't be there",
+                    next_header.chunk_type
+                );
+                // Will this recurse?
                 self.parse_header(next_header)?;
+                // return Err(PngDecodeErrors::Generic(format!(
+                //     "Found marker {:?} in between fctl, when it shouldn't be there",
+                //     next_header.chunk_type
+                // )));
             }
             should_add_fctl = false;
         }
@@ -536,26 +542,27 @@ impl<T: ZReaderTrait> PngDecoder<T> {
         if chunk.length != 26 {
             return Err(PngDecodeErrors::GenericStatic("Invalid fcTL length"));
         }
-        let _seq_number = self.stream.get_u32_be();
+        let seq_number = self.stream.get_u32_be() as i32;
         let width = self.stream.get_u32_be() as usize;
         let height = self.stream.get_u32_be() as usize;
-        let _x_offset = self.stream.get_u32_be() as usize;
-        let _y_offset = self.stream.get_u32_be() as usize;
-        let _delay_num = self.stream.get_u16_be();
-        let _delay_denom = self.stream.get_u16_be();
-        let _dispose_op = DisposeOp::from_int(self.stream.get_u8())?;
-        let _blend_op = BlendOp::from_int(self.stream.get_u8())?;
+        let x_offset = self.stream.get_u32_be() as usize;
+        let y_offset = self.stream.get_u32_be() as usize;
+        let delay_num = self.stream.get_u16_be();
+        let delay_denom = self.stream.get_u16_be();
+        let dispose_op = DisposeOp::from_int(self.stream.get_u8())?;
+        let blend_op = BlendOp::from_int(self.stream.get_u8())?;
 
         let fctl_info = FrameInfo {
-            _seq_number,
+            seq_number,
             width,
             height,
-            _x_offset,
-            _y_offset,
-            _delay_num,
-            _delay_denom,
-            _dispose_op,
-            _blend_op
+            x_offset,
+            y_offset,
+            delay_num,
+            delay_denom,
+            dispose_op,
+            blend_op,
+            is_part_of_seq: true
         };
         // skip crc
         self.stream.skip(4);
