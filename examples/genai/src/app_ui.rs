@@ -277,6 +277,9 @@ live_design!{
                     let scale = mix(vec2(1.0), max_scale, self.hover);
                     let pan = mix(vec2(0.0), (vec2(1.0) - max_scale) * 0.5, self.hover)* self.image_scale;
                     let color = self.get_color_scale_pan(scale * self.image_scale, pan + self.image_pan) + mix(vec4(0.0), vec4(0.1), self.down);
+                    if color.a<0.0001{
+                        color = #3
+                    }
                     sdf.fill_keep(color);
                     sdf.stroke(
                         mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
@@ -477,6 +480,7 @@ live_design!{
                 popup_menu_position: BelowInput 
                 labels: [
                     "Flux",
+                    "FluxHD",
                     "Hunyuan",
                 ]
             }
@@ -516,6 +520,38 @@ live_design!{
                         ]
                     }
                     frames_slider = <Slider> {width:100, text: "Frames", default: 57.0, min:1, max: 127, step:4, precision:0}
+                }
+                fluxhd = <View>{
+                    width: Fit,
+                    resolution = <DropDownFlat> {
+                        width: Fit, 
+                        margin:{left:0},
+                        popup_menu_position: BelowInput 
+                        labels: [
+                            "1920x1088 - 16:9",
+                            "1440x816 - 16:9",
+                            "1280x720 - 16:9",
+                            "960x544 - 16:9",
+                            "1088x1920 - 9:16",
+                            "2048x1448 - A3",
+                            "768x1024 - 3:4"
+                        ]
+                    }
+                    steps_slider = <Slider> {width:100,text: "Steps", default: 30, min:20, max: 70, step:1, precision:0}
+                    lora = <DropDownFlat> {
+                        width: Fit, 
+                        margin:{left:0},
+                        popup_menu_position: BelowInput 
+                        labels: [
+                            "aesthetic2-cdo-0.5",
+                            "flux_realism_lora",
+                            "Flux.1_Turbo_Detailer",
+                            "FantasyWizardWitchesFluxV2-000001",
+                            "aidmaMJ6.1-FLUX-v0.4",
+                            "aidmaHyperrealism-FLUX-v0.3",
+                        ]
+                    }
+                    lora_slider = <Slider> {width:100,text: "Lora", default: 0.0, min:0.0, max: 1.0, step:0.01, precision:2}
                 }
             }
                  
