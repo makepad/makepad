@@ -25,7 +25,7 @@
         },
         "235": {
             "inputs": {
-                "text": "POSITIVE_INPUT",
+                "text": "PROMPT",
                 "clip": [
                     "251",
                     0
@@ -606,7 +606,7 @@
                             "Node name for S&R": "CLIPTextEncode"
                         },
                         "widgets_values": [
-                            "POSITIVE_INPUT"
+                            "PROMPT"
                         ],
                         "color": "#232",
                         "bgcolor": "#353"

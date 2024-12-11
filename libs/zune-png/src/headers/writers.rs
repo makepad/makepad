@@ -4,8 +4,8 @@
  * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
 
-use makepad_zune_core::bytestream::ZByteWriter;
-use makepad_zune_core::colorspace::ColorSpace;
+use zune_core::bytestream::ZByteWriter;
+use zune_core::colorspace::ColorSpace;
 
 use crate::crc::calc_crc;
 use crate::decoder::PngChunk;
@@ -29,7 +29,6 @@ pub(crate) fn write_ihdr(ctx: &PngEncoder, output: &mut ZByteWriter) {
     };
     output.write_u8(color_int);
     //compression method
-
     output.write_u8(0);
     // filter method for first row
     output.write_u8(ctx.row_filter.to_int());

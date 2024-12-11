@@ -3,6 +3,7 @@
  *
  * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
+#![cfg_attr(feature = "portable-simd", feature(portable_simd))]
 
 //! A png decoder
 //!
@@ -14,13 +15,50 @@
 //! - Fast inflate decoder
 //! - Platform specific intrinsics for accelerated decoding on x86
 //! - Endian aware decoding support.
+//! - Support for animated PNG and post processing of the same
 //!
+//!
+//! ## portable-simd
+//!  The crate supports using portable-simd to accelerate decoding of images, this can be used
+//! in favour of platform specific intrinsics especially where those intrinsics haven't been written, e.g aarch64, wasm
+//!
+//! Though portable-simd is a nightly only feature, hence it is hidden under a flag `portable-simd` and can only compile
+//! on rust nightly
+//!
+//! To enable it add
+//! ``` toml
+//! zune-png = {version="0.4",feature=["portable-simd"]}
+//!```
+//! and compile on nightly
 //! # Usage
 //! Add the library to `Cargo.toml`
 //!
 //! ```toml
-//! zune_png="0.2"
+//! zune_png="0.4"
 //! ```
+//!
+//! #### Decode to 8-bit(1 byte) per pixel always
+//!
+//! PNG supports both 8-bit and 16 bit images, but people mainly expect the
+//! images to be in 8 bit, the library can implicitly convert to 8 bit images when
+//! requested in case one doesn't want to handle it  at the cost
+//! of an extra allocation
+//!
+//! The below example shows how to do that
+//!
+//!```no_run
+//! use zune_core::options::DecoderOptions;
+//! use zune_png::PngDecoder;
+//! // tell the png decoder to always strip 16 bit images to 8 bits
+//! let options = DecoderOptions::default().png_set_strip_to_8bit(true);
+//! let mut decoder = PngDecoder::new_with_options(&[],options);
+//!
+//! let pixels = decoder.decode_raw();
+//! ```
+//!
+//!  Above, we set the  [`DecoderOptions::png_set_strip_to_8bit`](zune_core::options::DecoderOptions::png_get_strip_to_8bit)
+//! to be true in order to indicate to the decoder that it should strip 16 bit images to 8 bit.
+//!
 //!
 //! #### Decode to raw bytes.
 //!
@@ -106,24 +144,30 @@
 //! Some data is usually borrowed from the underlying reader, so the lifetime of the [`PngInfo`] struct is tied
 //! to the lifetime of the [`PngDecoder`] struct from which it was derived
 //!
+//!
+//! # Animated images decoding support.
+//!
+//! The library supports animated images decoding, up to post processing for 8-bit images.
+//!
+//! To understand more see [post_process_image]
+//!
 //! # Alternatives
 //! - [png](https://crates.io/crates/png) crate
+//!
+//!
 //!
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::op_ref, clippy::identity_op)]
 extern crate alloc;
+extern crate core;
 
-macro_rules!trace {
-    ( $ ( $ t: tt) *) => {}
-}
-macro_rules!warn {
-    ( $ ( $ t: tt) *) => {}
-}
-
+#[cfg(feature = "std")]
+pub use apng::post_process_image;
+pub use apng::{BlendOp, DisposeOp};
 pub use decoder::{ItxtChunk, PngDecoder, PngInfo, TextChunk, TimeInfo, ZtxtChunk};
 pub use encoder::PngEncoder;
 pub use enums::InterlaceMethod;
-pub use makepad_zune_core;
+pub use zune_core;
 
 mod apng;
 mod constants;

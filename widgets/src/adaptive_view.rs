@@ -303,7 +303,7 @@ impl AdaptiveView {
         self.should_reapply_selector = true;
     }
 
-    pub fn set_default_variant_selector(&mut self, cx: &mut Cx) {
+    pub fn set_default_variant_selector(&mut self, _cx: &mut Cx) {
         // TODO(Julian): setup a more comprehensive default
         self.set_variant_selector(|cx, _parent_size| {
             if cx.display_context.is_desktop() {

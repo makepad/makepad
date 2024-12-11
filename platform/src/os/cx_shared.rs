@@ -210,7 +210,9 @@ impl Cx {
     pub (crate) fn call_draw_event(&mut self) {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
+        self.in_draw_event = true;
         self.call_event_handler(&Event::Draw(draw_event));
+        self.in_draw_event = false;
     }
 
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {

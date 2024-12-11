@@ -239,6 +239,7 @@ pub use {
             TextureFormat,
             TextureSize,
             TextureUpdated,
+            TextureAnimation,
         },
         live_prims::{
             LiveDependency,

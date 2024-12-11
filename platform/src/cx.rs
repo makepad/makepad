@@ -110,6 +110,7 @@ pub struct Cx {
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
     pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
+    pub (crate) in_draw_event: bool,
 
     pub display_context: DisplayContext,
     
@@ -250,6 +251,7 @@ impl Cx {
             null_texture,
             cpu_cores: 8,
             in_makepad_studio: false,
+            in_draw_event: false,
             os_type: OsType::Unknown,
             gpu_info: Default::default(),
             xr_capabilities: Default::default(),

@@ -592,14 +592,14 @@ impl WidgetNode for View {
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-                #[cfg(not(ignore_query))]
+               /* #[cfg(not(ignore_query))]
                 if local_results.0.len() == 0{
                     log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
                 }
                 #[cfg(panic_query)]
                 if local_results.0.len() == 0{
                     panic!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
-                }
+                }*/
                 self.find_cache.borrow_mut().push((hash, local_results));
             }
             WidgetCache::No => {

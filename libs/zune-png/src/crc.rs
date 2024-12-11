@@ -47,3 +47,23 @@ pub fn _crc32_slice1(data: &[u8], mut crc: u32) -> u32 {
 pub fn calc_crc(data: &[u8]) -> u32 {
     !crc32_slice8(data, u32::MAX)
 }
+
+#[test]
+fn test_crc_same() {
+    use alloc::vec;
+
+    use nanorand::Rng;
+
+    let mut rng = nanorand::WyRand::new();
+
+    let mut data = vec![0_u8; 1000];
+    rng.fill(&mut data);
+
+    let crc_simple = _crc32_slice1(&data, 0);
+    let crc_table8 = crc32_slice8(&data, 0);
+
+    assert_eq!(
+        crc_simple, crc_table8,
+        "CRC {crc_simple} {crc_table8} do not match"
+    );
+}

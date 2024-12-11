@@ -5,9 +5,11 @@
  */
 
 use alloc::vec;
-use makepad_zune_core::bytestream::ZByteWriter;
-use makepad_zune_core::options::EncoderOptions;
-use makepad_zune_inflate::DeflateEncoder;
+use alloc::vec::Vec;
+
+use zune_core::bytestream::ZByteWriter;
+use zune_core::options::EncoderOptions;
+use zune_inflate::DeflateEncoder;
 
 use crate::constants::PNG_SIGNATURE;
 use crate::decoder::PngChunk;
@@ -183,8 +185,8 @@ impl<'a> PngEncoder<'a> {
 
 #[test]
 fn test_simple_write() {
-    use makepad_zune_core::bit_depth::BitDepth;
-    use makepad_zune_core::colorspace::ColorSpace;
+    use zune_core::bit_depth::BitDepth;
+    use zune_core::colorspace::ColorSpace;
 
     use crate::PngDecoder;
 
