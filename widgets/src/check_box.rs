@@ -46,7 +46,7 @@ live_design!{
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
                         sdf.stroke(mix(
-                            mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_CTRL_HOVER, self.hover),
+                            THEME_COLOR_U_HIDDEN,
                             THEME_COLOR_TEXT_ACTIVE,
                             self.selected), 1.25
                         );
