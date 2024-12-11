@@ -9,7 +9,7 @@ use crate::{
 live_design!{
     link widgets;
     use link::theme::*;
-    use makepad_draw::shader::std::*;
+    use link::shaders::*;
     use crate::view_ui::CachedRoundedView;
     
     DrawRadioButton = {{DrawRadioButton}} {}
