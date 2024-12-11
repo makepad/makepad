@@ -22,7 +22,7 @@ live_design!{
     
     pub H1 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_1)}
+        margin: {top: (THEME_FONT_SIZE_1 * 0.25)}
         draw_text: {
             wrap: Word
             text_style: <THEME_FONT_BOLD> {
@@ -36,7 +36,7 @@ live_design!{
     
     pub H1italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_1)}
+        margin: {top: (THEME_FONT_SIZE_1 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -49,7 +49,7 @@ live_design!{
     
     pub H2 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_2)}
+        margin: {top: (THEME_FONT_SIZE_2 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -62,7 +62,7 @@ live_design!{
     
     pub H2italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_2)}
+        margin: {top: (THEME_FONT_SIZE_2 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -75,7 +75,7 @@ live_design!{
     
     pub H3 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_3)}
+        margin: {top: (THEME_FONT_SIZE_3 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -88,7 +88,7 @@ live_design!{
     
     pub H3italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_3)}
+        margin: {top: (THEME_FONT_SIZE_3 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -101,7 +101,7 @@ live_design!{
     
     pub H4 = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_4)}
+        margin: {top: (THEME_FONT_SIZE_4 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -114,7 +114,7 @@ live_design!{
     
     pub H4italic = <Label> {
         width: Fill,
-        margin: {top: (THEME_FONT_SIZE_4)}
+        margin: {top: (THEME_FONT_SIZE_4 * 0.25)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -129,7 +129,7 @@ live_design!{
         width: Fill,
         margin: 0.,
         padding: 0.,
-        // margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -142,7 +142,7 @@ live_design!{
     
     pub Pbold = <Label> {
         width: Fill,
-        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -155,7 +155,7 @@ live_design!{
     
     pub Pitalic = <Label> {
         width: Fill,
-        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
@@ -168,7 +168,7 @@ live_design!{
     
     pub Pbolditalic = <Label> {
         width: Fill,
-        margin: {top: (THEME_SPACE_2), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
         draw_text: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
