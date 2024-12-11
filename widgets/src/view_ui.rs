@@ -13,36 +13,51 @@ live_design! {
     pub View = <ViewBase> {}
     
     pub Hr = <View> {
-        width: Fill, height: Fit,
+        width: Fill, height: 4.,
         flow: Down,
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
-        <View> {
-            width: Fill, height: (THEME_BEVELING * 2.0),
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
-        }
-        <View> {
-            width: Fill, height: (THEME_BEVELING * 0.5),
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+
+        show_bg: true, 
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+
+                sdf.hline(1.0, 1.0);
+                sdf.fill(THEME_COLOR_BEVEL_SHADOW);
+
+                sdf.hline(2.0, 1.0);
+                sdf.fill(THEME_COLOR_BEVEL_LIGHT);
+
+                return sdf.result
+            }
         }
     }
     
     pub Vr = <View> {
-        width: Fit, height: Fill,
+        width: 4., height: Fill,
         flow: Right,
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
-        <View> {
-            width: (THEME_BEVELING * 2.0), height: Fill
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
-        }
-        <View> {
-            width: (THEME_BEVELING), height: Fill,
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+
+        show_bg: true, 
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+
+                let stroke_width = 1.;
+
+                sdf.move_to(1., 0.);
+                sdf.line_to(0.0, self.rect_size.y);
+                sdf.stroke(THEME_COLOR_BEVEL_SHADOW, stroke_width);
+
+                let offset = stroke_width * 2.0;
+                sdf.move_to(1. + stroke_width, 0.);
+                sdf.line_to(1. + stroke_width, self.rect_size.y);
+                sdf.stroke(THEME_COLOR_BEVEL_LIGHT, stroke_width);
+
+                return sdf.result
+            }
         }
     }
     

@@ -11,13 +11,13 @@ live_design!{
     use link::theme::*;
     use link::shaders::*;
     use crate::view_ui::CachedRoundedView;
-     
+    
     DrawRadioButton = {{DrawRadioButton}} {}
     pub RadioButtonBase = {{RadioButton}} {}
     pub RadioButtonGroupBase = {{RadioButtonGroup }} {}
     
     pub RadioButton = <RadioButtonBase> {
-        // TODO: adda  focus states 
+        // TODO: adda  focus states
         width: Fit, height: 16.,
         align: { x: 0.0, y: 0.5 }
         
@@ -211,7 +211,7 @@ live_design!{
         margin: { left: -17.5 }
         label_walk: {
             width: Fit, height: Fit,
-            margin: { left: (THEME_SPACE_1) }
+            margin: { left: (THEME_SPACE_2) }
         }
     }
         
@@ -290,6 +290,13 @@ live_design!{
         draw_bg: {
             radius: 4.
         }
+    }
+
+    pub RadioButtonGroupTab = <RadioButtonTab> {
+        height: Fit,
+        draw_radio: { radio_type: Tab }
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25), right: (THEME_SPACE_2 * 2.)}
+            
     }
 }
 
