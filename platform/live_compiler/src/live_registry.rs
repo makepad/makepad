@@ -637,6 +637,7 @@ impl LiveRegistry {
                     Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
                     Ok(new_tokens) => {
                         let live_file = self.file_id_to_file_mut(file_id);
+                        
                         match LiveParser::parse_live_document(&new_tokens, &live_file.live_type_infos, file_id) {
                             Err(msg) => {
                                 errors.push(msg);
@@ -752,7 +753,13 @@ impl LiveRegistry {
                 recur_block.push(file_id);
                 let doc = &docs[file_id.to_index()];
                 let imports = &doc.original.resolved_imports.as_ref().unwrap();
-                let pos = dep_order.iter().position(|v| *v == file_id).unwrap();
+                let pos = if let Some(pos) = dep_order.iter().position(|v| *v == file_id){
+                    pos
+                }
+                else{
+                    println!("Invalid state in dependency list for {}", docs[file_id.to_index()].file_name);
+                    return
+                };
                 dep_order.remove(pos);
                 dep_order.push(file_id);
                 for import in imports.values(){
@@ -938,6 +945,7 @@ impl LiveRegistry {
         // FIX dont hardcode this, will fix it up with the icon refactor
         let fixup_file_id = self.path_end_to_file_id("draw_trapezoid.rs").unwrap();
         self.doc_original_raw_imports_to_resolved_recur(fixup_file_id, errors, &mut dep_order);
+        
         
         /*for dep in &dep_order{
             println!("{}", self.file_id_to_file_name(*dep));
