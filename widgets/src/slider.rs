@@ -481,7 +481,7 @@ impl Widget for Slider {
                 self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerHoverOver(_) => {
-                cx.set_cursor(MouseCursor::Hand);
+                cx.set_cursor(MouseCursor::Grab);
             },
             Hit::FingerDown(FingerDownEvent {
                 abs,
