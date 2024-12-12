@@ -1,4 +1,3 @@
-
 use {
     std::collections::{HashSet, HashMap},
     crate::{
@@ -135,6 +134,16 @@ impl Cx {
             event_handler(self, event);
             self.event_handler = Some(event_handler);
         }
+
+        // Reset widget query invalidation after all views have processed it.
+        // We wait until event_id is at least 1 events past the invalidation event
+        // to ensure the cache clear has propagated through the widget hierarchy
+        // during the previous event cycle.
+        if let Some(event_id) = self.widget_query_invalidation_event {
+            if self.event_id > event_id + 1 {
+                self.widget_query_invalidation_event = None;
+            }
+        }
     }
     
     fn inner_key_focus_change(&mut self) {
@@ -201,7 +210,9 @@ impl Cx {
     pub (crate) fn call_draw_event(&mut self) {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
+        self.in_draw_event = true;
         self.call_event_handler(&Event::Draw(draw_event));
+        self.in_draw_event = false;
     }
 
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {

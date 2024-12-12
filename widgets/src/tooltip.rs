@@ -6,8 +6,55 @@ use crate::{
     widget::*
 };
 
-live_design! {
-    TooltipBase = {{Tooltip}} {}
+live_design!{
+    link widgets;
+    use link::widgets::*;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub TooltipBase = {{Tooltip}} {}
+    pub Tooltip = <TooltipBase> {
+        width: Fill,
+        height: Fill,
+        
+        flow: Overlay
+        align: {x: 0.0, y: 0.0}
+        
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                return vec4(0., 0., 0., 0.0)
+            }
+        }
+        
+        content: <View> {
+            flow: Overlay
+            width: Fit
+            height: Fit
+            
+            <RoundedView> {
+                width: Fit,
+                height: Fit,
+                
+                padding: 16,
+                
+                draw_bg: {
+                    color: #fff,
+                    border_width: 1.0,
+                    border_color: #D0D5DD,
+                    radius: 2.
+                }
+                
+                tooltip_label = <Label> {
+                    width: 270,
+                    draw_text: {
+                        text_style: <THEME_FONT_REGULAR>{font_size: 9},
+                        text_wrap: Word,
+                        color: #000
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook, Widget)]

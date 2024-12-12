@@ -6,7 +6,7 @@
 
 //! Utilities required by multiple implementations
 //! that help to do small things
-use makepad_zune_core::bit_depth::{BitDepth, ByteEndian};
+use zune_core::bit_depth::{BitDepth, ByteEndian};
 
 use crate::decoder::PLTEEntry;
 use crate::enums::PngColor;
@@ -348,5 +348,16 @@ pub(crate) fn add_alpha(input: &[u8], output: &mut [u8], colorspace: PngColor, d
             }
         }
         (a, b) => panic!("Unknown combination of depth {a:?} and color type for expand alpha {b:?}")
+    }
+}
+
+pub fn convert_u16_to_u8_slice(slice: &mut [u16]) -> &mut [u8] {
+    // Converting a u16 slice to a u8 slice is always correct because
+    // the alignment of the target is smaller.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            slice.as_ptr() as *mut u8,
+            slice.len().checked_mul(2).unwrap()
+        )
     }
 }

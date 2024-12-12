@@ -357,6 +357,9 @@ impl CxOsApi for Cx {
     fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
         crate::error!("open_url not implemented on this platform");
     }
+    
+    fn max_texture_width()->usize{16384}
+    
     /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()

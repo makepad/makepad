@@ -1,0 +1,15 @@
+[package]
+name = "makepad-example-genai"
+version = "0.4.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad GenAI example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "OdPLY-BJBHsefskAAk9P-mwa-8o="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.4.0" }
+makepad-micro-serde-derive = { path = "../../libs/micro_serde/derive", version = "0.4.0" }
+jpeg-encoder = {version = "0.6.0"}
+makepad-http = { path = "../../libs/http", version = "0.4.0" } 

@@ -44,6 +44,7 @@ pub trait CxOsApi {
     
     fn default_window_size(&self)->DVec2{dvec2(800.,600.)}
     
+    fn max_texture_width()->usize{4096}
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -103,6 +104,10 @@ pub enum CxOsOp {
 }
 
 impl Cx {
+    pub fn in_draw_event(&self)->bool{
+        self.in_draw_event
+    }
+
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities
     }
@@ -111,7 +116,6 @@ impl Cx {
         CxRef(self.self_ref.clone().unwrap())
     }
     
-        
     pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get_mut(path) {
             if let Some(data) = data.data.take() {
@@ -590,6 +594,10 @@ impl Cx {
     pub fn open_system_openfolder_dialog(&mut self) {
         self.platform_ops.push(CxOsOp::SelectFolderDialog(FileDialog::new()));
 
+    }
+
+    pub fn event_id(&self) -> u64 {
+        self.event_id
     }
 }
 

@@ -12,7 +12,7 @@ use crate::{
   
   
 live_design! {
-    ParticleSystem = {{ParticleSystem}} {
+    pub ParticleSystem = {{ParticleSystem}} {
         width: Fill,
         height: Fill,
         

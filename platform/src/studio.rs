@@ -3,7 +3,6 @@ use crate::makepad_derive_live::*;
 use crate::LiveId;
 use crate::action::*;
 use crate::log::LogLevel;
-pub use crate::makepad_live_compiler::live_node::LiveDesignInfo;
 // communication enums for studio
 
 #[derive(SerBin, DeBin, Debug)]
@@ -76,12 +75,37 @@ pub struct EditFile{
     pub replace: String
 }
 
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct SelectInFile{
+    pub file_name: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub column_start: u32,
+    pub column_end: u32,
+}
+
+#[derive(SerBin, DeBin, Debug, Clone)]
+pub struct SwapSelection{
+    pub s1_file_name: String,
+    pub s1_line_start: u32,
+    pub s1_line_end: u32,
+    pub s1_column_start: u32,
+    pub s1_column_end: u32,
+    pub s2_file_name: String,
+    pub s2_line_start: u32,
+    pub s2_line_end: u32,
+    pub s2_column_start: u32,
+    pub s2_column_end: u32,
+}
+
+
 #[derive(SerBin, DeBin, Debug)]
 pub enum AppToStudio{
     LogItem(StudioLogItem),
     EventSample(EventSample),
     GPUSample(GPUSample),
     JumpToFile(JumpToFile),
+    SelectInFile(SelectInFile),
     PatchFile(PatchFile),
     DesignerComponentMoved(DesignerComponentPosition),
     DesignerZoomPan(DesignerZoomPan),
@@ -90,6 +114,7 @@ pub enum AppToStudio{
     DesignerFileSelected{
         file_name:String,
     },
+    SwapSelection(SwapSelection),
     FocusDesign
 }
 

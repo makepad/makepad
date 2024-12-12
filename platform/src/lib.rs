@@ -53,6 +53,10 @@ pub mod file_dialogs;
 
 mod media_api;
 
+pub mod ui_runner;
+
+pub mod display_context;
+
 #[macro_use]
 mod app_main;
 
@@ -235,6 +239,7 @@ pub use {
             TextureFormat,
             TextureSize,
             TextureUpdated,
+            TextureAnimation,
         },
         live_prims::{
             LiveDependency,
@@ -274,7 +279,8 @@ pub use {
             GeometryRef,
             Geometry,
         },
-        gpu_info::GpuPerformance,       
+        gpu_info::GpuPerformance,     
+        ui_runner::*,  
     },
 };
 

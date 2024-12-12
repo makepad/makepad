@@ -1,6 +1,6 @@
 //use crate::id::Id;
 use {
-    std::collections::{BTreeMap, BTreeSet},
+    std::collections::{BTreeMap, HashMap},
     crate::{
         makepad_live_id::*,
        // makepad_error_log::*,
@@ -8,7 +8,7 @@ use {
         live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveIdAsProp, LiveDesignInfo, LiveDesignInfoIndex},
+        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveIdAsProp},
         /*live_node_reader::{LiveNodeMutReader},*/
         live_node_vec::{LiveNodeSliceApi, /*LiveNodeVecApi*/},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
@@ -22,13 +22,11 @@ use {
 #[derive(Default)]
 pub struct LiveFile {
     pub (crate) reexpand: bool,
-    
     pub module_id: LiveModuleId,
     pub (crate) start_pos: TextPos,
     pub file_name: String,
     pub cargo_manifest_path: String,
     pub (crate) source: String,
-    pub (crate) deps: BTreeSet<LiveModuleId>,
     
     pub generation: LiveFileGeneration,
     pub original: LiveOriginal,
@@ -38,8 +36,17 @@ pub struct LiveFile {
     pub live_type_infos: Vec<LiveTypeInfo>,
 }
 
+#[derive(Default)]
+pub struct LiveLinkTarget{
+    targets: Vec<LiveFileId>,
+    combined_exports: Option<HashMap<LiveId, LiveFileId>>
+}
+
 pub struct LiveRegistry {
     pub (crate) file_ids: BTreeMap<String, LiveFileId>,
+    pub (crate) link_targets: BTreeMap<LiveId, LiveLinkTarget>,
+    pub (crate) link_connections: BTreeMap<LiveId, LiveId>,
+    
     pub module_id_to_file_id: BTreeMap<LiveModuleId, LiveFileId>,
     pub live_files: Vec<LiveFile>,
     pub live_type_infos: BTreeMap<LiveType, LiveTypeInfo>,
@@ -54,6 +61,8 @@ impl Default for LiveRegistry {
         Self {
             main_module: None,
             file_ids: Default::default(),
+            link_targets: Default::default(),
+            link_connections: Default::default(),
             module_id_to_file_id: Default::default(),
             live_files: Vec::new(),
             live_type_infos: Default::default(),
@@ -69,6 +78,12 @@ pub struct LiveDocNodes<'a> {
     pub index: usize
 }*/
 
+#[derive(Default)]
+struct ProcessedImports{
+    set: HashMap<LiveId,LiveFileId>
+}
+
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum LiveScopeTarget {
     LocalPtr(usize),
@@ -83,6 +98,15 @@ pub struct LiveFileChange {
 }
 
 impl LiveRegistry {
+    pub fn link(&mut self, from:LiveId, to:LiveId){
+        if let Some(from) = self.link_connections.get_mut(&from){
+            *from = to;
+        }
+        else{
+            self.link_connections.insert(from, to);
+        }
+    }
+    
     pub fn file_ids(&self)->&BTreeMap<String, LiveFileId>{
         &self.file_ids
     }
@@ -92,8 +116,6 @@ impl LiveRegistry {
         doc.generation == live_ptr.generation
     }
     
-    
-        
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation {
@@ -149,6 +171,26 @@ impl LiveRegistry {
         (&doc.expanded, doc.expanded.resolve_ptr(live_ptr.index as usize))
     }
     
+    pub fn ptr_to_file_name_and_object_span(&self, ptr: LivePtr) -> (String, TextSpan){
+        let doc = self.ptr_to_doc(ptr);
+        let start_node = &doc.nodes[ptr.index as usize];
+        let end_index = doc.nodes.skip_node(ptr.index as usize) - 1;
+        let end_node = &doc.nodes[end_index];
+        
+        let start_token = self.token_id_to_token(start_node.origin.token_id().unwrap()).clone();
+        let end_token = self.token_id_to_token(end_node.origin.token_id().unwrap()).clone();
+        let start = start_token.span.start;
+        let end = end_token.span.end;
+        (
+            self.file_id_to_file(ptr.file_id).file_name.clone(),
+            TextSpan{
+                file_id: ptr.file_id,
+                start,
+                end
+            }
+        )
+    }
+    
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveExpanded {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation {
@@ -180,7 +222,7 @@ impl LiveRegistry {
         }
         (&doc.expanded.nodes, live_ptr.index as usize)
     }
-    
+    /*
     pub fn ptr_to_design_info(&self, live_ptr: LivePtr) -> Option<&LiveDesignInfo> {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation {
@@ -199,113 +241,20 @@ impl LiveRegistry {
             _=>()
         }
         None
-    }
-    
-    pub fn patch_design_info(&mut self, live_ptr: LivePtr, mut new_design_info: LiveDesignInfo) -> Option<(String, &str,DesignInfoRange)> {
-        let live_file = &mut self.live_files[live_ptr.file_id.to_index()];
-        if live_file.generation != live_ptr.generation {
-            panic!("ptr_to_nodes_index generation invalid for file {} gen:{} ptr:{}", live_file.file_name, live_file.generation, live_ptr.generation);
-        }
-        let node = &mut live_file.expanded.nodes[live_ptr.index as usize];
-        match &mut node.value{
-            LiveValue::Clone{design_info,..}|
-            LiveValue::Deref{design_info,..}|
-            LiveValue::Class {design_info,..}=>{
-                let string = new_design_info.to_string();
-                                    
-                if !design_info.is_invalid(){
-                    let old_design_info = &mut live_file.original.design_info[design_info.index()];
-                    new_design_info.span = old_design_info.span;
-                    *old_design_info = new_design_info;
-                    
-                    let start = old_design_info.span.start;
-                    let end = &mut old_design_info.span.end;
-                    
-                    if start.line != end.line{
-                        println!("ptr_to_design_info_range on multiple lines not supported");
-                        return None
-                    }
-                    let start_column = start.column;
-                    let end_column = end.column - 1;
-                    end.column = start.column + string.len() as u32 + 1;
-                    
-                    return Some((
-                        string,
-                        &live_file.file_name, 
-                        DesignInfoRange{
-                            line: start.line,
-                            start_column,
-                            end_column
-                        }
-                    ));
-                }
-                else{ // we dont have design info. lets patch it in
-                    let string = format!(" {}", string); 
-                    let tok = if node.id.is_unique(){
-                        let token_id = node.origin.token_id().unwrap();
-                        &live_file.original.tokens[token_id.token_index()+2]
-                    }
-                    else{
-                        let token_id = node.origin.token_id().unwrap();
-                        &live_file.original.tokens[token_id.token_index()+4]
-                    };
-                    
-                    // give this a span
-                    new_design_info.span = tok.span;
-                    new_design_info.span.start.column += 1;
-                    new_design_info.span.end.column += string.len() as u32;
-                    
-                    *design_info = LiveDesignInfoIndex::from_usize(live_file.original.design_info.len());
-                    live_file.original.design_info.push(new_design_info);
-                    
-                    return Some((
-                        string,
-                        &live_file.file_name,
-                        DesignInfoRange{
-                            line: tok.span.start.line,
-                            start_column: tok.span.start.column,
-                            end_column: tok.span.start.column,
-                        }
-                    ))
-                }
-            }
-            _=>()
-        }
-        None
-    }
-    
-    pub fn new_design_info_location(&self, live_ptr: LivePtr) -> Option<(&str, DesignInfoRange)> {
-        let live_file = &self.live_files[live_ptr.file_id.to_index()];
-        let node = &live_file.expanded.nodes[live_ptr.index as usize];
-        // alright so how do we find the right position in the doc
-        if node.is_instance_prop(){
-            let tok = if node.id.is_unique(){
-                let token_id = node.origin.token_id().unwrap();
-                &live_file.original.tokens[token_id.token_index()+2]
-            }
-            else{
-                let token_id = node.origin.token_id().unwrap();
-                &live_file.original.tokens[token_id.token_index()+4]
-            };
-            return Some((
-                &live_file.file_name,
-                DesignInfoRange{
-                    line: tok.span.start.line,
-                    start_column: tok.span.start.column,
-                    end_column: tok.span.start.column,
-                }
-            ))
-        }
-        None
-        /*
-        let token_id = node.origin.token_id().unwrap();
-        let file_id = token_id.file_id().unwrap();
-        &self.live_files[file_id.to_index()].original.tokens[token_id.token_index()]*/
-    }
+    }*/
     
     pub fn path_str_to_file_id(&self, path: &str) -> Option<LiveFileId> {
         for (index, file) in self.live_files.iter().enumerate() {
             if file.file_name == path {
+                return Some(LiveFileId(index as u16))
+            }
+        }
+        None
+    }
+    
+    pub fn path_end_to_file_id(&self, path: &str) -> Option<LiveFileId> {
+        for (index, file) in self.live_files.iter().enumerate() {
+            if file.file_name.ends_with(path) {
                 return Some(LiveFileId(index as u16))
             }
         }
@@ -463,8 +412,8 @@ impl LiveRegistry {
     }
     
     pub fn find_scope_target(&self, item: LiveId, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let LiveValue::Root {id_resolve} = &nodes[0].value {
-            id_resolve.get(&item).cloned()
+        if let LiveValue::Root(root) = &nodes[0].value {
+            root.locals.get(&item).cloned()
         }
         else {
             println!("Can't find scope target on rootnode without id_resolve");
@@ -684,28 +633,19 @@ impl LiveRegistry {
         for change in changes {
             if let Some(file_id) = self.file_name_to_file_id(&change.file_name){
                 let module_id = self.file_id_to_module_id(file_id).unwrap();
-                let live_file = self.file_id_to_file_mut(file_id);
                 match Self::tokenize_from_str_live_design(&change.content, TextPos::default(), file_id, None) {
                     Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
                     Ok(new_tokens) => {
-                        let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
-                        match parser.parse_live_document() {
+                        let live_file = self.file_id_to_file_mut(file_id);
+                        match LiveParser::parse_live_document(&new_tokens, &live_file.live_type_infos, file_id) {
                             Err(msg) => {
                                 errors.push(msg);
                             },
                             Ok(mut ld) => { // only swap it out when it parses
-                                for node in &mut ld.nodes {
-                                    match &mut node.value {
-                                        LiveValue::Import(live_import) => {
-                                            if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
-                                               live_import.module_id.0 = module_id.0
-                                            };
-                                        }
-                                        _=>()
-                                    }
-                                }
                                 any_changes = true;
                                 ld.tokens = new_tokens;
+                                self.build_imports_and_exports(&mut ld, module_id, &change.file_name);
+                                let live_file = self.file_id_to_file_mut(file_id);
                                 live_file.original = ld;
                                 live_file.reexpand = true;
                                 live_file.generation.next_gen();
@@ -720,7 +660,7 @@ impl LiveRegistry {
             self.expand_all_documents(errors);
         }
     }
-
+    
     pub fn register_live_file(
         &mut self,
         file_name: &str,
@@ -741,13 +681,24 @@ impl LiveRegistry {
             Ok(lex_result) => lex_result
         };
         
-        let mut parser = LiveParser::new(&tokens, &live_type_infos, file_id);
-        
-        let mut original = match parser.parse_live_document() {
+        let mut original = match LiveParser::parse_live_document(&tokens, &live_type_infos, file_id) {
             Err(msg) => return Err(msg.into_live_file_error(file_name)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
         original.tokens = tokens;
+        // if we set a link, store it and point to our file_id
+        if let Some(link) = original.link{
+            // lets append our module_id
+            if let Some(lt) = self.link_targets.get_mut(&link){
+                lt.targets.push(file_id);
+            }
+            else{
+                self.link_targets.insert(link, LiveLinkTarget{
+                    targets: vec![file_id],
+                    combined_exports: None
+                });
+            }
+        }
         
         // update our live type info
         for live_type_info in &live_type_infos {
@@ -760,44 +711,10 @@ impl LiveRegistry {
             self.live_type_infos.insert(live_type_info.live_type, live_type_info.clone());
         }
         
-        let mut deps = BTreeSet::new();
-        
-        for node in &mut original.nodes {
-            match &mut node.value {
-                LiveValue::Import(live_import) => {
-                    if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
-                       live_import.module_id.0 = own_module_id.0
-                    };
-                    deps.insert(live_import.module_id);
-                }, // import
-                /*LiveValue::Registry(component_id) => {
-                    let reg = self.components.0.borrow();
-                    if let Some(entry) = reg.values().find(|entry| entry.component_type() == *component_id){
-                        entry.get_module_set(&mut deps);
-                    }
-                }, */
-                LiveValue::Deref {live_type, ..} => { // hold up. this is always own_module_path
-                    let infos = self.live_type_infos.get(live_type).unwrap();
-                    for sub_type in infos.fields.clone() {
-                        let sub_module_id = sub_type.live_type_info.module_id;
-                        if sub_module_id != own_module_id {
-                            deps.insert(sub_module_id);
-                        }
-                    }
-                }
-                LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
-                    let infos = self.live_type_infos.get(live_type).unwrap();
-                    for sub_type in infos.fields.clone() {
-                        let sub_module_id = sub_type.live_type_info.module_id;
-                        if sub_module_id != own_module_id {
-                            deps.insert(sub_module_id);
-                        }
-                    }
-                }
-                _ => {
-                }
-            }
-        }
+        //let mut deps = BTreeSet::new();
+        // lets populate all our exports on an exports table
+        // lets only walk the root level
+        self.build_imports_and_exports(&mut original, own_module_id, &file_name);
         
         let live_file = LiveFile {
             cargo_manifest_path: cargo_manifest_path.to_string(),
@@ -805,7 +722,6 @@ impl LiveRegistry {
             module_id: own_module_id,
             file_name: file_name.to_string(),
             start_pos,
-            deps,
             source,
             generation: LiveFileGeneration::default(),
             live_type_infos,
@@ -821,81 +737,218 @@ impl LiveRegistry {
         Ok(file_id)
     }
     
+    fn doc_original_raw_imports_to_resolved_recur(&mut self, file_id: LiveFileId, errors: &mut Vec<LiveError>, dep_order: &mut Vec<LiveFileId>){
+        
+        // lets see if we are already in the dep order, and ifso put us at the end
+        if dep_order.iter().find(|v| **v == file_id).is_some(){
+            
+            fn recur_dep_order(file_id:LiveFileId, dep_order: &mut Vec<LiveFileId>, docs:&[LiveFile], recur_block: &mut Vec<LiveFileId>){
+                if recur_block.contains(&file_id){
+                    for recur in recur_block{
+                        println!("Dependency recursion in: {:?}", docs[recur.to_index()].file_name);
+                    }
+                    return
+                }
+                recur_block.push(file_id);
+                let doc = &docs[file_id.to_index()];
+                let imports = &doc.original.resolved_imports.as_ref().unwrap();
+                let pos = dep_order.iter().position(|v| *v == file_id).unwrap();
+                dep_order.remove(pos);
+                dep_order.push(file_id);
+                for import in imports.values(){
+                    recur_dep_order(*import, dep_order, docs, recur_block)
+                }
+                for type_file_id in &doc.original.type_imports{
+                    if file_id != *type_file_id{
+                        recur_dep_order(*type_file_id, dep_order, docs, recur_block)
+                    }
+                }
+                recur_block.pop();
+            }
+            let mut recur_block = Vec::new();
+            recur_dep_order(file_id, dep_order, &mut self.live_files, &mut recur_block);
+            return;
+        }
+        else{
+            dep_order.push(file_id);
+        }
+        
+        let doc = &self.live_files[file_id.to_index()];
+        
+        // per link targets we should collect all exports in one hashtable
+        let mut ident_to_file:BTreeMap<LiveId,LiveFileId> = Default::default();
+        for (origin,import) in &doc.original.raw_imports{
+            // alright so if module id is link, we have to get a list of files
+            if import.module_id.0 == live_id!(link){
+                // module_id.1 is the link name
+                let link_to = if let Some(link_to) = self.link_connections.get(&import.module_id.1){
+                    *link_to
+                }
+                else{
+                    import.module_id.1
+                };
+                
+                if let Some(link_target) = self.link_targets.get(&link_to){
+                    let combined_exports = link_target.combined_exports.as_ref().unwrap();
+                    if import.import_id == LiveId(0){ // its a wildcard
+                        // compare our entire symbolset with the combined_exports
+                        for ident in &doc.original.identifiers{
+                            if let Some(inner_file_id) = combined_exports.get(&ident){
+                                if file_id != *inner_file_id{ // block refs to self
+                                    ident_to_file.insert(*ident, *inner_file_id);
+                                }
+                            }
+                        }
+                    }
+                    else{ // specific thing
+                        if let Some(file_id) = combined_exports.get(&import.import_id){
+                            ident_to_file.insert(import.import_id, *file_id);
+                        }
+                        else{
+                            errors.push(LiveError {
+                                origin: live_error_origin!(),
+                                span: doc.original.token_id_to_span(origin.token_id().unwrap()).into(),
+                                message: format!("Cannot find use target {}",import.import_id)
+                            });
+                        }
+                    }
+                }
+                else{
+                    errors.push(LiveError {
+                        origin: live_error_origin!(),
+                        span: doc.original.token_id_to_span(origin.token_id().unwrap()).into(),
+                        message: format!("No link connection targets {}",link_to)
+                    });
+                }
+            }
+            else if let Some(inner_file_id) = self.module_id_to_file_id(import.module_id){
+                let doc2 = &self.live_files[inner_file_id.to_index()];
+                if import.import_id == LiveId(0){ // its a wildcard
+                    // compare our entire symbolset with the combined_exports
+                    for ident in &doc.original.identifiers{
+                        if doc2.original.exports.get(&ident).is_some(){
+                            if file_id != inner_file_id{ // block refs to self
+                                ident_to_file.insert(*ident, inner_file_id);
+                            }
+                        }
+                    }
+                }
+                else{ // specific thing
+                    if  doc2.original.exports.get(&import.import_id).is_some(){
+                        ident_to_file.insert(import.import_id, inner_file_id);
+                    }
+                    else{
+                        errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: doc.original.token_id_to_span(origin.token_id().unwrap()).into(),
+                            message: format!("Cannot find use target {}",import.import_id)
+                        });
+                    }
+                }
+            }
+        }
+        // store an empty one to block recursion
+        let type_imports = doc.original.type_imports.clone();
+        self.live_files[file_id.to_index()].original.resolved_imports = Some(ident_to_file.clone());
+        // recur over all imported files
+        for file_id in type_imports{
+            self.doc_original_raw_imports_to_resolved_recur(file_id, errors, dep_order);
+        }
+        for file_id in ident_to_file.values(){
+            self.doc_original_raw_imports_to_resolved_recur(*file_id, errors, dep_order);
+        }
+        
+    }
+    
+    fn build_imports_and_exports(&self, doc:&mut LiveOriginal, own_module_id:LiveModuleId, _name:&str){
+        let mut node_iter = doc.nodes.first_child(0);
+                                
+        while let Some(node_index) = node_iter {
+                                                
+            let node = &mut doc.nodes[node_index];
+            if node.origin.node_has_prefix(){
+                let prev_token = &doc.tokens[node.origin.first_def().unwrap().token_index()-1];
+                if prev_token.token == LiveToken::Ident(live_id!(pub)){
+                    doc.exports.insert(node.id, node.origin);
+                }
+            }
+                                                
+            match &mut node.value {
+                LiveValue::Import(live_import) => {
+                    if live_import.module_id.0 == live_id!(crate) { // patch up crate refs
+                        live_import.module_id.0 = own_module_id.0
+                    };
+                    // ok lets emit the imports to the original
+                    doc.raw_imports.push((node.origin, *live_import.clone()));
+                },
+                LiveValue::Class {live_type, ..} => {
+                    // get our direct typed dependencies
+                    let live_type_info = self.live_type_infos.get(live_type).unwrap();
+                    for field in &live_type_info.fields {
+                        let lti = &field.live_type_info;
+                        
+                        if let Some(file_id) = self.module_id_to_file_id.get(&lti.module_id) {
+                            doc.type_imports.insert(*file_id);
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+                                                             
+            node_iter = doc.nodes.next_child(node_index);
+        }
+    }
+    
+    fn collect_combined_exports(&mut self, errors: &mut Vec<LiveError>){
+        for link_target in self.link_targets.values_mut(){
+            let mut combined_exports = HashMap::new();
+            for target in &link_target.targets{
+                // lets grab the file
+                let doc = &self.live_files[target.to_index()];
+                for (ident,origin) in &doc.original.exports{
+                    if combined_exports.get(ident).is_some(){
+                        errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: doc.original.token_id_to_span(origin.token_id().unwrap()).into(),
+                            message: format!("Target already present in link set: {}",ident)
+                        });
+                    }
+                    combined_exports.insert(*ident, *target);
+                }
+            }
+            link_target.combined_exports = Some(combined_exports);
+        }
+    }
+    
+    
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
-        // lets build up all dependencies here
+        // ok so first off
+        // we need to run over our link_connections to gather our combined_exports
+        self.collect_combined_exports(errors);
         
-        // alright so. we iterate
+        // alright lets start at the main module
+        // and then we have to hop from dependency to dependency
+        let main_module_id = self.main_module.as_ref().unwrap().module_id;
+        let main_file_id = self.module_id_to_file_id.get(&main_module_id).cloned().unwrap();
+        
         let mut dep_order = Vec::new();
+        self.doc_original_raw_imports_to_resolved_recur(main_file_id, errors, &mut dep_order);
         
-        fn recur_insert_dep(parent_index: usize, dep_order: &mut Vec<LiveModuleId>, current: LiveModuleId, files: &Vec<LiveFile>) {
-            let file = if let Some(file) = files.iter().find( | v | v.module_id == current) {
-                file
-            }
-            else {
-                return
-            };
-            let final_index = if let Some(index) = dep_order.iter().position( | v | *v == current) {
-                if index > parent_index { // insert before
-                    dep_order.remove(index);
-                    dep_order.insert(parent_index, current);
-                    parent_index
-                }
-                else {
-                    index
-                }
-            }
-            else {
-                dep_order.insert(parent_index, current);
-                parent_index
-            };
-            
-            for dep in &file.deps {
-                recur_insert_dep(final_index, dep_order, *dep, files);
-            }
-        }
+        // FIX dont hardcode this, will fix it up with the icon refactor
+        let fixup_file_id = self.path_end_to_file_id("draw_trapezoid.rs").unwrap();
+        self.doc_original_raw_imports_to_resolved_recur(fixup_file_id, errors, &mut dep_order);
         
-        for file in &self.live_files {
-            recur_insert_dep(dep_order.len(), &mut dep_order, file.module_id, &self.live_files);
-        }
-        
-        // now lets do the recursive recompile parsing.
-        fn recur_check_reexpand(current: LiveModuleId, files: &Vec<LiveFile>) -> bool {
-            let file = if let Some(file) = files.iter().find( | v | v.module_id == current) {
-                file
-            }
-            else {
-                return false
-            };
-            
-            if file.reexpand {
-                return true;
-            }
-            
-            for dep in &file.deps {
-                if recur_check_reexpand(*dep, files) {
-                    return true
-                }
-            }
-            false
-        }
-        
-        for i in 0..self.live_files.len() {
-            if recur_check_reexpand(self.live_files[i].module_id, &self.live_files) {
-                self.live_files[i].reexpand = true;
-            }
-        }
-       
-        for module_id in dep_order {
-            let file_id = if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
-                file_id
-            }
-            else {
-                continue
-            };
-            
+        /*for dep in &dep_order{
+            println!("{}", self.file_id_to_file_name(*dep));
+        }*/
+                
+        for file_id in dep_order.iter().rev() {
+            /*
             if !self.live_files[file_id.to_index()].reexpand {
                 continue;
-            }
+            }*/
+            let module_id = self.file_id_to_module_id(*file_id).unwrap();
             let mut out_doc = LiveExpanded::new();
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
             
@@ -916,7 +969,7 @@ impl LiveRegistry {
         }
     }
 }
-
+/*
 #[derive(Debug)]
 pub struct DesignInfoRange{
     pub line: u32,
@@ -960,4 +1013,4 @@ impl FileDepIter {
             }
         }
     }
-}
+}*/

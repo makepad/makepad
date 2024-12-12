@@ -13,6 +13,7 @@ use crate::enums::FilterMethod;
 
 pub mod de_filter;
 mod filter;
+mod portable_simd;
 mod sse4;
 
 pub fn choose_compression_filter(_previous_row: &[u8], _current_row: &[u8]) -> FilterMethod {

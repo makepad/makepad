@@ -3,11 +3,11 @@ use makepad_platform::live_atomic::*;
 
 
 live_design!{
-    import makepad_widgets::base::*;
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::vectorline::*;
-    import makepad_draw::shader::std::*;
-    import makepad_example_ui_zoo::demofiletree::*;
+    use link::theme::*;
+    use link::shaders::*;
+    use link::widgets::*;
+    use makepad_widgets::vectorline::*;
+    use makepad_example_ui_zoo::demofiletree::*;
 
     COLOR_CONTAINER = (THEME_COLOR_D_1)
     COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
@@ -73,7 +73,7 @@ live_design!{
             caption_bar = {
                 visible: true,
                 margin: {left: -100},
-                caption_label = { label = {text: "Makepad UI Zoo"} }
+                caption_label = { label = {text: "Makepad UI Zoo "} }
             },
 
             body = <View> {
@@ -113,7 +113,8 @@ live_design!{
                         align: { x: 0., y: 0.}
                         flow: Right,
                         spacing: (THEME_SPACE_2)
-                        <P> { text: "TestButton", width: Fit}
+                        <P> { text: "TestLabel", width: Fit}
+                        <Vr> {} 
                         <LinkLabel> { text: "TestButton", width: Fit}
                         <CheckBox> { text: "TestButton"}
                         <CheckBoxToggle> { text: "TestButton"}
@@ -1094,6 +1095,383 @@ live_design!{
                                         <Label> {text: "Hi"}
                                     }
                                 }
+
+                            }
+                        }
+                    }
+
+                <ZooHeader> {
+                    title = {text:"Docs tests"}
+                    <ZooDesc> {text:"Docs tests"}
+                    <RoundedView> {
+                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                        width: Fill, height: Fit,
+                            <View> {
+                                height: Fit, width: Fill
+                                show_bg: false,
+                                margin: { bottom: 200.}
+                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
+                                spacing: 5.0,
+                                flow: Down,
+                                <H3> { text: "Button" }
+                                <H4> { text: "Basic"}
+                                <Button> { text: "I can be clicked" } // Default button with a custom label.
+
+                                <H4> { text: "Typical"}
+                                <Button> {
+                                    text: "I can be clicked", // Text label.
+                                    draw_bg: {
+                                        bodytop: #3, // Set the hover-state color.
+                                        bodybottom: #f00, // Set the pressed-state color.
+                                    },
+                                    height: Fit, // Element assumes height of its children.
+                                    width: Fit, // Element expands to use all available horizontal space.
+                                    margin: 0.0, // Homogenous spacing of 10.0 around the element.
+                                    padding: 10.  // Homogenous spacing of 7.5 between all the element's
+                                                // borders and its content.
+                                }
+
+                                <H4> { text: "Advanced"}
+                                <Button> {
+                                // Allows instantiation of customly styled elements as i.e. <MyButton> {}.
+
+                                    // BUTTON SPECIFIC PROPERTIES
+
+                                    draw_bg: { // Shader object that draws the bg.
+                                            fn pixel(self) -> vec4 {
+                                            return mix( // State transition animations.
+                                                mix(
+                                                    #800,
+                                                    mix(#800, #f, 0.5),
+                                                    self.hover
+                                                ),
+                                                #00f,
+                                                self.pressed
+                                            )
+                                        }
+                                    },
+
+                                    draw_icon: { // Shader object that draws the icon.
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                        // Icon file dependency.
+
+                                        fn get_color(self) -> vec4 { // Overwrite the shader's fill method.
+                                            return mix( // State transition animations.
+                                                mix(
+                                                    #f0f,
+                                                    #fff,
+                                                    self.hover
+                                                ),
+                                                #000,
+                                                self.pressed
+                                            )
+                                        }
+                                    }
+
+                                    // draw_text: { // Shader object that draws the icon.
+                                    //     wrap: Word, // Wraps text between words.
+                                    //     text_style: {
+                                    //     // Controls the appearance of text.
+                                    //         font: {path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf")},
+                                    //         // Font file dependency.
+
+                                    //         font_size: 12.0, // Font-size of 12.0.
+                                    //     }
+
+                                    //     fn get_color(self) -> vec4 { // Overwrite the shader's fill method.
+                                    //         return mix( // State transition animations.
+                                    //             mix(
+                                    //                 self.color,
+                                    //                 self.bodytop,
+                                    //                 self.bodybottom
+                                    //             ),
+                                    //             self.color_pressed,
+                                    //             self.pressed
+                                    //         )
+                                    //     }
+                                    // }
+
+                                    grab_key_focus: true, // Keyboard gets focus when clicked.
+
+                                    icon_walk: {
+                                        margin: 10.,
+                                        width: 16.,
+                                        height: Fit
+                                    }
+
+                                    label_walk: {
+                                        margin: 0.,
+                                        width: Fit,
+                                        height: Fit,
+                                    }
+
+                                    text: "I can be clicked", // Text label.
+
+                                    animator: { // State change triggered animations.
+                                        hover = { // State
+                                            default: off // The state's starting point.
+                                            off = { // Behavior when the animation is started to the off-state
+                                                from: { // Behavior depending on the prior states
+                                                    all: Forward {duration: 0.1}, // Default animation direction and speed in secs.
+                                                    pressed: Forward {duration: 0.25} // Direction and speed for 'pressed' in secs.
+                                                }
+                                                apply: { // Shader methods to animate
+                                                    draw_bg: { pressed: 0.0, hover: 0.0 } // Timeline target positions for the given states.
+                                                    draw_icon: { pressed: 0.0, hover: 0.0 }
+                                                    draw_text: { pressed: 0.0, hover: 0.0 }
+                                                }
+                                            }
+
+                                            on = { // Behavior when the animation is started to the on-state
+                                                from: {
+                                                    all: Forward {duration: 0.1},
+                                                    pressed: Forward {duration: 0.5}
+                                                }
+                                                apply: {
+                                                    draw_bg: { pressed: 0.0, hover: [{time: 0.0, value: 1.0}] },
+                                                    // pressed: 'pressed' timeline target position
+                                                    // hover, time: Normalized timeline from 0.0 - 1.0. 'duration' then determines the actual playback duration of this animation in seconds.
+                                                    // hover, value: target timeline position
+                                                    draw_icon: { pressed: 0.0, hover: [{time: 0.0, value: 1.0}] },
+                                                    draw_text: { pressed: 0.0, hover: [{time: 0.0, value: 1.0}] }
+                                                }
+                                            }
+                                
+                                            pressed = { // Behavior when the animation is started to the pressed-state
+                                                from: {all: Forward {duration: 0.2}}
+                                                apply: {
+                                                    draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0}, 
+                                                    draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0},
+                                                    draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0}
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // LAYOUT PROPERTIES
+
+                                    height: Fit,
+                                    // Element assumes the height of its children.
+
+                                    width: Fill,
+                                    // Element assumes the width of its children.
+
+                                    margin: 5.0
+                                    padding: { top: 3.0, right: 6.0, bottom: 3.0, left: 6.0 },
+                                    // Individual space between the element's border and its content
+                                    // for top and left.
+
+                                    flow: Right,
+                                    // Stacks children from left to right.
+
+                                    spacing: 5.0,
+                                    // A spacing of 10.0 between children.
+
+                                    align: { x: 0.5, y: 0.5 },
+                                    // Positions children at the left (x) bottom (y) corner of the parent.
+
+                                    line_spacing: 1.5
+                                }
+
+                                <H4> { text: "Preset: ButtonFlat"}
+                                <ButtonFlat> {
+                                    text: "Flat Button"
+                                }
+
+                                <H4> { text: "Preset: ButtonFlatter"}
+                                <ButtonFlatter> {
+                                    draw_icon: {
+                                        color: #f00,
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                    text: "Flatter Button"
+                                }
+
+                                <H3> { text: "Checkbox" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "ColorPicker" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Dock" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "DropDown" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "ExpandablePanel" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "FileTree" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "FlatList" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "FoldButton" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "FoldHeader" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Html" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Icon" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Image" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "ImageBlend" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Label" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "LinkLabel" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Markdown" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "NavControl" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "PageFlip" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Piano" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "PopupMenu" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "PortalList" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "RadioButton" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "RotatedImage" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "ScrollBar" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "ScrollBars" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "SlidePanel" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Slider" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "SlidesView" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Splitter" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "StackNavigation" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Tab" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "TabBar" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "TabCloseButton" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "TextInput" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "VectorLine" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "Video" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
+                                <H3> { text: "View" }
+                                <H4> { text: "Basic"}
+                                <H4> { text: "Typical"}
+                                <H4> { text: "Advanced"}
+
 
                             }
                         }

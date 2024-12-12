@@ -7,11 +7,297 @@ use crate::{
     };
 
 live_design!{
-    //import crate::base::View;
-
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    use crate::view_ui::CachedRoundedView;
+    
     DrawRadioButton = {{DrawRadioButton}} {}
-    RadioButtonBase = {{RadioButton}} {}
-    RadioButtonGroupBase = {{RadioButtonGroup }} {}
+    pub RadioButtonBase = {{RadioButton}} {}
+    pub RadioButtonGroupBase = {{RadioButtonGroup }} {}
+    
+    pub RadioButton = <RadioButtonBase> {
+        // TODO: adda  focus states
+        width: Fit, height: 16.,
+        align: { x: 0.0, y: 0.5 }
+        
+        icon_walk: { margin: { left: 20. } }
+        
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { left: 20. }
+        }
+        label_align: { y: 0.0 }
+        
+        draw_radio: {
+            uniform size: 7.0;
+            // uniform color_active: (THEME_COLOR_U_2)
+            // uniform color_inactive: (THEME_COLOR_D_4)
+            
+            // instance pressed: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
+            instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                match self.radio_type {
+                    RadioType::Round => {
+                        let sz = self.size;
+                        let left = sz + 1.;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        sdf.circle(left, c.y, sz);
+                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
+                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), (THEME_BEVELING))
+                        let isz = sz * 0.5;
+                        sdf.circle(left, c.y, isz);
+                        sdf.fill(
+                            mix(
+                                mix(
+                                    THEME_COLOR_U_HIDDEN,
+                                    THEME_COLOR_CTRL_HOVER,
+                                    self.hover
+                                ),
+                                THEME_COLOR_TEXT_ACTIVE,
+                                self.selected
+                            )
+                        );
+                        
+                    }
+                    RadioType::Tab => {
+                        let grad_top = 5.0;
+                        let grad_bot = 1.0;
+                        let body = mix(
+                            mix(self.bodytop, (THEME_COLOR_CTRL_HOVER), self.hover),
+                            self.bodybottom,
+                            self.selected
+                        );
+                        let body_transp = vec4(body.xyz, 0.0);
+                        let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.selected), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                        let bot_gradient = mix(
+                            mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.selected),
+                            top_gradient,
+                            clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                        );
+                        
+                        // the little drop shadow at the bottom
+                        let shift_inward = 0. * 1.75;
+                        sdf.move_to(shift_inward, self.rect_size.y);
+                        sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
+                        sdf.stroke(
+                            mix(THEME_COLOR_BEVEL_SHADOW,
+                                THEME_COLOR_U_HIDDEN,
+                                self.selected
+                            ), THEME_BEVELING * 2.
+                        );
+                            
+                        sdf.box(
+                            1.,
+                            1.,
+                            self.rect_size.x - 2.0,
+                            self.rect_size.y - 2.0,
+                            1.
+                        )
+                        sdf.fill_keep(body)
+                            
+                        sdf.stroke(bot_gradient, THEME_BEVELING * 1.5)
+                    }
+                }
+                return sdf.result
+            }
+        }
+            
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+                
+            uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
+                
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected,
+                        // self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_unselected,
+                    // self.color_selected,
+                    self.selected
+                )
+            }
+        }
+            
+        draw_icon: {
+            instance hover: 0.0
+            instance selected: 0.0
+            uniform color: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color,
+                        mix(self.color, #f, 0.4),
+                        self.hover
+                    ),
+                    mix(
+                        self.color_active,
+                        mix(self.color_active, #f, 0.75),
+                        self.hover
+                    ),
+                    self.selected
+                )
+            }
+        }
+            
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_radio: {hover: 0.0}
+                        draw_text: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_radio: {hover: 1.0}
+                        draw_text: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
+                    }
+                }
+            }
+            selected = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_radio: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
+                        draw_text: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_radio: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
+                        draw_text: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
+                    }
+                }
+            }
+        }
+    }
+        
+    pub RadioButtonCustom = <RadioButton> {
+        height: Fit,
+        draw_radio: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                return sdf.result
+            }
+        }
+        margin: { left: -17.5 }
+        label_walk: {
+            width: Fit, height: Fit,
+            margin: { left: (THEME_SPACE_2) }
+        }
+    }
+        
+    pub RadioButtonTextual = <RadioButton> {
+        height: Fit,
+        draw_radio: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                return sdf.result
+            }
+        }
+        label_walk: {
+            margin: 0.,
+            width: Fit, height: Fit,
+        }
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+                
+            uniform color_unselected: (THEME_COLOR_U_3)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_SELECTED)
+                
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
+        }
+    }
+        
+    pub RadioButtonImage = <RadioButton> { }
+        
+    pub RadioButtonTab = <RadioButton> {
+        height: Fit,
+        draw_radio: { radio_type: Tab }
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
+            
+        draw_text: {
+            instance hover: 0.0
+            instance selected: 0.0
+                
+            uniform color_unselected: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_unselected_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_selected: (THEME_COLOR_TEXT_HOVER)
+                
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected,
+                        // self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
+        }
+    }
+    
+    pub ButtonGroup = <CachedRoundedView> {
+        height: Fit, width: Fit,
+        spacing: 0.0,
+        flow: Right
+        align: { x: 0.0, y: 0.5 }
+        draw_bg: {
+            radius: 4.
+        }
+    }
+
+    pub RadioButtonGroupTab = <RadioButtonTab> {
+        height: Fit,
+        draw_radio: { radio_type: Tab }
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25), right: (THEME_SPACE_2 * 2.)}
+            
+    }
 }
 
 #[derive(Live, LiveHook, LiveRegister)]

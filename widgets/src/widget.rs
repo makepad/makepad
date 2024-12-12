@@ -1,6 +1,7 @@
 pub use crate::register_widget;
 use {
     crate::makepad_draw::*,
+    crate::designer_data::DesignerDataToWidget,
     std::any::TypeId,
     std::cell::RefCell,
     std::collections::BTreeMap,
@@ -17,7 +18,7 @@ pub enum WidgetCache {
     Clear,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WidgetUid(pub u64);
 
 pub trait WidgetDesign: WidgetNode {}
@@ -102,6 +103,10 @@ pub trait Widget: WidgetNode {
         while self.draw(cx, scope).is_step() {}
     }
     
+    fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
+       self.draw(cx, &mut Scope::empty())
+    }
+    
     fn draw_all_unscoped(&mut self, cx: &mut Cx2d) {
         self.draw_all(cx, &mut Scope::empty());
     }
@@ -137,6 +142,10 @@ pub trait Widget: WidgetNode {
         Self: 'static,
     {
         LiveType::of::<Self>()
+    }
+
+    fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
+        UiRunner::new(self.widget_uid().0 as usize)
     }
 }
 
@@ -295,6 +304,10 @@ impl WidgetSet {
             widget_set: self,
             index: 0
         }
+    }
+    
+    pub fn filter_actions<'a>(&'a self, actions:&'a Actions)-> impl Iterator<Item = &'a WidgetAction>{
+        actions.filter_widget_actions_set(self)
     }
 }
 
@@ -504,14 +517,22 @@ impl WidgetRef {
         }
         WidgetRef::empty()
     }
-
+    
+    // depricate this one
     pub fn widgets(&self, paths: &[&[LiveId]]) -> WidgetSet {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.widgets(paths);
         }
         WidgetSet::default()
     }
-
+    
+    pub fn widget_set(&self, paths: &[&[LiveId]]) -> WidgetSet {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.widgets(paths);
+        }
+        WidgetSet::default()
+    }
+    
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
@@ -533,6 +554,18 @@ impl WidgetRef {
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw(cx, scope).step() {
+                if nd.is_empty() {
+                    return DrawStep::make_step_here(self.clone());
+                }
+                return DrawStep::make_step_here(nd);
+            }
+        }
+        DrawStep::done()
+    }
+    
+    pub fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            if let Some(nd) = inner.widget.draw(cx, &mut Scope::empty()).step() {
                 if nd.is_empty() {
                     return DrawStep::make_step_here(self.clone());
                 }
@@ -574,6 +607,10 @@ impl WidgetRef {
             return inner.widget.action_data()
         }
         None
+    }
+        
+    pub fn filter_actions<'a>(&'a self, actions:&'a Actions)-> impl Iterator<Item = &'a WidgetAction>{
+        actions.filter_widget_actions(self.widget_uid())
     }
     
     pub fn draw_all_unscoped(&self, cx: &mut Cx2d) {
@@ -639,7 +676,16 @@ impl WidgetRef {
         self.redraw(cx);
     }
     
-    
+    fn store_designer_backref(&self, cx:&mut Cx, apply:&mut Apply, index:usize){
+        if let Some(scope) = &mut apply.scope{
+            if let Some(file_id) = apply.from.file_id(){
+                if let Some(dd) = scope.data.get_mut::<DesignerDataToWidget>(){
+                    let ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+                    dd.live_ptr_to_widget.insert(ptr, self.clone());
+                }
+            }                        
+        }
+    }
     fn apply(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut inner = self.0.borrow_mut();
         if let LiveValue::Class { live_type, .. } = nodes[index].value {
@@ -648,6 +694,7 @@ impl WidgetRef {
                     *inner = None; // type changed, drop old component
                     log!("TYPECHANGE {:?}", nodes[index]);
                 } else {
+                    self.store_designer_backref(cx, apply, index);
                     return component.widget.apply(cx, apply, index, nodes);
                 }
             }
@@ -663,6 +710,7 @@ impl WidgetRef {
                     panic!()
                 }
                 *inner = Some(WidgetRefInner { widget: component });
+                self.store_designer_backref(cx, apply, index);
                 if let Some(component) = &mut *inner {
                     return component.widget.apply(cx, apply, index, nodes);
                 }
@@ -675,6 +723,7 @@ impl WidgetRef {
                 );
             }
         } else if let Some(component) = &mut *inner {
+            self.store_designer_backref(cx, apply, index);
             return component.widget.apply(cx, apply, index, nodes);
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
@@ -875,6 +924,8 @@ pub trait WidgetActionsApi {
         ) -> impl Iterator<Item = &T>
         where
         T: Clone;
+        
+    fn filter_widget_actions_set(&self, set: &WidgetSet) -> impl Iterator<Item = &WidgetAction>;
 }
 
 pub trait WidgetActionOptionApi {
@@ -967,7 +1018,7 @@ impl WidgetActionsApi for Actions {
         }
         None
     }
-
+    
     fn find_widget_action_cast<T: WidgetActionTrait + 'static + Send>(
         &self,
         widget_uid: WidgetUid,
@@ -990,6 +1041,7 @@ impl WidgetActionsApi for Actions {
                 .and_then(|action| (action.widget_uid == widget_uid).then_some(action))
         })
     }
+    
 
     fn filter_widget_actions_cast<T: WidgetActionTrait >(
         &self,
@@ -1025,6 +1077,16 @@ impl WidgetActionsApi for Actions {
                     None
                 }
             })
+        })
+    }
+        
+    fn filter_widget_actions_set(&self, set:&WidgetSet) -> impl Iterator<Item = &WidgetAction> {
+        self.iter().filter_map(move |action| {
+            action
+            .downcast_ref::<WidgetAction>()
+            .and_then(|action| (
+                set.iter().any(|w| action.widget_uid == w.widget_uid())
+            ).then_some(action))
         })
     }
 }

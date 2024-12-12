@@ -7,7 +7,179 @@ use {
 };
 
 live_design!{
-    LabelBase = {{Label}} {}
+    link widgets;
+    use link::theme::*;
+    
+    pub LabelBase = {{Label}} {}
+    pub Label = <LabelBase> {
+        width: Fit, height: Fit,
+        draw_text: {
+            color: (THEME_COLOR_TEXT_DEFAULT),
+            text_style: <THEME_FONT_REGULAR> {},
+            wrap: Word
+        }
+    }
+    
+    pub H1 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_1 * 0.25)}
+        draw_text: {
+            wrap: Word
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_1)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H1"
+    }
+    
+    pub H1italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_1 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_1)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H1"
+    }
+    
+    pub H2 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_2 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_2)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H2"
+    }
+    
+    pub H2italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_2 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_2)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H2"
+    }
+    
+    pub H3 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_3 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_3)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H3"
+    }
+    
+    pub H3italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_3 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_3)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H3"
+    }
+    
+    pub H4 = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_4 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_4)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H4"
+    }
+    
+    pub H4italic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_FONT_SIZE_4 * 0.25)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_4)
+            }
+            color: (THEME_COLOR_TEXT_HL)
+        }
+        text: "Headline H4"
+    }
+    
+    pub P = <Label> {
+        width: Fill,
+        margin: 0.,
+        padding: 0.,
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_REGULAR> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+    
+    pub Pbold = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+    
+    pub Pitalic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+    
+    pub Pbolditalic = <Label> {
+        width: Fill,
+        margin: {top: (THEME_SPACE_2 * 0.25), bottom: (THEME_FONT_SIZE_P * 0.5)}
+        draw_text: {
+            text_style: <THEME_FONT_BOLD_ITALIC> {
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
+        text: "Paragraph"
+    }
+
+    
 }
 
 #[derive(Clone, Debug, DefaultNone)]

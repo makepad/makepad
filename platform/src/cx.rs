@@ -21,6 +21,7 @@ use {
         draw_matrix::CxDrawMatrixPool,
         os::{CxOs},
         debug::Debug,
+        display_context::DisplayContext,
         performance_stats::PerformanceStats,
         event::{
             DrawEvent,
@@ -53,7 +54,7 @@ use {
  
 pub struct Cx {
     pub (crate) os_type: OsType,
-    pub (crate) in_makepad_studio: bool,
+    pub in_makepad_studio: bool,
     pub demo_time_repaint: bool,
     pub (crate) gpu_info: GpuInfo,
     pub (crate) xr_capabilities: XrCapabilities,
@@ -109,6 +110,9 @@ pub struct Cx {
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
     pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
+    pub (crate) in_draw_event: bool,
+
+    pub display_context: DisplayContext,
     
     pub debug: Debug,
 
@@ -120,6 +124,15 @@ pub struct Cx {
     pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
+
+    /// Event ID that triggered a widget query cache invalidation.
+    /// When Some(event_id), indicates that widgets should clear their query caches
+    /// on the next event loop cycle. This ensures all views process the cache clear
+    /// before it's reset to None.
+    /// 
+    /// This is primarily used when adaptive views change their active variant,
+    /// as the widget hierarchy changes require parent views to rebuild their widget queries.
+    pub widget_query_invalidation_event: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -238,6 +251,7 @@ impl Cx {
             null_texture,
             cpu_cores: 8,
             in_makepad_studio: false,
+            in_draw_event: false,
             os_type: OsType::Unknown,
             gpu_info: Default::default(),
             xr_capabilities: Default::default(),
@@ -295,6 +309,10 @@ impl Cx {
 
             self_ref: None,
             performance_stats: Default::default(),
+
+            display_context: Default::default(),
+
+            widget_query_invalidation_event: None,
         }
     }
 }

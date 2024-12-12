@@ -62,6 +62,8 @@ pub mod performance_view;
 pub mod nav_control;
 
 pub mod view;
+pub mod adaptive_view;
+pub mod view_ui;
 pub mod widget;
 pub mod widget_match_event;
 pub mod toggle_panel;
@@ -71,24 +73,31 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
-pub mod base;
 pub mod theme_desktop_dark;
+pub mod theme_desktop_light;
+pub mod theme_mobile_dark;
+pub mod theme_mobile_light;
 pub mod image_cache;
 pub mod bare_step;
 pub mod turtle_step;
 
 pub mod designer;
+pub mod designer_dummy;
+pub mod designer_theme;
 pub mod designer_outline_tree;
 pub mod designer_view;
 pub mod designer_outline;
 pub mod designer_data;
 pub mod designer_toolbox;
 
+pub mod defer_with_redraw;
+
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     cached_widget::*,
     view::*,
+    adaptive_view::*,
     image::*,
     image_blend::*,
     icon::*,
@@ -123,6 +132,7 @@ pub use crate::{
     slides_view::{SlidesView},
     widget_match_event::WidgetMatchEvent,
     toggle_panel::*,
+    defer_with_redraw::*,
     widget::{
         WidgetSet,
         WidgetUid,
@@ -149,14 +159,24 @@ pub use crate::{
 
 
 pub fn live_design(cx: &mut Cx) {
+    cx.link(live_id!(theme), live_id!(theme_desktop_dark));
+    if cx.in_makepad_studio() {
+        cx.link(live_id!(designer), live_id!(designer_real));
+    }
+    else{
+        cx.link(live_id!(designer), live_id!(designer_dummy));
+    }
+    
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
     crate::performance_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
-    crate::base::live_design(cx);
     crate::theme_desktop_dark::live_design(cx);
+    crate::theme_desktop_light::live_design(cx);
+    crate::theme_mobile_dark::live_design(cx);
+    crate::theme_mobile_light::live_design(cx);
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
@@ -170,6 +190,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::popup_notification::live_design(cx);
     crate::video::live_design(cx);
     crate::view::live_design(cx);
+    crate::adaptive_view::live_design(cx);
+    crate::view_ui::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
     crate::link_label::live_design(cx);
@@ -208,7 +230,9 @@ pub fn live_design(cx: &mut Cx) {
     crate::toggle_panel::live_design(cx);
     crate::cached_widget::live_design(cx);
     
+    crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
+    crate::designer_dummy::live_design(cx);
     crate::designer_view::live_design(cx);
     crate::designer_outline::live_design(cx);
     crate::designer_outline_tree::live_design(cx);

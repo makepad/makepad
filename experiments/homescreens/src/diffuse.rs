@@ -10,7 +10,7 @@ use crate::{
 
 
 live_design!{
-    DiffuseThing = {{DiffuseThing}} 
+    pub DiffuseThing = {{DiffuseThing}} 
     {
         height: 100,
         width: 100,

@@ -1,12 +1,10 @@
 use {
     crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
-    std::{
-        cell::RefCell,
-    },
+    std::cell::RefCell,
 };
 
 live_design! {
-    ViewBase = {{View}} {debug:None}
+    pub ViewBase = {{View}} {debug:None}
 }
 
 // maybe we should put an enum on the bools like
@@ -594,14 +592,14 @@ impl WidgetNode for View {
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
                 }
-                #[cfg(not(ignore_query))]
+               /* #[cfg(not(ignore_query))]
                 if local_results.0.len() == 0{
                     log!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
                 }
                 #[cfg(panic_query)]
                 if local_results.0.len() == 0{
                     panic!("Widget query not found: {:?} on view {:?}", path, self.widget_uid());
-                }
+                }*/
                 self.find_cache.borrow_mut().push((hash, local_results));
             }
             WidgetCache::No => {
@@ -638,6 +636,12 @@ impl Widget for View {
             if actions.len() > 0 {
                 cx.redraw_area_and_children(self.area);
             };
+        }
+
+        // If the UI tree has changed significantly (e.g. AdaptiveView varaints changed),
+        // we need to clear the cache and re-query widgets.
+        if cx.widget_query_invalidation_event.is_some() {
+            self.find_cache.borrow_mut().clear();
         }
 
         match &self.event_order {
@@ -782,7 +786,7 @@ impl Widget for View {
                                 initial: true,
                             },
                         );
-                        texture_cache.pass.add_color_texture(
+                        texture_cache.pass.set_color_texture(
                             cx,
                             &texture_cache.color_texture,
                             PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),

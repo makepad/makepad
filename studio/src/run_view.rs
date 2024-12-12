@@ -6,9 +6,9 @@ use crate::{
 };
 
 live_design!{
-    import makepad_draw::shader::std::*;
+    use link::shaders::*;
     
-    RunView = {{RunView}} {
+    pub RunView = {{RunView}} {
         draw_app: {
             texture tex: texture2d
             instance recompiling: 0.0

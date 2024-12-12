@@ -17,9 +17,10 @@ use {
 };
 
 live_design! {
-    import makepad_draw::shader::std::*;
-    import makepad_widgets::theme_desktop_dark::*;
-
+    use link::shaders::*;
+    use link::theme::*;
+    use link::widgets::*;
+    
     TokenColors = {{TokenColors}} {
         whitespace: #6E6E6E,
         delimiter: #a,
@@ -112,7 +113,7 @@ live_design! {
 
     DrawCodeText = {{DrawCodeText}} { }
 
-    CodeEditor = {{CodeEditor}} {
+    pub CodeEditor = {{CodeEditor}} {
         height: Fill, width: Fill,
         margin: 0,
         pad_left_top: vec2(10.0,10.0)
@@ -547,7 +548,21 @@ impl CodeEditor {
         pos: Position,
         session: &mut CodeSession,
     ) {
-        session.set_selection(pos, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        session.set_selection(session.clamp_position(pos), Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
+        self.redraw(cx);
+    }
+    
+    pub fn set_selection_and_scroll(
+        &mut self,
+        cx: &mut Cx,
+        start: Position,
+        end: Position,
+        session: &mut CodeSession,
+    ) {
+        
+        session.set_selection(session.clamp_position(start), Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+        session.move_to(session.clamp_position(end), Affinity::Before, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
     }

@@ -102,7 +102,7 @@ impl CodeSession {
             selection_state.selections.as_selections()
         })
     }
-
+    
     pub fn last_added_selection_index(&self) -> Option<usize> {
         self.selection_state.borrow().last_added_selection_index
     }
@@ -215,7 +215,8 @@ impl CodeSession {
         }
     }
     
-    fn clamp_position(&self, mut position: Position) -> Position {
+    
+    pub fn clamp_position(&self, mut position: Position) -> Position {
         let text = self.document().as_text();
         let lines = text.as_lines();
         if position.line_index >= lines.len() {
@@ -697,7 +698,7 @@ impl CodeSession {
                     } else {
                         // There is at least one non-whitespace character before the cursor on the
                         // current line, so delete backwards by a single grapheme.
-                        let byte_count = lines[position.line_index]
+                        let byte_count = lines[position.line_index][..position.byte_index]
                             .graphemes()
                             .next_back()
                             .unwrap()

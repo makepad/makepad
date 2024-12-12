@@ -1,0 +1,11 @@
+[package]
+name = "btree_vec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+array_vec = { path = "../array_vec" }
+btree = { path = "../btree" }
+
+[dev-dependencies]
+proptest = "1.4.0"

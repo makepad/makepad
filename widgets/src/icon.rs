@@ -5,7 +5,25 @@ use crate::{
 };
 
 live_design! {
-    IconBase = {{Icon}} {}
+    link widgets
+    pub IconBase = {{Icon}} {}
+    pub Icon = <IconBase> {
+        width: Fit,
+        height: Fit,
+        
+        icon_walk: {
+            margin: {left: 5.0},
+            width: Fit,
+            height: Fit,
+        }
+        
+        draw_bg: {
+            instance color: #0000,
+            fn pixel(self) -> vec4 {
+                return self.color;
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook, Widget)]

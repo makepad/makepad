@@ -7,8 +7,14 @@ use crate::{
 use std::collections::HashMap;
 
 live_design!{
-    WindowMenuBase = {{WindowMenu}}{
+    link widgets;
+    use link::theme::*;
+    use makepad_draw::shader::std::*;
+    
+    pub WindowMenuBase = {{WindowMenu}}{
     }
+    
+    pub WindowMenu = <WindowMenuBase> { height: 0, width: 0, }
 }
 
 #[derive(Clone, Debug, Live, LiveHook)]

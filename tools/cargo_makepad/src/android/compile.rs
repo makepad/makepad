@@ -77,6 +77,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->Stri
         <uses-permission android:name="android.permission.BLUETOOTH"/>
         <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
         <uses-permission android:name="android.permission.CAMERA"/>
+        <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
         <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
         <uses-permission android:name="android.permission.USE_BIOMETRIC" />
         <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
@@ -93,7 +94,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->Stri
 fn main_java(url:&str)->String{
     format!(r#"
         package {url};
-        import dev.makepad.android.MakepadActivity;
+        use dev.makepad.android.MakepadActivity;
         public class MakepadApp extends MakepadActivity{{
         }}
     "#)

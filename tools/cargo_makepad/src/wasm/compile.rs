@@ -41,7 +41,7 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
             wasm._has_thread_support = true;
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
-            import {{WasmWebGL}} from './makepad_platform/web_gl.js'
+            use {{WasmWebGL}} from './makepad_platform/web_gl.js'
             ")
     } else {
         format!("

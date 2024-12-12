@@ -2,9 +2,9 @@ use crate::makepad_platform::*;
 
 live_design! {
 
-    import makepad_widgets::theme_desktop_dark::*;
-    import makepad_widgets::base::*;
-    import makepad_draw::shader::std::*;
+    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets::base::*;
+    use makepad_draw::shader::std::*;
     const FONT_SIZE_H2 = 10;
     const FONT_SIZE_REGULAR = 8;
 
