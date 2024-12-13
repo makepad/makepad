@@ -661,21 +661,9 @@ impl DrawText {
                         let mut iter = glyph_infos.iter().peekable();
                         while let Some(glyph_info) = iter.next() {
                             let glyph_start = start + glyph_info.cluster;
-
-                            let glyph_end = if let Some(next_info) = iter.peek() {
-                                start + next_info.cluster
-                            } else {
-                                // If it is the last glyph, use the length of the entire string
-                                start + string.len()
-                            };
-                            // Add safety checks.
-                            if glyph_end <= glyph_start || glyph_start >= text.len() {
-                                continue;
-                            }
-                            // Use safe maximum boundaries
-                            let safe_end = glyph_end.min(text.len());
-                            let grapheme_count = text[glyph_start..safe_end].graphemes(true).count();
+                            let glyph_end = start + iter.peek().map_or(string.len(), |glyph_info| glyph_info.cluster);
                             let glyph_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_atlas);
+                            let grapheme_count = text[glyph_start..glyph_end].graphemes(true).count();
                             let glyph_width_per_grapheme = glyph_width / grapheme_count as f64;
                             for (grapheme_start, grapheme) in text[glyph_start..glyph_end].grapheme_indices(true) {
                                 if target.index < glyph_start + grapheme_start + grapheme.len() {
