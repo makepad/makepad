@@ -494,6 +494,15 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         worker.postMessage(this.alloc_thread_stack(args.context_ptr, args.timer));
+        worker.onmessage = (e) => {
+            // try to preemptively send a signal to ui to read from the websocket
+            setTimeout(() => {
+                if (this.exports.wasm_check_signal() == 1) {
+                    this.to_wasm.ToWasmSignal();
+                    this.do_wasm_pump();
+                }
+            }, 1);
+        }
         
         this.workers.push(worker);
     }

@@ -68,6 +68,7 @@ onmessage = async function(e) {
                 wasm.exports.wasm_web_socket_error(id, err.ptr, err.len);
             }
             web_socket.onmessage = e => {
+                postMessage("SignalToUI");  // preemptively sends the signal to ui to read from the websocket
                 if(typeof e.data == "string"){
                     let data = string_to_u8("" + e.data);
                     wasm.exports.wasm_web_socket_string(id, data.ptr, data.len);
