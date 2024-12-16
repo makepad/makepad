@@ -375,30 +375,30 @@ live_design!{
                             <H4> { text: "Inline Label", width: 175.}
                             <TextInput> { empty_message: "Inline Label" }
                         }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "Secret", width: 175.}
-                            <TextInput> { text: "1234567", empty_message: "Password", secret: true }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "On focus select all", width: 175.}
-                            <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "Read only", width: 175.}
-                            <TextInput> { text: "You can't change me", read_only: true }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "ASCII only", width: 175.}
-                            <TextInput> { empty_message: "No fancy characters", ascii_only: true }
-                        }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "Secret", width: 175.}
+                        //     <TextInput> { text: "1234567", empty_message: "Password", secret: true }
+                        // }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "On focus select all", width: 175.}
+                        //     <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
+                        // }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "Read only", width: 175.}
+                        //     <TextInput> { text: "You can't change me", read_only: true }
+                        // }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "ASCII only", width: 175.}
+                        //     <TextInput> { empty_message: "No fancy characters", ascii_only: true }
+                        // }
                         // <View> {
                         //     height: Fit, width: Fill,
                         //     spacing: (THEME_SPACE_2),
