@@ -29,6 +29,7 @@ live_design!{
             instance hover: float
             instance focus: float
             instance drag: float
+            instance label_size: 0.0
             
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
@@ -103,10 +104,6 @@ live_design!{
             
         text_input: <TextInput> {
             width: Fit, padding: 0.,
-            // cursor_margin_bottom: (THEME_SPACE_1),
-            // cursor_margin_top: (THEME_SPACE_1),
-            // select_pad_edges: 3.0
-            // cursor_size: 2.0,
             empty_message: "0",
             is_numeric_only: true,
                 
@@ -213,8 +210,10 @@ live_design!{
             },
         }
         draw_slider: {
-            instance line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG)
-            instance bipolar: 0.0
+            instance line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG),
+            instance bipolar: 0.0,
+            uniform label_size: 0.0,
+
             fn pixel(self) -> vec4 {
                 let nub_size = 3
                     
@@ -276,6 +275,87 @@ live_design!{
             }
         }
     }
+
+    pub SliderCompact = <Slider> {
+        height: 18.,
+        text: "CutOff1",
+        // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
+
+        text_input: {
+            empty_message: "0",
+            is_numeric_only: true,
+            margin: { right: 7.5, top: 1. } 
+
+            draw_text: {
+                fn get_color(self) -> vec4 {
+                    return
+                    mix(
+                        mix(
+                            mix(THEME_COLOR_U_5, THEME_COLOR_WHITE, self.hover),
+                            THEME_COLOR_WHITE,
+                            self.focus
+                        ),
+                        mix(THEME_COLOR_U_5, THEME_COLOR_WHITE, self.hover),
+                        self.is_empty
+                    )
+                }
+            }
+        }
+
+        draw_slider: {
+            uniform peak: 3.0;
+            instance bipolar: 0.0;
+            uniform color_a: (THEME_COLOR_D_1);
+            uniform color_b: (THEME_COLOR_D_4);
+            uniform label_size: 75.0;
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+
+                let nub_size = 5.;
+                let offset_left = self.label_size;
+                let offset_top = 8.5;
+                let padding = 5.0;
+                let nub_x = self.slide_pos * (self.rect_size.x - offset_left - (nub_size + padding) * 2.0);
+
+                // Background
+                sdf.box(offset_left, 0.0, self.rect_size.x - offset_left, self.rect_size.y, 5.);
+                sdf.fill_keep(
+                    mix(
+                        mix((THEME_COLOR_D_2), (THEME_COLOR_D_HIDDEN), pow(self.pos.y, 1.0)),
+                        mix((THEME_COLOR_D_2), (THEME_COLOR_BEVEL_LIGHT) * 0.1, pow(self.pos.y, 1.0)),
+                        self.drag
+                    )
+                )
+                sdf.stroke(mix(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_SHADOW * 1.25, self.drag), THEME_COLOR_BEVEL_LIGHT, pow(self.pos.y, 2.0)), 1.0)
+
+                offset_left = offset_left + nub_size + padding;
+
+                // Amount bar
+                sdf.move_to(mix(offset_left, self.rect_size.x, self.bipolar), offset_top);
+                sdf.line_to(offset_left + nub_x, offset_top);
+                sdf.stroke(
+                    mix(mix(
+                        mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)),
+                        mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)), self.hover),
+                        mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)),
+                        self.drag),
+                    6.5
+                )
+
+                // Nub
+                sdf.circle(offset_left + nub_x, self.rect_size.y * 0.45, mix(3., nub_size, self.hover));
+                sdf.fill_keep(mix(
+                    mix(THEME_COLOR_U_2, THEME_COLOR_U_3, self.hover),
+                    THEME_COLOR_U_4,
+                    self.drag
+                ))
+                
+                return sdf.result
+            }
+        }
+    }
+
 }
 
 #[derive(Live, LiveHook)]
@@ -299,8 +379,9 @@ impl LiveHook for Slider{
 #[repr(C)]
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
+    #[live] offset_left: f32,
     #[live] slide_pos: f32,
-    #[live] slider_type: SliderType
+    #[live] slide_posr_type: SliderType
 }
 
 #[derive(Live, Widget)]
@@ -508,8 +589,9 @@ impl Widget for Slider {
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
+                let offset_left = 75.;
                 if let Some(start_pos) = self.dragging {
-                    self.relative_value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
+                    self.relative_value = (start_pos + rel.x / (fe.rect.size.x - offset_left)).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input_and_redraw(cx);
