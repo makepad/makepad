@@ -445,6 +445,7 @@ live_design!{
                     <ZooGroup> {
                         width: Fill, height: Fit,
                         flow: Right,
+                        spacing: 10.0,
                         align: { x: 0., y: 0.}
                         <View> {
                             width: Fill, height: Fit,
@@ -464,10 +465,33 @@ live_design!{
                             <SliderBig> { text: "precision", precision: 20 }
                             <SliderBig> { text: "step", step: 0.1 }
                         }
+                        <View> {
+                            width: Fill, height: Fit,
+                            flow: Down,
+                            <SliderCompact> {
+                                text: "Colored",
+                                draw_slider: {
+                                    peak: 8.0;
+                                    color_a: (#FFCC00),
+                                    color_b: #f00,
+                                }
+                            }
+                            <SliderCompact> {
+                                text: "Solid",
+                                draw_slider: {
+                                    color_a: #28,
+                                    color_b: #28,
+                                }
+                            }
+                            <SliderCompact> { text: "min/max", min: 0., max: 100. }
+                            <SliderCompact> { text: "precision", precision: 20 }
+                            <SliderCompact> { text: "step", step: 0.1 }
+                        }
                     }
                 }
 
                 <ZooHeader> {
+                    title = {text:"<DropDown>"}
                     title = {text:"<DropDown>"}
                     <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
                     <ZooGroup> {
