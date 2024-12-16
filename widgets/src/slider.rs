@@ -308,18 +308,17 @@ live_design!{
             uniform color_a: (THEME_COLOR_D_1);
             uniform color_b: (THEME_COLOR_D_4);
             uniform label_size: 75.0;
+            offset_left: 75.0;
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-
                 let nub_size = 5.;
-                let offset_left = self.label_size;
                 let offset_top = 8.5;
                 let padding = 5.0;
-                let nub_x = self.slide_pos * (self.rect_size.x - offset_left - (nub_size + padding) * 2.0);
+                let nub_x = self.slide_pos * (self.rect_size.x - 75.0 - (nub_size + padding) * 2.0);
 
                 // Background
-                sdf.box(offset_left, 0.0, self.rect_size.x - offset_left, self.rect_size.y, 5.);
+                sdf.box(self.offset_left, 0.0, self.rect_size.x - self.offset_left, self.rect_size.y, 5.);
                 sdf.fill_keep(
                     mix(
                         mix((THEME_COLOR_D_2), (THEME_COLOR_D_HIDDEN), pow(self.pos.y, 1.0)),
@@ -327,13 +326,14 @@ live_design!{
                         self.drag
                     )
                 )
+
                 sdf.stroke(mix(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_SHADOW * 1.25, self.drag), THEME_COLOR_BEVEL_LIGHT, pow(self.pos.y, 2.0)), 1.0)
 
-                offset_left = offset_left + nub_size + padding;
+                let offset_l2 = self.offset_left + nub_size + padding;
 
                 // Amount bar
-                sdf.move_to(mix(offset_left, self.rect_size.x, self.bipolar), offset_top);
-                sdf.line_to(offset_left + nub_x, offset_top);
+                sdf.move_to(mix(offset_l2, self.rect_size.x, self.bipolar), offset_top);
+                sdf.line_to(offset_l2 + nub_x, offset_top);
                 sdf.stroke(
                     mix(mix(
                         mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)),
@@ -344,7 +344,7 @@ live_design!{
                 )
 
                 // Nub
-                sdf.circle(offset_left + nub_x, self.rect_size.y * 0.45, mix(3., nub_size, self.hover));
+                sdf.circle(offset_l2 + nub_x, self.rect_size.y * 0.45, mix(3., nub_size, self.hover));
                 sdf.fill_keep(mix(
                     mix(THEME_COLOR_U_2, THEME_COLOR_U_3, self.hover),
                     THEME_COLOR_U_4,
@@ -589,9 +589,9 @@ impl Widget for Slider {
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
-                let offset_left = 75.;
                 if let Some(start_pos) = self.dragging {
-                    self.relative_value = (start_pos + rel.x / (fe.rect.size.x - offset_left)).max(0.0).min(1.0);
+                    println!("The value of my_variable is: {}", self.draw_slider.offset_left);
+                    self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.offset_left as f64)).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input_and_redraw(cx);
