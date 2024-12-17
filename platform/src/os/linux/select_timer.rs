@@ -151,12 +151,14 @@ impl SelectTimers {
         
         // Remove the timer from the list.
         let delta_timeout = self.timers.remove(index).unwrap().delta_timeout;
+
+        // self.timers.remove(index);
         
         // The timer succeeding the removed timer now has a different timer preceding it, so we need
         // to adjust its `delta timeout`.
-        if index < self.timers.len() {
-            self.timers[index].delta_timeout += delta_timeout;
-        }
+        // if index < self.timers.len() {
+        //     self.timers[index].delta_timeout += delta_timeout;
+        // }
     }
     
 }
