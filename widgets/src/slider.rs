@@ -278,7 +278,8 @@ live_design!{
         }
     }
 
-    pub SLIDER_CMPCT_ROUNDING = 5.0;
+
+    pub SLIDER_CMPCT_ROUNDING = (THEME_CORNER_RADIUS * 2.);
     pub SLIDER_CMPCT_PEAK = 5.0;
     pub SLIDER_CMPCT_HANDLE_SIZE = 4.0;
 
@@ -287,20 +288,21 @@ live_design!{
     pub SLIDER_CMPCT_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
     pub SLIDER_CMPCT_LABEL_HOVER_COLOR = (THEME_COLOR_TEXT_DEFAULT);
 
-    pub SLIDER_CMPCT_BG_COLOR_A = (THEME_COLOR_D_2);
-    pub SLIDER_CMPCT_BG_HOVER_COLOR_A = (THEME_COLOR_D_2);
-    pub SLIDER_CMPCT_BG_DRAG_COLOR_A = (THEME_COLOR_D_3);
+    pub SLIDER_CMPCT_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub SLIDER_CMPCT_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub SLIDER_CMPCT_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
     pub SLIDER_CMPCT_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
     pub SLIDER_CMPCT_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
     pub SLIDER_CMPCT_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
 
-    pub SLIDER_CMPCT_DATA_FONTSIZE = 8.0;
-    pub SLIDER_CMPCT_DATA_COLOR = (THEME_COLOR_U_3);
-    pub SLIDER_CMPCT_DATA_HOVER_COLOR = (THEME_COLOR_U_4);
-    pub SLIDER_CMPCT_DATA_FOCUS_COLOR = (THEME_COLOR_U_5);
-    pub SLIDER_CMPCT_DATA_FOCUS_HOVER_COLOR = (THEME_COLOR_WHITE);
-    pub SLIDER_CMPCT_DATA_EMPTY_COLOR = (THEME_COLOR_U_3);
-    pub SLIDER_CMPCT_DATA_EMPTY_HOVER_COLOR = (THEME_COLOR_U_4);
+    pub SLIDER_CMPCT_DATA_FONT_TOPMARGIN = 3.0;
+    pub SLIDER_CMPCT_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
+    pub SLIDER_CMPCT_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+    pub SLIDER_CMPCT_DATA_HOVER_COLOR = (THEME_COLOR_TEXT_HOVER);
+    pub SLIDER_CMPCT_DATA_FOCUS_COLOR = (THEME_COLOR_TEXT_FOCUSED);
+    pub SLIDER_CMPCT_DATA_FOCUS_HOVER_COLOR = (THEME_COLOR_TEXT_FOCUSED);
+    pub SLIDER_CMPCT_DATA_EMPTY_COLOR = (THEME_COLOR_TEXT_PLACEHOLDER);
+    pub SLIDER_CMPCT_DATA_EMPTY_HOVER_COLOR = (THEME_COLOR_TEXT_PLACEHOLDER);
 
     pub SLIDER_CMPCT_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
     pub SLIDER_CMPCT_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
@@ -309,12 +311,13 @@ live_design!{
     pub SLIDER_CMPCT_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
     pub SLIDER_CMPCT_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
 
-    pub SLIDER_CMPCT_VAL_COLOR_A = (THEME_COLOR_D_1);
-    pub SLIDER_CMPCT_VAL_HOVER_COLOR_A = (THEME_COLOR_D_2);
-    pub SLIDER_CMPCT_VAL_DRAG_COLOR_A = (THEME_COLOR_D_2);
-    pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_D_4);
-    pub SLIDER_CMPCT_VAL_HOVER_COLOR_B = (THEME_COLOR_BLACK);
-    pub SLIDER_CMPCT_VAL_DRAG_COLOR_B = (THEME_COLOR_BLACK);
+    pub SLIDER_CMPCT_VAL_PADDING = 2.5;
+    pub SLIDER_CMPCT_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
+    pub SLIDER_CMPCT_VAL_HOVER_COLOR_A = (THEME_COLOR_AMOUNT_HOVER * 0.8);
+    pub SLIDER_CMPCT_VAL_DRAG_COLOR_A = (THEME_COLOR_AMOUNT_ACTIVE * 0.8);
+    pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.3);
+    pub SLIDER_CMPCT_VAL_HOVER_COLOR_B = (THEME_COLOR_AMOUNT_HOVER * 1.3);
+    pub SLIDER_CMPCT_VAL_DRAG_COLOR_B = (THEME_COLOR_AMOUNT_ACTIVE * 1.3);
 
     pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_U_4);
     pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
@@ -325,7 +328,7 @@ live_design!{
 
     pub SliderCompact = <Slider> {
         height: 18.,
-        text: "CutOff1",
+        text: "Label",
 
         draw_text: {
             instance hover: 0.0;
@@ -346,7 +349,7 @@ live_design!{
         text_input: {
             empty_message: "0",
             is_numeric_only: true,
-            margin: { right: 7.5, top: (SLIDER_CMPCT_DATA_FONTSIZE * 0.25) } 
+            margin: { right: 7.5, top: (SLIDER_CMPCT_DATA_FONT_TOPMARGIN) } 
 
             draw_text: {
                 text_style: <THEME_FONT_REGULAR> {
@@ -387,7 +390,7 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let handle_size = (SLIDER_CMPCT_HANDLE_SIZE);
-                let padding = 2.5;
+                let padding = (SLIDER_CMPCT_VAL_PADDING);
 
                 let handle_x = self.slide_pos * (self.rect_size.x - self.offset_left - (handle_size + padding) * 2.0);
 
@@ -425,7 +428,6 @@ live_design!{
                 sdf.box(
                     self.offset_left + padding,
                     padding,
-                    // ((self.rect_size.x - self.offset_left) * self.slide_pos) - (padding * 2.),
                     (reprojected_length * self.slide_pos) + padding * 2. + (handle_size * 2.0),
                     self.rect_size.y - padding * 2.,
                     SLIDER_CMPCT_ROUNDING * 0.75
@@ -446,8 +448,6 @@ live_design!{
                 // Handle
                 sdf.circle(
                     (reprojected_length * self.slide_pos) + self.offset_left + padding * 2. + handle_size,
-                    // ((self.rect_size.x - self.offset_left) * self.slide_pos) + self.offset_left - (padding * 2.),
-                    // self.offset_left + amt_offset_left - handle_size,
                     self.rect_size.y * 0.5,
                     mix(0., handle_size, self.hover)
                 );
