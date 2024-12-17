@@ -294,7 +294,7 @@ live_design!{
     pub SLIDER_CMPCT_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
     pub SLIDER_CMPCT_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
 
-    pub SLIDER_CMPCT_DATA_FONTSIZE = 0.0;
+    pub SLIDER_CMPCT_DATA_FONTSIZE = 8.0;
     pub SLIDER_CMPCT_DATA_COLOR = (THEME_COLOR_U_3);
     pub SLIDER_CMPCT_DATA_HOVER_COLOR = (THEME_COLOR_U_4);
     pub SLIDER_CMPCT_DATA_FOCUS_COLOR = (THEME_COLOR_U_5);
@@ -346,7 +346,7 @@ live_design!{
         text_input: {
             empty_message: "0",
             is_numeric_only: true,
-            margin: { right: 7.5, top: 1. } 
+            margin: { right: 7.5, top: (SLIDER_CMPCT_DATA_FONTSIZE * 0.25) } 
 
             draw_text: {
                 text_style: <THEME_FONT_REGULAR> {
@@ -408,24 +408,25 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(SLIDER_CMPCT_BORDER_COLOR_A, SLIDER_CMPCT_BORDER_COLOR_B, pow(self.pos.y, 2.0)),
-                            mix(SLIDER_CMPCT_BORDER_HOVER_COLOR_A, SLIDER_CMPCT_BORDER_HOVER_COLOR_B, pow(self.pos.y, 2.0)),
+                            mix(SLIDER_CMPCT_BORDER_COLOR_A, SLIDER_CMPCT_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(SLIDER_CMPCT_BORDER_HOVER_COLOR_A, SLIDER_CMPCT_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
                             self.hover
                         ),
-                        mix(SLIDER_CMPCT_BORDER_DRAG_COLOR_A, SLIDER_CMPCT_BORDER_DRAG_COLOR_B, pow(self.pos.y, 2.0)),
+                        mix(SLIDER_CMPCT_BORDER_DRAG_COLOR_A, SLIDER_CMPCT_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
                         self.drag
                     ), 1.0
                 )
 
                 let amt_offset_left = (handle_size + padding) * 2.0;
 
-                // Amount bar
-                // sdf.box(self.offset_left, 0.0, self.rect_size.x - self.offset_left, self.rect_size.y, SLIDER_CMPCT_ROUNDING);
+                let reprojected_length = (self.rect_size.x - self.offset_left - (padding * 4.) - (handle_size * 2.));
 
+                // Amount bar
                 sdf.box(
                     self.offset_left + padding,
                     padding,
-                    ((self.rect_size.x - self.offset_left) * self.slide_pos) - (padding * 2.),
+                    // ((self.rect_size.x - self.offset_left) * self.slide_pos) - (padding * 2.),
+                    (reprojected_length * self.slide_pos) + padding * 2. + (handle_size * 2.0),
                     self.rect_size.y - padding * 2.,
                     SLIDER_CMPCT_ROUNDING * 0.75
                 );
@@ -443,7 +444,6 @@ live_design!{
                 )
 
                 // Handle
-                let reprojected_length = (self.rect_size.x - self.offset_left - (padding * 4.) - (handle_size * 2.));
                 sdf.circle(
                     (reprojected_length * self.slide_pos) + self.offset_left + padding * 2. + handle_size,
                     // ((self.rect_size.x - self.offset_left) * self.slide_pos) + self.offset_left - (padding * 2.),
