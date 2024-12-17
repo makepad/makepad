@@ -151,7 +151,8 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     ease: OutQuad
                     apply: {
-                        draw_slider: {hover: 0.0}
+                        draw_slider: { hover: 0.0 },
+                        draw_text: { hover: 0.0 }
                         // text_input: { draw_bg: { hover: 0.0}}
                     }
                 }
@@ -159,7 +160,8 @@ live_design!{
                     //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        draw_slider: {hover: 1.0}
+                        draw_slider: { hover: 1.0 },
+                        draw_text: { hover: 1.0 }
                         // text_input: { draw_bg: { hover: 1.0}}
                     }
                 }
@@ -276,10 +278,70 @@ live_design!{
         }
     }
 
+    pub SLIDER_CMPCT_ROUNDING = 5.0;
+    pub SLIDER_CMPCT_PEAK = 5.0;
+    pub SLIDER_CMPCT_HANDLE_SIZE = 4.0;
+
+    pub SLIDER_CMPCT_LABEL_SIZE = 75.0;
+    pub SLIDER_CMPCT_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
+    pub SLIDER_CMPCT_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+    pub SLIDER_CMPCT_LABEL_HOVER_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+
+    pub SLIDER_CMPCT_BG_COLOR_A = (THEME_COLOR_D_2);
+    pub SLIDER_CMPCT_BG_HOVER_COLOR_A = (THEME_COLOR_D_2);
+    pub SLIDER_CMPCT_BG_DRAG_COLOR_A = (THEME_COLOR_D_3);
+    pub SLIDER_CMPCT_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub SLIDER_CMPCT_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub SLIDER_CMPCT_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+
+    pub SLIDER_CMPCT_DATA_FONTSIZE = 0.0;
+    pub SLIDER_CMPCT_DATA_COLOR = (THEME_COLOR_U_3);
+    pub SLIDER_CMPCT_DATA_HOVER_COLOR = (THEME_COLOR_U_4);
+    pub SLIDER_CMPCT_DATA_FOCUS_COLOR = (THEME_COLOR_U_5);
+    pub SLIDER_CMPCT_DATA_FOCUS_HOVER_COLOR = (THEME_COLOR_WHITE);
+    pub SLIDER_CMPCT_DATA_EMPTY_COLOR = (THEME_COLOR_U_3);
+    pub SLIDER_CMPCT_DATA_EMPTY_HOVER_COLOR = (THEME_COLOR_U_4);
+
+    pub SLIDER_CMPCT_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub SLIDER_CMPCT_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub SLIDER_CMPCT_BORDER_DRAG_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub SLIDER_CMPCT_BORDER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub SLIDER_CMPCT_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub SLIDER_CMPCT_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+
+    pub SLIDER_CMPCT_VAL_COLOR_A = (THEME_COLOR_D_1);
+    pub SLIDER_CMPCT_VAL_HOVER_COLOR_A = (THEME_COLOR_D_2);
+    pub SLIDER_CMPCT_VAL_DRAG_COLOR_A = (THEME_COLOR_D_2);
+    pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_D_4);
+    pub SLIDER_CMPCT_VAL_HOVER_COLOR_B = (THEME_COLOR_BLACK);
+    pub SLIDER_CMPCT_VAL_DRAG_COLOR_B = (THEME_COLOR_BLACK);
+
+    pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_U_4);
+    pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
+    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_A = (THEME_COLOR_U_4);
+    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_B = (THEME_COLOR_U_1);
+    pub SLIDER_CMPCT_HANDLE_DRAG_COLOR_A = (THEME_COLOR_U_1);
+    pub SLIDER_CMPCT_HANDLE_DRAG_COLOR_B = (THEME_COLOR_U_4);
+
     pub SliderCompact = <Slider> {
         height: 18.,
         text: "CutOff1",
-        // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
+
+        draw_text: {
+            instance hover: 0.0;
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
+
+            fn get_color(self) -> vec4 {
+                return
+                mix(
+                    (SLIDER_CMPCT_LABEL_COLOR),
+                    (SLIDER_CMPCT_LABEL_HOVER_COLOR),
+                    self.hover
+                )
+            }
+        }
 
         text_input: {
             empty_message: "0",
@@ -287,15 +349,31 @@ live_design!{
             margin: { right: 7.5, top: 1. } 
 
             draw_text: {
+                text_style: <THEME_FONT_REGULAR> {
+                    font_size: (SLIDER_CMPCT_DATA_FONTSIZE)
+                }
+
                 fn get_color(self) -> vec4 {
                     return
                     mix(
                         mix(
-                            mix(THEME_COLOR_U_5, THEME_COLOR_WHITE, self.hover),
-                            THEME_COLOR_WHITE,
+                            mix(
+                                SLIDER_CMPCT_DATA_COLOR,
+                                SLIDER_CMPCT_DATA_HOVER_COLOR,
+                                self.hover
+                            ),
+                            mix(
+                                SLIDER_CMPCT_DATA_FOCUS_COLOR,
+                                SLIDER_CMPCT_DATA_FOCUS_HOVER_COLOR,
+                                self.hover
+                            ),
                             self.focus
                         ),
-                        mix(THEME_COLOR_U_5, THEME_COLOR_WHITE, self.hover),
+                        mix(
+                            SLIDER_CMPCT_DATA_EMPTY_COLOR,
+                            SLIDER_CMPCT_DATA_EMPTY_HOVER_COLOR,
+                            self.hover
+                        ),
                         self.is_empty
                     )
                 }
@@ -303,53 +381,87 @@ live_design!{
         }
 
         draw_slider: {
-            uniform peak: 3.0;
             instance bipolar: 0.0;
-            uniform color_a: (THEME_COLOR_D_1);
-            uniform color_b: (THEME_COLOR_D_4);
-            uniform label_size: 75.0;
-            offset_left: 75.0;
+            offset_left: (SLIDER_CMPCT_LABEL_SIZE);
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let nub_size = 5.;
-                let offset_top = 8.5;
-                let padding = 5.0;
-                let nub_x = self.slide_pos * (self.rect_size.x - 75.0 - (nub_size + padding) * 2.0);
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let handle_size = (SLIDER_CMPCT_HANDLE_SIZE);
+                let padding = 2.5;
+
+                let handle_x = self.slide_pos * (self.rect_size.x - self.offset_left - (handle_size + padding) * 2.0);
 
                 // Background
-                sdf.box(self.offset_left, 0.0, self.rect_size.x - self.offset_left, self.rect_size.y, 5.);
+                sdf.box(self.offset_left, 0.0, self.rect_size.x - self.offset_left, self.rect_size.y, SLIDER_CMPCT_ROUNDING);
                 sdf.fill_keep(
                     mix(
-                        mix((THEME_COLOR_D_2), (THEME_COLOR_D_HIDDEN), pow(self.pos.y, 1.0)),
-                        mix((THEME_COLOR_D_2), (THEME_COLOR_BEVEL_LIGHT) * 0.1, pow(self.pos.y, 1.0)),
+                        mix(
+                            mix(SLIDER_CMPCT_BG_COLOR_A, SLIDER_CMPCT_BG_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(SLIDER_CMPCT_BG_HOVER_COLOR_A, SLIDER_CMPCT_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
+                            self.hover
+                        ),
+                        mix(SLIDER_CMPCT_BG_DRAG_COLOR_A, SLIDER_CMPCT_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
                         self.drag
                     )
                 )
 
-                sdf.stroke(mix(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_SHADOW * 1.25, self.drag), THEME_COLOR_BEVEL_LIGHT, pow(self.pos.y, 2.0)), 1.0)
-
-                let offset_l2 = self.offset_left + nub_size + padding;
-
-                // Amount bar
-                sdf.move_to(mix(offset_l2, self.rect_size.x, self.bipolar), offset_top);
-                sdf.line_to(offset_l2 + nub_x, offset_top);
                 sdf.stroke(
-                    mix(mix(
-                        mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)),
-                        mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)), self.hover),
-                        mix(self.color_a, self.color_b, pow(self.pos.x, self.peak)),
-                        self.drag),
-                    6.5
+                    mix(
+                        mix(
+                            mix(SLIDER_CMPCT_BORDER_COLOR_A, SLIDER_CMPCT_BORDER_COLOR_B, pow(self.pos.y, 2.0)),
+                            mix(SLIDER_CMPCT_BORDER_HOVER_COLOR_A, SLIDER_CMPCT_BORDER_HOVER_COLOR_B, pow(self.pos.y, 2.0)),
+                            self.hover
+                        ),
+                        mix(SLIDER_CMPCT_BORDER_DRAG_COLOR_A, SLIDER_CMPCT_BORDER_DRAG_COLOR_B, pow(self.pos.y, 2.0)),
+                        self.drag
+                    ), 1.0
                 )
 
-                // Nub
-                sdf.circle(offset_l2 + nub_x, self.rect_size.y * 0.45, mix(3., nub_size, self.hover));
-                sdf.fill_keep(mix(
-                    mix(THEME_COLOR_U_2, THEME_COLOR_U_3, self.hover),
-                    THEME_COLOR_U_4,
-                    self.drag
-                ))
+                let amt_offset_left = (handle_size + padding) * 2.0;
+
+                // Amount bar
+                // sdf.box(self.offset_left, 0.0, self.rect_size.x - self.offset_left, self.rect_size.y, SLIDER_CMPCT_ROUNDING);
+
+                sdf.box(
+                    self.offset_left + padding,
+                    padding,
+                    ((self.rect_size.x - self.offset_left) * self.slide_pos) - (padding * 2.),
+                    self.rect_size.y - padding * 2.,
+                    SLIDER_CMPCT_ROUNDING * 0.75
+                );
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            mix(SLIDER_CMPCT_VAL_COLOR_A, SLIDER_CMPCT_VAL_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK)),
+                            mix(SLIDER_CMPCT_VAL_HOVER_COLOR_A, SLIDER_CMPCT_VAL_HOVER_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK)),
+                            self.hover
+                        ),
+                        mix(SLIDER_CMPCT_VAL_DRAG_COLOR_A, SLIDER_CMPCT_VAL_DRAG_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK)),
+                        self.drag
+                    )
+                )
+
+                // Handle
+                let reprojected_length = (self.rect_size.x - self.offset_left - (padding * 4.) - (handle_size * 2.));
+                sdf.circle(
+                    (reprojected_length * self.slide_pos) + self.offset_left + padding * 2. + handle_size,
+                    // ((self.rect_size.x - self.offset_left) * self.slide_pos) + self.offset_left - (padding * 2.),
+                    // self.offset_left + amt_offset_left - handle_size,
+                    self.rect_size.y * 0.5,
+                    mix(0., handle_size, self.hover)
+                );
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(SLIDER_CMPCT_HANDLE_COLOR_A, SLIDER_CMPCT_HANDLE_COLOR_B, self.pos.y),
+                            mix(SLIDER_CMPCT_HANDLE_HOVER_COLOR_A, SLIDER_CMPCT_HANDLE_HOVER_COLOR_B, self.pos.y),
+                            self.hover
+                        ),
+                        mix(SLIDER_CMPCT_HANDLE_DRAG_COLOR_A, SLIDER_CMPCT_HANDLE_DRAG_COLOR_B, self.pos.y),
+                        self.drag
+                    )
+                )
                 
                 return sdf.result
             }
@@ -590,7 +702,6 @@ impl Widget for Slider {
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
-                    println!("The value of my_variable is: {}", self.draw_slider.offset_left);
                     self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.offset_left as f64)).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
