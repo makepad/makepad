@@ -311,9 +311,17 @@ live_design!{
     pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
     pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
 
-    pub SliderCompact = <Slider> {
+    pub SliderCompact = <SliderBase> {
         height: 18.,
         width: Fill,
+
+        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+        label_align: { y: 0.0 }
+
+        min: 0.0, max: 1.0,
+        step: 0.0,
+        precision: 2,
+
         text: "Label",
         hover_actions_enabled: false,
 
@@ -336,7 +344,10 @@ live_design!{
         }
 
         // Data input
-        text_input: {
+        text_input: <TextInput> {
+            width: Fit, padding: 0.,
+            label_align: {y: 0.},
+
             empty_message: "0",
             is_numeric_only: true,
             margin: { right: 7.5, top: (SLIDER_CMPCT_DATA_FONT_TOPMARGIN) } 
@@ -360,6 +371,40 @@ live_design!{
                             self.focus)
                     ); // Pad color
                     return sdf.result
+                }
+            }
+
+            draw_bg: {
+                instance radius: 1.0
+                instance border_width: 0.0
+                instance border_color: (#f00) // TODO: This appears not to do anything.
+                instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+                instance focus: 0.0,
+                color: (THEME_COLOR_D_HIDDEN)
+                instance color_selected: (THEME_COLOR_D_HIDDEN)
+                    
+                fn get_color(self) -> vec4 {
+                    return mix(self.color, self.color_selected, self.focus)
+                }
+                    
+                fn get_border_color(self) -> vec4 {
+                    return self.border_color
+                }
+                    
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    sdf.box(
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        max(1.0, self.radius)
+                    )
+                    sdf.fill_keep(self.get_color())
+                    if self.border_width > 0.0 {
+                        sdf.stroke(self.get_border_color(), self.border_width)
+                    }
+                    return sdf.result;
                 }
             }
 
@@ -398,6 +443,9 @@ live_design!{
 
         draw_slider: {
             instance bipolar: 0.0;
+            instance hover: float
+            instance focus: float
+            instance drag: float
 
             label_size: (SLIDER_CMPCT_LABEL_SIZE);
             uniform val_color_a: (SLIDER_CMPCT_VAL_COLOR_A);
@@ -503,6 +551,58 @@ live_design!{
                 )
                 
                 return sdf.result
+            }
+        }
+
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: OutQuad
+                    apply: {
+                        draw_slider: { hover: 0.0 },
+                        draw_text: { hover: 0.0 }
+                        // text_input: { draw_bg: { hover: 0.0}}
+                    }
+                }
+                on = {
+                    //cursor: Arrow,
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: { hover: 1.0 },
+                        draw_text: { hover: 1.0 }
+                        // text_input: { draw_bg: { hover: 1.0}}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_slider: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: {focus: 1.0}
+                    }
+                }
+            }
+            drag = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {draw_slider: {drag: 0.0}}
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Snap}
+                    apply: {draw_slider: {drag: 1.0}}
+                }
             }
         }
     }

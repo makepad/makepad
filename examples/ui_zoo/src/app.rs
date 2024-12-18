@@ -454,7 +454,7 @@ live_design!{
                             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                             <Slider> { text: "min/max", min: 0., max: 100. }
                             <Slider> { text: "precision", precision: 20 }
-                            <Slider> { text: "step", step: 0.1 }
+                            <Slider> { text: "stepped", step: 0.1 }
                         }
                         <View> {
                             width: Fill, height: Fit,
@@ -463,7 +463,7 @@ live_design!{
                             <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                             <SliderBig> { text: "min/max", min: 0., max: 100. }
                             <SliderBig> { text: "precision", precision: 20 }
-                            <SliderBig> { text: "step", step: 0.1 }
+                            <SliderBig> { text: "stepped", step: 0.1 }
                         }
                         <View> {
                             width: Fill, height: Fit,
@@ -492,7 +492,7 @@ live_design!{
                             }
                             <SliderCompact> { text: "min/max", min: 0., max: 100. }
                             <SliderCompact> { text: "precision", precision: 20 }
-                            <SliderCompact> { text: "step", step: 0.1 }
+                            <SliderCompact> { text: "stepped", step: 0.1 }
                             <SliderCompact> {
                                 text: "label_size",
                                 draw_slider: {label_size: 150. },
