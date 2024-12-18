@@ -480,6 +480,9 @@ live_design!{
                             }
                             <SliderCompact> {
                                 text: "Solid",
+                                draw_text: {
+                                    color: #0;
+                                }
                                 draw_slider: {
                                     val_color_a: #f08,
                                     val_color_b: #f08,
