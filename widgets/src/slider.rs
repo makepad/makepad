@@ -297,12 +297,8 @@ live_design!{
 
     pub SLIDER_CMPCT_DATA_FONT_TOPMARGIN = 3.0;
     pub SLIDER_CMPCT_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
+
     pub SLIDER_CMPCT_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub SLIDER_CMPCT_DATA_HOVER_COLOR = (THEME_COLOR_TEXT_HOVER);
-    pub SLIDER_CMPCT_DATA_FOCUS_COLOR = (THEME_COLOR_TEXT_FOCUSED);
-    pub SLIDER_CMPCT_DATA_FOCUS_HOVER_COLOR = (THEME_COLOR_TEXT_FOCUSED);
-    pub SLIDER_CMPCT_DATA_EMPTY_COLOR = (THEME_COLOR_TEXT_PLACEHOLDER);
-    pub SLIDER_CMPCT_DATA_EMPTY_HOVER_COLOR = (THEME_COLOR_TEXT_PLACEHOLDER);
 
     pub SLIDER_CMPCT_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
     pub SLIDER_CMPCT_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
@@ -373,6 +369,7 @@ live_design!{
             }
 
             draw_text: {
+                uniform val_text_color: (SLIDER_CMPCT_DATA_COLOR);
                 text_style: <THEME_FONT_REGULAR> {
                     font_size: (SLIDER_CMPCT_DATA_FONTSIZE)
                 }
@@ -382,20 +379,20 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                SLIDER_CMPCT_DATA_COLOR,
-                                SLIDER_CMPCT_DATA_HOVER_COLOR,
+                                self.val_text_color,
+                                mix(self.val_text_color, #f, 0.4),
                                 self.hover
                             ),
                             mix(
-                                SLIDER_CMPCT_DATA_FOCUS_COLOR,
-                                SLIDER_CMPCT_DATA_FOCUS_HOVER_COLOR,
+                                mix(self.val_text_color, #f, 0.4),
+                                mix(self.val_text_color, #f, 0.8),
                                 self.hover
                             ),
                             self.focus
                         ),
                         mix(
-                            SLIDER_CMPCT_DATA_EMPTY_COLOR,
-                            SLIDER_CMPCT_DATA_EMPTY_HOVER_COLOR,
+                            mix(self.val_text_color, #0, 0.4),
+                            self.val_text_color,
                             self.hover
                         ),
                         self.is_empty
@@ -406,8 +403,8 @@ live_design!{
 
         draw_slider: {
             instance bipolar: 0.0;
-            offset_left: (SLIDER_CMPCT_LABEL_SIZE);
 
+            offset_left: (SLIDER_CMPCT_LABEL_SIZE);
             uniform val_color_a: (SLIDER_CMPCT_VAL_COLOR_A);
             uniform val_color_b: (SLIDER_CMPCT_VAL_COLOR_B);
 
