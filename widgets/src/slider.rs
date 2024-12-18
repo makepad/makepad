@@ -280,7 +280,7 @@ live_design!{
 
 
     pub SLIDER_CMPCT_ROUNDING = (THEME_CORNER_RADIUS * 2.);
-    pub SLIDER_CMPCT_PEAK = 5.0;
+    pub SLIDER_CMPCT_PEAK_COMPRESSION = 3.5;
     pub SLIDER_CMPCT_HANDLE_SIZE = 4.0;
 
     pub SLIDER_CMPCT_LABEL_SIZE = 75.0;
@@ -315,14 +315,14 @@ live_design!{
     pub SLIDER_CMPCT_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
     pub SLIDER_CMPCT_VAL_HOVER_COLOR_A = (THEME_COLOR_AMOUNT_HOVER * 0.8);
     pub SLIDER_CMPCT_VAL_DRAG_COLOR_A = (THEME_COLOR_AMOUNT_ACTIVE * 0.8);
-    pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.3);
-    pub SLIDER_CMPCT_VAL_HOVER_COLOR_B = (THEME_COLOR_AMOUNT_HOVER * 1.3);
-    pub SLIDER_CMPCT_VAL_DRAG_COLOR_B = (THEME_COLOR_AMOUNT_ACTIVE * 1.3);
+    pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
+    pub SLIDER_CMPCT_VAL_HOVER_COLOR_B = (THEME_COLOR_AMOUNT_HOVER * 1.4);
+    pub SLIDER_CMPCT_VAL_DRAG_COLOR_B = (THEME_COLOR_AMOUNT_ACTIVE * 1.4);
 
     pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
     pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
-    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT * 1.25);
-    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_B = (THEME_COLOR_SLIDER_NUB_DEFAULT * 0.5);
+    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT * 0.5);
+    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_B = (THEME_COLOR_SLIDER_NUB_DEFAULT * 1.25);
     pub SLIDER_CMPCT_HANDLE_DRAG_COLOR_A = (THEME_COLOR_SLIDER_NUB_HOVER);
     pub SLIDER_CMPCT_HANDLE_DRAG_COLOR_B = (THEME_COLOR_SLIDER_NUB_HOVER);
 
@@ -330,6 +330,7 @@ live_design!{
         height: 18.,
         text: "Label",
 
+        // Label
         draw_text: {
             instance hover: 0.0;
             text_style: <THEME_FONT_REGULAR> {
@@ -346,10 +347,34 @@ live_design!{
             }
         }
 
+        // Data input
         text_input: {
             empty_message: "0",
             is_numeric_only: true,
             margin: { right: 7.5, top: (SLIDER_CMPCT_DATA_FONT_TOPMARGIN) } 
+
+            draw_selection: {
+                instance hover: 0.0
+                instance focus: 0.0
+                uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+                fn pixel(self) -> vec4 {
+                    //return mix(#f00,#0f0,self.pos.y)
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.box(
+                        0.,
+                        0.,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        self.border_radius
+                    )
+                    sdf.fill(
+                        mix(THEME_COLOR_U_HIDDEN,
+                            THEME_COLOR_D_3,
+                            self.focus)
+                    ); // Pad color
+                    return sdf.result
+                }
+            }
 
             draw_text: {
                 text_style: <THEME_FONT_REGULAR> {
@@ -392,10 +417,17 @@ live_design!{
                 let handle_size = (SLIDER_CMPCT_HANDLE_SIZE);
                 let padding = (SLIDER_CMPCT_VAL_PADDING);
 
-                let handle_x = self.slide_pos * (self.rect_size.x - self.offset_left - (handle_size + padding) * 2.0);
+                let track_length_bg = self.rect_size.x - self.offset_left;
 
                 // Background
-                sdf.box(self.offset_left, 0.0, self.rect_size.x - self.offset_left, self.rect_size.y, SLIDER_CMPCT_ROUNDING);
+                sdf.box(
+                    self.offset_left,
+                    0.0,
+                    track_length_bg,
+                    self.rect_size.y,
+                    SLIDER_CMPCT_ROUNDING
+                );
+
                 sdf.fill_keep(
                     mix(
                         mix(
@@ -420,34 +452,36 @@ live_design!{
                     ), 1.0
                 )
 
-                let amt_offset_left = (handle_size + padding) * 2.0;
-
-                let reprojected_length = (self.rect_size.x - self.offset_left - (padding * 4.) - (handle_size * 2.));
+                let padding_full = padding * 2.;
+                let min_size = padding_full + handle_size * 2.;
+                let track_length_val = self.rect_size.x - self.offset_left - padding_full - min_size;
 
                 // Amount bar
                 sdf.box(
                     self.offset_left + padding,
                     padding,
-                    (reprojected_length * self.slide_pos) + padding * 2. + (handle_size * 2.0),
-                    self.rect_size.y - padding * 2.,
+                    track_length_val * self.slide_pos + min_size,
+                    self.rect_size.y - padding_full,
                     SLIDER_CMPCT_ROUNDING * 0.75
                 );
 
                 sdf.fill(
                     mix(
                         mix(
-                            mix(SLIDER_CMPCT_VAL_COLOR_A, SLIDER_CMPCT_VAL_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK)),
-                            mix(SLIDER_CMPCT_VAL_HOVER_COLOR_A, SLIDER_CMPCT_VAL_HOVER_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK)),
+                            mix(SLIDER_CMPCT_VAL_COLOR_A, SLIDER_CMPCT_VAL_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
+                            mix(SLIDER_CMPCT_VAL_HOVER_COLOR_A, SLIDER_CMPCT_VAL_HOVER_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
                             self.hover
                         ),
-                        mix(SLIDER_CMPCT_VAL_DRAG_COLOR_A, SLIDER_CMPCT_VAL_DRAG_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK)),
+                        mix(SLIDER_CMPCT_VAL_DRAG_COLOR_A, SLIDER_CMPCT_VAL_DRAG_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
                         self.drag
                     )
                 )
 
+                let handle_shift = self.offset_left + padding_full + handle_size;
+
                 // Handle
                 sdf.circle(
-                    (reprojected_length * self.slide_pos) + self.offset_left + padding * 2. + handle_size,
+                    track_length_val * self.slide_pos + handle_shift,
                     self.rect_size.y * 0.5,
                     mix(0., handle_size, self.hover)
                 );
