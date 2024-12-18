@@ -295,37 +295,33 @@ impl<'a> HtmlWalker<'a>{
          CommentBody
      }
              
-     fn process_entity(c:char, body:&str, in_entity:&mut Option<usize>, i:usize, decoded:&mut String, errors:&mut Option<Vec<HtmlError>>, last_non_whitespace:&mut usize){
-         if c=='&'{
-             if in_entity.is_some(){
-                 if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected & inside entity".into(), position:i})};
-             }
-             *in_entity = Some(i+1);
-         }
-         else if let Some(start) = *in_entity{
-             if c == ';'{
-                 match match_entity(&body[start..i]){
-                     Err(e)=>{
+     fn process_entity(c:char, in_entity:&mut Option<usize>,  decoded:&mut String, last_non_whitespace:&mut usize){
+         if let Some(start) = *in_entity{ // scan entity
+             if c == ';'{ // potential end of entity
+                 match match_entity(&decoded[start+1..]){
+                     Err(_e)=>{
                          *in_entity = None;
-                         if let Some(errors) = errors{errors.push(HtmlError{message:e, position:i})};
-                         decoded.push_str(&body[start..i]);
                      }
                      Ok(entity)=>{
                          *in_entity = None;
+                         decoded.truncate(start);
                          decoded.push(std::char::from_u32(entity).unwrap());
+                         return
                      }
                  }
              }
-         }
-         else{
-             if c.is_whitespace() {
-                decoded.push(c);                      
+             // definitely not an entity
+             else if c.is_whitespace() ||  decoded.len() - start>"DOWNLEFTRIGHTVECTOR".len()  {
+                 *in_entity = None;
              }
-             else{
-                 decoded.push(c);
-                 *last_non_whitespace = decoded.len();
-             }
-         }
+        }
+        if c=='&'{
+            *in_entity = Some(decoded.len());
+        } 
+        decoded.push(c);                      
+        if !c.is_whitespace() {
+            *last_non_whitespace = decoded.len();
+        }
      }
      
      let mut nodes = Vec::new();
@@ -369,7 +365,7 @@ impl<'a> HtmlWalker<'a>{
                  }
                  else{
                      let mut last_non_whitespace = last_non_whitespace;
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, errors, &mut last_non_whitespace);
+                     process_entity(c, &mut in_entity, &mut decoded, &mut last_non_whitespace);
                      State::Text(start, dec_start, last_non_whitespace)
                  }
              }
@@ -519,7 +515,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded, errors, &mut 0);
+                     process_entity(c, &mut in_entity, &mut decoded, &mut 0);
                      State::AttribValueSq(lc,nc, start)
                  }
              }
@@ -532,7 +528,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &body, &mut in_entity, i, &mut decoded,  errors, &mut 0);
+                     process_entity(c, &mut in_entity, &mut decoded, &mut 0);
                      State::AttribValueDq(lc,nc, start)
                  }
              }
