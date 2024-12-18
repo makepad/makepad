@@ -313,10 +313,6 @@ live_design!{
 
     pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
     pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
-    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT * 0.5);
-    pub SLIDER_CMPCT_HANDLE_HOVER_COLOR_B = (THEME_COLOR_SLIDER_NUB_DEFAULT * 1.25);
-    pub SLIDER_CMPCT_HANDLE_DRAG_COLOR_A = (THEME_COLOR_SLIDER_NUB_HOVER);
-    pub SLIDER_CMPCT_HANDLE_DRAG_COLOR_B = (THEME_COLOR_SLIDER_NUB_HOVER);
 
     pub SliderCompact = <Slider> {
         height: 18.,
@@ -407,6 +403,8 @@ live_design!{
             offset_left: (SLIDER_CMPCT_LABEL_SIZE);
             uniform val_color_a: (SLIDER_CMPCT_VAL_COLOR_A);
             uniform val_color_b: (SLIDER_CMPCT_VAL_COLOR_B);
+            uniform handle_color_a: (SLIDER_CMPCT_HANDLE_COLOR_A);
+            uniform handle_color_b: (SLIDER_CMPCT_HANDLE_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -484,11 +482,23 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(SLIDER_CMPCT_HANDLE_COLOR_A, SLIDER_CMPCT_HANDLE_COLOR_B, self.pos.y),
-                            mix(SLIDER_CMPCT_HANDLE_HOVER_COLOR_A, SLIDER_CMPCT_HANDLE_HOVER_COLOR_B, self.pos.y),
+                            mix(
+                                self.handle_color_a,
+                                self.handle_color_b,
+                                self.pos.y
+                            ),
+                            mix(
+                                self.handle_color_a,
+                                self.handle_color_b,
+                                self.pos.y
+                            ),
                             self.hover
                         ),
-                        mix(SLIDER_CMPCT_HANDLE_DRAG_COLOR_A, SLIDER_CMPCT_HANDLE_DRAG_COLOR_B, self.pos.y),
+                        mix(
+                            self.handle_color_b,
+                            self.handle_color_a,
+                            self.pos.y
+                        ),
                         self.drag
                     )
                 )
