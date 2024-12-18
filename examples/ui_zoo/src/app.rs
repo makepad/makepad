@@ -493,6 +493,10 @@ live_design!{
                             <SliderCompact> { text: "min/max", min: 0., max: 100. }
                             <SliderCompact> { text: "precision", precision: 20 }
                             <SliderCompact> { text: "step", step: 0.1 }
+                            <SliderCompact> {
+                                text: "label_size",
+                                draw_slider: {label_size: 150. },
+                            }
                         }
                     }
                 }

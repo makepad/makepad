@@ -29,7 +29,6 @@ live_design!{
             instance hover: float
             instance focus: float
             instance drag: float
-            instance label_size: 0.0
             
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
@@ -214,7 +213,6 @@ live_design!{
         draw_slider: {
             instance line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG),
             instance bipolar: 0.0,
-            uniform label_size: 0.0,
 
             fn pixel(self) -> vec4 {
                 let nub_size = 3
@@ -401,7 +399,7 @@ live_design!{
         draw_slider: {
             instance bipolar: 0.0;
 
-            offset_left: (SLIDER_CMPCT_LABEL_SIZE);
+            label_size: (SLIDER_CMPCT_LABEL_SIZE);
             uniform val_color_a: (SLIDER_CMPCT_VAL_COLOR_A);
             uniform val_color_b: (SLIDER_CMPCT_VAL_COLOR_B);
             uniform handle_color_a: (SLIDER_CMPCT_HANDLE_COLOR_A);
@@ -412,11 +410,11 @@ live_design!{
                 let handle_size = (SLIDER_CMPCT_HANDLE_SIZE);
                 let padding = (SLIDER_CMPCT_VAL_PADDING);
 
-                let track_length_bg = self.rect_size.x - self.offset_left;
+                let track_length_bg = self.rect_size.x - self.label_size;
 
                 // Background
                 sdf.box(
-                    self.offset_left,
+                    self.label_size,
                     0.0,
                     track_length_bg,
                     self.rect_size.y,
@@ -449,11 +447,11 @@ live_design!{
 
                 let padding_full = padding * 2.;
                 let min_size = padding_full + handle_size * 2.;
-                let track_length_val = self.rect_size.x - self.offset_left - padding_full - min_size;
+                let track_length_val = self.rect_size.x - self.label_size - padding_full - min_size;
 
                 // Amount bar
                 sdf.box(
-                    self.offset_left + padding,
+                    self.label_size + padding,
                     padding,
                     track_length_val * self.slide_pos + min_size,
                     self.rect_size.y - padding_full,
@@ -472,7 +470,7 @@ live_design!{
                     )
                 )
 
-                let handle_shift = self.offset_left + padding_full + handle_size;
+                let handle_shift = self.label_size + padding_full + handle_size;
 
                 // Handle
                 sdf.circle(
@@ -532,7 +530,7 @@ impl LiveHook for Slider{
 #[repr(C)]
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
-    #[live] offset_left: f32,
+    #[live] label_size: f32,
     #[live] slide_pos: f32,
     #[live] slide_posr_type: SliderType
 }
@@ -743,7 +741,7 @@ impl Widget for Slider {
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
-                    self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.offset_left as f64)).max(0.0).min(1.0);
+                    self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.label_size as f64)).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input_and_redraw(cx);
