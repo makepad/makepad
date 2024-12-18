@@ -472,16 +472,16 @@ live_design!{
                                 text: "Colored",
                                 draw_slider: {
                                     peak: 8.0;
-                                    // val_color_a: (#FFCC00),
-                                    // val_color_b: #f00,
+                                    val_color_a: (#FFCC00),
+                                    val_color_b: #f00,
                                 }
                             }
                             <SliderCompact> {
                                 text: "Solid",
-                                // draw_slider: {
-                                //     val_color_a: #28,
-                                //     val_color_b: #28,
-                                // }
+                                draw_slider: {
+                                    val_color_a: #f0f,
+                                    val_color_b: #f0f,
+                                }
                             }
                             <SliderCompact> { text: "min/max", min: 0., max: 100. }
                             <SliderCompact> { text: "precision", precision: 20 }

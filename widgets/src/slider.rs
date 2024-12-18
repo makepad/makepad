@@ -313,11 +313,7 @@ live_design!{
 
     pub SLIDER_CMPCT_VAL_PADDING = 2.5;
     pub SLIDER_CMPCT_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
-    pub SLIDER_CMPCT_VAL_HOVER_COLOR_A = (THEME_COLOR_AMOUNT_HOVER * 0.8);
-    pub SLIDER_CMPCT_VAL_DRAG_COLOR_A = (THEME_COLOR_AMOUNT_ACTIVE * 0.8);
     pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
-    pub SLIDER_CMPCT_VAL_HOVER_COLOR_B = (THEME_COLOR_AMOUNT_HOVER * 1.4);
-    pub SLIDER_CMPCT_VAL_DRAG_COLOR_B = (THEME_COLOR_AMOUNT_ACTIVE * 1.4);
 
     pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
     pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
@@ -412,6 +408,9 @@ live_design!{
             instance bipolar: 0.0;
             offset_left: (SLIDER_CMPCT_LABEL_SIZE);
 
+            uniform val_color_a: (SLIDER_CMPCT_VAL_COLOR_A);
+            uniform val_color_b: (SLIDER_CMPCT_VAL_COLOR_B);
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let handle_size = (SLIDER_CMPCT_HANDLE_SIZE);
@@ -468,11 +467,11 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(SLIDER_CMPCT_VAL_COLOR_A, SLIDER_CMPCT_VAL_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
-                            mix(SLIDER_CMPCT_VAL_HOVER_COLOR_A, SLIDER_CMPCT_VAL_HOVER_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
+                            mix(self.val_color_a, self.val_color_b, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
+                            mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
                             self.hover
                         ),
-                        mix(SLIDER_CMPCT_VAL_DRAG_COLOR_A, SLIDER_CMPCT_VAL_DRAG_COLOR_B, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
+                        mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
                         self.drag
                     )
                 )
