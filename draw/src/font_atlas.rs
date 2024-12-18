@@ -318,7 +318,8 @@ impl CxShapeCache {
 
         let infos = buffer.glyph_infos();
 
-        // Modify the way glyph iteration is handled.
+        // Track the processed text position to avoid reprocessing characters
+        // that have already been handled through font fallback
         let mut skip_to = 0;
 
         let mut info_iter = infos.iter();
@@ -353,10 +354,11 @@ impl CxShapeCache {
                 next_valid
             };
 
-            // Verify the validity of the slice range.
-            if start >= next_cluster {
-                continue;
-            }
+            // Skipping invalid text range: start >= next_cluster
+            debug_assert!(
+                start < next_cluster,
+                "HarfBuzz guarantees monotonic cluster values"
+            );
 
             // Recursively call,
             // trying to process the current character with the fallback font.
