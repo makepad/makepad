@@ -479,8 +479,8 @@ live_design!{
                             <SliderCompact> {
                                 text: "Solid",
                                 draw_slider: {
-                                    val_color_a: #f0f,
-                                    val_color_b: #f0f,
+                                    val_color_a: #f08,
+                                    val_color_b: #f08,
                                 }
                             }
                             <SliderCompact> { text: "min/max", min: 0., max: 100. }
