@@ -286,7 +286,6 @@ live_design!{
     pub SLIDER_CMPCT_LABEL_SIZE = 75.0;
     pub SLIDER_CMPCT_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
     pub SLIDER_CMPCT_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub SLIDER_CMPCT_LABEL_HOVER_COLOR = (THEME_COLOR_TEXT_DEFAULT);
 
     pub SLIDER_CMPCT_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
     pub SLIDER_CMPCT_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
@@ -316,22 +315,25 @@ live_design!{
 
     pub SliderCompact = <Slider> {
         height: 18.,
+        width: Fill,
         text: "Label",
+        hover_actions_enabled: false,
+
+        label_walk: {
+            width: Fill,
+            height: Fit
+        }
 
         // Label
         draw_text: {
             instance hover: 0.0;
+            uniform color: (SLIDER_CMPCT_LABEL_COLOR),
             text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
+                font_size: (SLIDER_CMPCT_LABEL_FONTSIZE)
             }
 
             fn get_color(self) -> vec4 {
-                return
-                mix(
-                    (SLIDER_CMPCT_LABEL_COLOR),
-                    (SLIDER_CMPCT_LABEL_HOVER_COLOR),
-                    self.hover
-                )
+                return self.color;
             }
         }
 
@@ -346,7 +348,6 @@ live_design!{
                 instance focus: 0.0
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
                 fn pixel(self) -> vec4 {
-                    //return mix(#f00,#0f0,self.pos.y)
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
                         0.,
