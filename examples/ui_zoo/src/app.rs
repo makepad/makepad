@@ -474,13 +474,17 @@ live_design!{
                                     peak: 8.0;
                                     val_color_a: (#FFCC00),
                                     val_color_b: #f00,
-                                }
+                                    handle_color_a: #0,
+                                    handle_color_b: #0,
+                               }
                             }
                             <SliderCompact> {
                                 text: "Solid",
                                 draw_slider: {
                                     val_color_a: #f08,
                                     val_color_b: #f08,
+                                    handle_color_a: #FFFF,
+                                    handle_color_b: #FFF0,
                                 }
                             }
                             <SliderCompact> { text: "min/max", min: 0., max: 100. }
