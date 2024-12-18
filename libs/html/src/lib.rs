@@ -592,9 +592,6 @@ impl<'a> HtmlWalker<'a>{
              }
          }
      }
-     if let Some(start) = in_entity{
-          if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
-     }
      if let State::Text(_, dec_start, last_non_whitespace) = state{
         nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len(), all_ws:dec_start == last_non_whitespace});
      }
