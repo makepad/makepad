@@ -343,15 +343,18 @@ impl Html {
                 tf.ignore_newlines.push(false);
                 tf.combine_spaces.push(false);
                 tf.begin_quote(cx);
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(br) => {
                 cx.turtle_new_line();
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(hr)
             | some_id!(sep) => {
                 cx.turtle_new_line();
                 tf.sep(cx);
                 cx.turtle_new_line();
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(u) => tf.underline.push(),
             some_id!(del)
