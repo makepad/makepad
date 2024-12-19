@@ -471,7 +471,6 @@ live_design!{
                             <SliderCompact> {
                                 text: "Colored",
                                 draw_slider: {
-                                    peak: 8.0;
                                     val_color_a: (#FFCC00),
                                     val_color_b: #f00,
                                     handle_color_a: #0,
@@ -481,11 +480,20 @@ live_design!{
                             <SliderCompact> {
                                 text: "Solid",
                                 draw_text: {
-                                    color: #0;
+                                    color: #0ff;
                                 }
                                 draw_slider: {
                                     val_color_a: #f08,
                                     val_color_b: #f08,
+                                    handle_color_a: #FFFF,
+                                    handle_color_b: #FFF0,
+                                }
+                            }
+                            <SliderCompact> {
+                                text: "Solid",
+                                draw_slider: {
+                                    val_color_a: #6,
+                                    val_color_b: #6,
                                     handle_color_a: #FFFF,
                                     handle_color_b: #FFF0,
                                 }
@@ -521,25 +529,25 @@ live_design!{
                     }
                 }
 
-                <ZooHeader> {
-                    title = { text:"<FoldHeader>" }
-                    <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
-                    <ZooGroup> {
-                        thefoldheader= <FoldHeader> {
-                            header: <View> {
-                                height: Fit
-                                align: {x: 0., y: 0.5}
-                                fold_button = <FoldButton> {} <P> {text: "Fold me!"}
-                            }
-                            body: <View> {
-                                width: Fill, height: Fit
-                                show_bg: false,
-                                padding: 5.0,
-                                <P> { text:"This is the body that can be folded away" }
-                            }
-                        }
-                    }
-                }
+                // <ZooHeader> {
+                //     title = { text:"<FoldHeader>" }
+                //     <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
+                //     <ZooGroup> {
+                //         thefoldheader= <FoldHeader> {
+                //             header: <View> {
+                //                 height: Fit
+                //                 align: {x: 0., y: 0.5}
+                //                 fold_button = <FoldButton> {} <P> {text: "Fold me!"}
+                //             }
+                //             body: <View> {
+                //                 width: Fill, height: Fit
+                //                 show_bg: false,
+                //                 padding: 5.0,
+                //                 <P> { text:"This is the body that can be folded away" }
+                //             }
+                //         }
+                //     }
+                // }
 
                 <ZooHeader> {
                     title = {text:"<Html>"}
@@ -1304,8 +1312,6 @@ live_design!{
 
                                     align: { x: 0.5, y: 0.5 },
                                     // Positions children at the left (x) bottom (y) corner of the parent.
-
-                                    line_spacing: 1.5
                                 }
 
                                 <H4> { text: "Preset: ButtonFlat"}

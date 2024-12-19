@@ -23,7 +23,7 @@ live_design!{
         label_align: { y: 0.0 }
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
-        height: Fit
+        height: Fit,
         
         draw_slider: {
             instance hover: float
@@ -46,8 +46,8 @@ live_design!{
                 let nub_color = (THEME_COLOR_SLIDER_NUB_DEFAULT);
                 let nubbg_color = mix(THEME_COLOR_SLIDER_NUB_HOVER, THEME_COLOR_SLIDER_NUB_ACTIVE, self.drag);
                     
-                match self.slider_type {
-                    SliderType::Horizontal => {
+                // match self.slider_type {
+                    // SliderType::Horizontal => {
                         sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                         sdf.fill(slider_bg_color);
                             
@@ -80,14 +80,14 @@ live_design!{
                             slider_height
                         )
                         sdf.fill(nub_color);
-                    }
-                    SliderType::Vertical => {
+                //     }
+                //     SliderType::Vertical => {
                             
-                    }
-                    SliderType::Rotary => {
+                //     }
+                //     SliderType::Rotary => {
                             
-                    }
-                }
+                //     }
+                // }
                 return sdf.result
             }
         }
@@ -151,7 +151,7 @@ live_design!{
                     ease: OutQuad
                     apply: {
                         draw_slider: { hover: 0.0 },
-                        draw_text: { hover: 0.0 }
+                        // draw_text: { hover: 0.0 }
                         // text_input: { draw_bg: { hover: 0.0}}
                     }
                 }
@@ -160,7 +160,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: { hover: 1.0 },
-                        draw_text: { hover: 1.0 }
+                        // draw_text: { hover: 1.0 }
                         // text_input: { draw_bg: { hover: 1.0}}
                     }
                 }
@@ -442,7 +442,6 @@ live_design!{
         }
 
         draw_slider: {
-            instance bipolar: 0.0;
             instance hover: float
             instance focus: float
             instance drag: float
@@ -563,8 +562,12 @@ live_design!{
                     ease: OutQuad
                     apply: {
                         draw_slider: { hover: 0.0 },
-                        draw_text: { hover: 0.0 }
-                        // text_input: { draw_bg: { hover: 0.0}}
+                        draw_text: { hover: 0.0 },
+                        text_input: {
+                            draw_selection: { hover: 0.0},
+                            draw_bg: { hover: 0.0},
+                            draw_text: { hover: 0.0},
+                        }
                     }
                 }
                 on = {
@@ -573,7 +576,11 @@ live_design!{
                     apply: {
                         draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 }
-                        // text_input: { draw_bg: { hover: 1.0}}
+                        text_input: {
+                            draw_selection: { hover: 1.0},
+                            draw_bg: { hover: 1.0},
+                            draw_text: { hover: 1.0},
+                        }
                     }
                 }
             }
