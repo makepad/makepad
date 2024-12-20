@@ -468,7 +468,7 @@ live_design!{
                         <View> {
                             width: Fill, height: Fit,
                             flow: Down,
-                            <SliderCompact> {
+                            <SliderAlt1> {
                                 text: "Colored",
                                 draw_slider: {
                                     val_color_a: (#FFCC00),
@@ -477,7 +477,7 @@ live_design!{
                                     handle_color_b: #0,
                                }
                             }
-                            <SliderCompact> {
+                            <SliderAlt1> {
                                 text: "Solid",
                                 draw_text: {
                                     color: #0ff;
@@ -489,7 +489,7 @@ live_design!{
                                     handle_color_b: #FFF0,
                                 }
                             }
-                            <SliderCompact> {
+                            <SliderAlt1> {
                                 text: "Solid",
                                 draw_slider: {
                                     val_color_a: #6,
@@ -498,10 +498,10 @@ live_design!{
                                     handle_color_b: #C,
                                 }
                             }
-                            <SliderCompact> { text: "min/max", min: 0., max: 100. }
-                            <SliderCompact> { text: "precision", precision: 20 }
-                            <SliderCompact> { text: "stepped", step: 0.1 }
-                            <SliderCompact> {
+                            <SliderAlt1> { text: "min/max", min: 0., max: 100. }
+                            <SliderAlt1> { text: "precision", precision: 20 }
+                            <SliderAlt1> { text: "stepped", step: 0.1 }
+                            <SliderAlt1> {
                                 text: "label_size",
                                 draw_slider: {label_size: 150. },
                             }
