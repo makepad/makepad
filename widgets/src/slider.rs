@@ -267,41 +267,41 @@ live_design!{
     }
 
 
-    pub SLIDER_CMPCT_ROUNDING = (THEME_CORNER_RADIUS * 2.);
-    pub SLIDER_CMPCT_PEAK_COMPRESSION = 3.5;
-    pub SLIDER_CMPCT_HANDLE_SIZE = 4.0;
+    pub SLIDER_ALT1_ROUNDING = (THEME_CORNER_RADIUS * 2.);
+    pub SLIDER_ALT1_PEAK_COMPRESSION = 3.5;
+    pub SLIDER_ALT1_HANDLE_SIZE = 4.0;
 
-    pub SLIDER_CMPCT_LABEL_SIZE = 75.0;
-    pub SLIDER_CMPCT_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
-    pub SLIDER_CMPCT_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+    pub SLIDER_ALT1_LABEL_SIZE = 75.0;
+    pub SLIDER_ALT1_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
+    pub SLIDER_ALT1_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
 
-    pub SLIDER_CMPCT_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
-    pub SLIDER_CMPCT_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
-    pub SLIDER_CMPCT_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
-    pub SLIDER_CMPCT_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
-    pub SLIDER_CMPCT_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
-    pub SLIDER_CMPCT_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub SLIDER_ALT1_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub SLIDER_ALT1_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub SLIDER_ALT1_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
+    pub SLIDER_ALT1_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub SLIDER_ALT1_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub SLIDER_ALT1_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
 
-    pub SLIDER_CMPCT_DATA_FONT_TOPMARGIN = 3.0;
-    pub SLIDER_CMPCT_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
+    pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 3.0;
+    pub SLIDER_ALT1_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
 
-    pub SLIDER_CMPCT_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+    pub SLIDER_ALT1_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
 
-    pub SLIDER_CMPCT_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub SLIDER_CMPCT_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub SLIDER_CMPCT_BORDER_DRAG_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub SLIDER_CMPCT_BORDER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
-    pub SLIDER_CMPCT_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
-    pub SLIDER_CMPCT_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub SLIDER_ALT1_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub SLIDER_ALT1_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub SLIDER_ALT1_BORDER_DRAG_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub SLIDER_ALT1_BORDER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub SLIDER_ALT1_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub SLIDER_ALT1_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
 
-    pub SLIDER_CMPCT_VAL_PADDING = 2.5;
-    pub SLIDER_CMPCT_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
-    pub SLIDER_CMPCT_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
+    pub SLIDER_ALT1_VAL_PADDING = 2.5;
+    pub SLIDER_ALT1_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
+    pub SLIDER_ALT1_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
 
-    pub SLIDER_CMPCT_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
-    pub SLIDER_CMPCT_HANDLE_COLOR_B = (THEME_COLOR_U_1);
+    pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
+    pub SLIDER_ALT1_HANDLE_COLOR_B = (THEME_COLOR_U_1);
 
-    pub SliderCompact = <SliderBase> {
+    pub SliderAlt1 = <SliderBase> {
         height: 18.,
         width: Fill,
 
@@ -323,9 +323,9 @@ live_design!{
         // Label
         draw_text: {
             instance hover: 0.0;
-            uniform color: (SLIDER_CMPCT_LABEL_COLOR),
+            uniform color: (SLIDER_ALT1_LABEL_COLOR),
             text_style: <THEME_FONT_REGULAR> {
-                font_size: (SLIDER_CMPCT_LABEL_FONTSIZE)
+                font_size: (SLIDER_ALT1_LABEL_FONTSIZE)
             }
 
             fn get_color(self) -> vec4 {
@@ -340,7 +340,7 @@ live_design!{
 
             empty_message: "0",
             is_numeric_only: true,
-            margin: { right: 7.5, top: (SLIDER_CMPCT_DATA_FONT_TOPMARGIN) } 
+            margin: { right: 7.5, top: (SLIDER_ALT1_DATA_FONT_TOPMARGIN) } 
 
             draw_selection: {
                 instance hover: 0.0
@@ -399,9 +399,9 @@ live_design!{
             }
 
             draw_text: {
-                uniform val_text_color: (SLIDER_CMPCT_DATA_COLOR);
+                uniform val_text_color: (SLIDER_ALT1_DATA_COLOR);
                 text_style: <THEME_FONT_REGULAR> {
-                    font_size: (SLIDER_CMPCT_DATA_FONTSIZE)
+                    font_size: (SLIDER_ALT1_DATA_FONTSIZE)
                 }
 
                 fn get_color(self) -> vec4 {
@@ -436,16 +436,16 @@ live_design!{
             instance focus: float
             instance drag: float
 
-            label_size: (SLIDER_CMPCT_LABEL_SIZE);
-            uniform val_color_a: (SLIDER_CMPCT_VAL_COLOR_A);
-            uniform val_color_b: (SLIDER_CMPCT_VAL_COLOR_B);
-            uniform handle_color_a: (SLIDER_CMPCT_HANDLE_COLOR_A);
-            uniform handle_color_b: (SLIDER_CMPCT_HANDLE_COLOR_B);
+            label_size: (SLIDER_ALT1_LABEL_SIZE);
+            uniform val_color_a: (SLIDER_ALT1_VAL_COLOR_A);
+            uniform val_color_b: (SLIDER_ALT1_VAL_COLOR_B);
+            uniform handle_color_a: (SLIDER_ALT1_HANDLE_COLOR_A);
+            uniform handle_color_b: (SLIDER_ALT1_HANDLE_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let handle_size = (SLIDER_CMPCT_HANDLE_SIZE);
-                let padding = (SLIDER_CMPCT_VAL_PADDING);
+                let handle_size = (SLIDER_ALT1_HANDLE_SIZE);
+                let padding = (SLIDER_ALT1_VAL_PADDING);
 
                 let track_length_bg = self.rect_size.x - self.label_size;
 
@@ -455,17 +455,17 @@ live_design!{
                     0.0,
                     track_length_bg,
                     self.rect_size.y,
-                    SLIDER_CMPCT_ROUNDING
+                    SLIDER_ALT1_ROUNDING
                 );
 
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(SLIDER_CMPCT_BG_COLOR_A, SLIDER_CMPCT_BG_COLOR_B, pow(self.pos.y, 1.0)),
-                            mix(SLIDER_CMPCT_BG_HOVER_COLOR_A, SLIDER_CMPCT_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(SLIDER_ALT1_BG_COLOR_A, SLIDER_ALT1_BG_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(SLIDER_ALT1_BG_HOVER_COLOR_A, SLIDER_ALT1_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
                             self.hover
                         ),
-                        mix(SLIDER_CMPCT_BG_DRAG_COLOR_A, SLIDER_CMPCT_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
+                        mix(SLIDER_ALT1_BG_DRAG_COLOR_A, SLIDER_ALT1_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
                         self.drag
                     )
                 )
@@ -473,11 +473,11 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(SLIDER_CMPCT_BORDER_COLOR_A, SLIDER_CMPCT_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
-                            mix(SLIDER_CMPCT_BORDER_HOVER_COLOR_A, SLIDER_CMPCT_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(SLIDER_ALT1_BORDER_COLOR_A, SLIDER_ALT1_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(SLIDER_ALT1_BORDER_HOVER_COLOR_A, SLIDER_ALT1_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
                             self.hover
                         ),
-                        mix(SLIDER_CMPCT_BORDER_DRAG_COLOR_A, SLIDER_CMPCT_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
+                        mix(SLIDER_ALT1_BORDER_DRAG_COLOR_A, SLIDER_ALT1_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
                         self.drag
                     ), 1.0
                 )
@@ -492,17 +492,17 @@ live_design!{
                     padding,
                     track_length_val * self.slide_pos + min_size,
                     self.rect_size.y - padding_full,
-                    SLIDER_CMPCT_ROUNDING * 0.75
+                    SLIDER_ALT1_ROUNDING * 0.75
                 );
 
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.val_color_a, self.val_color_b, pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
-                            mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
+                            mix(self.val_color_a, self.val_color_b, pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
+                            mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
                             self.hover
                         ),
-                        mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_CMPCT_PEAK_COMPRESSION)),
+                        mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
                         self.drag
                     )
                 )
@@ -604,27 +604,12 @@ live_design!{
         }
     }
 
-    pub SLIDER_ROTARY_ROUNDING = (THEME_CORNER_RADIUS * 2.);
-    pub SLIDER_ROTARY_PEAK_COMPRESSION = 3.5;
-    pub SLIDER_ROTARY_HANDLE_SIZE = 4.0;
     pub SLIDER_ROTARY_LABEL_SIZE = 75.0;
     pub SLIDER_ROTARY_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
     pub SLIDER_ROTARY_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub SLIDER_ROTARY_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
-    pub SLIDER_ROTARY_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
-    pub SLIDER_ROTARY_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
-    pub SLIDER_ROTARY_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
-    pub SLIDER_ROTARY_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
-    pub SLIDER_ROTARY_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
     pub SLIDER_ROTARY_DATA_FONT_TOPMARGIN = 3.0;
     pub SLIDER_ROTARY_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
     pub SLIDER_ROTARY_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub SLIDER_ROTARY_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub SLIDER_ROTARY_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub SLIDER_ROTARY_BORDER_DRAG_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub SLIDER_ROTARY_BORDER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
-    pub SLIDER_ROTARY_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
-    pub SLIDER_ROTARY_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
     pub SLIDER_ROTARY_VAL_PADDING = 2.5;
     pub SLIDER_ROTARY_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
     pub SLIDER_ROTARY_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
@@ -694,40 +679,6 @@ live_design!{
                 }
             }
 
-            // draw_bg: {
-            //     instance radius: 1.0
-            //     instance border_width: 0.0
-            //     instance border_color: (#f00) // todo: this appears not to do anything.
-            //     instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            //     instance focus: 0.0,
-            //     color: (theme_color_d_hidden)
-            //     instance color_selected: (theme_color_d_hidden)
-                    
-            //     fn get_color(self) -> vec4 {
-            //         return mix(self.color, self.color_selected, self.focus)
-            //     }
-                    
-            //     fn get_border_color(self) -> vec4 {
-            //         return self.border_color
-            //     }
-                    
-            //     fn pixel(self) -> vec4 {
-            //         let sdf = sdf2d::viewport(self.pos * self.rect_size)
-            //         sdf.box(
-            //             self.inset.x + self.border_width,
-            //             self.inset.y + self.border_width,
-            //             self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-            //             self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-            //             max(1.0, self.radius)
-            //         )
-            //         sdf.fill_keep(self.get_color())
-            //         if self.border_width > 0.0 {
-            //             sdf.stroke(self.get_border_color(), self.border_width)
-            //         }
-            //         return sdf.result;
-            //     }
-            // }
-
             draw_text: {
                 uniform val_text_color: (SLIDER_ROTARY_DATA_COLOR);
                 text_style: <THEME_FONT_REGULAR> {
@@ -774,100 +725,12 @@ live_design!{
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let handle_size = (SLIDER_ROTARY_HANDLE_SIZE);
                 let padding = (SLIDER_ROTARY_VAL_PADDING);
 
-                let track_length_bg = self.rect_size.x;
-
                 // Background
-                sdf.box(
-                    0.0,
-                    0.0,
-                    track_length_bg,
-                    self.rect_size.y,
-                    SLIDER_ROTARY_ROUNDING
-                );
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(SLIDER_ROTARY_BG_COLOR_A, SLIDER_ROTARY_BG_COLOR_B, pow(self.pos.y, 1.0)),
-                            mix(SLIDER_ROTARY_BG_HOVER_COLOR_A, SLIDER_ROTARY_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
-                            self.hover
-                        ),
-                        mix(SLIDER_ROTARY_BG_DRAG_COLOR_A, SLIDER_ROTARY_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
-                        self.drag
-                    )
-                )
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(SLIDER_ROTARY_BORDER_COLOR_A, SLIDER_ROTARY_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
-                            mix(SLIDER_ROTARY_BORDER_HOVER_COLOR_A, SLIDER_ROTARY_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
-                            self.hover
-                        ),
-                        mix(SLIDER_ROTARY_BORDER_DRAG_COLOR_A, SLIDER_ROTARY_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
-                        self.drag
-                    ), 1.0
-                )
-
-                let padding_full = padding * 2.;
-                let min_size = padding_full + handle_size * 2.;
-                let track_length_val = self.rect_size.x - padding_full - min_size;
-
-                // Amount bar
-                sdf.box(
-                    padding,
-                    padding,
-                    track_length_val * self.slide_pos + min_size,
-                    self.rect_size.y - padding_full,
-                    SLIDER_ROTARY_ROUNDING * 0.75
-                );
-
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(self.val_color_a, self.val_color_b, pow(self.pos.x, SLIDER_ROTARY_PEAK_COMPRESSION)),
-                            mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_ROTARY_PEAK_COMPRESSION)),
-                            self.hover
-                        ),
-                        mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_ROTARY_PEAK_COMPRESSION)),
-                        self.drag
-                    )
-                )
-
-                let handle_shift = padding_full + handle_size;
-
-                // Handle
-                sdf.circle(
-                    track_length_val * self.slide_pos + handle_shift,
-                    self.rect_size.y * 0.5,
-                    mix(0., handle_size, self.hover)
-                );
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                self.handle_color_a,
-                                self.handle_color_b,
-                                self.pos.y
-                            ),
-                            mix(
-                                self.handle_color_a,
-                                self.handle_color_b,
-                                self.pos.y
-                            ),
-                            self.hover
-                        ),
-                        mix(
-                            mix(self.handle_color_a, #0, 1.0),
-                            mix(self.handle_color_b, #0, 0.1),
-                            self.pos.y
-                        ),
-                        self.drag
-                    )
-                )
+                sdf.circle(self.rect_size.x / 2., self.rect_size.y / 2., 20.0);
+                // sdf.arc2(self.rect_size.x / 2., self.rect_size.y / 2., 20., 0.0, 3.14);
+                sdf.stroke(#0ff, 3.0);
                 
                 return sdf.result
             }
