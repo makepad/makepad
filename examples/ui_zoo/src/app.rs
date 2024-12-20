@@ -494,14 +494,55 @@ live_design!{
                                 draw_slider: {
                                     val_color_a: #6,
                                     val_color_b: #6,
-                                    handle_color_a: #FFFF,
-                                    handle_color_b: #FFF0,
+                                    handle_color_a: #0,
+                                    handle_color_b: #C,
                                 }
                             }
                             <SliderCompact> { text: "min/max", min: 0., max: 100. }
                             <SliderCompact> { text: "precision", precision: 20 }
                             <SliderCompact> { text: "stepped", step: 0.1 }
                             <SliderCompact> {
+                                text: "label_size",
+                                draw_slider: {label_size: 150. },
+                            }
+                        }
+                        <View> {
+                            width: Fill, height: Fit,
+                            flow: Down,
+                            <Rotary> {
+                                text: "Colored",
+                                draw_slider: {
+                                    val_color_a: (#FFCC00),
+                                    val_color_b: #f00,
+                                    handle_color_a: #0,
+                                    handle_color_b: #0,
+                               }
+                            }
+                            <Rotary> {
+                                text: "Solid",
+                                draw_text: {
+                                    color: #0ff;
+                                }
+                                draw_slider: {
+                                    val_color_a: #f08,
+                                    val_color_b: #f08,
+                                    handle_color_a: #FFFF,
+                                    handle_color_b: #FFF0,
+                                }
+                            }
+                            <Rotary> {
+                                text: "Solid",
+                                draw_slider: {
+                                    val_color_a: #6,
+                                    val_color_b: #6,
+                                    handle_color_a: #0,
+                                    handle_color_b: #C,
+                                }
+                            }
+                            <Rotary> { text: "min/max", min: 0., max: 100. }
+                            <Rotary> { text: "precision", precision: 20 }
+                            <Rotary> { text: "stepped", step: 0.1 }
+                            <Rotary> {
                                 text: "label_size",
                                 draw_slider: {label_size: 150. },
                             }
