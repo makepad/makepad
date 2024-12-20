@@ -48,14 +48,14 @@ pub struct CxFontAtlas {
 }
 
 /// A cache for rasterized glyph data.
-/// 
+///
 /// The cache is split into two parts:
 /// - The rasterized glyph data itself.
 /// - An index for the rasterized glyph data.
-/// 
+///
 /// The index contains a mapping from the `LiveId` of a glyph to an index entry. Each index entry
 /// contains the offset of the glyph within the rasterized glyph data, as well as its size.
-/// 
+///
 /// This cache can optionally be backed by a file on disk, allowing the cache to be persisted across
 /// runs of the application. This should improve startup time, as the cache data does not need to be
 /// re-generated every time the application is started.
@@ -73,12 +73,12 @@ pub struct FontCache {
 
 impl FontCache {
     /// Creates a new `FontCache`.
-    /// 
+    ///
     /// If a directory is provided, the cache data will be initialized from the file `font_cache`,
     /// and the cache index from the file `font_cache_index`. Moreover, every time a new glyph is
     /// inserted into the cache, the data for the glyph will be appended to `font_cache`, and the
     /// index entry for the glyph to `font_cache_index`.
-    /// 
+    ///
     /// If no directory is provided, the cache will start out empty, and will not be backed by a
     /// file on disk.
     fn new(dir: Option<impl AsRef<Path>>) -> Self {
@@ -168,7 +168,7 @@ impl FontCache {
             buffer[8..16].copy_from_slice(&u64::try_from(offset).unwrap().to_be_bytes());
             buffer[16..24].copy_from_slice(&u64::try_from(size.width).unwrap().to_be_bytes());
             buffer[24..32].copy_from_slice(&u64::try_from(size.height).unwrap().to_be_bytes());
-            
+
             index_file
                 .write_all(&buffer)
                 .expect("couldn't write to font cache index file");
@@ -238,7 +238,7 @@ impl CxShapeCache {
             let font = font_atlas.fonts[font_id].as_mut().unwrap();
             let glyph_id = font.glyph_id('•').0 as usize;
             if glyph_id == 0 {
-                None 
+                None
             } else {
                 Some((font_id, glyph_id))
             }
@@ -269,6 +269,7 @@ impl CxShapeCache {
                 font_ids,
                 font_atlas,
                 &mut glyph_infos,
+                0,
             );
             if self.shape_keys.len() == 4096 {
                 let shape_key = self.shape_keys.pop_front().unwrap();
@@ -286,56 +287,97 @@ impl CxShapeCache {
         font_ids: &[usize],
         font_atlas: &CxFontAtlas,
         glyph_infos: &mut Vec<GlyphInfo>,
+        // Used to pass the current cluster index value after the font switch.
+        base_cluster: usize,
     ) -> Result<(), ()> {
-        let Some((&font_id, font_ids)) = font_ids.split_first() else {
+
+        // Get the preferred font to be used currently.
+        let Some((&font_id, remaining_font_ids)) = font_ids.split_first() else {
             return Err(());
         };
+
+        // Verify if the font is available, and if not, try the fallback font.
         let Some(font) = &font_atlas.fonts[font_id] else {
-            return self.shape_full_recursive(text, font_ids, font_atlas, glyph_infos);
+            return self.shape_full_recursive(
+                text,
+                remaining_font_ids,
+                font_atlas,
+                glyph_infos,
+                base_cluster
+            );
         };
 
+        // Create and configure the HarfBuzz buffer.
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
+
+        // Shape the text using HarfBuzz.
         let buffer = font.owned_font_face.with_ref(|face| {
             makepad_rustybuzz::shape(face, &[], buffer)
         });
 
         let infos = buffer.glyph_infos();
+
+        // Track the processed text position to avoid reprocessing characters
+        // that have already been handled through font fallback
+        let mut skip_to = 0;
+
         let mut info_iter = infos.iter();
-        let mut info_slot = info_iter.next();
-        while let Some(info) = info_slot {
+        while let Some(info) = info_iter.next() {
+            // If this position has already been processed, skip it.
+            if (info.cluster as usize) < skip_to {
+                continue;
+            }
+            // Calculate the absolute cluster position.
+            let absolute_cluster = base_cluster + info.cluster as usize;
+
+            // Handle valid glyphs.
             if info.glyph_id != 0 {
-                info_slot = info_iter.next();
                 glyph_infos.push(GlyphInfo {
                     font_id,
                     glyph_id: info.glyph_id as usize,
-                    cluster: info.cluster as usize,
+                    cluster: absolute_cluster,
                 });
-            } else {
-                let start = info.cluster as usize;
-                let end = loop {
-                    info_slot = info_iter.next();
-                    if let Some(info) = info_slot {
-                        if info.glyph_id != 0 {
-                            break info.cluster as usize;
-                        }
-                    } else {
-                        break text.len()
-                    }
-                };
-                if self.shape_full_recursive(
-                    &text[start..end],
-                    font_ids,
-                    font_atlas,
-                    glyph_infos,
-                ).is_err() {
-                    glyph_infos.push(GlyphInfo {
-                        font_id,
-                        glyph_id: info.glyph_id as usize,
-                        cluster: info.cluster as usize,
-                    });
-                }
+                continue;
             }
+
+            // Handle missing glyphs.
+            let start = info.cluster as usize;
+
+            // Find the position of the next valid glyph.
+            let next_cluster = {
+                let mut preview_iter = info_iter.clone();
+                let next_valid = preview_iter
+                    .find(|next| next.glyph_id != 0)
+                    .map(|next| next.cluster as usize)
+                    .unwrap_or(text.len());
+                next_valid
+            };
+
+            // Skipping invalid text range: start >= next_cluster
+            debug_assert!(
+                start < next_cluster,
+                "HarfBuzz guarantees monotonic cluster values"
+            );
+
+            // Recursively call,
+            // trying to process the current character with the fallback font.
+            if let Ok(()) = self.shape_full_recursive(
+                &text[start..next_cluster],
+                remaining_font_ids,
+                font_atlas,
+                glyph_infos,
+                base_cluster + start,
+            ) {
+                skip_to = next_cluster;
+                continue;
+            }
+
+            glyph_infos.push(GlyphInfo {
+                font_id,
+                glyph_id: info.glyph_id as usize,
+                cluster: absolute_cluster,
+            });
         }
 
         Ok(())
@@ -557,7 +599,7 @@ impl CxFontAtlas {
         let path: Rc<str> = path.into();
         self.font_id_to_path.insert(font_id, path.clone());
         self.path_to_font_id.insert(path.clone(), font_id);
-        
+
         match cx.take_dependency(&path) {
             // FIXME(eddyb) this clones the `data` `Vec<u8>`, in order to own it
             // inside a `owned_font_face::OwnedFace`.
@@ -575,7 +617,7 @@ impl CxFontAtlas {
         }
         font_id
     }
-    
+
     pub fn reset_fonts_atlas(&mut self) {
         for cxfont in &mut self.fonts {
             if let Some(cxfont) = cxfont {
@@ -589,7 +631,7 @@ impl CxFontAtlas {
         self.alloc.hmax = 0;
         self.clear_buffer = true;
     }
-    
+
     pub fn get_internal_font_atlas_texture_id(&self) -> Texture {
         self.texture_sdf.clone()
     }
@@ -599,7 +641,7 @@ impl<'a> Cx2d<'a> {
     pub fn lazy_construct_font_atlas(cx: &mut Cx){
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
-            
+
             let texture_sdf = Texture::new_with_format(cx, TextureFormat::VecRu8 {
                 width: ATLAS_WIDTH,
                 height: ATLAS_HEIGHT,
@@ -614,7 +656,7 @@ impl<'a> Cx2d<'a> {
                 data: Some(vec![]),
                 updated: TextureUpdated::Full,
             });
-            
+
             let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg, cx.os_type());
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
@@ -625,14 +667,14 @@ impl<'a> Cx2d<'a> {
             cx.set_global(ShapeCacheRc(Rc::new(RefCell::new(CxShapeCache::new()))));
         }
     }
-    
+
     pub fn reset_fonts_atlas(cx:&mut Cx){
         if cx.has_global::<CxFontsAtlasRc>() {
             let mut fonts_atlas = cx.get_global::<CxFontsAtlasRc>().0.borrow_mut();
             fonts_atlas.reset_fonts_atlas();
         }
     }
-        
+
     pub fn draw_font_atlas(&mut self) {
         let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
@@ -986,7 +1028,7 @@ impl CxFont {
             shape_cache: OldShapeCache::new(),
         })
     }
-    
+
     pub fn get_atlas_page_id(&mut self, font_size_in_device_pixels: f64) -> usize {
         for (index, sg) in self.atlas_pages.iter().enumerate() {
             if sg.font_size_in_device_pixels == font_size_in_device_pixels {
