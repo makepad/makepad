@@ -434,11 +434,15 @@ impl WidgetRef {
         }
     }
 
+    /// Returns the unique ID (UID) of this widget.
+    ///
+    /// Returns `WidgetUid(0)` if the widget is currently borrowed or is empty.
     pub fn widget_uid(&self) -> WidgetUid {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.widget_uid();
-        }
-        WidgetUid(0)
+        self.0
+            .try_borrow()
+            .ok()
+            .and_then(|r| r.as_ref().map(|w| w.widget.widget_uid()))
+            .unwrap_or(WidgetUid(0))
     }
 
     pub fn area(&self) -> Area {
@@ -812,14 +816,24 @@ impl WidgetActionData{
     }
 }
 
-
+/// An action emitted by another widget via the `widget_action()` method.
 #[derive(Clone, Debug)]
 pub struct WidgetAction {
-    pub action: Box<dyn WidgetActionTrait>,
+    /// Extra data that can be stored on a widget at draw time,
+    /// and then cheaply cloned to be emitted as part of an action.
+    ///
+    /// To attach data to a widget action, use the `widget_action_with_data()` method.
     pub data: Option< Arc<dyn ActionTrait>>,
+    /// The emitted action object itself, which acts as a dyn Any-like.
+    pub action: Box<dyn WidgetActionTrait>,
+    /// The complete list of widgets this action bubbles up from.
+    /// You can use this to explore the UI tree of the widget that emitted the action.
     pub widgets: SmallVec<[WidgetRef;4]>,
+    /// The UID of the widget that emitted this action.
     pub widget_uid: WidgetUid,
+    /// The path-list of the widgets this action bubbles up from (if any).
     pub path: HeapLiveIdPath,
+    /// Used by list-like widgets (e.g., PortalList) to mark a group-uid around item-actions.
     pub group: Option<WidgetActionGroup>,
 }
 
