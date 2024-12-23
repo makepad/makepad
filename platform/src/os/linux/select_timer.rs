@@ -1,6 +1,5 @@
 use std::{collections::VecDeque, mem, os::raw::c_int, ptr, time::Instant};
 
-use crate::log;
 
 use self::super::libc_sys;
 
