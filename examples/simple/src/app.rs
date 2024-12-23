@@ -1,6 +1,4 @@
 
-use std::time::Instant;
-
 use makepad_widgets::*;
 
 live_design!{
@@ -50,12 +48,6 @@ app_main!(App);
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
-    #[rust] timer: Timer,
-    #[rust] timer1: Timer,
-    #[rust] timer2: Timer,
-    #[rust] 
-    time_elapsed: Option<Instant>,
-
  }
  
 impl LiveRegister for App {
@@ -68,11 +60,6 @@ impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
-            // self.timer = cx.start_timeout(3.0);
-            // self.timer1 = cx.start_timeout(2.0);
-            // self.timer2 = cx.start_timeout(3.0);
-            self.timer = cx.start_interval(1.0);
-            self.time_elapsed = Some(Instant::now());
         }
     }
 }
@@ -81,20 +68,5 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
-
-        if self.timer.is_event(event).is_some() {
-            log!("this timer run correct! ");
-            log!("Timer took {:?} seconds", self.time_elapsed.unwrap().elapsed());
-        }
-
-        if self.timer1.is_event(event).is_some() {
-            log!("this timer111 run correct! ");
-            log!("Timer took {:?} seconds", self.time_elapsed.unwrap().elapsed());
-        }
-
-        if self.timer2.is_event(event).is_some() {
-            log!("this timer222 run correct! ");
-            log!("Timer took {:?} seconds", self.time_elapsed.unwrap().elapsed());
-        }
     }
 }
