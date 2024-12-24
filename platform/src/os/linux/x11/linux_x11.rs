@@ -323,8 +323,11 @@ impl Cx {
                 CxOsOp::XrStopPresenting => {
                     //todo!()
                 },
-                CxOsOp::ShowTextIME(_area, _pos) => {
-                    //todo!()
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.clipped_rect(self).pos + pos;
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(pos);
+                    });
                 }
                 CxOsOp::HideTextIME => {
                     //todo!()
