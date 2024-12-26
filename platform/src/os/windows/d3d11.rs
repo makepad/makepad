@@ -173,8 +173,11 @@ impl Cx {
                 if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
+                if sh.mapping.uses_time {
+                    self.demo_time_repaint = true;
+                }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
-                
+
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     if draw_item.instances.as_ref().unwrap().len() == 0 {
