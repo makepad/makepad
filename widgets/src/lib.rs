@@ -67,6 +67,7 @@ pub mod view_ui;
 pub mod widget;
 pub mod widget_match_event;
 pub mod toggle_panel;
+pub mod command_text_input;
 
 pub mod touch_gesture;
 
@@ -124,6 +125,7 @@ pub use crate::{
     dock::*,
     stack_navigation::*,
     expandable_panel::*,
+    command_text_input::*,
     window::*,
     multi_window::*,
     scroll_bars::{ScrollBars},
@@ -229,6 +231,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::turtle_step::live_design(cx);
     crate::toggle_panel::live_design(cx);
     crate::cached_widget::live_design(cx);
+    crate::command_text_input::live_design(cx);
     
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
