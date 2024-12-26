@@ -15,8 +15,8 @@ live_design! {
         flow: Down,
         height: Fit,
 
-        keyboard_focus_color: #ffffff3a,
-        pointer_hover_color: #ffffff23,
+        keyboard_focus_color: (THEME_COLOR_CTRL_HOVER),
+        pointer_hover_color: (THEME_COLOR_CTRL_HOVER * 0.85),
 
         popup = <RoundedView> {
             flow: Down,
