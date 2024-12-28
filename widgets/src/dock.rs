@@ -28,7 +28,6 @@ live_design!{
         flow: Down,
         
         round_corner: {
-            draw_depth: 20.0
             border_radius: 20.
             fn pixel(self) -> vec4 {
                 let pos = vec2(
@@ -67,7 +66,6 @@ live_design!{
         flow: Down,
         
         round_corner: {
-            draw_depth: 20.0
             border_radius: 20.
             fn pixel(self) -> vec4 {
                 let pos = vec2(
