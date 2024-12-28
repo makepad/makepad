@@ -354,9 +354,9 @@ impl CxShapeCache {
                 next_valid
             };
 
-            // Skipping invalid text range: start >= next_cluster
+            // Allow cluster values to remain the same or increase.
             debug_assert!(
-                start < next_cluster,
+                start <= next_cluster,
                 "HarfBuzz guarantees monotonic cluster values"
             );
 
