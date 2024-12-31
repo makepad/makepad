@@ -118,7 +118,11 @@ impl ImageBlend {
 }
 
 impl ImageBlendRef {
-
+     pub fn switch_image(&self, cx:&mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.flip_animate(cx);
+        }
+    }
     pub fn set_texture(&self, cx:&mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             
