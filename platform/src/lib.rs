@@ -130,7 +130,7 @@ pub use {
     },
     crate::{
         os::*,
-        cx_api::{CxOsApi,OpenUrlInPlace},
+        cx_api::{CxOsApi,OpenUrlInPlace, CxOsOp},
         media_api::CxMediaApi,
         scope::*,
         draw_list::{
@@ -224,7 +224,7 @@ pub use {
         cursor::MouseCursor,
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
-        window::{WindowHandle,CxWindowPool},
+        window::{WindowHandle,CxWindowPool, WindowId},
         pass::{
             PassId,
             CxPassParent,
