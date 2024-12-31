@@ -215,7 +215,11 @@ impl MacosWindow {
             let () = msg_send![self.window, toggleFullScreen: nil];
         }
     }
-    
+    pub fn deminiaturize(&mut self) {
+        unsafe {
+            let () = msg_send![self.window, deminiaturize: nil];
+        }
+    }
     pub fn maximize(&mut self) {
         unsafe {
             let () = msg_send![self.window, toggleFullScreen: nil];
