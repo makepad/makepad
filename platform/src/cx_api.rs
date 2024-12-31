@@ -55,6 +55,7 @@ pub enum CxOsOp {
     CreateWindow(WindowId),
     CloseWindow(WindowId),
     MinimizeWindow(WindowId),
+    Deminiaturize(WindowId),
     MaximizeWindow(WindowId),
     FullscreenWindow(WindowId),
     NormalizeWindow(WindowId),
