@@ -197,6 +197,10 @@ impl Cx {
                 },
                 CxOsOp::RestoreWindow(_window_id) => {
                 },
+                CxOsOp::Deminiaturize(_window_id) => {
+                },
+                CxOsOp::HideWindow(_window_id) => {
+                },
                 CxOsOp::FullscreenWindow(_window_id) => {
                     todo!()
                 },
