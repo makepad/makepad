@@ -60,6 +60,7 @@ pub enum CxOsOp {
     FullscreenWindow(WindowId),
     NormalizeWindow(WindowId),
     RestoreWindow(WindowId),
+    HideWindow(WindowId),
     SetTopmost(WindowId, bool),
 
     XrStartPresenting,
