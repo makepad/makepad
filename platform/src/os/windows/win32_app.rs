@@ -479,6 +479,8 @@ impl Win32App {
                 MouseCursor::Default => IDC_ARROW,
                 MouseCursor::Crosshair => IDC_CROSS,
                 MouseCursor::Hand => IDC_HAND,
+                // Default to Hand for non-supported cursors, until we include our own custom cursor files.
+                MouseCursor::Grab | MouseCursor::Grabbing => IDC_HAND,
                 MouseCursor::Arrow => IDC_ARROW,
                 MouseCursor::Move => IDC_SIZEALL,
                 MouseCursor::Text => IDC_IBEAM,
