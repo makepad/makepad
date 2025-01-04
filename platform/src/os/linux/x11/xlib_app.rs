@@ -713,6 +713,8 @@ impl XlibApp {
             MouseCursor::NwseResize => self.load_first_cursor(&[b"bd_double_arrow\0", b"size_bdiag\0"]),
             MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
             MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
+            MouseCursor::Grab => self.load_first_cursor(&[b"grab\0"]),
+            MouseCursor::Grabbing => self.load_first_cursor(&[b"grabbing\0"]),
         };
         if let Some(x11_cursor) = x11_cursor {
             unsafe {
