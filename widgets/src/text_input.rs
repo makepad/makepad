@@ -634,26 +634,18 @@ impl Widget for TextInput {
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers {
-                    logo: true,
-                    shift: false,
-                    ..
-                },
+                modifiers,
                 ..
-            }) if !self.is_read_only => {
+            }) if modifiers.is_primary() && !modifiers.shift && !self.is_read_only => {
                 self.undo();
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers {
-                    logo: true,
-                    shift: true,
-                    ..
-                },
+                modifiers,
                 ..
-            }) if !self.is_read_only => {
+            }) if modifiers.is_primary() && modifiers.shift && !self.is_read_only => {
                 self.redo();
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
