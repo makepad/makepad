@@ -47,9 +47,6 @@ live_design! {
 /// it should be used judiciously. Overuse of caching can lead to unexpected behavior if not managed properly.
 #[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct CachedWidget {
-    #[rust]
-    area: Area,
-
     #[walk]
     walk: Walk,
 
@@ -152,12 +149,14 @@ impl WidgetNode for CachedWidget {
         if let Some(widget) = &self.widget {
             widget.area()
         } else {
-            self.area
+            Area::default()
         }
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
+        if let Some(widget) = &self.widget {
+            widget.redraw(cx);
+        }
     }
 
     // Searches for widgets within this CachedWidget based on the given path.
