@@ -998,14 +998,23 @@ impl Widget for Slider {
 
         match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
                 self.animator_play(cx, id!(hover.on));
-            }
+            },
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(_fe) => {
+            Hit::FingerHoverOver(_) => {
+                cx.set_cursor(MouseCursor::Grab);
+            },
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                rect,
+                ..
+            }) => {
                 // cx.set_key_focus(self.slider.area());
+                self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
+                self.update_text_input_and_redraw(cx);
+
                 self.text_input.is_read_only = true;
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
@@ -1014,6 +1023,7 @@ impl Widget for Slider {
                 self.animator_play(cx, id!(drag.on));
                 self.dragging = Some(self.relative_value);
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
+                cx.set_cursor(MouseCursor::Grabbing);
             },
             Hit::FingerUp(fe) => {
                 self.text_input.is_read_only = false;
@@ -1028,6 +1038,7 @@ impl Widget for Slider {
                 }
                 self.dragging = None;
                 cx.widget_action(uid, &scope.path, SliderAction::EndSlide);
+                cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
