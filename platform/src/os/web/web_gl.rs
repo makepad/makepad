@@ -355,6 +355,10 @@ impl Cx {
                 }
                 if cx_shader.os_shader_id.is_none() {
                     let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
+                    if cx_shader.mapping.uses_time {
+                        self.demo_time_repaint = true;
+                    }
+
                     self.os.from_wasm(FromWasmCompileWebGLShader{
                         shader_id: item.draw_shader_id,
                         vertex: shp.vertex.clone(), 
