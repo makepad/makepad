@@ -306,6 +306,69 @@ live_design!{
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.dist);
         }
+
+        // A distance function for an arc with round caps
+        fn arc_round_caps(
+            inout self,
+            // The x-coordinate of the center of the arc
+            x: float,
+            // The y-coordinate of the center of the arc
+            y: float,
+            // The radius of the the arc
+            radius: float,
+            // The start angle of the arc, in radians
+            start_angle: float,
+            // The end angle of the arc, in radians
+            end_angle: float,
+            // The thickness of the arc
+            thickness: float
+        ) {
+            let p = self.pos - vec2(x, y);
+            let half_angle = (end_angle - start_angle) / 2.0;
+            let p = Math::rotate_2d(p, -start_angle - half_angle);
+            p.x = abs(p.x);
+            let sin_half_angle = sin(half_angle);
+            let cos_half_angle = cos(half_angle);
+            let dist_to_arc = abs(length(p) - radius) - 0.5 * thickness;
+            let cap_center = vec2(sin_half_angle, cos_half_angle) * radius;
+            let dist_to_cap = length(p - cap_center) - 0.5 * thickness;
+            if cos_half_angle * p.x < sin_half_angle * p.y {
+                self.dist = dist_to_arc;
+            } else {
+                self.dist = dist_to_cap;
+            }
+            self.old_shape = self.shape;
+            self.shape = min(self.shape, self.dist);
+        }
+
+        // A distance function for an arc with flat caps
+        fn arc_flat_caps(
+            inout self,
+            // The x-coordinate of the center of the arc
+            x: float,
+            // The y-coordinate of the center of the arc
+            y: float,
+            // The radius of the arc
+            radius: float,
+            // The start angle of the arc, in radians
+            start_angle: float,
+            // The end angle of the arc, in radians
+            end_angle: float,
+            // The thickness of the arc
+            thickness: float
+        ) {
+            let p = self.pos - vec2(x, y);
+            let half_angle = (end_angle - start_angle) / 2.0;
+            let p = Math::rotate_2d(p, -start_angle - half_angle);
+            p.x = abs(p.x);
+            let p = Math::rotate_2d(p, half_angle);
+            let dist_to_arc = abs(length(p) - radius) - thickness * 0.5;
+            let dist_y_to_cap = max(0.0, abs(radius - p.y) - thickness * 0.5);
+            let dist_to_cap =  sign(p.x) * length(vec2(p.x, dist_y_to_cap));
+            self.dist = max(dist_to_arc, dist_to_cap);
+            self.old_shape = self.shape;
+            self.shape = min(self.shape, self.dist);
+        }
          
         fn arc2(inout self, x: float, y: float, r: float, s:float, e:float)->vec4{
             let c = self.pos - vec2(x, y);
