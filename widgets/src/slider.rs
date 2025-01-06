@@ -619,6 +619,7 @@ live_design!{
     pub Rotary = <SliderBase> {
         height: 100.,
         width: 100.,
+        axis: Vertical,
 
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         label_align: { y: 0.0 }
@@ -730,7 +731,7 @@ live_design!{
                 // Background
                 sdf.circle(self.rect_size.x / 2., self.rect_size.y / 2., 20.0);
                 // sdf.arc2(self.rect_size.x / 2., self.rect_size.y / 2., 20., 0.0, 3.14);
-                sdf.stroke(#0ff, 3.0);
+                sdf.stroke(#0ff, self.slide_pos * 5.);
                 
                 return sdf.result
             }
@@ -809,6 +810,13 @@ pub enum SliderType {
     Rotary = shader_enum(3),
 }
 
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum DragAxis {
+    #[pick] Horizontal,
+    Vertical
+}
+
 impl LiveHook for Slider{
     fn after_new_from_doc(&mut self, cx:&mut Cx){
         self.set_internal(self.default);
@@ -822,7 +830,7 @@ impl LiveHook for Slider{
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
     #[live] label_size: f32,
-    #[live] slide_pos: f32,
+    #[live]  slide_pos: f32,
     #[live] slide_posr_type: SliderType
 }
 
@@ -832,6 +840,8 @@ pub struct Slider {
     #[area] #[redraw] #[live] draw_slider: DrawSlider,
     
     #[walk] walk: Walk,
+
+    #[live(DragAxis::Horizontal)] pub axis: DragAxis,
     
     #[layout] layout: Layout,
     #[animator] animator: Animator,
@@ -938,7 +948,7 @@ impl Slider {
             self.update_text_input(cx);
         }
     }
-}
+    }
 
 impl WidgetDesign for Slider{
     
@@ -1040,7 +1050,11 @@ impl Widget for Slider {
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
-                    self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.label_size as f64)).max(0.0).min(1.0);
+                    if let DragAxis::Horizontal = self.axis {
+                        self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.label_size as f64)).max(0.0).min(1.0);
+                    } else {
+                        self.relative_value = (start_pos - rel.y / fe.rect.size.y as f64).max(0.0).min(1.0);
+                    }
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input(cx);
