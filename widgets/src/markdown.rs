@@ -504,7 +504,7 @@ impl Markdown {
 }
 
 impl MarkdownRef {
-    pub fn set_text(&mut self, v:&str) {
+    pub fn set_text(&self, v:&str) {
         let Some(mut inner) = self.borrow_mut() else { return };
         inner.set_text(v)
     }
@@ -550,7 +550,7 @@ impl Widget for MarkdownLink {
 }
 
 impl MarkdownLinkRef {
-    pub fn set_href(&mut self, v: &str) {
+    pub fn set_href(&self, v: &str) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
         };
