@@ -365,12 +365,19 @@ impl Win32App {
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         let slot = self.get_free_timer_slot();
         let win32_id = unsafe {SetTimer(None, 0, (interval * 1000.0) as u32, Some(Self::timer_proc))};
-        self.timers[slot] = Win32Timer::Timer {
-            timer_id: timer_id,
-            win32_id: win32_id,
-            interval: interval,
-            repeats: repeats
-        };
+        if timer_id == 0{
+            self.timers[slot] = Win32Timer::SignalPoll {
+                win32_id: win32_id,
+            };
+        }
+        else{
+            self.timers[slot] = Win32Timer::Timer {
+                timer_id: timer_id,
+                win32_id: win32_id,
+                interval: interval,
+                repeats: repeats
+            };
+        }
     }
     
     pub fn stop_timer(&mut self, which_timer_id: u64) {
