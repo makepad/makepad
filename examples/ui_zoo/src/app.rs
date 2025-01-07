@@ -521,6 +521,8 @@ live_design!{
                                     color: #0ff;
                                 }
                                 draw_slider: {
+                                    val_color_a: #ff0,
+                                    val_color_b: #f00,
                                     gap: 180.,
                                     padding: 2.,
                                     width: 6.,
@@ -532,8 +534,7 @@ live_design!{
                                     gap: 90.,
                                     padding: 10.,
                                     width: 20.,
-                                    handle_color_a: #f0f,
-                                    handle_color_b: #0ff,
+                                    handle_color: #f0f,
                                 }
                             }
                             <Rotary> {
@@ -551,9 +552,9 @@ live_design!{
                             <Rotary> {
                                 text: "Solid",
                                 draw_slider: {
-                                    gap: 90.,
-                                    padding: 2.,
-                                    width: 6.,
+                                    gap: 45.,
+                                    padding: 3.,
+                                    width: 8.,
                                 }
                             }
                         }
