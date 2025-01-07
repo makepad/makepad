@@ -265,7 +265,7 @@ impl StackNavigationView {
 }
 
 impl StackNavigationViewRef {
-    pub fn show(&mut self, cx: &mut Cx, root_width: f64) {
+    pub fn show(&self, cx: &mut Cx, root_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.apply_over(cx, live! {offset: (root_width), visible: true});
             inner.offset_to_hide = root_width;
@@ -290,7 +290,7 @@ impl StackNavigationViewRef {
         }
     }
 
-    pub fn set_offset_to_hide(&mut self, offset_to_hide: f64) {
+    pub fn set_offset_to_hide(&self, offset_to_hide: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.offset_to_hide = offset_to_hide;
         }
@@ -380,7 +380,7 @@ impl WidgetMatchEvent for StackNavigation {
             if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
                 self.screen_width = ce.new_geom.inner_size.x * ce.new_geom.dpi_factor;
                 if let ActiveStackView::Active(stack_view_id) = self.active_stack_view {
-                    let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
+                    let stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
                     stack_view_ref.set_offset_to_hide(self.screen_width);
                 }
             }
@@ -397,7 +397,7 @@ impl WidgetMatchEvent for StackNavigation {
 impl StackNavigation {
     pub fn show_stack_view_by_id(&mut self, stack_view_id: LiveId, cx: &mut Cx) {
         if let ActiveStackView::None = self.active_stack_view {
-            let mut stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
+            let stack_view_ref = self.stack_navigation_view(&[stack_view_id]);
             stack_view_ref.show(cx, self.screen_width);
             self.active_stack_view = ActiveStackView::Active(stack_view_id);
 
@@ -435,13 +435,13 @@ impl StackNavigation {
 }
 
 impl StackNavigationRef {
-    pub fn show_stack_view_by_id(&mut self, stack_view_id: LiveId, cx: &mut Cx) {
+    pub fn show_stack_view_by_id(&self, stack_view_id: LiveId, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show_stack_view_by_id(stack_view_id, cx);
         }
     }
 
-    pub fn handle_stack_view_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+    pub fn handle_stack_view_actions(&self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
             if let StackNavigationAction::NavigateTo(stack_view_id) = action.as_widget_action().cast() {
                 self.show_stack_view_by_id(stack_view_id, cx);
