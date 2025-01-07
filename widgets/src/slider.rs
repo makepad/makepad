@@ -802,10 +802,18 @@ live_design!{
                     mix(
                         mix(
                             mix(self.val_color_a, self.val_color_b, self.slide_pos),
-                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                            mix(
+                                mix(self.val_color_a, #f, 0.1),
+                                mix(self.val_color_b, #f, 0.1),
+                                self.slide_pos
+                            ),
                             self.hover
                         ),
-                        mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                        mix(
+                            mix(self.val_color_a, #0, 0.1),
+                            mix(self.val_color_b, #0, 0.1),
+                            self.slide_pos
+                        ),
                         self.drag
                     )
                 )

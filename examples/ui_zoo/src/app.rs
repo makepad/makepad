@@ -523,6 +523,7 @@ live_design!{
                                 draw_slider: {
                                     val_color_a: #ff0,
                                     val_color_b: #f00,
+                                    handle_color: #f,
                                     gap: 180.,
                                     padding: 2.,
                                     width: 6.,
