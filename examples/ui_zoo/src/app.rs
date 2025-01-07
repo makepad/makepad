@@ -512,10 +512,7 @@ live_design!{
                             <Rotary> {
                                 text: "Colored",
                                 draw_slider: {
-                                    val_color_a: (#FFCC00),
-                                    val_color_b: #f00,
-                                    handle_color_a: #0,
-                                    handle_color_b: #0,
+                                    padding: 0.,
                                }
                             }
                             <Rotary> {
@@ -524,27 +521,40 @@ live_design!{
                                     color: #0ff;
                                 }
                                 draw_slider: {
-                                    val_color_a: #f08,
-                                    val_color_b: #f08,
-                                    handle_color_a: #FFFF,
-                                    handle_color_b: #FFF0,
+                                    gap: 180.,
+                                    padding: 2.,
+                                    width: 6.,
                                 }
                             }
                             <Rotary> {
                                 text: "Solid",
                                 draw_slider: {
-                                    val_color_a: #6,
-                                    val_color_b: #6,
-                                    handle_color_a: #0,
-                                    handle_color_b: #C,
+                                    gap: 90.,
+                                    padding: 10.,
+                                    width: 20.,
+                                    handle_color_a: #f0f,
+                                    handle_color_b: #0ff,
                                 }
                             }
-                            <Rotary> { text: "min/max", min: 0., max: 100. }
-                            <Rotary> { text: "precision", precision: 20 }
-                            <Rotary> { text: "stepped", step: 0.1 }
                             <Rotary> {
-                                text: "label_size",
-                                draw_slider: {label_size: 150. },
+                                text: "Solid",
+                                draw_text: {
+                                    color: #0ff;
+                                }
+                                draw_slider: {
+                                    gap: 90.,
+                                    padding: 2.,
+                                    width: 6.,
+                                    radius: 12.5
+                                }
+                            }
+                            <Rotary> {
+                                text: "Solid",
+                                draw_slider: {
+                                    gap: 90.,
+                                    padding: 2.,
+                                    width: 6.,
+                                }
                             }
                         }
                     }

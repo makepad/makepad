@@ -461,11 +461,11 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(SLIDER_ALT1_BG_COLOR_A, SLIDER_ALT1_BG_COLOR_B, pow(self.pos.y, 1.0)),
-                            mix(SLIDER_ALT1_BG_HOVER_COLOR_A, SLIDER_ALT1_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
                             self.hover
                         ),
-                        mix(SLIDER_ALT1_BG_DRAG_COLOR_A, SLIDER_ALT1_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
+                        mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
                         self.drag
                     )
                 )
@@ -473,11 +473,11 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(SLIDER_ALT1_BORDER_COLOR_A, SLIDER_ALT1_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
-                            mix(SLIDER_ALT1_BORDER_HOVER_COLOR_A, SLIDER_ALT1_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(ROTARY_BORDER_HOVER_COLOR_A, ROTARY_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
                             self.hover
                         ),
-                        mix(SLIDER_ALT1_BORDER_DRAG_COLOR_A, SLIDER_ALT1_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
+                        mix(ROTARY_BORDER_DRAG_COLOR_A, ROTARY_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
                         self.drag
                     ), 1.0
                 )
@@ -604,17 +604,31 @@ live_design!{
         }
     }
 
-    pub SLIDER_ROTARY_LABEL_SIZE = 75.0;
-    pub SLIDER_ROTARY_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
-    pub SLIDER_ROTARY_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub SLIDER_ROTARY_DATA_FONT_TOPMARGIN = 3.0;
-    pub SLIDER_ROTARY_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
-    pub SLIDER_ROTARY_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub SLIDER_ROTARY_VAL_PADDING = 2.5;
-    pub SLIDER_ROTARY_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
-    pub SLIDER_ROTARY_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
-    pub SLIDER_ROTARY_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
-    pub SLIDER_ROTARY_HANDLE_COLOR_B = (THEME_COLOR_U_1);
+    pub ROTARY_LABEL_SIZE = 75.0;
+    pub ROTARY_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
+    pub ROTARY_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+    pub ROTARY_DATA_FONT_TOPMARGIN = 3.0;
+    pub ROTARY_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
+    pub ROTARY_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+
+    pub ROTARY_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub ROTARY_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub ROTARY_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
+    pub ROTARY_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub ROTARY_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub ROTARY_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+
+    pub ROTARY_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_BORDER_DRAG_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_BORDER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub ROTARY_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub ROTARY_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+
+    pub ROTARY_VAL_COLOR_A = (THEME_COLOR_U_2);
+    pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_3);
+
+    pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
     pub Rotary = <SliderBase> {
         height: 100.,
@@ -639,9 +653,9 @@ live_design!{
         // Label
         draw_text: {
             instance hover: 0.0;
-            uniform color: (SLIDER_ROTARY_LABEL_COLOR),
+            uniform color: (ROTARY_LABEL_COLOR),
             text_style: <THEME_FONT_REGULAR> {
-                font_size: (SLIDER_ROTARY_LABEL_FONTSIZE)
+                font_size: (ROTARY_LABEL_FONTSIZE)
             }
 
             fn get_color(self) -> vec4 {
@@ -656,7 +670,7 @@ live_design!{
 
             empty_message: "0",
             is_numeric_only: true,
-            margin: { right: 7.5, top: (SLIDER_ROTARY_DATA_FONT_TOPMARGIN) } 
+            margin: { right: 7.5, top: (ROTARY_DATA_FONT_TOPMARGIN) } 
 
             draw_selection: {
                 instance hover: 0.0
@@ -681,9 +695,9 @@ live_design!{
             }
 
             draw_text: {
-                uniform val_text_color: (SLIDER_ROTARY_DATA_COLOR);
+                uniform val_text_color: (ROTARY_DATA_COLOR);
                 text_style: <THEME_FONT_REGULAR> {
-                    font_size: (SLIDER_ROTARY_DATA_FONTSIZE)
+                    font_size: (ROTARY_DATA_FONTSIZE)
                 }
 
                 fn get_color(self) -> vec4 {
@@ -718,20 +732,107 @@ live_design!{
             instance focus: float
             instance drag: float
 
-            label_size: (SLIDER_ROTARY_LABEL_SIZE);
-            uniform val_color_a: (SLIDER_ROTARY_VAL_COLOR_A);
-            uniform val_color_b: (SLIDER_ROTARY_VAL_COLOR_B);
-            uniform handle_color_a: (SLIDER_ROTARY_HANDLE_COLOR_A);
-            uniform handle_color_b: (SLIDER_ROTARY_HANDLE_COLOR_B);
+            uniform radius: 20.
+            uniform gap: 90.
+            uniform width: 12.
+            uniform padding: 4.0
+            uniform handle_color: (ROTARY_HANDLE_COLOR);
+            instance val_color_a: (ROTARY_VAL_COLOR_A);
+            instance val_color_b: (ROTARY_VAL_COLOR_B);
+
+
+            label_size: (ROTARY_LABEL_SIZE);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let padding = (SLIDER_ROTARY_VAL_PADDING);
+
+                let one_deg = 2 * PI / 360;
+                let gap_size_rad = one_deg * self.gap;
+                let val_length = 2 * PI - (one_deg * self.gap);
+
+                let rotary_start = gap_size_rad * 0.5;
+                let rotary_end = rotary_start + val_length;
 
                 // Background
-                sdf.circle(self.rect_size.x / 2., self.rect_size.y / 2., 20.0);
-                // sdf.arc2(self.rect_size.x / 2., self.rect_size.y / 2., 20., 0.0, 3.14);
-                sdf.stroke(#0ff, self.slide_pos * 5.);
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    self.rect_size.y / 2.,
+                    self.radius,
+                    rotary_start,
+                    rotary_start + val_length,
+                    // self.slide_pos * 2 * PI,
+                    self.width
+                );
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(SLIDER_ALT1_BG_COLOR_A, SLIDER_ALT1_BG_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(SLIDER_ALT1_BG_HOVER_COLOR_A, SLIDER_ALT1_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
+                            self.hover
+                        ),
+                        mix(SLIDER_ALT1_BG_DRAG_COLOR_A, SLIDER_ALT1_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
+                        self.drag
+                    )
+                )
+                sdf.stroke(
+
+                    mix(
+                        mix(
+                            mix(SLIDER_ALT1_BORDER_COLOR_A, SLIDER_ALT1_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(SLIDER_ALT1_BORDER_HOVER_COLOR_A, SLIDER_ALT1_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
+                            self.hover
+                        ),
+                        mix(SLIDER_ALT1_BORDER_DRAG_COLOR_A, SLIDER_ALT1_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
+                        self.drag
+                    ), 1.0
+                )
+
+                // Value
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    self.rect_size.y / 2.,
+                    self.radius,
+                    rotary_start,
+                    rotary_start + val_length * self.slide_pos,
+                    self.width - self.padding
+                
+                )
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                            self.hover
+                        ),
+                        mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                        self.drag
+                    )
+                )
+
+                // Handle
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    self.rect_size.y / 2.,
+                    self.radius,
+                    rotary_start + val_length * self.slide_pos,
+                    rotary_start + val_length * self.slide_pos,
+                    mix(
+                        (self.width - self.padding) * 0.,
+                        self.width - self.padding,
+                        self.hover
+                    )
+                    // self.width - self.padding
+                );
+
+            
+                sdf.fill_keep(
+                    mix(
+                        self.handle_color,
+                        mix(self.handle_color, #f, 0.25),
+                        self.drag
+                    )
+                )
                 
                 return sdf.result
             }
@@ -830,7 +931,7 @@ impl LiveHook for Slider{
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
     #[live] label_size: f32,
-    #[live]  slide_pos: f32,
+    #[live] slide_pos: f32,
     #[live] slide_posr_type: SliderType
 }
 
