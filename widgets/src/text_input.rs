@@ -763,12 +763,16 @@ impl Widget for TextInput {
         // Draw text
         if self.text.is_empty() {
             self.draw_text.is_empty = 1.0;
+            // Always draw non-secret text when displaying an empty message.
+            let was_secret = self.draw_text.text_style.is_secret;
+            self.draw_text.text_style.is_secret = false;
             self.draw_text.draw_walk(
                 cx,
                 inner_walk,
                 self.label_align,
                 &self.empty_message,
             );
+            self.draw_text.text_style.is_secret = was_secret;
         } else {
             self.draw_text.is_empty = 0.0;
             self.draw_text.draw_walk(
