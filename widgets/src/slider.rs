@@ -765,7 +765,7 @@ live_design!{
                     rotary_start + val_length,
                     min(
                         self.rect_size.x * self.width * 0.0075,
-                        self.rect_size.x * self.width * 0.0075
+                        self.rect_size.y * self.width * 0.0075
                     )
                 );
                 sdf.fill_keep(
@@ -807,7 +807,7 @@ live_design!{
                     rotary_start + val_length * self.slide_pos,                
                     min(
                         self.rect_size.x * (self.width - self.padding) * 0.0075,
-                        self.rect_size.x * (self.width - self.padding) * 0.0075 
+                        self.rect_size.y * (self.width - self.padding) * 0.0075 
                     )
                 )
 
@@ -848,7 +848,7 @@ live_design!{
                         0.,
                         min(
                             self.rect_size.x * (self.width - self.padding) * 0.0075,
-                            self.rect_size.x * (self.width - self.padding) * 0.0075 
+                            self.rect_size.y * (self.width - self.padding) * 0.0075 
                         ),
                         self.hover
                     )
