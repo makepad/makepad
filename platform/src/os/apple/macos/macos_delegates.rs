@@ -5,26 +5,20 @@ use {
         sync::Arc,
         sync::Mutex,
         ffi::CStr,
-        os::raw::{c_void}
+        os::raw::c_void,
     },
     crate::{
         makepad_live_id::LiveId,
-        makepad_math::{
-            DVec2,
-        },
+        makepad_math::DVec2,
         os::{
             apple::apple_sys::*,
             macos::{
                 macos_app::{
                     MacosApp,
-                    get_macos_app_global
+                    with_macos_app,
                 },
-                macos_event::{
-                    MacosEvent
-                },
-                macos_window::{
-                    get_cocoa_window
-                },
+                macos_event::MacosEvent,
+                macos_window::get_cocoa_window,
             },
             apple_classes::get_apple_class_global,
             apple_util::{
@@ -454,10 +448,10 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn reset_cursor_rects(this: &Object, _sel: Sel) {
         unsafe {
-            let current_cursor = get_macos_app_global().current_cursor.clone();
-            let cursor_id = *get_macos_app_global().cursors.entry(current_cursor.clone()).or_insert_with( || {
+            let current_cursor = with_macos_app(|app| app.current_cursor.clone());
+            let cursor_id = with_macos_app(|app| *app.cursors.entry(current_cursor.clone()).or_insert_with( || {
                 load_mouse_cursor(current_cursor.clone())
-            });
+            }));
             let bounds: NSRect = msg_send![this, bounds];
             if let MouseCursor::Hidden = current_cursor{
                 let _: () = msg_send![
