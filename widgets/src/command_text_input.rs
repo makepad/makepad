@@ -68,10 +68,9 @@ pub struct CommandTextInput {
     /// The character that triggers the popup.
     ///
     /// If not set, popup can't be triggerd by keyboard.
-    ///
-    /// `char` type is not "live", so String is used instead.
+    /// 
     /// Behavior is undefined if this string contains anything other than a
-    /// single character.
+    /// single grapheme.
     #[live]
     pub trigger: Option<String>,
 
