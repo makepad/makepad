@@ -2,23 +2,17 @@ use {
     std::{
         rc::Rc,
         cell::Cell,
-        os::raw::{c_void}
+        os::raw::c_void,
     },
     crate::{
-        makepad_math::{
-            DVec2,
-        },
+        makepad_math::DVec2,
         window::WindowId,
         os::{
             apple::apple_sys::*,
-            apple::apple_util::{
-                str_to_nsstring,
-            },
+            apple::apple_util::str_to_nsstring,
             macos::{
-                macos_event::{
-                    MacosEvent,
-                },
-                macos_app::{MacosApp, get_macos_class_global, get_macos_app_global},
+                macos_event::MacosEvent,
+                macos_app::{MacosApp, get_macos_class_global, with_macos_app},
             }
         },
         area::Area,
@@ -64,7 +58,7 @@ impl MacosWindow {
             let view: ObjcId = msg_send![get_macos_class_global().view, alloc];
             
             let () = msg_send![pool, drain];
-            get_macos_app_global().cocoa_windows.push((window, view));
+            with_macos_app(|app| app.cocoa_windows.push((window, view)));
             MacosWindow {
                 is_fullscreen: false,
                 live_resize_timer: nil,
@@ -171,11 +165,11 @@ impl MacosWindow {
         }
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            let cocoa_app = get_macos_app_global();
+            let timer_delegate_instance = with_macos_app(|app| app.timer_delegate_instance);
             self.live_resize_timer = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.01666666
-                target: cocoa_app.timer_delegate_instance
+                target: timer_delegate_instance
                 selector: sel!(receivedLiveResize:)
                 userInfo: nil
                 repeats: YES
@@ -238,7 +232,7 @@ impl MacosWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-         get_macos_app_global().time_now()
+        with_macos_app(|app| app.time_now())
     }
     
     pub fn get_window_geom(&self) -> WindowGeom {
@@ -379,7 +373,7 @@ impl MacosWindow {
     pub fn send_mouse_move(&mut self, _event: ObjcId, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         
-        get_macos_app_global().startup_focus_hack();
+        with_macos_app(|app| app.startup_focus_hack());
         
         self.do_callback(MacosEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
