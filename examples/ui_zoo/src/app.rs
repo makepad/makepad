@@ -506,62 +506,98 @@ live_design!{
                                 draw_slider: {label_size: 150. },
                             }
                         }
-                        <View> {
-                            width: Fill, height: Fit,
-                            flow: Down,
-                            <Rotary> {
-                                text: "Colored",
-                                draw_slider: {
-                                    padding: 0.,
-                               }
-                            }
-                            <Rotary> {
-                                text: "Solid",
-                                draw_text: {
-                                    color: #0ff;
-                                }
-                                draw_slider: {
-                                    val_color_a: #ff0,
-                                    val_color_b: #f00,
-                                    handle_color: #f,
-                                    gap: 180.,
-                                    padding: 2.,
-                                    width: 6.,
-                                }
-                            }
-                            <Rotary> {
-                                text: "Solid",
-                                draw_slider: {
-                                    gap: 90.,
-                                    padding: 10.,
-                                    width: 20.,
-                                    handle_color: #f0f,
-                                }
-                            }
-                            <Rotary> {
-                                text: "Solid",
-                                draw_text: {
-                                    color: #0ff;
-                                }
-                                draw_slider: {
-                                    gap: 90.,
-                                    padding: 2.,
-                                    width: 6.,
-                                    radius: 12.5
-                                }
-                            }
-                            <Rotary> {
-                                text: "Solid",
-                                draw_slider: {
-                                    gap: 45.,
-                                    padding: 3.,
-                                    width: 8.,
-                                }
-                            }
-                        }
                     }
                 }
 
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <Rotary> {
+                        width: 25, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 50, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 100, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 200, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 400, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 30., height: 30.,
+                        text: "Colored",
+                        draw_slider: {
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 100., height: 30.,
+                        text: "Solid",
+                        draw_text: {
+                            color: #0ff;
+                        }
+                        draw_slider: {
+                            val_color_a: #ff0,
+                            val_color_b: #f00,
+                            handle_color: #f,
+                            gap: 180.,
+                            padding: 2.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 50., height: 100.,
+                        text: "Solid",
+                        draw_slider: {
+                            gap: 90.,
+                            padding: 10.,
+                            width: 20.,
+                            handle_color: #f0f,
+                        }
+                    }
+                    <Rotary> {
+                        width: 150., height: 150.,
+                        text: "Solid",
+                        draw_text: {
+                            color: #0ff;
+                        }
+                        draw_slider: {
+                            gap: 90.,
+                            padding: 4.,
+                            width: 6.,
+                        }
+                    }
+                    <Rotary> {
+                        text: "Solid",
+                        draw_slider: {
+                            gap: 45.,
+                            padding: 0.,
+                        }
+                    }
+                }
                 <ZooHeader> {
                     title = {text:"<DropDown>"}
                     title = {text:"<DropDown>"}
