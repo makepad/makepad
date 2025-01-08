@@ -666,8 +666,8 @@ live_design!{
 
             width: Fit, height: Fit,
             padding: 0.,
-            label_align: {x: 0.0, y: 0.0},
-            margin: { right: 20., top: (ROTARY_DATA_FONT_TOPMARGIN) } 
+            label_align: {x: 0.0, y: 0.0 },
+            margin: { right: 20., top: 0. } 
 
             draw_selection: {
                 instance hover: 0.0
@@ -744,7 +744,7 @@ live_design!{
                 let one_deg = 2 * PI / 360;
                 let gap_size_rad = one_deg * self.gap;
                 let val_length = 2 * PI - (one_deg * self.gap);
-                let label_height = 17.5;
+                let label_height = 22.5;
 
                 let rotary_start = gap_size_rad * 0.5;
                 let rotary_end = rotary_start + val_length;
@@ -917,12 +917,27 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
-                    apply: {draw_slider: {drag: 0.0}}
+                    apply:
+                        {
+                            draw_slider: {drag: 0.0},
+                            text_input: {
+                                draw_selection: { hover: 0.0},
+                                draw_bg: { hover: 0.0},
+                                draw_text: { hover: 0.0},
+                            }
+                        }
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Snap}
-                    apply: {draw_slider: {drag: 1.0}}
+                    apply: {
+                        draw_slider: {drag: 1.0},
+                        text_input: {
+                            draw_selection: { hover: 0.0},
+                            draw_bg: { hover: 0.0},
+                            draw_text: { hover: 0.0},
+                        }
+                    }
                 }
             }
         }
@@ -1142,13 +1157,13 @@ impl Widget for Slider {
                 cx.set_cursor(MouseCursor::Grab);
             },
             Hit::FingerDown(FingerDownEvent {
-                abs,
-                rect,
+                // abs,
+                // rect,
                 device,
                 ..
             }) if device.is_primary_hit() => {
                 // cx.set_key_focus(self.slider.area());
-                self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
+                // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
 
                 self.text_input.is_read_only = true;
