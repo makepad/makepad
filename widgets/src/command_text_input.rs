@@ -572,8 +572,7 @@ fn graphemes_with_pos(text: &str) -> impl DoubleEndedIterator<Item = (usize, &st
 }
 
 fn inserted_grapheme_with_pos(text: &str, cursor_pos: usize) -> Option<(usize, &str)> {
-    // TODO: Should be < ?
-    graphemes_with_pos(text).rfind(|(i, _)| *i <= cursor_pos)
+    graphemes_with_pos(text).rfind(|(i, _)| *i < cursor_pos)
 }
 
 fn inserted_grapheme(text: &str, cursor_pos: usize) -> Option<&str> {
