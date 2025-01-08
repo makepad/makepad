@@ -545,7 +545,19 @@ live_design!{
                         }
                     }
                     <Rotary> {
-                        width: 400, height: 150,
+                        width: Fill, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            width: 20.
+                            padding: 0.,
+                        }
+                    }
+                }
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <Rotary> {
+                        width: 100., height: 100.,
                         text: "Colored",
                         draw_slider: {
                             width: 20.
@@ -553,15 +565,7 @@ live_design!{
                         }
                     }
                     <Rotary> {
-                        width: 30., height: 30.,
-                        text: "Colored",
-                        draw_slider: {
-                            width: 20.
-                            padding: 0.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 100., height: 30.,
+                        width: 120., height: 120.,
                         text: "Solid",
                         draw_text: {
                             color: #0ff;
@@ -571,11 +575,12 @@ live_design!{
                             val_color_b: #f00,
                             handle_color: #f,
                             gap: 180.,
+                            width: 10.,
                             padding: 2.,
                         }
                     }
                     <Rotary> {
-                        width: 50., height: 100.,
+                        width: 100., height: 80.,
                         text: "Solid",
                         draw_slider: {
                             gap: 90.,
@@ -597,9 +602,10 @@ live_design!{
                         }
                     }
                     <Rotary> {
+                        width: 150., height: 150.,
                         text: "Solid",
                         draw_slider: {
-                            gap: 45.,
+                            gap: 0.,
                             padding: 0.,
                         }
                     }
