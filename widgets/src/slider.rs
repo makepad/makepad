@@ -607,7 +607,7 @@ live_design!{
     pub ROTARY_LABEL_SIZE = 75.0;
     pub ROTARY_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
     pub ROTARY_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub ROTARY_DATA_FONT_TOPMARGIN = 3.0;
+    pub ROTARY_DATA_FONT_TOPMARGIN = 40.0;
     pub ROTARY_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
     pub ROTARY_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
 
@@ -631,19 +631,15 @@ live_design!{
     pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
     pub Rotary = <SliderBase> {
-        height: 100.,
-        width: 100.,
         axis: Vertical,
-
-        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-        label_align: { y: 0.0 }
-
-        min: 0.0, max: 1.0,
         step: 0.0,
         precision: 2,
-
-        text: "Label",
+        min: 0.0, max: 1.0,
         hover_actions_enabled: false,
+
+        height: 95., width: 65.,
+        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+        text: "Label",
 
         label_walk: {
             width: Fill,
@@ -665,12 +661,13 @@ live_design!{
 
         // Data input
         text_input: <TextInput> {
-            width: Fit, padding: 0.,
-            label_align: {y: 0.},
-
             empty_message: "0",
             is_numeric_only: true,
-            margin: { right: 7.5, top: (ROTARY_DATA_FONT_TOPMARGIN) } 
+
+            width: Fit, height: Fit,
+            padding: 0.,
+            label_align: {x: 0.0, y: 0.0},
+            margin: { right: 20., top: (ROTARY_DATA_FONT_TOPMARGIN) } 
 
             draw_selection: {
                 instance hover: 0.0
@@ -732,14 +729,12 @@ live_design!{
             instance focus: float
             instance drag: float
 
-            uniform radius: 20.
             uniform gap: 90.
-            uniform width: 12.
+            uniform width: 5.
             uniform padding: 4.0
             uniform handle_color: (ROTARY_HANDLE_COLOR);
-            instance val_color_a: (ROTARY_VAL_COLOR_A);
-            instance val_color_b: (ROTARY_VAL_COLOR_B);
-
+            uniform val_color_a: (ROTARY_VAL_COLOR_A);
+            uniform val_color_b: (ROTARY_VAL_COLOR_B);
 
             label_size: (ROTARY_LABEL_SIZE);
 
@@ -749,6 +744,7 @@ live_design!{
                 let one_deg = 2 * PI / 360;
                 let gap_size_rad = one_deg * self.gap;
                 let val_length = 2 * PI - (one_deg * self.gap);
+                let label_height = 17.5;
 
                 let rotary_start = gap_size_rad * 0.5;
                 let rotary_end = rotary_start + val_length;
@@ -756,12 +752,21 @@ live_design!{
                 // Background
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    self.rect_size.y / 2.,
-                    self.radius,
+                    min(
+                        self.rect_size.x / 2.5 + label_height,
+                        self.rect_size.y / 2.5 + label_height 
+                    ),
+                    min(
+                        self.rect_size.x * 0.35,
+                        self.rect_size.y * 0.35
+                    ),
+                    // self.rect_size.x * 0.35,
                     rotary_start,
                     rotary_start + val_length,
-                    // self.slide_pos * 2 * PI,
-                    self.width
+                    min(
+                        self.rect_size.x * self.width * 0.0075,
+                        self.rect_size.x * self.width * 0.0075
+                    )
                 );
                 sdf.fill_keep(
                     mix(
@@ -790,12 +795,20 @@ live_design!{
                 // Value
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    self.rect_size.y / 2.,
-                    self.radius,
+                    min(
+                        self.rect_size.x / 2.5 + label_height,
+                        self.rect_size.y / 2.5 + label_height 
+                    ),
+                    min(
+                        self.rect_size.x * 0.35,
+                        self.rect_size.y * 0.35
+                    ),
                     rotary_start,
-                    rotary_start + val_length * self.slide_pos,
-                    self.width - self.padding
-                
+                    rotary_start + val_length * self.slide_pos,                
+                    min(
+                        self.rect_size.x * (self.width - self.padding) * 0.0075,
+                        self.rect_size.x * (self.width - self.padding) * 0.0075 
+                    )
                 )
 
                 sdf.fill(
@@ -821,13 +834,22 @@ live_design!{
                 // Handle
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    self.rect_size.y / 2.,
-                    self.radius,
+                    min(
+                        self.rect_size.x / 2.5 + label_height,
+                        self.rect_size.y / 2.5 + label_height 
+                    ),
+                    min(
+                        self.rect_size.x * 0.35,
+                        self.rect_size.y * 0.35
+                    ),
                     rotary_start + val_length * self.slide_pos,
                     rotary_start + val_length * self.slide_pos,
                     mix(
-                        (self.width - self.padding) * 0.,
-                        self.width - self.padding,
+                        0.,
+                        min(
+                            self.rect_size.x * (self.width - self.padding) * 0.0075,
+                            self.rect_size.x * (self.width - self.padding) * 0.0075 
+                        ),
                         self.hover
                     )
                 );
@@ -905,7 +927,6 @@ live_design!{
             }
         }
     }
-
 
 }
 
