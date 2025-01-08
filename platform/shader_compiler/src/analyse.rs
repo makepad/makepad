@@ -1114,7 +1114,7 @@ impl<'a> FnDefAnalyser<'a> {
     }
     
     fn analyse_expr_stmt(&mut self, _span: TokenSpan, expr: &Expr) -> Result<(), LiveError> {
-        self.ty_checker().ty_check_expr(expr) ?;
+        self.ty_checker().ty_check_expr(expr)?;
         self.const_evaluator().try_const_eval_expr(expr);
         self.const_gatherer().const_gather_expr(expr);
         self.dep_analyser().dep_analyse_expr(expr);
