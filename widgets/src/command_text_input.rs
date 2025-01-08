@@ -83,7 +83,7 @@ pub struct CommandTextInput {
     #[live]
     pub pointer_hover_color: Vec4,
 
-    /// Just used to detect `trigger`` insertion.
+    /// Just used to detect `trigger` insertion.
     #[rust]
     previous: String,
 
@@ -144,18 +144,15 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.deref.handle_event(cx, event, scope);
 
-        // since popup is hidden on blur, this is enough
-        if self.view(id!(popup)).visible() {
-            if let Event::KeyDown(key_event) = event {
-                let delta = match key_event.key_code {
-                    KeyCode::ArrowDown => 1,
-                    KeyCode::ArrowUp => -1,
-                    _ => 0,
-                };
+        if let Hit::KeyDown(key_event) = event.hits(cx, self.search_input_ref().area()) {
+            let delta = match key_event.key_code {
+                KeyCode::ArrowDown => 1,
+                KeyCode::ArrowUp => -1,
+                _ => 0,
+            };
 
-                if delta != 0 {
-                    self.on_keyboard_move(cx, delta);
-                }
+            if delta != 0 {
+                self.on_keyboard_move(cx, delta);
             }
         }
 
