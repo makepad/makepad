@@ -1,4 +1,5 @@
 use crate::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 live_design! {
     link widgets;
@@ -267,28 +268,37 @@ impl CommandTextInput {
         cx.widget_action(self.widget_uid(), &scope.path, InternalAction::ItemSelected);
         self.hide_popup();
         self.is_text_input_focus_pending = true;
-        self.try_remove_trigger_char();
+        self.try_remove_trigger_grapheme();
         self.redraw(cx);
     }
 
-    fn try_remove_trigger_char(&mut self) {
-        let text_input = self.text_input_ref();
-        let cursor_pos = text_input.borrow().map_or(0, |p| p.get_cursor().head.index);
-        if cursor_pos > 0 {
-            let last_char_pos = cursor_pos - 1;
-            let last_char = text_input.text().chars().nth(last_char_pos);
+    fn try_remove_trigger_grapheme(&mut self) {
+        let head = get_head(&self.text_input_ref());
 
-            if last_char == self.trigger_char() {
-                let at_removed = text_input
-                    .text()
-                    .chars()
-                    .enumerate()
-                    .filter_map(|(i, c)| if i == last_char_pos { None } else { Some(c) })
-                    .collect::<String>();
+        if head == 0 {
+            return;
+        }
 
-                text_input.set_text(&at_removed);
-                self.previous = at_removed;
-            }
+        let text = self.text();
+        let Some((inserted_grapheme_pos, inserted_grapheme)) =
+            inserted_grapheme_with_pos(&text, head)
+        else {
+            return;
+        };
+
+        if Some(inserted_grapheme) == self.trigger_grapheme() {
+            let at_removed = graphemes_with_pos(&text)
+                .filter_map(|(p, g)| {
+                    if p == inserted_grapheme_pos {
+                        None
+                    } else {
+                        Some(g)
+                    }
+                })
+                .collect::<String>();
+
+            self.set_text(&at_removed);
+            self.previous = at_removed;
         }
     }
 
@@ -392,30 +402,35 @@ impl CommandTextInput {
     fn was_trigger_inserted(&self) -> bool {
         let text_input = self.text_input_ref();
         let prev = self.previous.as_str();
-        let current = &text_input.text();
+        let current = &self.text();
 
-        if current.len() != prev.len() + 1 {
+        let prev_graphemes_count = graphemes(prev).count();
+        let current_graphemes_count = graphemes(current).count();
+
+        if current_graphemes_count != prev_graphemes_count + 1 {
             return false;
         }
 
         // not necessarily the cursor head, but works for this single character use case
-        let cursor_pos = text_input.borrow().map_or(0, |p| p.get_cursor().head.index);
+        let head = get_head(&text_input);
 
-        if cursor_pos == 0 {
+        if head == 0 {
             return false;
         }
 
-        let inserted_char = current.chars().nth(cursor_pos - 1).unwrap_or_default();
-
-        let Some(trigger) = self.trigger_char() else {
+        let Some(inserted_grapheme) = inserted_grapheme(current, head) else {
             return false;
         };
 
-        inserted_char == trigger
+        let Some(trigger) = self.trigger_grapheme() else {
+            return false;
+        };
+
+        inserted_grapheme == trigger
     }
 
-    fn trigger_char(&self) -> Option<char> {
-        self.trigger.as_ref().and_then(|t| t.chars().next())
+    fn trigger_grapheme(&self) -> Option<&str> {
+        self.trigger.as_ref().and_then(|t| graphemes(t).next())
     }
 
     fn on_keyboard_move(&mut self, cx: &mut Cx, delta: i32) {
@@ -545,6 +560,27 @@ impl CommandTextInputRef {
         self.borrow()
             .map_or(String::new(), |inner| inner.search_text())
     }
+}
+
+fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
+    text.graphemes(true)
+}
+
+fn graphemes_with_pos(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
+    text.grapheme_indices(true)
+}
+
+fn inserted_grapheme_with_pos(text: &str, cursor_pos: usize) -> Option<(usize, &str)> {
+    // TODO: Should be < ?
+    graphemes_with_pos(text).rfind(|(i, _)| *i <= cursor_pos)
+}
+
+fn inserted_grapheme(text: &str, cursor_pos: usize) -> Option<&str> {
+    inserted_grapheme_with_pos(text, cursor_pos).map(|(_, g)| g)
+}
+
+fn get_head(text_input: &TextInputRef) -> usize {
+    text_input.borrow().map_or(0, |p| p.get_cursor().head.index)
 }
 
 /// Reduced and adapted copy of the `List` widget from Moly.
