@@ -197,9 +197,9 @@ impl fmt::Display for Vec3 {
     }
 }
 
-pub fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}
-pub fn vec3(x: f32, y: f32, z: f32) -> Vec3 {Vec3 {x, y, z}}
-pub fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4 {Vec4 {x, y, z, w}}
+pub const fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}
+pub const fn vec3(x: f32, y: f32, z: f32) -> Vec3 {Vec3 {x, y, z}}
+pub const fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4 {Vec4 {x, y, z, w}}
 
 const TORAD: f32 = 0.017453292;
 const TODEG: f32 = 57.29578;
@@ -233,11 +233,11 @@ impl Vec3 {
         self.z = 0.0;
     }
     
-    pub fn all(x: f32) -> Vec3 {
+    pub const fn all(x: f32) -> Vec3 {
         Vec3 {x, y: x, z: x}
     }
     
-    pub fn to_vec2(&self) -> Vec2 {
+    pub const fn to_vec2(&self) -> Vec2 {
         Vec2 {x: self.x, y: self.y}
     }
     
@@ -342,11 +342,11 @@ impl Vec4 {
     pub const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
 
     
-    pub fn all(v: f32) -> Self {
+    pub const fn all(v: f32) -> Self {
         Self {x: v, y: v, z: v, w: v}
     }
     
-    pub fn to_vec3(&self) -> Vec3 {
+    pub const fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: self.z}
     }
     
@@ -426,11 +426,11 @@ impl Vec4 {
         (r<<24)|(g<<16)|(b<<8)|a
     }
 
-    pub fn xy(&self) -> Vec2 {
+    pub const fn xy(&self) -> Vec2 {
         Vec2{x:self.x, y:self.y}
     }
 
-    pub fn zw(&self) -> Vec2 {
+    pub const fn zw(&self) -> Vec2 {
         Vec2{x:self.z, y:self.w}
     }
 
@@ -514,7 +514,7 @@ pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
 
 
 impl Mat4 {
-    pub fn identity() -> Mat4 {
+    pub const fn identity() -> Mat4 {
         Mat4 {v: [
             1.0,
             0.0,
@@ -660,7 +660,7 @@ impl Mat4 {
         ]}
     }
     
-    pub fn translation(x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn translation(x: f32, y: f32, z: f32) -> Mat4 {
         Mat4 {v: [
             1.0,
             0.0,
@@ -682,7 +682,7 @@ impl Mat4 {
         
     }
     
-    pub fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
         Mat4 {v: [
             s,
             0.0,
