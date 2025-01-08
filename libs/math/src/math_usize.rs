@@ -7,11 +7,11 @@ pub struct RectUsize {
 }
 
 impl RectUsize {
-    pub fn new(origin: PointUsize, size: SizeUsize) -> Self {
+    pub const fn new(origin: PointUsize, size: SizeUsize) -> Self {
         Self { origin, size }
     }
 
-    pub fn min(self) -> PointUsize {
+    pub const fn min(self) -> PointUsize {
         self.origin
     }
 
@@ -33,7 +33,7 @@ pub struct PointUsize {
 }
 
 impl PointUsize {
-    pub fn new(x: usize, y: usize) -> Self {
+    pub const fn new(x: usize, y: usize) -> Self {
         Self { x, y }
     }
 
@@ -75,7 +75,7 @@ pub struct SizeUsize {
 }
 
 impl SizeUsize {
-    pub fn new(width: usize, height: usize) -> Self {
+    pub const fn new(width: usize, height: usize) -> Self {
         Self { width, height }
     }
 }
