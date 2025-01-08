@@ -516,6 +516,7 @@ live_design!{
                         width: 25, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            width: 20.
                             padding: 0.,
                         }
                     }
@@ -523,6 +524,7 @@ live_design!{
                         width: 50, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            width: 20.
                             padding: 0.,
                         }
                     }
@@ -530,6 +532,7 @@ live_design!{
                         width: 100, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            width: 20.
                             padding: 0.,
                         }
                     }
@@ -537,6 +540,7 @@ live_design!{
                         width: 200, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            width: 20.
                             padding: 0.,
                         }
                     }
@@ -544,6 +548,7 @@ live_design!{
                         width: 400, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            width: 20.
                             padding: 0.,
                         }
                     }
@@ -551,6 +556,7 @@ live_design!{
                         width: 30., height: 30.,
                         text: "Colored",
                         draw_slider: {
+                            width: 20.
                             padding: 0.,
                         }
                     }
