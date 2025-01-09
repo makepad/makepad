@@ -329,7 +329,7 @@ impl AdaptiveViewRef {
     /// Set a variant selector for this widget.
     /// The selector is a closure that takes a `DisplayContext` and returns a `LiveId`, corresponding to the template to use.
     pub fn set_variant_selector(
-        &mut self,
+        &self,
         selector: impl FnMut(&mut Cx, &DVec2) -> LiveId + 'static,
     ) {
         let Some(mut inner) = self.borrow_mut() else {

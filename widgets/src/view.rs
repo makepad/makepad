@@ -434,20 +434,20 @@ impl ViewRef {
 }
 
 impl ViewSet {
-    pub fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_cut(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
             item.animator_cut(cx, state)
         }
     }
 
-    pub fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+    pub fn animator_play(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
             item.animator_play(cx, state);
         }
     }
 
     pub fn toggle_state(
-        &mut self,
+        &self,
         cx: &mut Cx,
         is_state_1: bool,
         animate: Animate,
