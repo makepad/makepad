@@ -141,7 +141,7 @@ impl Widget for CommandTextInput {
 
         if let Event::TextInput(input_event) = event {
             if cx.has_key_focus(self.text_input_ref().area()) {
-                self.on_text_input_insert(cx, scope, &input_event.input);
+                self.on_text_inserted(cx, scope, &input_event.input);
             }
         }
 
@@ -230,7 +230,7 @@ impl Widget for CommandTextInput {
 }
 
 impl CommandTextInput {
-    fn on_text_input_insert(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
+    fn on_text_inserted(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
         if graphemes(inserted).last() == self.trigger_grapheme() {
             self.show_popup(cx);
             self.is_search_input_focus_pending = true;
@@ -273,7 +273,7 @@ impl CommandTextInput {
             return;
         };
 
-        if Some(inserted_grapheme) == self.trigger_grapheme() {
+        if self.trigger_grapheme() == Some(inserted_grapheme) {
             let at_removed = graphemes_with_pos(&text)
                 .filter_map(|(p, g)| {
                     if p == inserted_grapheme_pos {
