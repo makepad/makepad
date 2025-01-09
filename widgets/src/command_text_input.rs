@@ -82,10 +82,6 @@ pub struct CommandTextInput {
     #[live]
     pub pointer_hover_color: Vec4,
 
-    /// Just used to detect `trigger` insertion.
-    #[rust]
-    previous: String,
-
     /// To deal with focus requesting issues.
     #[rust]
     is_search_input_focus_pending: bool,
@@ -141,20 +137,13 @@ impl Widget for CommandTextInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // Hook right before text input processes the text input event to save
-        // the current text as previous.
-        //
-        // This allows solid comparision between current and previous texts
-        // even in cases where the text input has been changed programatically
-        // without this widget knowing.
-        if let Event::TextInput(_) = event {
-            let text_input = self.text_input_ref();
-            if cx.has_key_focus(text_input.area()) {
-                self.previous = text_input.text();
+        self.deref.handle_event(cx, event, scope);
+
+        if let Event::TextInput(input_event) = event {
+            if cx.has_key_focus(self.text_input_ref().area()) {
+                self.on_text_input_insert(cx, scope, &input_event.input);
             }
         }
-
-        self.deref.handle_event(cx, event, scope);
 
         if let Event::KeyDown(key_event) = event {
             if cx.has_key_focus(self.search_input_ref().area()) {
@@ -205,19 +194,9 @@ impl Widget for CommandTextInput {
                 self.select_item(cx, scope, selected);
             }
 
-            let text_input = self.text_input_ref();
             let search_input = self.search_input_ref();
 
             for action in actions.iter().filter_map(|a| a.as_widget_action()) {
-                if action.widget_uid == text_input.widget_uid() {
-                    match action.cast::<TextInputAction>() {
-                        TextInputAction::Change(_) => {
-                            self.on_text_input_changed(cx, scope);
-                        }
-                        _ => {}
-                    }
-                }
-
                 if action.widget_uid == search_input.widget_uid() {
                     match action.cast::<TextInputAction>() {
                         TextInputAction::Change(search) => {
@@ -251,8 +230,8 @@ impl Widget for CommandTextInput {
 }
 
 impl CommandTextInput {
-    fn on_text_input_changed(&mut self, cx: &mut Cx, scope: &mut Scope) {
-        if self.was_trigger_inserted() {
+    fn on_text_input_insert(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
+        if graphemes(inserted).last() == self.trigger_grapheme() {
             self.show_popup(cx);
             self.is_search_input_focus_pending = true;
             cx.widget_action(
@@ -324,7 +303,6 @@ impl CommandTextInput {
         self.clear_popup();
         self.hide_popup();
         self.text_input_ref().set_text("");
-        self.previous = String::new();
     }
 
     fn clear_popup(&mut self) {
@@ -404,36 +382,6 @@ impl CommandTextInput {
     // `_ref` is added for consistency with `text_input_ref`.
     pub fn search_input_ref(&self) -> TextInputRef {
         self.text_input(id!(search_input))
-    }
-
-    fn was_trigger_inserted(&self) -> bool {
-        let text_input = self.text_input_ref();
-        let prev = self.previous.as_str();
-        let current = &self.text();
-
-        let prev_graphemes_count = graphemes(prev).count();
-        let current_graphemes_count = graphemes(current).count();
-
-        if current_graphemes_count != prev_graphemes_count + 1 {
-            return false;
-        }
-
-        // not necessarily the cursor head, but works for this single character use case
-        let head = get_head(&text_input);
-
-        if head == 0 {
-            return false;
-        }
-
-        let Some(inserted_grapheme) = inserted_grapheme(current, head) else {
-            return false;
-        };
-
-        let Some(trigger) = self.trigger_grapheme() else {
-            return false;
-        };
-
-        inserted_grapheme == trigger
     }
 
     fn trigger_grapheme(&self) -> Option<&str> {
@@ -579,10 +527,6 @@ fn graphemes_with_pos(text: &str) -> impl DoubleEndedIterator<Item = (usize, &st
 
 fn inserted_grapheme_with_pos(text: &str, cursor_pos: usize) -> Option<(usize, &str)> {
     graphemes_with_pos(text).rfind(|(i, _)| *i < cursor_pos)
-}
-
-fn inserted_grapheme(text: &str, cursor_pos: usize) -> Option<&str> {
-    inserted_grapheme_with_pos(text, cursor_pos).map(|(_, g)| g)
 }
 
 fn get_head(text_input: &TextInputRef) -> usize {
