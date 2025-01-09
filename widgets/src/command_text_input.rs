@@ -1,4 +1,5 @@
 use crate::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 live_design! {
     link widgets;
@@ -68,9 +69,8 @@ pub struct CommandTextInput {
     ///
     /// If not set, popup can't be triggerd by keyboard.
     ///
-    /// `char` type is not "live", so String is used instead.
     /// Behavior is undefined if this string contains anything other than a
-    /// single character.
+    /// single grapheme.
     #[live]
     pub trigger: Option<String>,
 
@@ -81,10 +81,6 @@ pub struct CommandTextInput {
     /// Weak color to highlight the item that the pointer is hovering over.
     #[live]
     pub pointer_hover_color: Vec4,
-
-    /// Just used to detect `trigger`` insertion.
-    #[rust]
-    previous: String,
 
     /// To deal with focus requesting issues.
     #[rust]
@@ -143,9 +139,14 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.deref.handle_event(cx, event, scope);
 
-        // since popup is hidden on blur, this is enough
-        if self.view(id!(popup)).visible() {
-            if let Event::KeyDown(key_event) = event {
+        if let Event::TextInput(input_event) = event {
+            if cx.has_key_focus(self.text_input_ref().area()) {
+                self.on_text_inserted(cx, scope, &input_event.input);
+            }
+        }
+
+        if let Event::KeyDown(key_event) = event {
+            if cx.has_key_focus(self.search_input_ref().area()) {
                 let delta = match key_event.key_code {
                     KeyCode::ArrowDown => 1,
                     KeyCode::ArrowUp => -1,
@@ -193,19 +194,9 @@ impl Widget for CommandTextInput {
                 self.select_item(cx, scope, selected);
             }
 
-            let text_input = self.text_input_ref();
             let search_input = self.search_input_ref();
 
             for action in actions.iter().filter_map(|a| a.as_widget_action()) {
-                if action.widget_uid == text_input.widget_uid() {
-                    match action.cast::<TextInputAction>() {
-                        TextInputAction::Change(_) => {
-                            self.on_text_input_changed(cx, scope);
-                        }
-                        _ => {}
-                    }
-                }
-
                 if action.widget_uid == search_input.widget_uid() {
                     match action.cast::<TextInputAction>() {
                         TextInputAction::Change(search) => {
@@ -239,8 +230,8 @@ impl Widget for CommandTextInput {
 }
 
 impl CommandTextInput {
-    fn on_text_input_changed(&mut self, cx: &mut Cx, scope: &mut Scope) {
-        if self.was_trigger_inserted() {
+    fn on_text_inserted(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
+        if graphemes(inserted).last() == self.trigger_grapheme() {
             self.show_popup(cx);
             self.is_search_input_focus_pending = true;
             cx.widget_action(
@@ -249,9 +240,6 @@ impl CommandTextInput {
                 InternalAction::ShouldBuildItems,
             );
         }
-
-        let current = self.text_input_ref().text();
-        self.previous = current;
     }
 
     fn on_search_input_submit(&mut self, cx: &mut Cx, scope: &mut Scope) {
@@ -267,28 +255,36 @@ impl CommandTextInput {
         cx.widget_action(self.widget_uid(), &scope.path, InternalAction::ItemSelected);
         self.hide_popup();
         self.is_text_input_focus_pending = true;
-        self.try_remove_trigger_char();
+        self.try_remove_trigger_grapheme();
         self.redraw(cx);
     }
 
-    fn try_remove_trigger_char(&mut self) {
-        let text_input = self.text_input_ref();
-        let cursor_pos = text_input.borrow().map_or(0, |p| p.get_cursor().head.index);
-        if cursor_pos > 0 {
-            let last_char_pos = cursor_pos - 1;
-            let last_char = text_input.text().chars().nth(last_char_pos);
+    fn try_remove_trigger_grapheme(&mut self) {
+        let head = get_head(&self.text_input_ref());
 
-            if last_char == self.trigger_char() {
-                let at_removed = text_input
-                    .text()
-                    .chars()
-                    .enumerate()
-                    .filter_map(|(i, c)| if i == last_char_pos { None } else { Some(c) })
-                    .collect::<String>();
+        if head == 0 {
+            return;
+        }
 
-                text_input.set_text(&at_removed);
-                self.previous = at_removed;
-            }
+        let text = self.text();
+        let Some((inserted_grapheme_pos, inserted_grapheme)) =
+            inserted_grapheme_with_pos(&text, head)
+        else {
+            return;
+        };
+
+        if self.trigger_grapheme() == Some(inserted_grapheme) {
+            let at_removed = graphemes_with_pos(&text)
+                .filter_map(|(p, g)| {
+                    if p == inserted_grapheme_pos {
+                        None
+                    } else {
+                        Some(g)
+                    }
+                })
+                .collect::<String>();
+
+            self.set_text(&at_removed);
         }
     }
 
@@ -307,7 +303,6 @@ impl CommandTextInput {
         self.clear_popup();
         self.hide_popup();
         self.text_input_ref().set_text("");
-        self.previous = String::new();
     }
 
     fn clear_popup(&mut self) {
@@ -390,33 +385,8 @@ impl CommandTextInput {
         self.text_input(id!(search_input))
     }
 
-    fn was_trigger_inserted(&self) -> bool {
-        let text_input = self.text_input_ref();
-        let prev = self.previous.as_str();
-        let current = &text_input.text();
-
-        if current.len() != prev.len() + 1 {
-            return false;
-        }
-
-        // not necessarily the cursor head, but works for this single character use case
-        let cursor_pos = text_input.borrow().map_or(0, |p| p.get_cursor().head.index);
-
-        if cursor_pos == 0 {
-            return false;
-        }
-
-        let inserted_char = current.chars().nth(cursor_pos - 1).unwrap_or_default();
-
-        let Some(trigger) = self.trigger_char() else {
-            return false;
-        };
-
-        inserted_char == trigger
-    }
-
-    fn trigger_char(&self) -> Option<char> {
-        self.trigger.as_ref().and_then(|t| t.chars().next())
+    fn trigger_grapheme(&self) -> Option<&str> {
+        self.trigger.as_ref().and_then(|t| graphemes(t).next())
     }
 
     fn on_keyboard_move(&mut self, cx: &mut Cx, delta: i32) {
@@ -546,6 +516,22 @@ impl CommandTextInputRef {
         self.borrow()
             .map_or(String::new(), |inner| inner.search_text())
     }
+}
+
+fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
+    text.graphemes(true)
+}
+
+fn graphemes_with_pos(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
+    text.grapheme_indices(true)
+}
+
+fn inserted_grapheme_with_pos(text: &str, cursor_pos: usize) -> Option<(usize, &str)> {
+    graphemes_with_pos(text).rfind(|(i, _)| *i < cursor_pos)
+}
+
+fn get_head(text_input: &TextInputRef) -> usize {
+    text_input.borrow().map_or(0, |p| p.get_cursor().head.index)
 }
 
 /// Reduced and adapted copy of the `List` widget from Moly.
