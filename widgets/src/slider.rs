@@ -335,7 +335,7 @@ live_design!{
 
         // Data input
         text_input: <TextInput> {
-            width: Fit, padding: 0.,
+            width: Fill, padding: 0.,
             label_align: {y: 0.},
 
             empty_message: "0",
@@ -604,7 +604,6 @@ live_design!{
         }
     }
 
-    pub ROTARY_LABEL_SIZE = 75.0;
     pub ROTARY_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
     pub ROTARY_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
     pub ROTARY_DATA_FONT_TOPMARGIN = 40.0;
@@ -625,8 +624,8 @@ live_design!{
     pub ROTARY_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
     pub ROTARY_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
 
-    pub ROTARY_VAL_COLOR_A = (THEME_COLOR_U_2);
-    pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_3);
+    pub ROTARY_VAL_COLOR_A = (THEME_COLOR_U_1);
+    pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_2);
 
     pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
@@ -641,9 +640,10 @@ live_design!{
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         text: "Label",
 
+        align: { x: 0., y: 0.0 }
         label_walk: {
-            width: Fill,
-            height: Fit
+            margin: <THEME_MSPACE_1> {},
+            width: Fill, height: Fit
         }
 
         // Label
@@ -665,9 +665,21 @@ live_design!{
             is_numeric_only: true,
 
             width: Fit, height: Fit,
-            padding: 0.,
+            padding: <THEME_MSPACE_1> {},
             label_align: {x: 0.0, y: 0.0 },
-            margin: { right: 20., top: 0. } 
+
+            draw_bg: {
+                instance radius: (THEME_CORNER_RADIUS)
+                instance hover: 0.0
+                instance focus: 0.0
+                instance bodytop: (THEME_COLOR_INSET_DEFAULT)
+                instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+                
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    return sdf.result
+                }
+            }
 
             draw_selection: {
                 instance hover: 0.0
@@ -693,10 +705,6 @@ live_design!{
 
             draw_text: {
                 uniform val_text_color: (ROTARY_DATA_COLOR);
-                text_style: <THEME_FONT_REGULAR> {
-                    font_size: (ROTARY_DATA_FONTSIZE)
-                }
-
                 fn get_color(self) -> vec4 {
                     return
                     mix(
@@ -736,18 +744,18 @@ live_design!{
             uniform val_color_a: (ROTARY_VAL_COLOR_A);
             uniform val_color_b: (ROTARY_VAL_COLOR_B);
 
-            label_size: (ROTARY_LABEL_SIZE);
-
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
-                let one_deg = 2 * PI / 360;
-                let gap_size_rad = one_deg * self.gap;
-                let val_length = 2 * PI - (one_deg * self.gap);
-                let label_height = 22.5;
+                let label_height = 25.;
 
-                let rotary_start = gap_size_rad * 0.5;
-                let rotary_end = rotary_start + val_length;
+                let one_deg = PI / 180;
+                let threesixty_deg = 2 * PI;
+                let gap_size = self.gap * one_deg;
+                let val_length = threesixty_deg - (one_deg * self.gap);
+                let start = gap_size * 0.5;
+                let end = start + val_length;
+                let end_val = start + val_length * self.slide_pos;
 
                 // Background
                 sdf.arc_round_caps(
@@ -760,9 +768,8 @@ live_design!{
                         self.rect_size.x * 0.35,
                         self.rect_size.y * 0.35
                     ),
-                    // self.rect_size.x * 0.35,
-                    rotary_start,
-                    rotary_start + val_length,
+                    start,
+                    end, 
                     min(
                         self.rect_size.x * self.width * 0.0075,
                         self.rect_size.y * self.width * 0.0075
@@ -783,7 +790,12 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y,
+                                min(
+                                    self.rect_size.x * 0.025,
+                                    self.rect_size.y * 0.025
+                                )
+                            )),
                             mix(ROTARY_BORDER_HOVER_COLOR_A, ROTARY_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
                             self.hover
                         ),
@@ -803,8 +815,8 @@ live_design!{
                         self.rect_size.x * 0.35,
                         self.rect_size.y * 0.35
                     ),
-                    rotary_start,
-                    rotary_start + val_length * self.slide_pos,                
+                    start,
+                    end_val,
                     min(
                         self.rect_size.x * (self.width - self.padding) * 0.0075,
                         self.rect_size.y * (self.width - self.padding) * 0.0075 
@@ -842,8 +854,8 @@ live_design!{
                         self.rect_size.x * 0.35,
                         self.rect_size.y * 0.35
                     ),
-                    rotary_start + val_length * self.slide_pos,
-                    rotary_start + val_length * self.slide_pos,
+                    end_val,
+                    end_val,
                     mix(
                         0.,
                         min(
