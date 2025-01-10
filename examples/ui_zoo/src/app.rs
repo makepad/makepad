@@ -580,7 +580,22 @@ live_design!{
                         }
                     }
                     <Rotary> {
-                        width: 100., height: 80.,
+                        width: 120., height: 120.,
+                        text: "Solid",
+                        draw_text: {
+                            color: #0ff;
+                        }
+                        draw_slider: {
+                            val_color_a: #0ff,
+                            val_color_b: #ff0,
+                            handle_color: #f,
+                            gap: 270.,
+                            width: 10.,
+                            padding: 2.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 100., height: 50.,
                         text: "Solid",
                         draw_slider: {
                             gap: 90.,
