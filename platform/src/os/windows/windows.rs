@@ -412,6 +412,7 @@ impl Cx {
                 CxOsOp::SelectFileDialog(_) =>  todo!(),
                 CxOsOp::SaveFolderDialog(_) =>  todo!(),
                 CxOsOp::SelectFolderDialog(_) =>  todo!(),
+                CxOsOp::ShowInDock(_) => todo!()
             }
         }
         if geom_changes.len()>0{

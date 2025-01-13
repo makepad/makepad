@@ -574,6 +574,9 @@ impl Cx {
                 {
                     with_macos_app(|app| app.open_select_folder_dialog(settings));
                 }
+                CxOsOp::ShowInDock(show) => {
+                    with_macos_app(|app| app.show_in_dock(show));
+                }
             }
         }
         EventFlow::Poll
