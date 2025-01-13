@@ -62,7 +62,7 @@ pub enum CxOsOp {
     RestoreWindow(WindowId),
     HideWindow(WindowId),
     SetTopmost(WindowId, bool),
-
+    ShowInDock(bool),
     XrStartPresenting,
     XrStopPresenting,
 
@@ -169,7 +169,11 @@ impl Cx {
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
     }
-
+    // Determines whether to show your application in the dock when it runs. The default value is true. 
+    // You can remove the dock icon by setting this value to false. 
+    pub fn show_in_dock(&mut self, show: bool) {
+        self.platform_ops.push(CxOsOp::ShowInDock(show));
+    }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
             self.platform_ops.push(op);
