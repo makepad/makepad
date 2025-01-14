@@ -399,7 +399,7 @@ live_design!{
 
             }
 
-            <IconButton> {
+            find = <IconButton> {
                 draw_icon: { svg_file: (ICO_FIND) }
                 icon_walk: {width: 20.0, height: Fit},
                 width: 30.
@@ -936,16 +936,19 @@ app_main!(App);
 
 #[derive(Live, LiveHook, Widget)]
 struct NewsFeed{
-    #[deref] view:View
+    #[deref] view:View,
+    #[rust(1usize)] len:usize,
+    #[rust(1usize)] iter:usize
 }
 
 impl Widget for NewsFeed{
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         while let Some(item) =  self.view.draw_walk(cx, scope, walk).step(){
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, 1000);
+                list.set_item_range(cx, 0, self.len);
+                self.iter += 1;
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let template = match item_id {
+                    let template = match item_id+self.iter{
                         0 => live_id!(TopSpace),
                         x if x % 5 == 0 => live_id!(PostImage),
                         _ => live_id!(Post)
@@ -957,9 +960,9 @@ impl Widget for NewsFeed{
                         3 => format!("Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. id: {}", item_id),
                         _ => format!("Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. 4 id {}", item_id),
                     };
-                    item.label(id!(content.text)).set_text(&text);
-                    item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
-                    item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
+                    item.label(id!(content.text)).set_text(cx, &text);
+                    item.button(id!(likes)).set_text(cx, &format!("{}", item_id % 23));
+                    item.button(id!(comments)).set_text(cx, &format!("{}", item_id % 6));
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
@@ -984,11 +987,8 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
-        let news_feeds = self.ui.portal_list_set(ids!(news_feed.list));
-        for (item_id, item) in news_feeds.items_with_actions(&actions) {
-            if item.button(id!(likes)).clicked(&actions) {
-                log!("hello {}", item_id);
-            }
+        if self.ui.button(id!(find)).clicked(&actions) {
+            
         }
     }
 }

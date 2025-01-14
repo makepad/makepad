@@ -9,7 +9,7 @@ live_design!{
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
-                body = <ScrollXYView>{
+                body = <View>{
                     flow: Down,
                     spacing: 10,
                     align: {
@@ -19,6 +19,7 @@ live_design!{
                     show_bg: true,
                     draw_bg:{
                         fn pixel(self) -> vec4 {
+                            return #3
                             let center = vec2(0.5, 0.5);
                             let uv = self.pos - center;
                             let radius = length(uv);
@@ -28,14 +29,28 @@ live_design!{
                             return mix(color1, color2, radius);
                         }
                     }
-                    button1 = <Button> {
-                        text: "Click me 123"
-                        draw_text:{color:#fff}
+                    <View>{
+                        flow:Overlay
+                        <ScrollXYView>{
+                            flow:Down
+                            button1
+                            b0= <Button> {
+                                text: "Click me 123"
+                                draw_text:{color:#fff}
+                            }
+                            button1 = <Button> {
+                                text: "Click me 123"
+                                height: 500
+                                draw_text:{color:#fff}
+                            }
+                            button2 = <Button> {
+                                text: "Click me 345"
+                                height: 500
+                                draw_text:{color:#fff}
+                            }
+                        }
                     }
-                    button2 = <Button> {
-                        text: "Click me 345"
-                        draw_text:{color:#fff}
-                    }
+                    
                 }
             }
         }
@@ -57,7 +72,7 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
         }

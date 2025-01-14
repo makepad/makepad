@@ -336,6 +336,7 @@ live_design!{
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.dist);
         }
+        
         fn box_y(inout self, x: float, y: float, w: float, h: float, r_top: float, r_bottom: float) {
             let size = vec2(0.5 * w, 0.5 * h);
             let p_r = self.pos - vec2(x, y);

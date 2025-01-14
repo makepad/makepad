@@ -158,8 +158,8 @@ impl Widget for LinkLabel {
         self.button.text()
     }
     
-    fn set_text(&mut self, v:&str){
-        self.button.set_text(v);
+    fn set_text(&mut self, cx:&mut Cx, v:&str){
+        self.button.set_text(cx, v);
     }
 }
 

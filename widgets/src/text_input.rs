@@ -833,7 +833,7 @@ impl Widget for TextInput {
         self.text.to_string()
     }
     
-    fn set_text(&mut self, text: &str) {
+    fn set_text(&mut self, cx:&mut Cx, text: &str) {
         if self.text == text {
             return;
         }
@@ -841,6 +841,7 @@ impl Widget for TextInput {
         self.cursor.head.index = self.cursor.head.index.min(text.len());
         self.cursor.tail.index = self.cursor.tail.index.min(text.len());
         self.history.clear();
+        self.redraw(cx);
     }
 }
 
