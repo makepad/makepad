@@ -155,7 +155,7 @@ impl LiveHook for Window {
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
             // lets show a VR button
-            self.view(id!(web_xr)).set_visible(true);
+            self.view(id!(web_xr)).set_visible(cx, true);
             log!("VR IS SUPPORTED");
         }
        
@@ -168,8 +168,8 @@ impl LiveHook for Window {
         match cx.os_type() {
             OsType::Windows => {
                 if !cx.in_makepad_studio(){
-                    self.view(id!(caption_bar)).set_visible(true);
-                    self.view(id!(windows_buttons)).set_visible(true);
+                    self.view(id!(caption_bar)).set_visible(cx, true);
+                    self.view(id!(windows_buttons)).set_visible(cx, true);
                 }
             }
             OsType::Macos => {
@@ -312,12 +312,10 @@ impl Widget for Window {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen{
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    self.view(id!(caption_bar)).set_visible(false);
-                                    self.redraw(cx);
+                                    self.view(id!(caption_bar)).set_visible(cx, false);
                                 }
                                 else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(id!(caption_bar)).set_visible(true);
-                                    self.redraw(cx);
+                                    self.view(id!(caption_bar)).set_visible(cx, true);
                                 };
                             }
                         }

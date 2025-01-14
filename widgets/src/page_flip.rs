@@ -158,12 +158,7 @@ impl Widget for PageFlip {
 }
 
 impl PageFlipRef {
-    pub fn set_active_page(&self, page: LiveId) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.active_page = page;
-        }
-    }
-    pub fn set_active_page_and_redraw(&self, cx: &mut Cx, page: LiveId) {
+    pub fn set_active_page(&self, cx: &mut Cx, page: LiveId) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.redraw(cx);
             inner.active_page = page;

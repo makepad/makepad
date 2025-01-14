@@ -377,13 +377,7 @@ impl ViewRef {
         }
     }
 
-    pub fn set_visible(&self, visible: bool) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.visible = visible
-        }
-    }
-
-    pub fn set_visible_and_redraw(&self, cx: &mut Cx, visible: bool) {
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible;
             inner.redraw(cx);
@@ -459,9 +453,9 @@ impl ViewSet {
         }
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    pub fn set_visible(&self, cx:&mut Cx, visible: bool) {
         for item in self.iter() {
-            item.set_visible(visible)
+            item.set_visible(cx, visible)
         }
     }
 
