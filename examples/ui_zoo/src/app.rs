@@ -621,7 +621,8 @@ live_design!{
                         text: "Solid",
                         draw_slider: {
                             gap: 0.,
-                            padding: 0.,
+                            width: 10.0,
+                            padding: 4.,
                         }
                     }
                 }
