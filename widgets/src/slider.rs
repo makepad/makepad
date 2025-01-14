@@ -786,33 +786,24 @@ live_design!{
                     bg_width_scaled
                 );
 
+                let ratio_factor = max((self.rect_size.y - label_height) / self.rect_size.x, 1.0);
+
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, pow(self.pos.y, 1.0)),
-                            mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, pow(self.pos.y, 1.5) * ratio_factor),
+                            mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, pow(self.pos.y, 1.5) * ratio_factor),
                             self.hover
                         ),
-                        mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
+                        mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, pow(self.pos.y, 1.5) * ratio_factor),
                         self.drag
                     )
                 )
 
+
                 sdf.stroke(
-                    mix(
-                        mix(
-                            mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y,
-                                min(
-                                    self.rect_size.x * 0.025,
-                                    self.rect_size.y * 0.025
-                                )
-                            )),
-                            mix(ROTARY_BORDER_HOVER_COLOR_A, ROTARY_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
-                            self.hover
-                        ),
-                        mix(ROTARY_BORDER_DRAG_COLOR_A, ROTARY_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
-                        self.drag
-                    ), 1.0
+                    mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y, 2.0) * ratio_factor),
+                    1.0
                 )
 
                 let val_width = (self.width - self.padding) * 0.0075;
