@@ -438,7 +438,7 @@ impl Widget for AiChatView {
                                 Some(AiChatMessage::Assistant(val))=>{
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff
-                                    item.widget(id!(md)).set_text(&val);
+                                    item.widget(id!(md)).set_text(cx, &val);
                                     item.view(id!(busy)).set_visible(
                                         item_id + 1 == doc.file.history[self.history_slot].messages.len() && 
                                         doc.in_flight.is_some()
@@ -475,7 +475,7 @@ impl Widget for AiChatView {
                                         dd.set_selected_item(pos);
                                     }
                                     
-                                    item.widget(id!(message_input)).set_text(&val.message);
+                                    item.widget(id!(message_input)).set_text(cx, &val.message);
                                     item.draw_all_unscoped(cx);
                                 }
                                 _=>()

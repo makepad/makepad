@@ -180,7 +180,7 @@ impl MatchEvent for App {
             log!("BUTTON CLICKED {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            label.set_text(cx,&format!("Counter: {}", self.counter));
         }
 
         for action in actions {
@@ -308,7 +308,7 @@ impl LiveHook for HtmlImage {
                     "Loading image..."
                 };
                 
-                self.toi.text_view.label(id!(label)).set_text(text);
+                self.toi.text_view.label(id!(label)).set_text(cx, text);
                 
                 if !self.src.is_empty() {
                     // temp: just assume a local path URL only for now

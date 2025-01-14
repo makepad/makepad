@@ -409,7 +409,7 @@ impl Widget for TextFlow {
         }
         DrawStep::done()
     }
-    
+    /*
     fn text(&self)->String{
         "".into()
         //self.text.as_ref().to_string()
@@ -417,7 +417,7 @@ impl Widget for TextFlow {
     
     fn set_text(&mut self, _v:&str){
         //self.text.as_mut_empty().push_str(v);
-    }
+    }*/
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for (id,(entry,_)) in self.items.as_mut().unwrap().iter_mut(){
@@ -735,7 +735,7 @@ impl TextFlow{
     pub fn draw_link(&mut self, cx:&mut Cx2d, template:LiveId, data:impl ActionTrait + PartialEq, label:&str){
         let entry_id = self.new_counted_id();
         self.item_with(cx, entry_id, template, |cx, item, tf|{
-            item.set_text(label);
+            item.set_text(cx, label);
             item.set_action_data(data);
             item.draw_all(cx, &mut Scope::with_data(tf));
         })
@@ -890,9 +890,10 @@ impl Widget for TextFlowLink {
         self.text.as_ref().to_string()
     }
     
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
-    }
+        self.redraw(cx);
+    }    
 }
 /*
 #[derive(Clone)]

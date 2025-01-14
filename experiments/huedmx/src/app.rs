@@ -351,45 +351,55 @@ impl App {
         #[derive(Debug,Default,SerRon, DeRon)]
         struct State{ 
             fade:[f32;9],
-            dial_a:[f32;8], 
-            dial_b:[f32;8], 
-            dial_c:[f32;8], 
+            tempo: f32,
+            //dial_a:[f32;8], 
+            //dial_b:[f32;8], 
+            dial_0:[f32;8],
+            dial_1:[f32;8],
+            dial_2:[f32;8],
+            dial_3:[f32;8],
+            dial_4:[f32;8],
+            dial_5:[f32;8],
+            dial_6:[f32;8],
+            dial_7:[f32;8],
+            dial_top:[f32;8],
         }
         #[derive(Debug,Clone,Default)]
         struct Buttons{
-            mute:[bool;8],
-            rec:[bool;8],
-            solo:bool,
-            bank_left:bool,
-            bank_right:bool
+            //mute:[bool;8],
+            //rec:[bool;8],
+            preset:[bool;13],
+            write_preset: bool,
+            //solo:bool,
+            power: bool,
+            //bank_left:bool,
+            // bank_right:bool
         }
         impl Buttons{
             fn preset_id(&self)->Option<usize>{
-                for i in 0..8{
-                    if self.mute[i]{
+                for i in 0..13{
+                    if self.preset[i]{
                         return Some(i)
-                    }
-                }
-                for i in 0..8{
-                    if self.rec[i]{
-                        return Some(i+8)
                     }
                 }
                 None
             }
             fn delta(old:&Buttons, new:&Buttons)->Self{
-                let mut mute = [false;8];
-                let mut rec = [false;8];
+                //let mut mute = [false;8];
+                //let mut rec = [false;8];
+                let mut preset = [false;13];
+                let write_preset = !old.write_preset && new.write_preset;
                 for i in 0..8{
-                    mute[i] = !old.mute[i] && new.mute[i];
-                    rec[i] = !old.rec[i] && new.rec[i];
+                    //mute[i] = !old.mute[i] && new.mute[i];
+                    //rec[i] = !old.rec[i] && new.rec[i];
+                    preset[i] = !old.preset[i] && new.preset[i];
                 }
                 Self{
-                    mute,
-                    rec,
-                    solo: !old.solo && new.solo,
-                    bank_left: !old.bank_left && new.bank_left,
-                    bank_right: !old.bank_right && new.bank_right
+                    write_preset,
+                    //mute,
+                    //rec,
+                    preset,
+                    power: new.power ,
                 }
             }
         }
@@ -470,59 +480,118 @@ impl App {
             let mut counter = 0;
             let mut clock = 0.0f64;
             loop {
-                while let Ok((_length, _addr)) = socket.recv_from(&mut buffer){
+                //while let Ok((_length, _addr)) = socket.recv_from(&mut buffer){
                     //log!("READ {:x?}",&buffer[0..length]);
-                } 
+                //} 
                 // lets poll midi
                 while let Some((_port,data)) = midi_input.receive(){
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
+                            if cc.param == 13{
+                                if cc.value == 1{ // down
+                                    state.tempo += 0.02;
+                                    if state.tempo > 1.0{
+                                        state.tempo = 1.0;
+                                    }                                }
+                                else{ // up
+                                    state.tempo -= 0.02;
+                                    if state.tempo < 0.0{
+                                        state.tempo = 0.0;
+                                    }
+                                }
+                                println!("{}", state.tempo);
+                            }
                             let v = cc.value as f32 / 127.0;
-                            match cc.param{
-                                16=>state.dial_a[0] = v,
-                                17=>state.dial_b[0] = v,
-                                18=>state.dial_c[0] = v,
-                                19=>state.fade[0] = v,
-                                20=>state.dial_a[1] = v,
-                                21=>state.dial_b[1] = v,
-                                22=>state.dial_c[1] = v,
-                                23=>state.fade[1] = v,
-                                24=>state.dial_a[2] = v,
-                                25=>state.dial_b[2] = v,
-                                26=>state.dial_c[2] = v,
-                                27=>state.fade[2] = v,
-                                28=>state.dial_a[3] = v,
-                                29=>state.dial_b[3] = v,
-                                30=>state.dial_c[3] = v,
-                                31=>state.fade[3] = v,                               
-                                46=>state.dial_a[4] = v,
-                                47=>state.dial_b[4] = v,
-                                48=>state.dial_c[4] = v,
-                                49=>state.fade[4] = v, 
-                                50=>state.dial_a[5] = v,
-                                51=>state.dial_b[5] = v,
-                                52=>state.dial_c[5] = v,
-                                53=>state.fade[5] = v,
-                                54=>state.dial_a[6] = v,
-                                55=>state.dial_b[6] = v,
-                                56=>state.dial_c[6] = v,
-                                57=>state.fade[6] = v,
-                                58=>state.dial_a[7] = v,
-                                59=>state.dial_b[7] = v,
-                                60=>state.dial_c[7] = v,
-                                61=>state.fade[7] = v,
-                                62=>state.fade[8] = v,
-                                _=>{
-                                    log!("{} {}", cc.param, cc.value);
+                            if cc.param == 7{
+                                match cc.channel{
+                                    0..8=>state.fade[cc.channel as usize] = v,
+                                    _=>()
                                 }
                             }
+                            if cc.param >= 16 && cc.param <=23{
+                                match cc.channel{
+                                    0=>state.dial_0[cc.param as usize - 16] = v,
+                                    1=>state.dial_1[cc.param as usize - 16] = v,
+                                    2=>state.dial_2[cc.param as usize - 16] = v,
+                                    3=>state.dial_3[cc.param as usize - 16] = v,
+                                    4=>state.dial_4[cc.param as usize - 16] = v,
+                                    5=>state.dial_5[cc.param as usize - 16] = v,
+                                    6=>state.dial_6[cc.param as usize - 16] = v,
+                                    7=>state.dial_7[cc.param as usize - 16] = v,
+                                    _=>()
+                                }
+                            }
+                            if cc.channel == 0{
+                                match cc.param{
+                                    48=>state.dial_top[0] = v,
+                                    49=>state.dial_top[1] = v,
+                                    50=>state.dial_top[2] = v,
+                                    51=>state.dial_top[3] = v,
+                                    52=>state.dial_top[4] = v,
+                                    53=>state.dial_top[5] = v,
+                                    54=>state.dial_top[6] = v,
+                                    55=>state.dial_top[7] = v,
+                                    _=>{
+                                        log!("{} {}", cc.param, cc.value);
+                                    }
+                                }
+                            
+                                /*
+                                match cc.param{
+                                    16=>state.dial_a[0] = v,
+                                    17=>state.dial_b[0] = v,
+                                    18=>state.dial_c[0] = v,
+                                    19=>state.fade[0] = v,
+                                    20=>state.dial_a[1] = v,
+                                    21=>state.dial_b[1] = v,
+                                    22=>state.dial_c[1] = v,
+                                    23=>state.fade[1] = v,
+                                    24=>state.dial_a[2] = v,
+                                    25=>state.dial_b[2] = v,
+                                    26=>state.dial_c[2] = v,
+                                    27=>state.fade[2] = v,
+                                    28=>state.dial_a[3] = v,
+                                    29=>state.dial_b[3] = v,
+                                    30=>state.dial_c[3] = v,
+                                    31=>state.fade[3] = v,                               
+                                    46=>state.dial_a[4] = v,
+                                    47=>state.dial_b[4] = v,
+                                    48=>state.dial_c[4] = v,
+                                    49=>state.fade[4] = v, 
+                                    50=>state.dial_a[5] = v,
+                                    51=>state.dial_b[5] = v,
+                                    52=>state.dial_c[5] = v,
+                                    53=>state.fade[5] = v,
+                                    54=>state.dial_a[6] = v,
+                                    55=>state.dial_b[6] = v,
+                                    56=>state.dial_c[6] = v,
+                                    57=>state.fade[6] = v,
+                                    58=>state.dial_a[7] = v,
+                                    59=>state.dial_b[7] = v,
+                                    60=>state.dial_c[7] = v,
+                                    61=>state.fade[7] = v,
+                                    62=>state.fade[8] = v,
+                                    _=>{
+                                        log!("{} {}", cc.param, cc.value);
+                                    }
+                                }*/
+                            }
+                            
                         }
                         MidiEvent::Note(n)=>match n.note_number{
-                            48..=55=>new_buttons.mute[n.note_number as usize -48] = n.is_on,
-                            56..=63=>new_buttons.rec[n.note_number as usize -56] = n.is_on,
-                            25=>new_buttons.bank_left = n.is_on,
-                            26=>new_buttons.bank_right = n.is_on,
-                            27=>new_buttons.solo = n.is_on,
+                            81=>new_buttons.write_preset = n.is_on,
+                            89=>new_buttons.power = n.is_on,
+                            52=>{
+                                new_buttons.preset[n.channel as usize] = n.is_on;
+                            }
+                            82..87=>{
+                                new_buttons.preset[n.note_number as usize - 82 + 8] = n.is_on;
+                            }
+                            //48..=55=>new_buttons.mute[n.note_number as usize -48] = n.is_on,
+                            //56..=63=>new_buttons.rec[n.note_number as usize -56] = n.is_on,
+                            //25=>new_buttons.bank_left = n.is_on,
+                            //26=>new_buttons.bank_right = n.is_on,
+                            //27=>new_buttons.solo = n.is_on,
                             x=>{log!("{}",x)}
                         }
                         x=>log!("{:?}",x)
@@ -555,36 +624,30 @@ impl App {
                 // KITCHEN STRIP (C) - 38
                 // DESK (B)  - 39
                 // TABLE (B) - 40
-                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0], &[3, 19, 22, 29]);
-                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0], &[8, 23, 34, 40, 39]);
-                hue_wargb(&mut hue_sender, state.dial_c[0], state.fade[0], &[24, 25, 32, 33, 38]);
+                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[3, 19, 22, 29]);
+                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[8, 23, 34, 40, 39]);
+                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[24, 25, 32, 33, 38]);
                 
                 // all these buttons become preset= slots
                 
+                // main power 
+                hue_switch(&mut hue_sender,/*buttons.power*/true, &[41]);
                 
-                if buttons.bank_right{
-                    hue_switch(&mut hue_sender,false, &[41]);
-                }
-                else if buttons.solo{
-                    hue_switch(&mut hue_sender,true, &[41]);
-                }
-                if new_buttons.bank_left{ // write a preset
+                if new_buttons.write_preset{ // write a preset
                     if let Some(idx) = new_buttons.preset_id(){
-                        println!("{} {:?}", idx, new_buttons);
+                        //println!("{} {:?}", idx, new_buttons);
                         std::fs::write(format!("dmx{}.ron", idx), state.serialize_ron().as_bytes()).unwrap();
                     }
                 }
                 else{ // read a preset
                     if let Some(idx) = new_buttons.preset_id(){
-                        println!("{} {:?}", idx, buttons);
                         if let Ok(result) = std::fs::read_to_string(format!("dmx{}.ron", idx)){
                             if let Ok(load) = State::deserialize_ron(&result){
                                 let ts = state;
                                 state = load;
-                                for i in 5..8{
-                                    state.dial_a[i] = ts.dial_a[i];
-                                    state.dial_b[i] = ts.dial_b[i];
-                                    state.fade[4] = ts.fade[4];
+                                println!("LOAD PRESET {:?}", idx);
+                                for i in 0..8{
+                                    state.dial_0[i] = ts.dial_0[i];
                                 }
                             }
                         }
@@ -606,15 +669,9 @@ impl App {
                 }                
                 */
                 
-                if state.fade[6]>0.5{
-                    hue_switch(&mut hue_sender,true,  &[42]);
-                }
-                else {
-                    hue_switch(&mut hue_sender,false,  &[42]); 
-                }
                       
                  
-                map_wargb(state.dial_c[3], 1.0, dmx, &[110+2-1]); // RGB laser color
+                map_wargb(state.dial_top[3], 1.0, dmx, &[110+2-1]); // RGB laser color
                 // lets set the laser mode with the slider
                 let rgb_laser_addr = 110;
                 match (state.fade[3] * 3.0) as usize{
@@ -635,7 +692,7 @@ impl App {
                 }
                 // overload the other laser onto the this laser
                 let rgb_laser_addr = 110;
-                map_wargb(state.dial_c[3], 1.0, dmx, &[rgb_laser_addr+2-1]); // RGB laser color
+                map_wargb(state.dial_top[3], 1.0, dmx, &[rgb_laser_addr+2-1]); // RGB laser color
                 match (state.fade[3] * 4.0) as usize{
                     0=>{ // laser off
                         dmx_u8(0, dmx, &[rgb_laser_addr], 1);
@@ -663,14 +720,14 @@ impl App {
                 dmx_f32(state.dial_c[4], dmx, &[multi_fx_addr], 4);
                 */
                 let rgb_strobe = 120;
-                map_wargb(state.dial_c[3], state.fade[3], dmx, &[rgb_strobe+3-1]); // Strobe RGB
+                map_wargb(state.dial_top[3], state.fade[3], dmx, &[rgb_strobe+3-1]); // Strobe RGB
                 dmx_f32(1.0, dmx, &[rgb_strobe], 1);
-                dmx_f32(state.dial_a[6], dmx, &[rgb_strobe], 10);
+                dmx_f32(state.tempo, dmx, &[rgb_strobe], 10);
                 //dmx_f32(1.0-(state.fade[3].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
                 
                 // strobe
                 dmx_f32(state.fade[4], dmx, &[rgb_strobe], 6);
-                dmx_f32(state.dial_a[7], dmx, &[rgb_strobe], 8);
+                dmx_f32(state.tempo, dmx, &[rgb_strobe], 8);
                 
                 
                 /*
@@ -683,24 +740,26 @@ impl App {
                 let spot1 = 200;
                 let spot2 = 250;
                 
-                dmx_f32(state.fade[2], dmx, &[spot1, spot2], 6);
-                dmx_f32(state.dial_a[0], dmx, &[spot1], 1);
-                dmx_f32(state.dial_a[0], dmx, &[spot2], 1);
-                dmx_f32(state.dial_a[1], dmx, &[spot1, spot2], 3);
+                // the gobo options
+                dmx_f32(state.fade[1], dmx, &[spot1, spot2], 6);
+                dmx_f32(state.dial_1[0], dmx, &[spot1], 1);
+                dmx_f32(state.dial_1[0], dmx, &[spot2], 1);
+                dmx_f32(state.dial_1[1], dmx, &[spot1, spot2], 3);
+                dmx_f32(state.dial_top[1], dmx, &[spot1, spot2], 8);
+                dmx_f32(state.dial_1[4], dmx, &[spot1, spot2], 12);
+                dmx_f32(state.dial_1[3], dmx, &[spot1, spot2], 13);
+                dmx_f32(state.dial_1[2], dmx, &[spot1, spot2], 10);
                 
-                dmx_f32(state.fade[1], dmx, &[spot1, spot2], 14); 
+                // the outer one
+                dmx_f32(state.fade[2], dmx, &[spot1, spot2], 14); 
+                map_wargb(state.dial_top[2], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
                 
-                map_wargb(state.dial_c[1], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
-                dmx_f32(state.dial_c[2], dmx, &[spot1, spot2], 8);
-                dmx_f32(state.dial_a[4], dmx, &[spot1, spot2], 12);
-                dmx_f32(state.dial_a[3], dmx, &[spot1, spot2], 13);
-                dmx_f32(state.dial_a[2], dmx, &[spot1, spot2], 10);
                 
                 // smoke machine
                 let smoke = 300;
                 // ok so depending on the state of c_[7] we do a percentage of a 
                 let slot = 101.0f64;
-                let needed = slot * state.dial_b[5] as f64;
+                let needed = slot * state.dial_0[0] as f64;
                 let t = clock.rem_euclid(slot);
                 if t < needed{
                     dmx_f32(1.0, dmx, &[smoke], 1);
@@ -710,8 +769,8 @@ impl App {
                 }
                 // in time modulus 
                 let smoke2 = 310;
-                dmx_f32(state.dial_b[7], dmx, &[smoke2], 1);
-                dmx_f32(state.dial_b[6], dmx, &[smoke2], 2);
+                dmx_f32(state.dial_0[2], dmx, &[smoke2], 1);
+                dmx_f32(state.dial_0[1], dmx, &[smoke2], 2);
                 
                 // laser: 400
                 let laser1 = 400;
@@ -722,13 +781,13 @@ impl App {
                 let lasers = [laser1,laser2,laser3,laser4,laser5];
                                 
                 dmx_f32(state.fade[5], dmx, &lasers, 1);
-                dmx_f32(state.dial_b[0], dmx, &lasers, 2);
-                dmx_f32(state.dial_b[1], dmx, &lasers, 11); 
-                dmx_f32(state.dial_b[2], dmx, &lasers, 12); 
+                dmx_f32(state.dial_5[0], dmx, &lasers, 2);
+                dmx_f32(state.dial_top[5], dmx, &lasers, 11); 
+                dmx_f32(state.dial_5[1], dmx, &lasers, 12); 
                 dmx_f32(0.5, dmx, &lasers, 3);
                 dmx_f32(0.3, dmx, &lasers, 4);
-                dmx_f32(state.dial_b[3], dmx, &lasers, 5);
-                dmx_f32(state.dial_b[4], dmx, &lasers, 6);
+                dmx_f32(state.dial_5[2], dmx, &lasers, 5);
+                dmx_f32(state.dial_5[3], dmx, &lasers, 6);
                 dmx_f32(0.5, dmx, &lasers, 7);
                 dmx_f32(0.5, dmx, &lasers, 8); 
                 dmx_f32(0.5, dmx, &lasers, 10); 
@@ -738,11 +797,17 @@ impl App {
                 let uv2 = 502;
                 let uv3 = 504;        
                 let uv = [uv1, uv2, uv3];
-                dmx_f32(state.fade[7], dmx, &uv, 1);
-                dmx_f32(if state.dial_a[7]<0.1{0.0}else{state.dial_a[7]}, dmx, &uv, 2);
+                dmx_f32(state.fade[6], dmx, &uv, 1);
+                dmx_f32(if state.tempo<0.1{0.0}else{state.tempo}, dmx, &uv, 2);
                 //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
                 //let _ = rc_car_socket.send_to(&buf, rc_car_send_addr);
-                
+                // UV SPOT
+                if state.fade[7]>0.5{
+                    hue_switch(&mut hue_sender,true,  &[42]);
+                }
+                else {
+                    hue_switch(&mut hue_sender,false,  &[42]); 
+                }
                                 
                 //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
                 //dmx_f32(state.fade[7], dmx, &[spot], 6);
@@ -758,7 +823,6 @@ impl App {
                 socket.send_to(&universe, broadcast_addr).unwrap();
                 
                 std::fs::write("dmx.ron", state.serialize_ron().as_bytes()).unwrap();
-                
                 //socket.send(&universe, broadcast_add.into());
                 // lets sleep 1/44th of a second
                 std::thread::sleep(Duration::from_secs_f64(1.0/44.0))
