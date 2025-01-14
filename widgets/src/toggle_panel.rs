@@ -132,14 +132,14 @@ impl Widget for TogglePanel {
             let close = self.button(id!(close));
 
             if open.clicked(actions) {
-                open.set_visible(false);
-                close.set_visible(true);
+                open.set_visible(cx, false);
+                close.set_visible(cx, true);
                 self.set_open(cx, true);
             }
 
             if close.clicked(actions) {
-                close.set_visible(false);
-                open.set_visible(true);
+                close.set_visible(cx, false);
+                open.set_visible(cx, true);
                 self.set_open(cx, false);
             }
         }

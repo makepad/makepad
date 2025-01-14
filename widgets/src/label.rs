@@ -215,7 +215,7 @@ impl Widget for Label {
         // here we need to check if the text is empty, if so we need to set it to a space
         // or the text draw will not work(seems like lazy drawtext bug)
         let _ = self.text.as_ref().is_empty().then(|| {
-            let _ = self.set_text(" ");
+            let _ = self.set_text(cx, " ");
         });
         self.draw_text.draw_walk(cx, walk, self.align, self.text.as_ref());
         cx.end_turtle_with_area(&mut self.area);
@@ -226,8 +226,9 @@ impl Widget for Label {
         self.text.as_ref().to_string()
     }
     
-    fn set_text(&mut self, v:&str){
+    fn set_text(&mut self, cx:&mut Cx, v:&str){
         self.text.as_mut_empty().push_str(v);
+        self.redraw(cx);
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {

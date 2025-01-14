@@ -82,7 +82,7 @@ impl MatchEvent for App{
         if let Some(socket) = &mut self.web_socket{
             match socket.try_recv(){
                 Ok(WebSocketMessage::Binary(data))=>{
-                    self.ui.label(id!(time)).set_text_and_redraw(cx, &format!("GOT BINARY {}", data.len()));
+                    self.ui.label(id!(time)).set_text(cx, &format!("GOT BINARY {}", data.len()));
                     // we got a new image. lets decode and show it
                     let img = self.ui.image_blend(id!(image));
                     let _ = img.load_png_from_data(cx, &data);

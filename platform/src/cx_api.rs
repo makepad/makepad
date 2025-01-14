@@ -396,6 +396,9 @@ impl Cx {
     }
 
     pub fn redraw_list(&mut self, draw_list_id: DrawListId) {
+        if self.in_draw_event{
+            return
+        }
         if self
             .new_draw_event
             .draw_lists
@@ -409,6 +412,9 @@ impl Cx {
     }
 
     pub fn redraw_list_and_children(&mut self, draw_list_id: DrawListId) {
+        if self.in_draw_event{
+            return
+        }
         if self
             .new_draw_event
             .draw_lists_and_children
