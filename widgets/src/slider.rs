@@ -461,11 +461,11 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, pow(self.pos.y, 1.0)),
-                            mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(SLIDER_ALT1_BG_COLOR_A, SLIDER_ALT1_BG_COLOR_B, pow(self.pos.y, 1.0)),
+                            mix(SLIDER_ALT1_BG_HOVER_COLOR_A, SLIDER_ALT1_BG_HOVER_COLOR_B, pow(self.pos.y, 1.0)),
                             self.hover
                         ),
-                        mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
+                        mix(SLIDER_ALT1_BG_DRAG_COLOR_A, SLIDER_ALT1_BG_DRAG_COLOR_B, pow(self.pos.y, 1.0)),
                         self.drag
                     )
                 )
@@ -473,11 +473,11 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
-                            mix(ROTARY_BORDER_HOVER_COLOR_A, ROTARY_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(SLIDER_ALT1_BORDER_COLOR_A, SLIDER_ALT1_BORDER_COLOR_B, pow(self.pos.y, 3.0)),
+                            mix(SLIDER_ALT1_BORDER_HOVER_COLOR_A, SLIDER_ALT1_BORDER_HOVER_COLOR_B, pow(self.pos.y, 3.0)),
                             self.hover
                         ),
-                        mix(ROTARY_BORDER_DRAG_COLOR_A, ROTARY_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
+                        mix(SLIDER_ALT1_BORDER_DRAG_COLOR_A, SLIDER_ALT1_BORDER_DRAG_COLOR_B, pow(self.pos.y, 3.0)),
                         self.drag
                     ), 1.0
                 )
