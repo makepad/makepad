@@ -407,16 +407,7 @@ impl Cx {
         if self.in_draw_event{
             return
         }
-        if self
-            .new_draw_event
-            .draw_lists
-            .iter()
-            .position(|v| *v == draw_list_id)
-            .is_some()
-        {
-            return;
-        }
-        self.new_draw_event.draw_lists.push(draw_list_id);
+        self.redraw_list_in_draw(draw_list_id);
     }
     
     pub fn redraw_list_in_draw(&mut self, draw_list_id: DrawListId) {
