@@ -390,7 +390,13 @@ impl Cx {
             self.redraw_list(draw_list_id);
         }
     }
-
+    
+    pub fn redraw_area_in_draw(&mut self, area: Area) {
+        if let Some(draw_list_id) = area.draw_list_id() {
+            self.redraw_list_in_draw(draw_list_id);
+        }
+    }
+    
     pub fn redraw_area_and_children(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_and_children(draw_list_id);
@@ -407,6 +413,19 @@ impl Cx {
             .iter()
             .position(|v| *v == draw_list_id)
             .is_some()
+        {
+            return;
+        }
+        self.new_draw_event.draw_lists.push(draw_list_id);
+    }
+    
+    pub fn redraw_list_in_draw(&mut self, draw_list_id: DrawListId) {
+        if self
+        .new_draw_event
+        .draw_lists
+        .iter()
+        .position(|v| *v == draw_list_id)
+        .is_some()
         {
             return;
         }
