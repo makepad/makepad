@@ -236,7 +236,7 @@ impl PerformanceLiveGraph {
 }
 
 impl PerformanceLiveGraphRef {
-    pub fn add_y_entry(&mut self, cx: &mut Cx, y_entry: i64) {
+    pub fn add_y_entry(&self, cx: &mut Cx, y_entry: i64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.add_y_entry(cx, y_entry);
         }

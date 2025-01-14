@@ -634,26 +634,18 @@ impl Widget for TextInput {
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers {
-                    logo: true,
-                    shift: false,
-                    ..
-                },
+                modifiers,
                 ..
-            }) if !self.is_read_only => {
+            }) if modifiers.is_primary() && !modifiers.shift && !self.is_read_only => {
                 self.undo();
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers {
-                    logo: true,
-                    shift: true,
-                    ..
-                },
+                modifiers,
                 ..
-            }) if !self.is_read_only => {
+            }) if modifiers.is_primary() && modifiers.shift && !self.is_read_only => {
                 self.redo();
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Change(self.text.clone()));
@@ -771,12 +763,16 @@ impl Widget for TextInput {
         // Draw text
         if self.text.is_empty() {
             self.draw_text.is_empty = 1.0;
+            // Always draw non-secret text when displaying an empty message.
+            let was_secret = self.draw_text.text_style.is_secret;
+            self.draw_text.text_style.is_secret = false;
             self.draw_text.draw_walk(
                 cx,
                 inner_walk,
                 self.label_align,
                 &self.empty_message,
             );
+            self.draw_text.text_style.is_secret = was_secret;
         } else {
             self.draw_text.is_empty = 0.0;
             self.draw_text.draw_walk(
