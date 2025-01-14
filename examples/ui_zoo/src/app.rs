@@ -375,30 +375,30 @@ live_design!{
                             <H4> { text: "Inline Label", width: 175.}
                             <TextInput> { empty_message: "Inline Label" }
                         }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "Secret", width: 175.}
-                            <TextInput> { text: "1234567", empty_message: "Password", secret: true }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "On focus select all", width: 175.}
-                            <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "Read only", width: 175.}
-                            <TextInput> { text: "You can't change me", read_only: true }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "ASCII only", width: 175.}
-                            <TextInput> { empty_message: "No fancy characters", ascii_only: true }
-                        }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "Secret", width: 175.}
+                        //     <TextInput> { text: "1234567", empty_message: "Password", secret: true }
+                        // }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "On focus select all", width: 175.}
+                        //     <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
+                        // }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "Read only", width: 175.}
+                        //     <TextInput> { text: "You can't change me", read_only: true }
+                        // }
+                        // <View> {
+                        //     height: Fit, width: Fill,
+                        //     spacing: (THEME_SPACE_2),
+                        //     <H4> { text: "ASCII only", width: 175.}
+                        //     <TextInput> { empty_message: "No fancy characters", ascii_only: true }
+                        // }
                         // <View> {
                         //     height: Fit, width: Fill,
                         //     spacing: (THEME_SPACE_2),
@@ -445,6 +445,7 @@ live_design!{
                     <ZooGroup> {
                         width: Fill, height: Fit,
                         flow: Right,
+                        spacing: 10.0,
                         align: { x: 0., y: 0.}
                         <View> {
                             width: Fill, height: Fit,
@@ -453,7 +454,7 @@ live_design!{
                             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                             <Slider> { text: "min/max", min: 0., max: 100. }
                             <Slider> { text: "precision", precision: 20 }
-                            <Slider> { text: "step", step: 0.1 }
+                            <Slider> { text: "stepped", step: 0.1 }
                         }
                         <View> {
                             width: Fill, height: Fit,
@@ -462,12 +463,95 @@ live_design!{
                             <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                             <SliderBig> { text: "min/max", min: 0., max: 100. }
                             <SliderBig> { text: "precision", precision: 20 }
-                            <SliderBig> { text: "step", step: 0.1 }
+                            <SliderBig> { text: "stepped", step: 0.1 }
+                        }
+                        <View> {
+                            width: Fill, height: Fit,
+                            flow: Down,
+                            <SliderAlt1> {
+                                text: "Colored",
+                                draw_slider: {
+                                    val_color_a: (#FFCC00),
+                                    val_color_b: #f00,
+                                    handle_color_a: #0,
+                                    handle_color_b: #0,
+                               }
+                            }
+                            <SliderAlt1> {
+                                text: "Solid",
+                                draw_text: {
+                                    color: #0ff;
+                                }
+                                draw_slider: {
+                                    val_color_a: #f08,
+                                    val_color_b: #f08,
+                                    handle_color_a: #FFFF,
+                                    handle_color_b: #FFF0,
+                                }
+                            }
+                            <SliderAlt1> {
+                                text: "Solid",
+                                draw_slider: {
+                                    val_color_a: #6,
+                                    val_color_b: #6,
+                                    handle_color_a: #0,
+                                    handle_color_b: #C,
+                                }
+                            }
+                            <SliderAlt1> { text: "min/max", min: 0., max: 100. }
+                            <SliderAlt1> { text: "precision", precision: 20 }
+                            <SliderAlt1> { text: "stepped", step: 0.1 }
+                            <SliderAlt1> {
+                                text: "label_size",
+                                draw_slider: {label_size: 150. },
+                            }
+                        }
+                        <View> {
+                            width: Fill, height: Fit,
+                            flow: Down,
+                            <Rotary> {
+                                text: "Colored",
+                                draw_slider: {
+                                    val_color_a: (#FFCC00),
+                                    val_color_b: #f00,
+                                    handle_color_a: #0,
+                                    handle_color_b: #0,
+                               }
+                            }
+                            <Rotary> {
+                                text: "Solid",
+                                draw_text: {
+                                    color: #0ff;
+                                }
+                                draw_slider: {
+                                    val_color_a: #f08,
+                                    val_color_b: #f08,
+                                    handle_color_a: #FFFF,
+                                    handle_color_b: #FFF0,
+                                }
+                            }
+                            <Rotary> {
+                                text: "Solid",
+                                draw_slider: {
+                                    val_color_a: #6,
+                                    val_color_b: #6,
+                                    handle_color_a: #0,
+                                    handle_color_b: #C,
+                                }
+                            }
+                            <Rotary> { text: "min/max", min: 0., max: 100. }
+                            <Rotary> { text: "precision", precision: 20 }
+                            <Rotary> { text: "stepped", step: 0.1 }
+                            <Rotary> {
+                                text: "label_size",
+                                draw_slider: {label_size: 150. },
+                            }
                         }
                     }
                 }
 
                 <ZooHeader> {
+                    title = {text:"<DropDown>"}
                     title = {text:"<DropDown>"}
                     <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
                     <ZooGroup> {
@@ -486,25 +570,25 @@ live_design!{
                     }
                 }
 
-                <ZooHeader> {
-                    title = { text:"<FoldHeader>" }
-                    <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
-                    <ZooGroup> {
-                        thefoldheader= <FoldHeader> {
-                            header: <View> {
-                                height: Fit
-                                align: {x: 0., y: 0.5}
-                                fold_button = <FoldButton> {} <P> {text: "Fold me!"}
-                            }
-                            body: <View> {
-                                width: Fill, height: Fit
-                                show_bg: false,
-                                padding: 5.0,
-                                <P> { text:"This is the body that can be folded away" }
-                            }
-                        }
-                    }
-                }
+                // <ZooHeader> {
+                //     title = { text:"<FoldHeader>" }
+                //     <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
+                //     <ZooGroup> {
+                //         thefoldheader= <FoldHeader> {
+                //             header: <View> {
+                //                 height: Fit
+                //                 align: {x: 0., y: 0.5}
+                //                 fold_button = <FoldButton> {} <P> {text: "Fold me!"}
+                //             }
+                //             body: <View> {
+                //                 width: Fill, height: Fit
+                //                 show_bg: false,
+                //                 padding: 5.0,
+                //                 <P> { text:"This is the body that can be folded away" }
+                //             }
+                //         }
+                //     }
+                // }
 
                 <ZooHeader> {
                     title = {text:"<Html>"}
@@ -1269,8 +1353,6 @@ live_design!{
 
                                     align: { x: 0.5, y: 0.5 },
                                     // Positions children at the left (x) bottom (y) corner of the parent.
-
-                                    line_spacing: 1.5
                                 }
 
                                 <H4> { text: "Preset: ButtonFlat"}

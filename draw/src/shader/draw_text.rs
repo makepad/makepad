@@ -14,32 +14,32 @@ live_design!{
     pub DrawText = {{DrawText}} {
         //debug: true;
         color: #fff
-        
+
        // uniform brightness: float
        // uniform curve: float
         //uniform sdf_radius: float
         //uniform sdf_cutoff: float
-        
+
         texture tex: texture2d
-        
+
         varying tex_coord1: vec2
         varying tex_coord2: vec2
         varying tex_coord3: vec2
         varying clipped: vec2
         varying pos: vec2
-        
+
         fn vertex(self) -> vec4 {
             let min_pos = vec2(self.rect_pos.x, self.rect_pos.y)
             let max_pos = vec2(self.rect_pos.x + self.rect_size.x, self.rect_pos.y - self.rect_size.y)
-            
+
             self.clipped = clamp(
                 mix(min_pos, max_pos, self.geom_pos),
                 self.draw_clip.xy,
                 self.draw_clip.zw
             )
-            
+
             let normalized: vec2 = (self.clipped - min_pos) / vec2(self.rect_size.x, -self.rect_size.y)
-            
+
             self.tex_coord1 = mix(
                 vec2(self.font_t1.x, 1.0-self.font_t1.y),
                 vec2(self.font_t2.x, 1.0-self.font_t2.y),
@@ -53,24 +53,24 @@ live_design!{
                 1.
             )))
         }
-        
+
         fn get_color(self) -> vec4 {
             return self.color;
         }
         fn blend_color(self, incol:vec4)->vec4{
             return incol
         }
-        
+
         fn get_brightness(self)->float{
             return 1.0;
         }
-        
+
         fn sample_color(self, scale:float, pos:vec2)->vec4{
             let brightness = self.get_brightness();
             let sdf_radius = 8.0;
             let sdf_cutoff = 0.25;
             let s = sample2d(self.tex, pos).x;
-            let curve = 0.5; 
+            let curve = 0.5;
             //if (self.sdf_radius != 0.0) {
             // HACK(eddyb) harcoded atlas size (see asserts below).
             let texel_coords = pos.xy * 4096.0;
@@ -78,10 +78,10 @@ live_design!{
             //} else {
             //    s = pow(s, curve);
             //}
-            let col = self.get_color(); 
+            let col = self.get_color();
             return self.blend_color(vec4(s * col.rgb * brightness * col.a, s * col.a));
         }
-        
+
         fn pixel(self) -> vec4 {
             let texel_coords = self.tex_coord1.xy;
             let dxt = length(dFdx(texel_coords));
@@ -115,27 +115,27 @@ live_design!{
             //16x AA
             /*
             let d = 0.25;
-            let d2 = 0.5; 
-            let d3 = 0.75; 
+            let d2 = 0.5;
+            let d3 = 0.75;
             let x1 = self.sample_color(scale, self.tex_coord1.xy);
             let x2 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,0.0));
             let x3 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,0.0));
             let x4 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,0.0));
-                        
+
             let x5 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d));
             let x6 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d));
             let x7 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
             let x8 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d));
-                        
+
             let x9 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d2));
             let x10 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d2));
             let x11 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d2));
-            let x12 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d2));           
-            
+            let x12 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d2));
+
             let x13 = self.sample_color(scale, self.tex_coord1.xy+vec2(0.0,dyt *d3));
             let x14 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d,dyt *d3));
             let x15 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d2,dyt *d3));
-            let x16 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d3));            
+            let x16 =  self.sample_color(scale, self.tex_coord1.xy+vec2(dxt * d3,dyt *d3));
             return (x1+x2+x3+x4+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+x15+x16)/16 ;*/
         }
     }
@@ -172,18 +172,18 @@ pub enum TextWrap {
 #[repr(C)]
 pub struct DrawText {
     #[rust] pub many_instances: Option<ManyInstances>,
-    
+
 
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
     #[live] pub wrap: TextWrap,
-    
+
     #[live] pub ignore_newlines: bool,
     #[live] pub combine_spaces: bool,
-    
+
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
-    
+
     #[deref] pub draw_vars: DrawVars,
     // these values are all generated
     #[live] pub color: Vec4,
@@ -205,51 +205,51 @@ impl LiveHook for DrawText {
 }
 
 impl DrawText {
-    
+
     pub fn draw(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
     }
-    
+
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos + cx.turtle().origin(), val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
     }
-    
+
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
         if self.many_instances.is_some() {
             self.end_many_instances(cx)
         }
     }
-    
+
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
         let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let fonts_atlas = fonts_atlas_rc.0.borrow();
         self.begin_many_instances_internal(cx, &*fonts_atlas);
     }
-    
+
     fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, fonts_atlas: &CxFontAtlas) {
         self.update_draw_call_vars(fonts_atlas);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = mi;
     }
-    
+
     pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
-    
+
     pub fn new_draw_call(&self, cx: &mut Cx2d) {
         cx.new_draw_call(&self.draw_vars);
     }
-    
+
     pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontAtlas) {
         self.draw_vars.texture_slots[0] = Some(font_atlas.texture_sdf.clone());
         // self.draw_vars.user_uniforms[0] = self.text_style.brightness;
@@ -259,15 +259,15 @@ impl DrawText {
         //self.draw_vars.user_uniforms[0] = sdf_radius;
         //self.draw_vars.user_uniforms[1] = sdf_cutoff;
     }
-    
+
     pub fn get_line_spacing(&self) -> f64 {
         self.text_style.font_size * self.font_scale * self.text_style.line_spacing
     }
-    
+
     pub fn get_font_size(&self) -> f64 {
         self.text_style.font_size
     }
-    
+
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {
         // If the font did not load, there is nothing to draw.
         let Some(font_id) = self.text_style.font.font_id else {
@@ -299,7 +299,7 @@ impl DrawText {
         let font = font_atlas.fonts[font_id].as_mut().unwrap();
         let slot = font.owned_font_face.with_ref( | face | face.glyph_index('!').map_or(0, | id | id.0 as usize));
         let glyph = font.get_glyph_by_id(slot).unwrap();
-        
+
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
@@ -323,7 +323,7 @@ impl DrawText {
             font_ids[0] = font_id;
             &font_ids[..1]
         };
-        
+
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
@@ -341,7 +341,7 @@ impl DrawText {
 
     pub fn selected_rects(
         &self,
-        cx: &mut Cx2d, 
+        cx: &mut Cx2d,
         walk: Walk,
         _align: Align,
         width: f64,
@@ -429,10 +429,10 @@ impl DrawText {
                 size: dvec2(position.x, line_height),
             });
         }
-        
+
         drop(shape_cache_ref);
         drop(font_atlas_ref);
-        
+
         if let Some(rect) = rects.last_mut() {
             let end_position = self.index_affinity_to_position(
                 cx,
@@ -692,7 +692,7 @@ impl DrawText {
 
     fn draw_inner(&mut self, cx: &mut Cx2d, position: DVec2, line: &str, font_atlas: &mut CxFontAtlas) {
         self.char_depth = self.draw_depth;
-        
+
         // If the line is empty, there is nothing to draw.
         if line.is_empty() {
             return;
@@ -720,7 +720,7 @@ impl DrawText {
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
-        
+
         let origin = position;
         let mut position = DVec2::new();
         layout_line(
@@ -744,7 +744,7 @@ impl DrawText {
                         cx,
                         origin + position,
                         font_size,
-                        &glyph_infos, 
+                        &glyph_infos,
                         font_atlas
                     );
                 }
@@ -762,12 +762,12 @@ impl DrawText {
         text: &str,
     ) {
         self.char_depth = self.draw_depth;
-        
+
         // If the text is empty, there is nothing to draw.
         if text.is_empty() {
             return;
         }
-        
+
         // If the font did not load, there is nothing to draw.
         let Some(font_id) = self.text_style.font.font_id else {
             return;
@@ -781,7 +781,7 @@ impl DrawText {
             font_ids[0] = font_id;
             &font_ids[..1]
         };
-        
+
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas = font_atlas_rc.0.borrow_mut();
@@ -862,7 +862,7 @@ impl DrawText {
         });
 
         // cx.cx.debug.rect(rect, vec4(1.0, 0.0, 0.0, 1.0));
-        
+
         // Lay out the text again to draw the glyphs in the draw rectangle.
         let mut position = DVec2::new();
         layout_text(
@@ -915,12 +915,12 @@ impl DrawText {
         mut f: impl FnMut(&mut Cx2d, Rect)
     ) {
         self.char_depth = self.draw_depth;
-        
+
         // If the text is empty, there is nothing to draw.
         if text.is_empty() {
             return
         }
-        
+
         // If the font did not load, there is nothing to draw.
         let Some(font_id) = self.text_style.font.font_id else {
             return
@@ -1057,7 +1057,7 @@ impl DrawText {
         let Some(mi) = &mut self.many_instances else {
             return;
         };
-        
+
         // Get the device pixel ratio.
         let device_pixel_ratio = cx.current_dpi_factor();
 
@@ -1065,13 +1065,13 @@ impl DrawText {
         let glyph_padding_dpx = 2.0;
         let glyph_padding_lpx = glyph_padding_dpx / device_pixel_ratio;
 
-        
+
         let mut position = position;
         for glyph_info in glyph_infos {
             let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
             let units_per_em = font.ttf_font.units_per_em;
             let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size) * self.text_style.line_scale;
-            
+
             // Use the glyph id to get the glyph from the font.
             let glyph = font.owned_font_face.with_ref(|face| {
                 font.ttf_font.get_glyph_by_id(face, glyph_info.glyph_id as usize).unwrap()
@@ -1082,7 +1082,7 @@ impl DrawText {
                 units_to_lpxs(glyph.bounds.p_min.x, units_per_em, font_size),
                 units_to_lpxs(glyph.bounds.p_min.y, units_per_em, font_size),
             );
-            
+
             // Compute the size of the bounding box of the glyph in logical pixels.
             let glyph_size_lpx = dvec2(
                 units_to_lpxs(glyph.bounds.p_max.x - glyph.bounds.p_min.x, units_per_em, font_size),
@@ -1103,7 +1103,7 @@ impl DrawText {
 
             // Compute the padded size of the bounding box of the glyph in logical pixels.
             let padded_glyph_size_lpx = padded_glyph_size_dpx / device_pixel_ratio;
-            
+
             // Compute the left side bearing.
             let left_side_bearing = units_to_lpxs(glyph.horizontal_metrics.left_side_bearing, units_per_em, font_size);
 
@@ -1136,7 +1136,7 @@ impl DrawText {
 
             // Compute the advance width.
             let advance_width = compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, self.text_style.font_size, font_atlas);
-            
+
             // Emit the instance data.
             self.font_t1 = atlas_glyph.t1;
             self.font_t2 = atlas_glyph.t2;
@@ -1145,7 +1145,7 @@ impl DrawText {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
             self.char_depth += ZBIAS_STEP;
-            
+
             // Advance to the next position.
             position.x += advance_width;
         }
@@ -1247,7 +1247,7 @@ fn layout_line(
             font_size,
             line_spacing,
             wrap_width,
-            font_atlas, 
+            font_atlas,
             shape_cache,
             &mut f,
         ) {
@@ -1331,7 +1331,7 @@ fn layout_grapheme(
     line_spacing: f64,
     wrap_width: Option<f64>,
     font_atlas: &mut CxFontAtlas,
-    shape_cache: &mut CxShapeCache, 
+    shape_cache: &mut CxShapeCache,
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut CxFontAtlas) -> bool,
 ) -> bool {
     let grapheme = &text[grapheme_start..grapheme_end];

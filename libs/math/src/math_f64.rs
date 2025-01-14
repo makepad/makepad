@@ -216,8 +216,8 @@ impl std::convert::From<(DVec2, DVec2)> for Rect {
 }
 
 impl DVec2 {
-    pub fn new() -> DVec2 {
-        DVec2::default()
+    pub const fn new() -> DVec2 {
+        DVec2 {x: 0.0, y: 0.0}
     }
 
     pub fn zero(&mut self) {
@@ -233,11 +233,11 @@ impl DVec2 {
         }
     }
     
-    pub fn all(x: f64) -> DVec2 {
+    pub const fn all(x: f64) -> DVec2 {
         DVec2 {x, y: x}
     }
     
-    pub fn index(&self, index:Vec2Index)->f64{
+    pub const fn index(&self, index:Vec2Index)->f64{
         match index{
             Vec2Index::X=>self.x,
             Vec2Index::Y=>self.y
@@ -251,14 +251,14 @@ impl DVec2 {
         }
     }
     
-    pub fn from_index_pair(index:Vec2Index, a: f64, b:f64)->Self{
+    pub const fn from_index_pair(index:Vec2Index, a: f64, b:f64)->Self{
         match index{
             Vec2Index::X=>{Self{x:a,y:b}},
             Vec2Index::Y=>{Self{x:b,y:a}}
         }
     }
     
-    pub fn into_vec2(self) -> Vec2 {
+    pub const fn into_vec2(self) -> Vec2 {
         Vec2 {x: self.x as f32, y: self.y as f32}
     }
     
@@ -349,9 +349,9 @@ impl fmt::Display for DVec2 {
     }
 }
 
-pub fn dvec2(x: f64, y: f64) -> DVec2 {DVec2 {x, y}}
+pub const fn dvec2(x: f64, y: f64) -> DVec2 {DVec2 {x, y}}
 
-pub fn rect(x: f64, y: f64, w:f64, h:f64) -> Rect {Rect{pos:DVec2 {x, y}, size:DVec2{x:w, y:h}}}
+pub const fn rect(x: f64, y: f64, w:f64, h:f64) -> Rect {Rect{pos:DVec2 {x, y}, size:DVec2{x:w, y:h}}}
 
 
 //------ Vec2 operators

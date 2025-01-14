@@ -14,7 +14,6 @@ live_design! {
     pub AdaptiveView = <AdaptiveViewBase> {
         width: Fill, height: Fill
     
-        Default = <View> {}
         Mobile = <View> {}
         Desktop = <View> {}
     }
@@ -98,6 +97,13 @@ pub struct AdaptiveView {
     /// A flag to reapply the selector on the next draw call.
     #[rust]
     should_reapply_selector: bool,
+
+    /// Whether the AdaptiveView has non-default templates.
+    /// Used to determine if we should create a default widget.
+    /// When there are no custom templates, the user of this AdaptiveView is likely not
+    /// setting up a custom selector, so we should create a default widget.
+    #[rust]
+    has_custom_templates: bool,
 }
 
 pub struct WidgetVariant {
@@ -110,8 +116,7 @@ impl WidgetNode for AdaptiveView {
         if let Some(active_widget) = self.active_widget.as_ref() {
             active_widget.widget_ref.walk(cx)
         } else {
-            // No active widget found, returning default walk. This should never happen
-            // because in after_apply_from we create a default active widget.
+            // No active widget found, returning a default walk.
             self.walk
         }
     }
@@ -158,16 +163,17 @@ impl LiveHook for AdaptiveView {
             return;
         };
 
-        // Create a default widget with the default variant Desktop
+        // If there are no custom templates, create a default widget with the default variant Desktop
         // This is needed so that methods that run before drawing (find_widgets, walk) have something to work with
-        let template = self.templates.get(&live_id!(Desktop)).unwrap();
-        let widget_ref = WidgetRef::new_from_ptr(cx, Some(*template));
-        self.active_widget = Some(WidgetVariant {
-            template_id: live_id!(Desktop),
-            widget_ref: widget_ref.clone(),
-        });
-
-        self.set_default_variant_selector(cx);
+        if !self.has_custom_templates {
+            let template = self.templates.get(&live_id!(Desktop)).unwrap();
+            let widget_ref = WidgetRef::new_from_ptr(cx, Some(*template));
+            self.active_widget = Some(WidgetVariant {
+                template_id: live_id!(Desktop),
+                widget_ref: widget_ref.clone(),
+            });
+        }
+        self.set_default_variant_selector();
     }
 
     fn apply_value_instance(
@@ -181,6 +187,10 @@ impl LiveHook for AdaptiveView {
             if let Some(live_ptr) = apply.from.to_live_ptr(cx, index) {
                 let id = nodes[index].id;
                 self.templates.insert(id, live_ptr);
+
+                if id != live_id!(Desktop) && id != live_id!(Mobile) {
+                    self.has_custom_templates = true;
+                }
 
                 if let Some(widget_variant) = self.active_widget.as_mut() {
                     if widget_variant.template_id == id {
@@ -303,7 +313,7 @@ impl AdaptiveView {
         self.should_reapply_selector = true;
     }
 
-    pub fn set_default_variant_selector(&mut self, _cx: &mut Cx) {
+    pub fn set_default_variant_selector(&mut self) {
         // TODO(Julian): setup a more comprehensive default
         self.set_variant_selector(|cx, _parent_size| {
             if cx.display_context.is_desktop() {
@@ -319,7 +329,7 @@ impl AdaptiveViewRef {
     /// Set a variant selector for this widget.
     /// The selector is a closure that takes a `DisplayContext` and returns a `LiveId`, corresponding to the template to use.
     pub fn set_variant_selector(
-        &mut self,
+        &self,
         selector: impl FnMut(&mut Cx, &DVec2) -> LiveId + 'static,
     ) {
         let Some(mut inner) = self.borrow_mut() else {

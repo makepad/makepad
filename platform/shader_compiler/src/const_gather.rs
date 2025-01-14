@@ -17,14 +17,13 @@ pub struct ConstGatherer<'a> {
 
 impl<'a> ConstGatherer<'a> {
     pub fn const_gather_expr(&self, expr: &Expr) {
-        
         //let gather_span = if self.gather_all{Some(expr.span)}else{None};
         if !self.const_gather_active{
             return
         }
-        match expr.const_val.borrow().as_ref().unwrap() {
-            Some(Val::Vec4(val)) => {
-               expr.const_index.set(Some(
+        match *expr.const_val.borrow() {
+            Some(Some(Val::Vec4(val))) => {
+                expr.const_index.set(Some(
                     self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
                 self.write_span(&expr.span, 4);
@@ -34,12 +33,12 @@ impl<'a> ConstGatherer<'a> {
                 self.write_f32(val.w);
                 return;
             }
-            Some(Val::Float(val)) => {
+            Some(Some(Val::Float(val))) => {
                 expr.const_index.set(Some(
                     self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
                 self.write_span(&expr.span, 1);
-                self.write_f32(*val);
+                self.write_f32(val);
                 return;
             }
             _ => {},
