@@ -755,8 +755,8 @@ live_design!{
                 let gap_size = self.gap * one_deg;
                 let val_length = threesixty_deg - (one_deg * self.gap);
                 let start = gap_size * 0.5;
-                let end = start + val_length;
-                let end_val = start + val_length * self.slide_pos;
+                let bg_end = start + val_length;
+                let val_end = start + val_length * self.slide_pos;
 
                 // The min() functions ensure proper axis-independent scaling while taking into account additional elements like the label.
 
@@ -770,9 +770,10 @@ live_design!{
                         (self.rect_size.y - label_height) * 0.35
                     );
 
+                let bg_width = self.width * 0.0075;
                 let bg_width_scaled = min(
-                        self.rect_size.x * self.width * 0.0075,
-                        (self.rect_size.y - label_height) * self.width * 0.0075
+                        self.rect_size.x * bg_width,
+                        (self.rect_size.y - label_height) * bg_width
                     );
 
                 // Background
@@ -781,9 +782,10 @@ live_design!{
                     bg_pos_y_scaled,
                     bg_radius_scaled,
                     start,
-                    end, 
+                    bg_end, 
                     bg_width_scaled
                 );
+
                 sdf.fill_keep(
                     mix(
                         mix(
@@ -813,13 +815,7 @@ live_design!{
                     ), 1.0
                 )
 
-                let val_width = (self.width - self.padding);
-
-                let val_width_scaled = min(
-                        self.rect_size.x * val_width * 0.0075,
-                        (self.rect_size.y - label_height) * val_width * 0.0075
-                    );
-
+                let val_width = (self.width - self.padding) * 0.0075;
                 let val_pos_y_scaled = min(
                         self.rect_size.x / 2.5,
                         (self.rect_size.y - label_height) / 2.5
@@ -830,13 +826,18 @@ live_design!{
                         (self.rect_size.y - label_height) * 0.35
                     );
 
+                let val_width_scaled = min(
+                        self.rect_size.x * val_width,
+                        (self.rect_size.y - label_height) * val_width
+                    );
+
                 // Value
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
                     val_pos_y_scaled,
                     val_radius_scaled,
                     start,
-                    end_val,
+                    val_end,
                     val_width_scaled
                 )
 
@@ -865,8 +866,8 @@ live_design!{
                     self.rect_size.x / 2.,
                     val_pos_y_scaled,
                     val_radius_scaled,
-                    end_val,
-                    end_val,
+                    val_end,
+                    val_end,
                     mix(
                         0.,
                         val_width_scaled,
