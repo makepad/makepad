@@ -20,7 +20,7 @@ use {
                     macos_event::MacosEvent,
                     macos_app::{
                         MacosApp,
-                        get_macos_app_global,
+                        with_macos_app,
                         init_macos_app_global
                     },
                     macos_window::MacosWindow
@@ -172,7 +172,7 @@ impl Cx {
         }));
         // lets set our signal poll timer
         // final bit of initflow
-        get_macos_app_global().start_timer(0, 0.008, true);
+        with_macos_app(|app| app.start_timer(0, 0.008, true));
         
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
@@ -193,7 +193,7 @@ impl Cx {
                         if drawable == nil {
                             return
                         }
-                        self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
+                        self.passes[*pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
                         if metal_window.is_resizing {
                             self.draw_pass(*pass_id, metal_cx, DrawPassMode::Resizing(drawable));
                         }
@@ -204,11 +204,11 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
+                    self.passes[*pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
-                    self.passes[*pass_id].set_time(get_macos_app_global().time_now() as f32);
+                    self.passes[*pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
@@ -336,7 +336,7 @@ impl Cx {
             }
             MacosEvent::Paint => {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(get_macos_app_global().time_now());
+                    self.call_next_frame_event(with_macos_app(|app| app.time_now()));
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -471,6 +471,11 @@ impl Cx {
                         metal_window.cocoa_window.minimize();
                     }
                 },
+                CxOsOp::Deminiaturize(window_id) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.deminiaturize();
+                    }
+                },
                 CxOsOp::MaximizeWindow(window_id) => {
                     if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
                         metal_window.cocoa_window.maximize();
@@ -481,6 +486,11 @@ impl Cx {
                         metal_window.cocoa_window.restore();
                     }
                 },
+                CxOsOp::HideWindow(window_id) =>{
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.hide();
+                    }
+                }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     todo!()
                 },
@@ -506,13 +516,13 @@ impl Cx {
                     //todo!()
                 },
                 CxOsOp::SetCursor(cursor) => {
-                    get_macos_app_global().set_mouse_cursor(cursor);
+                    with_macos_app(|app| app.set_mouse_cursor(cursor));
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    get_macos_app_global().start_timer(timer_id, interval, repeats);
+                    with_macos_app(|app| app.start_timer(timer_id, interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    get_macos_app_global().stop_timer(timer_id);
+                    with_macos_app(|app| app.stop_timer(timer_id));
                 },
                 CxOsOp::StartDragging(items) => {
                     //  lets start dragging on the right window
@@ -522,7 +532,7 @@ impl Cx {
                     }
                 }
                 CxOsOp::UpdateMacosMenu(menu) => {
-                    get_macos_app_global().update_macos_menu(&menu)
+                    with_macos_app(|app| app.update_macos_menu(&menu))
                 },
                 CxOsOp::HttpRequest {request_id, request} => {
                     self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
@@ -534,7 +544,7 @@ impl Cx {
                     crate::log!("Show clipboard actions not supported yet");
                 },
                 CxOsOp::CopyToClipboard(content) => {
-                    get_macos_app_global().copy_to_clipboard(&content);
+                    with_macos_app(|app| app.copy_to_clipboard(&content));
                 },
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
@@ -547,22 +557,22 @@ impl Cx {
 
                 CxOsOp::SaveFileDialog(settings) => 
                 {
-                    get_macos_app_global().open_save_file_dialog(settings);
+                    with_macos_app(|app| app.open_save_file_dialog(settings));
                 }
                 
                 CxOsOp::SelectFileDialog(settings) => 
                 {
-                    get_macos_app_global().open_select_file_dialog(settings);                   
+                    with_macos_app(|app| app.open_select_file_dialog(settings));
                 }
                 
                 CxOsOp::SaveFolderDialog(settings) => 
                 {
-                    get_macos_app_global().open_save_folder_dialog(settings);
+                    with_macos_app(|app| app.open_save_folder_dialog(settings));
                 }
                 
                 CxOsOp::SelectFolderDialog(settings) => 
                 {
-                    get_macos_app_global().open_select_folder_dialog(settings);
+                    with_macos_app(|app| app.open_select_folder_dialog(settings));
                 }
             }
         }

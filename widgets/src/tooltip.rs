@@ -141,25 +141,25 @@ impl TooltipRef {
         }
     }
 
-    pub fn set_pos(&mut self, cx: &mut Cx, pos: DVec2) {
+    pub fn set_pos(&self, cx: &mut Cx, pos: DVec2) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_pos(cx, pos);
         }
     }
 
-    pub fn show(&mut self, cx: &mut Cx) {
+    pub fn show(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show(cx);
         }
     }
 
-    pub fn show_with_options(&mut self, cx: &mut Cx, pos: DVec2, text: &str) {
+    pub fn show_with_options(&self, cx: &mut Cx, pos: DVec2, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show_with_options(cx, pos, text);
         }
     }
 
-    pub fn hide(&mut self, cx: &mut Cx) {
+    pub fn hide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.hide(cx);
         }

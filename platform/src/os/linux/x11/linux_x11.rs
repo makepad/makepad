@@ -289,6 +289,8 @@ impl Cx {
                         window.xlib_window.minimize();
                     }
                 },
+                CxOsOp::Deminiaturize(_window_id) => todo!(),
+                CxOsOp::HideWindow(_window_id) => todo!(),
                 CxOsOp::MaximizeWindow(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         window.xlib_window.maximize();

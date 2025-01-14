@@ -9,10 +9,7 @@ live_design!(
     App = {{App}} {
         ui:<Root>{
             <Window>{
-                body = <Ui1> {}
-            }
-            <Window>{
-                body = <Ui2> {}
+                body = <Ui> {}
             }
         } 
     }

@@ -415,6 +415,10 @@ impl Cx {
                 },
                 CxOsOp::MinimizeWindow(_window_id) => {
                 },
+                CxOsOp::Deminiaturize(_window_id) => {
+                },
+                CxOsOp::HideWindow(_window_id) => {
+                },
                 CxOsOp::MaximizeWindow(_window_id) => {
                 },
                 CxOsOp::RestoreWindow(_window_id) => {

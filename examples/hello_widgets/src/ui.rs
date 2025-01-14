@@ -19,7 +19,7 @@ live_design!(
 #[derive(Live, LiveHook, Widget)]
 pub struct Ui {
     #[deref]
-    deref: Window,
+    deref: View,
 }
 
 impl Widget for Ui {
