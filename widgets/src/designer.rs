@@ -226,8 +226,8 @@ impl WidgetMatchEvent for Designer{
                 let path_ids = DesignerData::path_str_to_path_ids(&file_name);
                 if path_ids.len() > 0{
                     outline_tree.select_and_show_node(cx, &path_ids);
-                    designer_view.select_component_and_redraw(cx, None);
-                    designer_view.view_file_and_redraw(cx, *path_ids.last().unwrap());
+                    designer_view.select_component(cx, None);
+                    designer_view.view_file(cx, *path_ids.last().unwrap());
                 }
             }
              if let StudioToApp::DesignerLoadState{positions, zoom_pan} = action.cast_ref(){
@@ -254,8 +254,8 @@ impl WidgetMatchEvent for Designer{
                             Cx::send_studio_message(AppToStudio::FocusDesign);
                         }
                         else{
-                            designer_view.select_component_and_redraw(cx, None);
-                            designer_view.view_file_and_redraw(cx, outline_id);
+                            designer_view.select_component(cx, None);
+                            designer_view.view_file(cx, outline_id);
                         }        
                     }
                     OutlineNode::Component{..}=>{
@@ -268,8 +268,8 @@ impl WidgetMatchEvent for Designer{
                         else{
                             // only select the file 
                             if let Some(file_id) = self.data.find_file_parent(outline_id){
-                                designer_view.select_component_and_redraw(cx, Some(outline_id));
-                                designer_view.view_file_and_redraw(cx, file_id);
+                                designer_view.select_component(cx, Some(outline_id));
+                                designer_view.view_file(cx, file_id);
                             }
                         }
                     }

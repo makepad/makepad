@@ -832,14 +832,14 @@ impl Widget for DesignerView {
 }
 
 impl DesignerViewRef{
-    pub fn select_component_and_redraw(&self, cx:&mut Cx, comp:Option<LiveId>) {
+    pub fn select_component(&self, cx:&mut Cx, comp:Option<LiveId>) {
         if let Some(mut inner) = self.borrow_mut(){
             inner.select_component(cx, comp);
             inner.redraw(cx);
         }
     }
     
-    pub fn view_file_and_redraw(&self, cx:&mut Cx, file_id:LiveId){
+    pub fn view_file(&self, cx:&mut Cx, file_id:LiveId){
         if let Some(mut inner) = self.borrow_mut(){
             if inner.view_file != Some(file_id){
                 inner.containers.clear();

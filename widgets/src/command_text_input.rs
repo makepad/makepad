@@ -289,13 +289,13 @@ impl CommandTextInput {
     }
 
     fn show_popup(&mut self, cx: &mut Cx) {
-        self.view(id!(popup)).set_visible(true);
+        self.view(id!(popup)).set_visible(cx, true);
         self.view(id!(popup)).redraw(cx);
     }
 
     fn hide_popup(&mut self, cx:&mut Cx) {
         self.clear_popup(cx);
-        self.view(id!(popup)).set_visible(false);
+        self.view(id!(popup)).set_visible(cx, false);
     }
 
     /// Clear all text and hide the popup going back to initial state.

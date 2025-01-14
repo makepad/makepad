@@ -439,7 +439,7 @@ impl Widget for AiChatView {
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff
                                     item.widget(id!(md)).set_text(cx, &val);
-                                    item.view(id!(busy)).set_visible(
+                                    item.view(id!(busy)).set_visible(cx, 
                                         item_id + 1 == doc.file.history[self.history_slot].messages.len() && 
                                         doc.in_flight.is_some()
                                     );
@@ -453,26 +453,26 @@ impl Widget for AiChatView {
                                     let dd = item.drop_down(id!(model_dropdown));
                                     // ok how do we set these dropdown labels without causing memory changes
                                     let mut i = data.ai_chat_manager.models.iter();
-                                    dd.set_labels_with(|label|{i.next().map(|m| label.push_str(&m.name));});
+                                    dd.set_labels_with(cx, |label|{i.next().map(|m| label.push_str(&m.name));});
                                     if let Some(pos) = data.ai_chat_manager.models.iter().position(|b| b.name == val.model){
-                                        dd.set_selected_item(pos);
+                                        dd.set_selected_item(cx, pos);
                                     }
                                     
                                     
                                     let dd = item.drop_down(id!(context_dropdown));
                                     let mut i = data.ai_chat_manager.contexts.iter();
-                                    dd.set_labels_with(|label|{i.next().map(|m| label.push_str(&m.name));});
+                                    dd.set_labels_with(cx, |label|{i.next().map(|m| label.push_str(&m.name));});
                                     
                                     if let Some(pos) = data.ai_chat_manager.contexts.iter().position(|ctx| ctx.name == val.base_context){
-                                        dd.set_selected_item(pos);
+                                        dd.set_selected_item(cx, pos);
                                     }
                                     
                                     let dd = item.drop_down(id!(project_dropdown));
                                     let mut i = data.ai_chat_manager.projects.iter();
-                                    dd.set_labels_with(|label|{i.next().map(|m| label.push_str(&m.name));});
+                                    dd.set_labels_with(cx, |label|{i.next().map(|m| label.push_str(&m.name));});
                                                                         
                                     if let Some(pos) = data.ai_chat_manager.projects.iter().position(|ctx| ctx.name == val.base_context){
-                                        dd.set_selected_item(pos);
+                                        dd.set_selected_item(cx, pos);
                                     }
                                     
                                     item.widget(id!(message_input)).set_text(cx, &val.message);
