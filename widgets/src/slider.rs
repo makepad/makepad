@@ -758,23 +758,31 @@ live_design!{
                 let end = start + val_length;
                 let end_val = start + val_length * self.slide_pos;
 
+                // The min() functions ensure proper axis-independent scaling while taking into account additional elements like the label.
+
+                let bg_pos_y_scaled = min(
+                        self.rect_size.x / 2.5,
+                        (self.rect_size.y - label_height) / 2.5
+                    ) + label_height;
+
+                let bg_radius_scaled = min(
+                        self.rect_size.x * 0.35,
+                        (self.rect_size.y - label_height) * 0.35
+                    );
+
+                let bg_width_scaled = min(
+                        self.rect_size.x * self.width * 0.0075,
+                        (self.rect_size.y - label_height) * self.width * 0.0075
+                    );
+
                 // Background
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    min(
-                        self.rect_size.x / 2.5,
-                        (self.rect_size.y - label_height) / 2.5
-                    ) + label_height,
-                    min(
-                        self.rect_size.x * 0.35,
-                        (self.rect_size.y - label_height) * 0.35
-                    ),
+                    bg_pos_y_scaled,
+                    bg_radius_scaled,
                     start,
                     end, 
-                    min(
-                        self.rect_size.x * self.width * 0.0075,
-                        self.rect_size.y * self.width * 0.0075
-                    )
+                    bg_width_scaled
                 );
                 sdf.fill_keep(
                     mix(
@@ -805,23 +813,31 @@ live_design!{
                     ), 1.0
                 )
 
-                // // Value
-                sdf.arc_round_caps(
-                    self.rect_size.x / 2.,
-                    min(
+                let val_width = (self.width - self.padding);
+
+                let val_width_scaled = min(
+                        self.rect_size.x * val_width * 0.0075,
+                        (self.rect_size.y - label_height) * val_width * 0.0075
+                    );
+
+                let val_pos_y_scaled = min(
                         self.rect_size.x / 2.5,
                         (self.rect_size.y - label_height) / 2.5
-                    ) + label_height,
-                    min(
+                    ) + label_height;
+
+                let val_radius_scaled = min(
                         self.rect_size.x * 0.35,
                         (self.rect_size.y - label_height) * 0.35
-                    ),
+                    );
+
+                // Value
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    val_pos_y_scaled,
+                    val_radius_scaled,
                     start,
                     end_val,
-                    min(
-                        self.rect_size.x * (self.width - self.padding) * 0.0075,
-                        self.rect_size.y * (self.width - self.padding) * 0.0075 
-                    )
+                    val_width_scaled
                 )
 
                 sdf.fill(
@@ -844,30 +860,20 @@ live_design!{
                     )
                 )
 
-                // // Handle
+                // Handle
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    min(
-                        self.rect_size.x / 2.5,
-                        (self.rect_size.y - label_height) / 2.5
-                    ) + label_height,
-                    min(
-                        self.rect_size.x * 0.35,
-                        (self.rect_size.y - label_height) * 0.35
-                    ),
+                    val_pos_y_scaled,
+                    val_radius_scaled,
                     end_val,
                     end_val,
                     mix(
                         0.,
-                        min(
-                            self.rect_size.x * (self.width - self.padding) * 0.0075,
-                            self.rect_size.y * (self.width - self.padding) * 0.0075 
-                        ),
+                        val_width_scaled,
                         self.hover
                     )
                 );
 
-            
                 sdf.fill_keep(
                     mix(
                         self.handle_color,
