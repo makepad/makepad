@@ -1373,11 +1373,11 @@ impl MatchEvent for App {
                 if modifiers.control || modifiers.logo {
                     let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
                     if prompt_frame.visible() {
-                        prompt_frame.set_visible_and_redraw(cx, false);
+                        prompt_frame.set_visible(cx, false);
                     }
                     else {
                         //cx.set_cursor(MouseCursor::Hidden);
-                        prompt_frame.set_visible_and_redraw(cx, true);
+                        prompt_frame.set_visible(cx, true);
                     }
                 }
             }
@@ -1457,7 +1457,7 @@ impl MatchEvent for App {
             if let Some(label) = action.widget().as_drop_down().changed_label(&actions){
                 let id = LiveId::from_str(&label.to_lowercase());
                 let group = action.path.from_end(2);
-                self.ui.page_flip(id!((group).page_flip)).set_active_page_and_redraw(cx, id);
+                self.ui.page_flip(id!((group).page_flip)).set_active_page(cx, id);
             }
         }
         for action in self.ui.widget_set(ids!(cancel_button)).filter_actions(&actions){

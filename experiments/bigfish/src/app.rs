@@ -237,7 +237,7 @@ impl MatchEvent for App {
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
             let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx, &format!("Counter: {}", self.counter));
+            label.set_text(cx, &format!("Counter: {}", self.counter));
         }
 
         if self.ui.button(id!(savebutton)).clicked(&actions) {
