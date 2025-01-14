@@ -335,7 +335,7 @@ live_design!{
 
         // Data input
         text_input: <TextInput> {
-            width: Fill, padding: 0.,
+            width: Fit, padding: 0.,
             label_align: {y: 0.},
 
             empty_message: "0",
@@ -751,6 +751,7 @@ live_design!{
 
                 let one_deg = PI / 180;
                 let threesixty_deg = 2 * PI;
+
                 let gap_size = self.gap * one_deg;
                 let val_length = threesixty_deg - (one_deg * self.gap);
                 let start = gap_size * 0.5;
@@ -761,12 +762,12 @@ live_design!{
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
                     min(
-                        self.rect_size.x / 2.5 + label_height,
-                        self.rect_size.y / 2.5 + label_height 
-                    ),
+                        self.rect_size.x / 2.5,
+                        (self.rect_size.y - label_height) / 2.5
+                    ) + label_height,
                     min(
                         self.rect_size.x * 0.35,
-                        self.rect_size.y * 0.35
+                        (self.rect_size.y - label_height) * 0.35
                     ),
                     start,
                     end, 
@@ -804,16 +805,16 @@ live_design!{
                     ), 1.0
                 )
 
-                // Value
+                // // Value
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
                     min(
-                        self.rect_size.x / 2.5 + label_height,
-                        self.rect_size.y / 2.5 + label_height 
-                    ),
+                        self.rect_size.x / 2.5,
+                        (self.rect_size.y - label_height) / 2.5
+                    ) + label_height,
                     min(
                         self.rect_size.x * 0.35,
-                        self.rect_size.y * 0.35
+                        (self.rect_size.y - label_height) * 0.35
                     ),
                     start,
                     end_val,
@@ -843,16 +844,16 @@ live_design!{
                     )
                 )
 
-                // Handle
+                // // Handle
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
                     min(
-                        self.rect_size.x / 2.5 + label_height,
-                        self.rect_size.y / 2.5 + label_height 
-                    ),
+                        self.rect_size.x / 2.5,
+                        (self.rect_size.y - label_height) / 2.5
+                    ) + label_height,
                     min(
                         self.rect_size.x * 0.35,
-                        self.rect_size.y * 0.35
+                        (self.rect_size.y - label_height) * 0.35
                     ),
                     end_val,
                     end_val,

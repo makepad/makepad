@@ -513,11 +513,11 @@ live_design!{
                     width: Fill, height: Fit,
                     flow: Right,
                     <Rotary> {
-                        width: 25, height: 150,
+                        width: 150, height: 50,
                         text: "Colored",
                         draw_slider: {
                             width: 20.
-                            padding: 0.,
+                            padding: 2.,
                         }
                     }
                     <Rotary> {
@@ -525,7 +525,7 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             width: 20.
-                            padding: 0.,
+                            padding: 4.,
                         }
                     }
                     <Rotary> {
@@ -533,7 +533,7 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             width: 20.
-                            padding: 0.,
+                            padding: 4,
                         }
                     }
                     <Rotary> {
@@ -541,7 +541,7 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             width: 20.
-                            padding: 0.,
+                            padding: 4.,
                         }
                     }
                     <Rotary> {
@@ -549,7 +549,7 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             width: 20.
-                            padding: 0.,
+                            padding: 4.,
                         }
                     }
                 }
