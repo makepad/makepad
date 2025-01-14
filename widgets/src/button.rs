@@ -429,8 +429,9 @@ impl Widget for Button {
         self.text.as_ref().to_string()
     }
 
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
+        self.redraw(cx);
     }
 }
 
@@ -531,15 +532,17 @@ impl ButtonRef {
         self.borrow().and_then(|inner| inner.released_modifiers(actions))
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    pub fn set_visible(&self, cx:&mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible;
+            inner.redraw(cx);
         }
     }
 
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&self, cx:&mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.enabled = enabled;
+            inner.redraw(cx);
         }
     }
 
@@ -579,14 +582,14 @@ impl ButtonSet {
         None
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    pub fn set_visible(&self, cx:&mut Cx, visible: bool) {
         for item in self.iter() {
-            item.set_visible(visible)
+            item.set_visible(cx, visible)
         }
     }
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&self, cx:&mut Cx, enabled: bool) {
         for item in self.iter() {
-            item.set_enabled(enabled)
+            item.set_enabled(cx, enabled)
         }
     }
 }

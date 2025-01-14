@@ -550,10 +550,11 @@ impl Widget for Slider {
         format!("{}", self.to_external())
     }
         
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         if let Ok(v) = v.parse::<f64>(){
             self.set_internal(v);
-            self.update_text_input()
+            self.update_text_input();
+            self.redraw(cx);
         }
     }
         

@@ -22,7 +22,7 @@ live_design!{
         fn get_color(self) -> vec4 {
             return self.get_color_scale_pan(self.image_scale, self.image_pan)
         }
-                                
+        
         fn pixel(self) -> vec4 {
             let color = self.get_color();
             return Pal::premul(vec4(color.xyz, color.w * self.opacity))

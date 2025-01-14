@@ -148,7 +148,7 @@ impl MatchEvent for App{
             log!("BUTTON CLICKED {}", self.counter); 
             self.counter += 1;
             let label = self.ui.label(id!(label1));
-            label.set_text_and_redraw(cx,&format!("Counter: {}", self.counter));
+            label.set_text(cx,&format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
             
         }

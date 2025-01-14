@@ -454,6 +454,40 @@ live_design!{
         }
                                                 
     }
+    
+    LoraDropdown = <DropDownFlat> {
+        width: Fit, 
+        margin:{left:0},
+        popup_menu_position: BelowInput ,
+        labels:  [
+            "aesthetic2-cdo-0.5",
+            "flux_realism_lora",
+            "Flux.1_Turbo_Detailer",
+            "FantasyWizardWitchesFluxV2-000001",
+            "aidmaMJ6.1-FLUX-v0.4",
+            "aidmaHyperrealism-FLUX-v0.3",
+        ]
+    }
+    
+    ResDropdown = <DropDownFlat> {
+        width: Fit, 
+        margin:{left:0},
+        popup_menu_position: BelowInput 
+        labels: [
+            "1920x1088 - 16:9",
+            "1440x816 - 16:9",
+            "1280x720 - 16:9",
+            "960x544 - 16:9",
+            "1088x1920 - 9:16",
+            "2048x1448 - A3",
+            "768x1024 - 3:4"
+        ]
+    }
+    
+    LoraSlider = <Slider> {
+        width:100,text: "Influence", default: 0.0, min:0.0, max: 1.0, step:0.01, precision:2
+    }
+    
     MachineSettings = <RoundedView> {
         height: Fit,
         width: Fill
@@ -479,31 +513,20 @@ live_design!{
                 margin:{left:0},
                 popup_menu_position: BelowInput 
                 labels: [
-                    "Flux",
-                    "FluxHD",
+                    "FluxFusion",
+                    "FluxDev",
                     "Hunyuan",
                 ]
             }
             page_flip = <PageFlip>{
-                width:Fit,
-                active_page: flux
-                flux = <View>{
+                width: Fit,
+                height: Fit,
+                flow: Down
+                active_page: fluxfusion
+                fluxfusion = <View>{
                     width: Fit,
                     
-                    resolution = <DropDownFlat> {
-                        width: Fit, 
-                        margin:{left:0},
-                        popup_menu_position: BelowInput 
-                        labels: [
-                            "1920x1088 - 16:9",
-                            "1440x816 - 16:9",
-                            "1280x720 - 16:9",
-                            "960x544 - 16:9",
-                            "1088x1920 - 9:16",
-                            "2048x1448 - A3",
-                            "768x1024 - 3:4"
-                        ]
-                    }
+                    resolution = <ResDropdown>{}
                     steps_slider = <Slider> {width:100,text: "Steps", default: 4.0, min:1, max: 30, step:1, precision:0}
                 }
                 hunyuan = <View>{
@@ -519,40 +542,49 @@ live_design!{
                             "720x1280 - 9:16",
                         ]
                     }
-                    frames_slider = <Slider> {width:100, text: "Frames", default: 57.0, min:1, max: 127, step:4, precision:0}
+                    frames_slider = <Slider> {width:100, text: "Frames", default: 29.0, min:1, max: 127, step:4, precision:0}
                 }
-                fluxhd = <View>{
+                fluxdev = <View>{
                     width: Fit,
-                    resolution = <DropDownFlat> {
-                        width: Fit, 
-                        margin:{left:0},
-                        popup_menu_position: BelowInput 
-                        labels: [
-                            "1920x1088 - 16:9",
-                            "1440x816 - 16:9",
-                            "1280x720 - 16:9",
-                            "960x544 - 16:9",
-                            "1088x1920 - 9:16",
-                            "2048x1448 - A3",
-                            "768x1024 - 3:4"
-                        ]
+                    flow: Down
+                    <View>{
+                        width: Fit,
+                        height: Fit
+                        resolution = <ResDropdown>{
+                            labels: [
+                                "1024x1024",
+                                "768x1152",
+                                "1152x768",
+                                "960x544",
+                            ]
+                        }
+                        steps_slider = <Slider> {width:100,text: "Steps", default: 35, min:20, max: 70, step:1, precision:0}
+                        guidance_slider = <Slider> {width:100,text: "Guidance", default: 4, min:3.5, max: 7, step:0.01, precision:2}
                     }
-                    steps_slider = <Slider> {width:100,text: "Steps", default: 30, min:20, max: 70, step:1, precision:0}
-                    lora = <DropDownFlat> {
-                        width: Fit, 
-                        margin:{left:0},
-                        popup_menu_position: BelowInput 
-                        labels: [
-                            "aesthetic2-cdo-0.5",
-                            "flux_realism_lora",
-                            "Flux.1_Turbo_Detailer",
-                            "FantasyWizardWitchesFluxV2-000001",
-                            "aidmaMJ6.1-FLUX-v0.4",
-                            "aidmaHyperrealism-FLUX-v0.3",
-                        ]
+                    <View>{
+                        width: Fit,
+                        height: Fit
+                        lora1_slider = <LoraSlider>{}
+                        lora1 = <LoraDropdown>{}
                     }
-                    lora_slider = <Slider> {width:100,text: "Lora", default: 0.0, min:0.0, max: 1.0, step:0.01, precision:2}
+                    <View>{
+                        width: Fit,
+                        height: Fit
+                        lora2_slider = <LoraSlider>{}
+                        lora2 = <LoraDropdown>{}
+                    }
+                    <View>{
+                        width: Fit,
+                        height: Fit
+                        lora3_slider = <LoraSlider>{}
+                        lora3 = <LoraDropdown>{}
+                    }
                 }
+                
+            }
+            reconnect_button = <Button> {
+                text: "<>"
+                margin:{right:4}
             }
                  
             
@@ -656,7 +688,8 @@ live_design!{
                                 m2 = <MachineSettings>{inner = {render_check_box={text:"2"}}}
                                 m3 = <MachineSettings>{inner = {render_check_box={text:"3"}}}
                                 m4 = <MachineSettings>{inner = {render_check_box={text:"4"}}}
-                                m5 = <MachineSettings>{inner = {render_check_box={text:"5"}}}
+                                m7 = <MachineSettings>{inner = {render_check_box={text:"7"}}}
+                                m8 = <MachineSettings>{inner = {render_check_box={text:"8"}}}
                             }
                         }
                     }

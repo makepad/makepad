@@ -3,7 +3,6 @@ use makepad_micro_serde::*;
 use makepad_widgets::*;
 use makepad_widgets::image_cache::{ImageBuffer};
 use std::fs;
-use std::time::Instant;
 use std::time::SystemTime;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -175,7 +174,7 @@ impl Database {
         // lets see if we have too many images
         //println!("TEXTURES")
         let now = cx.event_id();
-        while self.textures.len()>40{
+        while self.textures.len()>400{
             if let Some((image_id,_)) = self.textures.iter().max_by(|(_,a),(_,b)|{
                 (now-a.last_seen).cmp(&(now-b.last_seen))
             }){
@@ -243,6 +242,21 @@ impl Database {
                                 starred,
                                 prompt,
                             });
+                        }
+                        else if let Ok(value) = JsonValue::deserialize_json(&v) { 
+                            // lets try to parse some older    
+                            if let JsonValue::Object(obj) = value{
+                                if let Some(JsonValue::String(v)) = obj.get("positive"){
+                                    self.prompt_files.push(PromptFile {
+                                        prompt_hash,
+                                        modified,
+                                        starred,
+                                        prompt: Prompt{
+                                            prompt: v.clone(),
+                                        }
+                                    });
+                                }
+                            } 
                         }
                     }
                 }

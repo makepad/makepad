@@ -99,7 +99,7 @@ impl App {
             max_tokens: 1000,
             stream: true,
         });
-        self.ui.label(id!(message_label)).set_text_and_redraw(cx, "Answering:..\n");
+        self.ui.label(id!(message_label)).set_text(cx, "Answering:..\n");
         cx.http_request(request_id, request);
     }
 }
@@ -128,7 +128,7 @@ impl MatchEvent for App {
                                     Ok(chat_response)=>{
                                         if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
                                             let msg = format!("{}{}", label.text(), content);
-                                            label.set_text_and_redraw(cx, &msg);
+                                            label.set_text(cx, &msg);
                                         }
                                     }
                                     Err(e)=>{
@@ -148,9 +148,9 @@ impl MatchEvent for App {
                         live_id!(SendChatMessage) => {
                             if response.status_code == 200 {
                                 let chat_response = response.get_json_body::<ChatResponse>().unwrap();
-                                label.set_text_and_redraw(cx, &chat_response.choices[0].message.as_ref().unwrap().content.as_ref().unwrap());
+                                label.set_text(cx, &chat_response.choices[0].message.as_ref().unwrap().content.as_ref().unwrap());
                             } else {
-                                label.set_text_and_redraw(cx, "Failed to connect with OpenAI");
+                                label.set_text(cx, "Failed to connect with OpenAI");
                             }
                         },
                         _ => (),
@@ -158,7 +158,7 @@ impl MatchEvent for App {
                 }
                 NetworkResponse::HttpRequestError(error) => {
                     let label = self.ui.label(id!(message_label));
-                    label.set_text_and_redraw(cx, &format!("Failed to connect with OpenAI {:?}", error));
+                    label.set_text(cx, &format!("Failed to connect with OpenAI {:?}", error));
                 }
                 _ => ()
             }

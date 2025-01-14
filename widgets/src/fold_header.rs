@@ -9,8 +9,8 @@ live_design!{
     link widgets;
     use link::theme::*;
     
-    FoldHeaderBase = {{FoldHeader}} {}
-    FoldHeader = <FoldHeaderBase> {
+    pub FoldHeaderBase = {{FoldHeader}} {}
+    pub FoldHeader = <FoldHeaderBase> {
         width: Fill, height: Fit,
         body_walk: { width: Fill, height: Fit}
         
