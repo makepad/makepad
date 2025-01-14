@@ -251,12 +251,12 @@ pub enum FlowBlockType {
 #[repr(C)]
 pub struct DrawFlowBlock {
     #[deref] draw_super: DrawQuad,
-    #[live] line_color: Vec4,
-    #[live] sep_color: Vec4,
-    #[live] code_color: Vec4,
-    #[live] quote_bg_color: Vec4,
-    #[live] quote_fg_color: Vec4,
-    #[live] block_type: FlowBlockType
+    #[live] pub line_color: Vec4,
+    #[live] pub sep_color: Vec4,
+    #[live] pub code_color: Vec4,
+    #[live] pub quote_bg_color: Vec4,
+    #[live] pub quote_fg_color: Vec4,
+    #[live] pub block_type: FlowBlockType
 }
 
 #[derive(Default)]
@@ -281,18 +281,17 @@ impl StackCounter{
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
-    #[live] draw_normal: DrawText,
-    #[live] draw_italic: DrawText,
-    #[live] draw_bold: DrawText,
-    #[live] draw_bold_italic: DrawText,
-    #[live] draw_fixed: DrawText,
-    
-    #[live] draw_block: DrawFlowBlock,
+    #[live] pub draw_normal: DrawText,
+    #[live] pub draw_italic: DrawText,
+    #[live] pub draw_bold: DrawText,
+    #[live] pub draw_bold_italic: DrawText,
+    #[live] pub draw_fixed: DrawText,
+    #[live] pub draw_block: DrawFlowBlock,
     
     /// The default font size used for all text if not otherwise specified.
-    #[live] font_size: f64,
+    #[live] pub font_size: f64,
     /// The default font color used for all text if not otherwise specified.
-    #[live] font_color: Vec4,
+    #[live] pub font_color: Vec4,
     #[walk] walk: Walk,
     
     #[rust] area_stack: SmallVec<[Area;4]>,
@@ -322,8 +321,8 @@ pub struct TextFlow {
     #[live] sep_walk: Walk, 
     #[live] list_item_layout: Layout,
     #[live] list_item_walk: Walk,
-    #[live] inline_code_padding: Padding,
-    #[live] inline_code_margin: Margin,
+    #[live] pub inline_code_padding: Padding,
+    #[live] pub inline_code_margin: Margin,
         
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,

@@ -19,7 +19,6 @@ live_design!{
                     show_bg: true,
                     draw_bg:{
                         fn pixel(self) -> vec4 {
-                            return #3
                             let center = vec2(0.5, 0.5);
                             let uv = self.pos - center;
                             let radius = length(uv);
@@ -29,28 +28,18 @@ live_design!{
                             return mix(color1, color2, radius);
                         }
                     }
-                    <View>{
-                        flow:Overlay
-                        <ScrollXYView>{
-                            flow:Down
-                            button1
-                            b0= <Button> {
-                                text: "Click me 123"
-                                draw_text:{color:#fff}
-                            }
-                            button1 = <Button> {
-                                text: "Click me 123"
-                                height: 500
-                                draw_text:{color:#fff}
-                            }
-                            button2 = <Button> {
-                                text: "Click me 345"
-                                height: 500
-                                draw_text:{color:#fff}
-                            }
-                        }
+                    b0= <Button> {
+                        text: "Click me 123"
+                        draw_text:{color:#fff}
                     }
-                    
+                    button1 = <Button> {
+                        text: "Click me 123"
+                        draw_text:{color:#fff}
+                    }
+                    button2 = <Button> {
+                        text: "Click me 345"
+                        draw_text:{color:#fff}
+                    }
                 }
             }
         }

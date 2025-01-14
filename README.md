@@ -301,7 +301,7 @@ cargo makepad wasm install-toolchain
 
 ### Android
 
-Command for installing the app onto an iOS Simulator.
+Command for installing the app onto an Android Simulator.
 
 ```bash
 cargo makepad android run -p makepad-example-simple --release
