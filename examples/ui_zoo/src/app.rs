@@ -580,7 +580,7 @@ live_design!{
                             val_color_a: #ff0,
                             val_color_b: #f00,
                             handle_color: #f,
-                            gap: 270.,
+                            gap: 180.,
                             width: 20.,
                             padding: 2.,
                         }
