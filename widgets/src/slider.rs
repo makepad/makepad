@@ -686,7 +686,7 @@ live_design!{
                 instance focus: 0.0
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
                 fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_ize);
                     sdf.box(
                         0.,
                         0.,
@@ -747,90 +747,76 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
-                let label_height = 25.;
+                let label_offset = 20.;
+                let effective_height = self.rect_size.y - label_offset;
+                let radius_scaled = min(
+                        self.rect_size.x * 0.5,
+                        (self.rect_size.y - label_offset) * 0.5
+                    );
+                let radius_width_compensation = self.width * 0.5;
+                let width_correction = 0.008;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_correction;
 
+                // Background
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation,
+                    start,
+                    bg_end, 
+                    bg_width_scaled
+                );
+
+                // TODO: fix this. for some reason gradients don't scale as expected.
+                let unit = max(self.rect_size.x, self.rect_size.y);
+                let circle_norm = min(
+                        self.rect_size.x / unit,
+                        (self.rect_size.y - label_offset) / unit
+                let label_offset_norm = label_offset / unit;
+                let gradient_y = (self.pos.y * arc_height) - label_offset_norm;
+                // let gradient_y = self.pos.y * 1.25 + 0.25;
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, gradient_y),
+                            mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, gradient_y),
+                            self.hover
+                        ),
+                        mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, gradient_y),
+                        self.drag
+                    )
+                )
+
+                sdf.stroke(
+                    mix(#f00, #0ff, gradient_y),
+                    // mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, gradient_y),
+                    1.
+                )
+
+                let val_width = (self.width - self.padding) * width_correction;
+                let val_width_scaled = min(
+                        self.rect_size.x * val_width,
+                        effective_height * val_width
+                    );
+
+                // Value
                 let one_deg = PI / 180;
-                let threesixty_deg = 2 * PI;
-
+                let threesixty_deg = 2. * PI;
                 let gap_size = self.gap * one_deg;
                 let val_length = threesixty_deg - (one_deg * self.gap);
                 let start = gap_size * 0.5;
                 let bg_end = start + val_length;
                 let val_end = start + val_length * self.slide_pos;
 
-                // The min() functions ensure proper axis-independent scaling while taking into account additional elements like the label.
-
-                let bg_pos_y_scaled = min(
-                        self.rect_size.x / 2.5,
-                        (self.rect_size.y - label_height) / 2.5
-                    ) + label_height;
-
-                let bg_radius_scaled = min(
-                        self.rect_size.x * 0.35,
-                        (self.rect_size.y - label_height) * 0.35
-                    );
-
-                let bg_width = self.width * 0.0075;
-                let bg_width_scaled = min(
-                        self.rect_size.x * bg_width,
-                        (self.rect_size.y - label_height) * bg_width
-                    );
-
-                // Background
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    bg_pos_y_scaled,
-                    bg_radius_scaled,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation,
                     start,
-                    bg_end, 
-                    bg_width_scaled
-                );
-
-                let ratio_factor = max((self.rect_size.y - label_height) / self.rect_size.x, 1.0);
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, pow(self.pos.y, 1.5) * ratio_factor),
-                            mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, pow(self.pos.y, 1.5) * ratio_factor),
-                            self.hover
-                        ),
-                        mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, pow(self.pos.y, 1.5) * ratio_factor),
-                        self.drag
-                    )
-                )
-
-
-                sdf.stroke(
-                    mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, pow(self.pos.y, 2.0) * ratio_factor),
-                    1.0
-                )
-
-                let val_width = (self.width - self.padding) * 0.0075;
-                let val_pos_y_scaled = min(
-                        self.rect_size.x / 2.5,
-                        (self.rect_size.y - label_height) / 2.5
-                    ) + label_height;
-
-                let val_radius_scaled = min(
-                        self.rect_size.x * 0.35,
-                        (self.rect_size.y - label_height) * 0.35
-                    );
-
-                let val_width_scaled = min(
-                        self.rect_size.x * val_width,
-                        (self.rect_size.y - label_height) * val_width
-                    );
-
-                // Value
-                sdf.arc_round_caps(
-                    self.rect_size.x / 2.,
-                    val_pos_y_scaled,
-                    val_radius_scaled,
-                    start,
-                    val_end,
+                    val_end, 
                     val_width_scaled
-                )
+                );
 
                 sdf.fill(
                     mix(
@@ -855,10 +841,10 @@ live_design!{
                 // Handle
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    val_pos_y_scaled,
-                    val_radius_scaled,
-                    val_end,
-                    val_end,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation,
+                    val_end, 
+                    val_end, 
                     mix(
                         0.,
                         val_width_scaled,
