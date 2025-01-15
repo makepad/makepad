@@ -748,6 +748,14 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
                 let label_offset = 20.;
+
+                let one_deg = PI / 180;
+                let threesixty_deg = 2. * PI;
+                let gap_size = self.gap * one_deg;
+                let val_length = threesixty_deg - (one_deg * self.gap);
+                let start = gap_size * 0.5;
+                let bg_end = start + val_length;
+                let val_end = start + val_length * self.slide_pos;
                 let effective_height = self.rect_size.y - label_offset;
                 let radius_scaled = min(
                         self.rect_size.x * 0.5,
@@ -772,6 +780,8 @@ live_design!{
                 let circle_norm = min(
                         self.rect_size.x / unit,
                         (self.rect_size.y - label_offset) / unit
+                    );
+                let arc_height = 1 + circle_norm;
                 let label_offset_norm = label_offset / unit;
                 let gradient_y = (self.pos.y * arc_height) - label_offset_norm;
                 // let gradient_y = self.pos.y * 1.25 + 0.25;
@@ -801,14 +811,6 @@ live_design!{
                     );
 
                 // Value
-                let one_deg = PI / 180;
-                let threesixty_deg = 2. * PI;
-                let gap_size = self.gap * one_deg;
-                let val_length = threesixty_deg - (one_deg * self.gap);
-                let start = gap_size * 0.5;
-                let bg_end = start + val_length;
-                let val_end = start + val_length * self.slide_pos;
-
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
                     radius_scaled + label_offset,
