@@ -779,9 +779,8 @@ live_design!{
                 // TODO: fix this. for some reason gradients don't scale as expected.
                 let label_offset_norm = label_offset / self.rect_size.y;
                 let arc_h_norm = (360. - self.gap) / 360.; // approximation
-                let circ_h = radius_scaled * 2. / self.rect_size.y * arc_h_norm;
-                let gradient_y = pow(self.pos.y, 2.) / circ_h - label_offset_norm;
-                // let gradient_y = (self.pos.y * arc_h_norm) - label_offset_norm;
+                let rotary_h = radius_scaled * 2. / self.rect_size.y * arc_h_norm;
+                let gradient_y = pow(self.pos.y, 2.) / rotary_h - label_offset_norm;
 
                 sdf.fill_keep(
                     mix(
@@ -796,8 +795,7 @@ live_design!{
                 )
 
                 sdf.stroke(
-                    mix(#f00, #0ff, gradient_y),
-                    // mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, gradient_y),
+                    mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, gradient_y),
                     outline_width
                 )
 
