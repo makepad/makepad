@@ -624,8 +624,8 @@ live_design!{
     pub ROTARY_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
     pub ROTARY_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
 
-    pub ROTARY_VAL_COLOR_A = (THEME_COLOR_U_2);
-    pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_3);
+    pub ROTARY_VAL_COLOR_A = #6;
+    pub ROTARY_VAL_COLOR_B = #8;
 
     pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
@@ -906,7 +906,6 @@ live_design!{
                     bg_width_scaled
                 );
 
-                // TODO: fix this. for some reason gradients don't scale as expected.
                 let label_offset_norm = label_offset / self.rect_size.y;
                 let arc_h_norm = (360. - self.gap) / 360.; // approximation
                 let rotary_h = radius_scaled * 2. / self.rect_size.y * arc_h_norm;
@@ -923,6 +922,17 @@ live_design!{
                         self.drag
                     )
                 )
+
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset * 0.9,
+                    radius_scaled - radius_width_compensation,
+                    start,
+                    bg_end, 
+                    bg_width_scaled * 0.5
+                );
+
+                sdf.fill(mix(#0006, #0000, gradient_y));
 
                 // outer rim
                 sdf.arc_round_caps(
