@@ -275,7 +275,25 @@ impl Cx {
         }
         return 1.0;
     }
-
+    
+    pub fn get_pass_window_id(&self, pass_id: PassId) -> Option<WindowId> {
+         let mut pass_id_walk = pass_id;
+         for _ in 0..25 {
+             match self.passes[pass_id_walk].parent {
+                 CxPassParent::Window(window_id) => {
+                     return Some(window_id)
+                 }
+                 CxPassParent::Pass(next_pass_id) => {
+                     pass_id_walk = next_pass_id;
+                 }
+                 _ => {
+                     break;
+                 }
+             }
+         }
+         None
+     }
+    
     pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f64 {
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
