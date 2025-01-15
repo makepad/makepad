@@ -748,6 +748,7 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
                 let label_offset = 20.;
+                let outline_width = 1.;
 
                 let one_deg = PI / 180;
                 let threesixty_deg = 2. * PI;
@@ -758,12 +759,12 @@ live_design!{
                 let val_end = start + val_length * self.slide_pos;
                 let effective_height = self.rect_size.y - label_offset;
                 let radius_scaled = min(
-                        self.rect_size.x * 0.5,
-                        (self.rect_size.y - label_offset) * 0.5
+                        (self.rect_size.x - outline_width) * 0.5,
+                        (self.rect_size.y - label_offset - outline_width) * 0.5
                     );
                 let radius_width_compensation = self.width * 0.5;
-                let width_correction = 0.008;
-                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_correction;
+                let width_fix = 0.008;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
 
                 // Background
                 sdf.arc_round_caps(
@@ -782,8 +783,12 @@ live_design!{
                         (self.rect_size.y - label_offset) / unit
                     );
                 let arc_height = 1 + circle_norm;
-                let label_offset_norm = label_offset / unit;
-                let gradient_y = (self.pos.y * arc_height) - label_offset_norm;
+
+                let label_offset_norm = label_offset / self.rect_size.y;
+                
+                let arc_h = min(self.rect_size.x, self.rect_size.y - label_offset) - label_offset_norm - min(self.rect_size.x, self.rect_size.y - label_offset);
+                let gradient_y = self.pos.y - label_offset_norm * (arc_h);
+                // let gradient_y = (self.pos.y * arc_h) + label_offset_norm;
                 // let gradient_y = self.pos.y * 1.25 + 0.25;
 
                 sdf.fill_keep(
@@ -799,12 +804,12 @@ live_design!{
                 )
 
                 sdf.stroke(
-                    mix(#f00, #0ff, gradient_y),
-                    // mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, gradient_y),
-                    1.
+                    // mix(#f00, #0ff, gradient_y),
+                    mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, gradient_y),
+                    outline_width
                 )
 
-                let val_width = (self.width - self.padding) * width_correction;
+                let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
                         self.rect_size.x * val_width,
                         effective_height * val_width
