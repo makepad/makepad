@@ -613,7 +613,7 @@ live_design!{
     pub ROTARY_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
     pub ROTARY_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
     pub ROTARY_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
-    pub ROTARY_BG_COLOR_B = (THEME_COLOR_D_HIDDEN);
+    pub ROTARY_BG_COLOR_B = (THEME_COLOR_D_2);
     pub ROTARY_BG_HOVER_COLOR_B = (THEME_COLOR_D_HIDDEN);
     pub ROTARY_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
 
@@ -932,7 +932,7 @@ live_design!{
                     bg_width_scaled * 0.5
                 );
 
-                sdf.fill(mix(#0005, #0000, gradient_y));
+                sdf.fill(mix(#0006, #0002, gradient_y + label_offset_norm));
 
                 // outer rim
                 sdf.arc_round_caps(
@@ -956,7 +956,7 @@ live_design!{
                     radius_scaled * 0.075
                 );
 
-                sdf.fill(mix(#fff2, #0006, gradient_y + label_offset_norm * 2.));
+                sdf.fill(mix(#fff2, #0000, gradient_y + label_offset_norm * 2.));
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
