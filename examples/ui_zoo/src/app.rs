@@ -513,25 +513,28 @@ live_design!{
                     width: Fill, height: Fit,
                     flow: Right,
                     <Rotary> {
-                        width: 150, height: 50,
+                        width: 100, height: 100,
                         text: "Colored",
                         draw_slider: {
+                            gap: 0.,
                             width: 20.
                             padding: 2.,
                         }
                     }
                     <Rotary> {
-                        width: 50, height: 150,
+                        width: 100, height: 200,
                         text: "Colored",
                         draw_slider: {
-                            width: 20.
+                            gap: 0.,
+                            width: 10.,
                             padding: 4.,
                         }
                     }
                     <Rotary> {
-                        width: 100, height: 150,
+                        width: 200, height: 100,
                         text: "Colored",
                         draw_slider: {
+                            gap: 0.,
                             width: 20.
                             padding: 4,
                         }
@@ -540,6 +543,7 @@ live_design!{
                         width: 200, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            gap: 0.,
                             width: 20.
                             padding: 4.,
                         }
@@ -548,8 +552,9 @@ live_design!{
                         width: Fill, height: 150,
                         text: "Colored",
                         draw_slider: {
+                            gap: 0.,
                             width: 20.
-                            padding: 4.,
+                            padding: 10.,
                         }
                     }
                 }
@@ -560,6 +565,7 @@ live_design!{
                         width: 100., height: 100.,
                         text: "Colored",
                         draw_slider: {
+                            gap: 0.,
                             width: 20.
                             padding: 0.,
                         }
@@ -574,8 +580,8 @@ live_design!{
                             val_color_a: #ff0,
                             val_color_b: #f00,
                             handle_color: #f,
-                            gap: 180.,
-                            width: 10.,
+                            gap: 270.,
+                            width: 20.,
                             padding: 2.,
                         }
                     }
@@ -589,7 +595,7 @@ live_design!{
                             val_color_a: #0ff,
                             val_color_b: #ff0,
                             handle_color: #f,
-                            gap: 270.,
+                            gap: 90.,
                             width: 10.,
                             padding: 2.,
                         }
@@ -611,7 +617,7 @@ live_design!{
                             color: #0ff;
                         }
                         draw_slider: {
-                            gap: 90.,
+                            gap: 180.,
                             padding: 4.,
                             width: 6.,
                         }
