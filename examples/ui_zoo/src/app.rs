@@ -516,7 +516,7 @@ live_design!{
                         width: 100, height: 100,
                         text: "Colored",
                         draw_slider: {
-                            gap: 0.,
+                            gap: 90.,
                             width: 20.
                             padding: 2.,
                         }
@@ -525,7 +525,7 @@ live_design!{
                         width: 100, height: 200,
                         text: "Colored",
                         draw_slider: {
-                            gap: 0.,
+                            gap: 60.,
                             width: 10.,
                             padding: 4.,
                         }
@@ -534,7 +534,7 @@ live_design!{
                         width: 200, height: 100,
                         text: "Colored",
                         draw_slider: {
-                            gap: 0.,
+                            gap: 75.,
                             width: 20.
                             padding: 4,
                         }
@@ -543,7 +543,7 @@ live_design!{
                         width: 200, height: 150,
                         text: "Colored",
                         draw_slider: {
-                            gap: 0.,
+                            gap: 90.,
                             width: 20.
                             padding: 4.,
                         }
@@ -552,7 +552,7 @@ live_design!{
                         width: Fill, height: 150,
                         text: "Colored",
                         draw_slider: {
-                            gap: 0.,
+                            gap: 60.,
                             width: 20.
                             padding: 10.,
                         }
@@ -596,7 +596,7 @@ live_design!{
                             val_color_b: #ff0,
                             handle_color: #f,
                             gap: 90.,
-                            width: 10.,
+                            width: 20.,
                             padding: 2.,
                         }
                     }
