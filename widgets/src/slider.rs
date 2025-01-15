@@ -932,7 +932,7 @@ live_design!{
                     bg_width_scaled * 0.5
                 );
 
-                sdf.fill(mix(#0006, #0000, gradient_y));
+                sdf.fill(mix(#0005, #0000, gradient_y));
 
                 // outer rim
                 sdf.arc_round_caps(
@@ -941,10 +941,10 @@ live_design!{
                     radius_scaled - radius_width_compensation + bg_width_scaled * 0.5,
                     start,
                     bg_end, 
-                    2.0
+                    radius_scaled * 0.035
                 );
 
-                sdf.fill(mix(#000, #fff4, gradient_y));
+                sdf.fill(mix(#000, #fff3, gradient_y));
 
                 // inner rim
                 sdf.arc_round_caps(
@@ -953,10 +953,10 @@ live_design!{
                     radius_scaled - radius_width_compensation - bg_width_scaled * 0.5,
                     start,
                     bg_end, 
-                    radius_scaled * 0.035
+                    radius_scaled * 0.075
                 );
 
-                sdf.fill(mix(#fff3, #000, gradient_y));
+                sdf.fill(mix(#fff2, #0006, gradient_y + label_offset_norm * 2.));
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
