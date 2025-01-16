@@ -709,26 +709,7 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             gap: 90.,
-                            width: 20.
                             padding: 2.,
-                        }
-                    }
-                    <RotarySolid> {
-                        width: 100, height: 200,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 60.,
-                            width: 10.,
-                            padding: 4.,
-                        }
-                    }
-                    <RotarySolid> {
-                        width: 200, height: 100,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 75.,
-                            width: 20.
-                            padding: 10,
                         }
                     }
                     <RotarySolid> {
@@ -736,7 +717,6 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             gap: 90.,
-                            width: 10.
                             padding: 4.,
                         }
                     }
@@ -745,8 +725,7 @@ live_design!{
                         text: "Colored",
                         draw_slider: {
                             gap: 60.,
-                            width: 20.
-                            padding: 10.,
+                            padding: 40.,
                         }
                     }
                 }
