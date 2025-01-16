@@ -9,6 +9,7 @@ pub mod draw_list_2d;
 pub mod shader;
 pub mod turtle;
 pub mod font_atlas;
+pub mod font_cache;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
@@ -27,9 +28,7 @@ pub use crate::{
         TurtleAlignRange,
         DeferWalk
     },
-    overlay::{
-        Overlay
-    },
+    overlay::Overlay,
     nav::{
         NavRole,
         NavOrder,
@@ -43,9 +42,7 @@ pub use crate::{
         Redrawing,
         RedrawingApi,
     },
-    cx_2d::{
-        Cx2d
-    },
+    cx_2d::Cx2d,
     shader::{
         //draw_shape::{DrawShape, Shape, Fill},
         draw_icon::DrawIcon,
