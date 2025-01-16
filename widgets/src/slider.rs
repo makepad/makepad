@@ -1110,7 +1110,7 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
                 let label_offset = 20.;
-                let outline_width = 1.;
+                let gloss_width = 1.;
 
                 let one_deg = PI / 180;
                 let threesixty_deg = 2. * PI;
@@ -1121,8 +1121,8 @@ live_design!{
                 let val_end = start + val_length * self.slide_pos;
                 let effective_height = self.rect_size.y - label_offset;
                 let radius_scaled = min(
-                        (self.rect_size.x - outline_width) * 0.5,
-                        (self.rect_size.y - label_offset - outline_width) * 0.5
+                        (self.rect_size.x - gloss_width) * 0.5,
+                        (self.rect_size.y - label_offset - gloss_width) * 0.5
                     );
                 let radius_width_compensation = self.width * 0.5;
                 let width_fix = 0.008;
@@ -1152,8 +1152,8 @@ live_design!{
 
                 sdf.fill(
                     mix(
-                        mix((THEME_COLOR_U_2), (THEME_COLOR_U_HIDDEN), self.pos.y),
-                        mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_U_2), self.pos.y),
+                        mix((THEME_COLOR_U_1), (THEME_COLOR_U_1), gradient_y),
+                        mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_U_2), gradient_y),
                         self.drag
                     )
                 )
@@ -1175,7 +1175,11 @@ live_design!{
                 );
 
                 sdf.fill_keep(mix(#fff2, #0000, gradient_y + label_offset_norm * 2.));
-                sdf.stroke(mix(#FFF4, #000F, gradient_y), 1.5);
+                sdf.stroke(mix(
+                        mix((THEME_COLOR_U_3), (THEME_COLOR_D_4), gradient_y),
+                        mix((THEME_COLOR_U_4), (THEME_COLOR_D_4), gradient_y),
+                        self.hover
+                    ), gloss_width);
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
@@ -1214,13 +1218,33 @@ live_design!{
                     val_width_scaled
                 );
 
-                sdf.fill_keep(
+                sdf.fill(
                     mix(
                         self.handle_color,
                         mix(self.handle_color, #f, 0.25),
                         self.drag
                     )
                 )
+
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled * 1.1,
+                    start, 
+                    start, 
+                    val_width_scaled * 0.75
+                );
+
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled * 1.1,
+                    bg_end, 
+                    bg_end, 
+                    val_width_scaled * 0.75
+                );
+
+                sdf.fill(#0)
                 
                 return sdf.result
             }
