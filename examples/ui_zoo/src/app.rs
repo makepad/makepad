@@ -588,9 +588,6 @@ live_design!{
                     <Rotary> {
                         width: 120., height: 120.,
                         text: "Solid",
-                        draw_text: {
-                            color: #0ff;
-                        }
                         draw_slider: {
                             val_color_a: #0ff,
                             val_color_b: #ff0,
@@ -601,7 +598,7 @@ live_design!{
                         }
                     }
                     <Rotary> {
-                        width: 100., height: 50.,
+                        width: 100., height: 90.,
                         text: "Solid",
                         draw_slider: {
                             gap: 90.,
@@ -613,10 +610,9 @@ live_design!{
                     <Rotary> {
                         width: 150., height: 150.,
                         text: "Solid",
-                        draw_text: {
-                            color: #0ff;
-                        }
                         draw_slider: {
+                            val_color_a: #0ff,
+                            val_color_b: #0ff,
                             gap: 180.,
                             padding: 4.,
                             width: 6.,
@@ -629,6 +625,56 @@ live_design!{
                             gap: 0.,
                             width: 10.0,
                             padding: 4.,
+                        }
+                    }
+                }
+                
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <RotarySolid> {
+                        width: 100, height: 100,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 90.,
+                            width: 20.
+                            padding: 2.,
+                        }
+                    }
+                    <RotarySolid> {
+                        width: 100, height: 200,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 60.,
+                            width: 10.,
+                            padding: 4.,
+                        }
+                    }
+                    <RotarySolid> {
+                        width: 200, height: 100,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 75.,
+                            width: 20.
+                            padding: 10,
+                        }
+                    }
+                    <RotarySolid> {
+                        width: 200, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 90.,
+                            width: 10.
+                            padding: 4.,
+                        }
+                    }
+                    <RotarySolid> {
+                        width: Fill, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 60.,
+                            width: 20.
+                            padding: 10.,
                         }
                     }
                 }
