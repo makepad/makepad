@@ -739,6 +739,7 @@ live_design!{
 
             uniform gap: 90.
             uniform padding: 2.0
+            uniform width: 10.
             uniform handle_color: (ROTARY_HANDLE_COLOR);
             uniform val_color_a: (ROTARY_VAL_COLOR_A);
             uniform val_color_b: (ROTARY_VAL_COLOR_B);
@@ -748,7 +749,6 @@ live_design!{
 
                 let label_offset = 20.;
                 let outline_width = 1.;
-                let foo = 10.
                 let one_deg = PI / 180;
                 let threesixty_deg = 2. * PI;
                 let gap_size = self.gap * one_deg;
@@ -761,9 +761,9 @@ live_design!{
                         (self.rect_size.x - outline_width) * 0.5,
                         (self.rect_size.y - label_offset - outline_width) * 0.5
                     );
-                let radius_width_compensation = foo * 0.5;
+                let radius_width_compensation = self.width * 0.5;
                 let width_fix = 0.008;
-                let bg_width_scaled = min(self.rect_size.x, effective_height) * foo * width_fix;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
 
                 // Background
                 sdf.arc_round_caps(
@@ -827,7 +827,7 @@ live_design!{
 
                 sdf.fill(mix(#fff2, #0000, gradient_y + label_offset_norm * 2.));
 
-                let val_width = (foo - self.padding) * width_fix;
+                let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
                         self.rect_size.x * val_width,
                         effective_height * val_width
