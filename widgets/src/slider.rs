@@ -794,25 +794,36 @@ live_design!{
 
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    radius_scaled + label_offset - 2.,
+                    radius_scaled + label_offset,
                     radius_scaled - radius_width_compensation,
                     start,
                     bg_end, 
-                    bg_width_scaled * mix(0.2, 0.3, self.drag)
+                    bg_width_scaled * 0.1
                 );
 
                 sdf.fill(#0004);
 
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    radius_scaled + label_offset,
+                    radius_scaled + label_offset + 1.,
                     radius_scaled - radius_width_compensation,
                     start,
                     bg_end, 
-                    bg_width_scaled * mix(0.2, 0.3, self.drag)
+                    bg_width_scaled * 0.1
                 );
 
-                sdf.fill(#fff1);
+                sdf.fill(#fff2);
+
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset - 2.,
+                    radius_scaled - radius_width_compensation,
+                    start,
+                    bg_end, 
+                    bg_width_scaled * 0.1
+                );
+
+                sdf.fill(#0008);
 
                 // outer rim
                 sdf.arc_round_caps(
