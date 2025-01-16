@@ -732,136 +732,6 @@ live_design!{
             }
         }
 
-        // draw_slider: {
-        //     instance hover: float
-        //     instance focus: float
-        //     instance drag: float
-
-        //     uniform gap: 90.
-        //     uniform width: 5.
-        //     uniform padding: 4.0
-        //     uniform handle_color: (ROTARY_HANDLE_COLOR);
-        //     uniform val_color_a: (ROTARY_VAL_COLOR_A);
-        //     uniform val_color_b: (ROTARY_VAL_COLOR_B);
-
-        //     fn pixel(self) -> vec4 {
-        //         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-
-        //         let label_offset = 20.;
-        //         let outline_width = 1.;
-
-        //         let one_deg = PI / 180;
-        //         let threesixty_deg = 2. * PI;
-        //         let gap_size = self.gap * one_deg;
-        //         let val_length = threesixty_deg - (one_deg * self.gap);
-        //         let start = gap_size * 0.5;
-        //         let bg_end = start + val_length;
-        //         let val_end = start + val_length * self.slide_pos;
-        //         let effective_height = self.rect_size.y - label_offset;
-        //         let radius_scaled = min(
-        //                 (self.rect_size.x - outline_width) * 0.5,
-        //                 (self.rect_size.y - label_offset - outline_width) * 0.5
-        //             );
-        //         let radius_width_compensation = self.width * 0.5;
-        //         let width_fix = 0.008;
-        //         let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
-
-        //         // Background
-        //         sdf.arc_round_caps(
-        //             self.rect_size.x / 2.,
-        //             radius_scaled + label_offset,
-        //             radius_scaled - radius_width_compensation,
-        //             start,
-        //             bg_end, 
-        //             bg_width_scaled
-        //         );
-
-        //         // TODO: fix this. for some reason gradients don't scale as expected.
-        //         let label_offset_norm = label_offset / self.rect_size.y;
-        //         let arc_h_norm = (360. - self.gap) / 360.; // approximation
-        //         let rotary_h = radius_scaled * 2. / self.rect_size.y * arc_h_norm;
-        //         let gradient_y = pow(self.pos.y, 2.) / rotary_h - label_offset_norm;
-
-        //         sdf.fill_keep(
-        //             mix(
-        //                 mix(
-        //                     mix(ROTARY_BG_COLOR_A, ROTARY_BG_COLOR_B, gradient_y),
-        //                     mix(ROTARY_BG_HOVER_COLOR_A, ROTARY_BG_HOVER_COLOR_B, gradient_y),
-        //                     self.hover
-        //                 ),
-        //                 mix(ROTARY_BG_DRAG_COLOR_A, ROTARY_BG_DRAG_COLOR_B, gradient_y),
-        //                 self.drag
-        //             )
-        //         )
-
-        //         sdf.stroke(
-        //             mix(ROTARY_BORDER_COLOR_A, ROTARY_BORDER_COLOR_B, gradient_y),
-        //             outline_width
-        //         )
-
-        //         let val_width = (self.width - self.padding) * width_fix;
-        //         let val_width_scaled = min(
-        //                 self.rect_size.x * val_width,
-        //                 effective_height * val_width
-        //             );
-
-        //         // Value
-        //         sdf.arc_round_caps(
-        //             self.rect_size.x / 2.,
-        //             radius_scaled + label_offset,
-        //             radius_scaled - radius_width_compensation,
-        //             start,
-        //             val_end, 
-        //             val_width_scaled
-        //         );
-
-        //         sdf.fill(
-        //             mix(
-        //                 mix(
-        //                     mix(self.val_color_a, self.val_color_b, self.slide_pos),
-        //                     mix(
-        //                         mix(self.val_color_a, #f, 0.1),
-        //                         mix(self.val_color_b, #f, 0.1),
-        //                         self.slide_pos
-        //                     ),
-        //                     self.hover
-        //                 ),
-        //                 mix(
-        //                     mix(self.val_color_a, #0, 0.1),
-        //                     mix(self.val_color_b, #0, 0.1),
-        //                     self.slide_pos
-        //                 ),
-        //                 self.drag
-        //             )
-        //         )
-
-        //         // Handle
-        //         sdf.arc_round_caps(
-        //             self.rect_size.x / 2.,
-        //             radius_scaled + label_offset,
-        //             radius_scaled - radius_width_compensation,
-        //             val_end, 
-        //             val_end, 
-        //             mix(
-        //                 0.,
-        //                 val_width_scaled,
-        //                 self.hover
-        //             )
-        //         );
-
-        //         sdf.fill_keep(
-        //             mix(
-        //                 self.handle_color,
-        //                 mix(self.handle_color, #f, 0.25),
-        //                 self.drag
-        //             )
-        //         )
-                
-        //         return sdf.result
-        //     }
-        // }
-
-
         draw_slider: {
             instance hover: float
             instance focus: float
@@ -925,11 +795,11 @@ live_design!{
 
                 sdf.arc_round_caps(
                     self.rect_size.x / 2.,
-                    radius_scaled + label_offset * 0.9,
+                    radius_scaled + label_offset,
                     radius_scaled - radius_width_compensation,
                     start,
                     bg_end, 
-                    bg_width_scaled * 0.5
+                    bg_width_scaled * mix(0.45, 0.55, self.drag)
                 );
 
                 sdf.fill(mix(#0006, #0002, gradient_y + label_offset_norm));
@@ -1006,6 +876,342 @@ live_design!{
                         val_width_scaled,
                         self.hover
                     )
+                );
+
+                sdf.fill_keep(
+                    mix(
+                        self.handle_color,
+                        mix(self.handle_color, #f, 0.25),
+                        self.drag
+                    )
+                )
+                
+                return sdf.result
+            }
+        }
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    ease: OutQuad
+                    apply: {
+                        draw_slider: { hover: 0.0 },
+                        draw_text: { hover: 0.0 },
+                        text_input: {
+                            draw_selection: { hover: 0.0},
+                            draw_bg: { hover: 0.0},
+                            draw_text: { hover: 0.0},
+                        }
+                    }
+                }
+                on = {
+                    //cursor: Arrow,
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: { hover: 1.0 },
+                        draw_text: { hover: 1.0 }
+                        text_input: {
+                            draw_selection: { hover: 1.0},
+                            draw_bg: { hover: 1.0},
+                            draw_text: { hover: 1.0},
+                        }
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_slider: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: {focus: 1.0}
+                    }
+                }
+            }
+            drag = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply:
+                        {
+                            draw_slider: {drag: 0.0},
+                            text_input: {
+                                draw_selection: { hover: 0.0},
+                                draw_bg: { hover: 0.0},
+                                draw_text: { hover: 0.0},
+                            }
+                        }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Snap}
+                    apply: {
+                        draw_slider: {drag: 1.0},
+                        text_input: {
+                            draw_selection: { hover: 0.0},
+                            draw_bg: { hover: 0.0},
+                            draw_text: { hover: 0.0},
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    pub ROTARY_SOLID_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
+    pub ROTARY_SOLID_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+    pub ROTARY_SOLID_DATA_FONT_TOPMARGIN = 40.0;
+    pub ROTARY_SOLID_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
+    pub ROTARY_SOLID_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
+
+    pub ROTARY_SOLID_BG_COLOR_A = (THEME_COLOR_D_3);
+    pub ROTARY_SOLID_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
+    pub ROTARY_SOLID_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
+    pub ROTARY_SOLID_BG_COLOR_B = (THEME_COLOR_D_4);
+    pub ROTARY_SOLID_BG_HOVER_COLOR_B = (THEME_COLOR_D_2);
+    pub ROTARY_SOLID_BG_DRAG_COLOR_B = (THEME_COLOR_D_2);
+
+    pub ROTARY_SOLID_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_SOLID_BORDER_HOVER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_SOLID_BORDER_DRAG_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_SOLID_BORDER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub ROTARY_SOLID_BORDER_HOVER_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+    pub ROTARY_SOLID_BORDER_DRAG_COLOR_B = (THEME_COLOR_BEVEL_LIGHT);
+
+    pub ROTARY_SOLID_VAL_COLOR_A = #6;
+    pub ROTARY_SOLID_VAL_COLOR_B = #8;
+
+    pub ROTARY_SOLID_HANDLE_COLOR = (THEME_COLOR_U_3);
+
+    pub RotarySolid = <SliderBase> {
+        axis: Vertical,
+        step: 0.0,
+        precision: 2,
+        min: 0.0, max: 1.0,
+        hover_actions_enabled: false,
+
+        height: 95., width: 65.,
+        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+        text: "Label",
+
+        align: { x: 0., y: 0.0 }
+        label_walk: {
+            margin: <THEME_MSPACE_1> {},
+            width: Fill, height: Fit
+        }
+
+        // Label
+        draw_text: {
+            instance hover: 0.0;
+            uniform color: (ROTARY_SOLID_LABEL_COLOR),
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (ROTARY_SOLID_LABEL_FONTSIZE)
+            }
+
+            fn get_color(self) -> vec4 {
+                return self.color;
+            }
+        }
+
+        // Data input
+        text_input: <TextInput> {
+            empty_message: "0",
+            is_numeric_only: true,
+
+            width: Fit, height: Fit,
+            padding: <THEME_MSPACE_1> {},
+            label_align: {x: 0.0, y: 0.0 },
+
+            draw_bg: {
+                instance radius: (THEME_CORNER_RADIUS)
+                instance hover: 0.0
+                instance focus: 0.0
+                instance bodytop: (THEME_COLOR_INSET_DEFAULT)
+                instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+                
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    return sdf.result
+                }
+            }
+
+            draw_selection: {
+                instance hover: 0.0
+                instance focus: 0.0
+                uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_ize);
+                    sdf.box(
+                        0.,
+                        0.,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        self.border_radius
+                    )
+                    sdf.fill(
+                        mix(THEME_COLOR_U_HIDDEN,
+                            THEME_COLOR_D_3,
+                            self.focus)
+                    ); // Pad color
+                    return sdf.result
+                }
+            }
+
+            draw_text: {
+                uniform val_text_color: (ROTARY_SOLID_DATA_COLOR);
+                fn get_color(self) -> vec4 {
+                    return
+                    mix(
+                        mix(
+                            mix(
+                                self.val_text_color,
+                                mix(self.val_text_color, #f, 0.4),
+                                self.hover
+                            ),
+                            mix(
+                                mix(self.val_text_color, #f, 0.4),
+                                mix(self.val_text_color, #f, 0.8),
+                                self.hover
+                            ),
+                            self.focus
+                        ),
+                        mix(
+                            mix(self.val_text_color, #0, 0.4),
+                            self.val_text_color,
+                            self.hover
+                        ),
+                        self.is_empty
+                    )
+                }
+            }
+        }
+
+        draw_slider: {
+            instance hover: float
+            instance focus: float
+            instance drag: float
+
+            uniform gap: 90.
+            uniform width: 5.
+            uniform padding: 4.0
+            uniform handle_color: (ROTARY_SOLID_HANDLE_COLOR);
+            uniform val_color_a: (ROTARY_SOLID_VAL_COLOR_A);
+            uniform val_color_b: (ROTARY_SOLID_VAL_COLOR_B);
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                let label_offset = 20.;
+                let outline_width = 1.;
+
+                let one_deg = PI / 180;
+                let threesixty_deg = 2. * PI;
+                let gap_size = self.gap * one_deg;
+                let val_length = threesixty_deg - (one_deg * self.gap);
+                let start = gap_size * 0.5;
+                let bg_end = start + val_length;
+                let val_end = start + val_length * self.slide_pos;
+                let effective_height = self.rect_size.y - label_offset;
+                let radius_scaled = min(
+                        (self.rect_size.x - outline_width) * 0.5,
+                        (self.rect_size.y - label_offset - outline_width) * 0.5
+                    );
+                let radius_width_compensation = self.width * 0.5;
+                let width_fix = 0.008;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
+
+                // Background
+                sdf.circle(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation
+                );
+
+                let label_offset_norm = label_offset / self.rect_size.y;
+                let arc_h_norm = (360. - self.gap) / 360.; // approximation
+                let rotary_solid_h = radius_scaled * 2. / self.rect_size.y * arc_h_norm;
+                let gradient_y = pow(self.pos.y, 2.) / rotary_solid_h - label_offset_norm;
+
+                sdf.fill(
+                    mix(ROTARY_SOLID_BG_COLOR_A, ROTARY_SOLID_BG_COLOR_B, gradient_y)
+                )
+
+                sdf.circle(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation - bg_width_scaled * 0.5
+                );
+
+                sdf.fill(
+                    mix(
+                        mix((THEME_COLOR_U_2), (THEME_COLOR_U_HIDDEN), self.pos.y),
+                        mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_U_2), self.pos.y),
+                        self.drag
+                    )
+                )
+
+                // outer rim
+                sdf.circle(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation
+                );
+
+                sdf.stroke(mix(#000F, #FFF3, gradient_y), 1.5);
+
+                // inner rim
+                sdf.circle(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation - bg_width_scaled * 0.5
+                );
+
+                sdf.fill_keep(mix(#fff2, #0000, gradient_y + label_offset_norm * 2.));
+                sdf.stroke(mix(#FFF4, #000F, gradient_y), 1.5);
+
+                let val_width = (self.width - self.padding) * width_fix;
+                let val_width_scaled = min(
+                        self.rect_size.x * val_width,
+                        effective_height * val_width
+                    );
+
+                // Value
+                sdf.fill(
+                    mix(
+                        mix(
+                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                            mix(
+                                mix(self.val_color_a, #f, 0.1),
+                                mix(self.val_color_b, #f, 0.1),
+                                self.slide_pos
+                            ),
+                            self.hover
+                        ),
+                        mix(
+                            mix(self.val_color_a, #0, 0.1),
+                            mix(self.val_color_b, #0, 0.1),
+                            self.slide_pos
+                        ),
+                        self.drag
+                    )
+                )
+
+                // Handle
+                sdf.arc_round_caps(
+                    self.rect_size.x / 2.,
+                    radius_scaled + label_offset,
+                    radius_scaled - radius_width_compensation - bg_width_scaled * 1.3,
+                    val_end, 
+                    val_end, 
+                    val_width_scaled
                 );
 
                 sdf.fill_keep(
