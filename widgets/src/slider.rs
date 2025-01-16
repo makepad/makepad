@@ -738,7 +738,6 @@ live_design!{
             instance drag: float
 
             uniform gap: 90.
-            uniform width: 5.
             uniform padding: 4.0
             uniform handle_color: (ROTARY_HANDLE_COLOR);
             uniform val_color_a: (ROTARY_VAL_COLOR_A);
@@ -749,7 +748,7 @@ live_design!{
 
                 let label_offset = 20.;
                 let outline_width = 1.;
-
+                let foo = 10.
                 let one_deg = PI / 180;
                 let threesixty_deg = 2. * PI;
                 let gap_size = self.gap * one_deg;
@@ -762,9 +761,9 @@ live_design!{
                         (self.rect_size.x - outline_width) * 0.5,
                         (self.rect_size.y - label_offset - outline_width) * 0.5
                     );
-                let radius_width_compensation = self.width * 0.5;
+                let radius_width_compensation = foo * 0.5;
                 let width_fix = 0.008;
-                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * foo * width_fix;
 
                 // Background
                 sdf.arc_round_caps(
@@ -828,7 +827,7 @@ live_design!{
 
                 sdf.fill(mix(#fff2, #0000, gradient_y + label_offset_norm * 2.));
 
-                let val_width = (self.width - self.padding) * width_fix;
+                let val_width = (foo - self.padding) * width_fix;
                 let val_width_scaled = min(
                         self.rect_size.x * val_width,
                         effective_height * val_width
@@ -969,7 +968,7 @@ live_design!{
     pub ROTARY_FLAT_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
     pub ROTARY_FLAT_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
     pub ROTARY_FLAT_BG_COLOR_A = (THEME_COLOR_D_HIDDEN);
-    pub ROTARY_FLAT_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
+    pub ROTARY_FLAT_BG_DRAG_COLOR_A = (THEME_COLOR_D_1);
     pub ROTARY_FLAT_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
     pub ROTARY_FLAT_VAL_COLOR_A = #6;
     pub ROTARY_FLAT_VAL_COLOR_B = #8;
@@ -1138,7 +1137,7 @@ live_design!{
                         self.drag
                     )
                 )
-                sdf.stroke((ROTARY_FLAT_BORDER_COLOR_A), outline_width);
+                sdf.stroke(mix(ROTARY_FLAT_BORDER_COLOR_A, ROTARY_FLAT_BG_COLOR_A, self.drag), outline_width);
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
@@ -1300,7 +1299,7 @@ live_design!{
     pub ROTARY_SOLID_VAL_COLOR_A = #6;
     pub ROTARY_SOLID_VAL_COLOR_B = #8;
 
-    pub ROTARY_SOLID_HANDLE_COLOR = (THEME_COLOR_U_3);
+    pub ROTARY_SOLID_HANDLE_COLOR = #FFA;
 
     pub RotarySolid = <SliderBase> {
         axis: Vertical,
@@ -1411,8 +1410,7 @@ live_design!{
             instance drag: float
 
             uniform gap: 90.
-            uniform width: 5.
-            uniform padding: 4.0
+            uniform width: 10.
             uniform handle_color: (ROTARY_SOLID_HANDLE_COLOR);
             uniform val_color_a: (ROTARY_SOLID_VAL_COLOR_A);
             uniform val_color_b: (ROTARY_SOLID_VAL_COLOR_B);
@@ -1476,7 +1474,7 @@ live_design!{
                     radius_scaled - radius_width_compensation
                 );
 
-                sdf.stroke(mix(#000F, #FFF3, gradient_y), 1.5);
+                sdf.stroke(mix((THEME_COLOR_BEVEL_SHADOW), (THEME_COLOR_BEVEL_LIGHT), gradient_y), 1.5);
 
                 // inner rim
                 sdf.circle(
@@ -1485,14 +1483,14 @@ live_design!{
                     radius_scaled - radius_width_compensation - bg_width_scaled * 0.5
                 );
 
-                sdf.fill_keep(mix(#fff2, #0000, gradient_y + label_offset_norm * 2.));
+                sdf.fill_keep(mix((THEME_COLOR_U_2), (THEME_COLOR_D_1), gradient_y));
                 sdf.stroke(mix(
-                        mix((THEME_COLOR_U_3), (THEME_COLOR_D_4), gradient_y),
+                        mix((THEME_COLOR_BEVEL_LIGHT), (THEME_COLOR_BEVEL_SHADOW), gradient_y),
                         mix((THEME_COLOR_U_4), (THEME_COLOR_D_4), gradient_y),
                         self.hover
-                    ), gloss_width);
+                    ), gloss_width * 1.5);
 
-                let val_width = (self.width) * 0.004;
+                let val_width = self.width * 0.004;
                 let val_width_scaled = min(
                         self.rect_size.x * val_width,
                         effective_height * val_width
