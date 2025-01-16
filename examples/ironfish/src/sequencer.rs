@@ -154,7 +154,7 @@ impl SeqButton {
         match event.hits_with_options(
             cx,
             self.draw_button.area(),
-            HitOptions::new().with_sweep_area(sweep_area)
+            HitOptions::default().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);

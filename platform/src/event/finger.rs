@@ -294,7 +294,7 @@ impl CxFingers {
         self.hovers.push(CxDigitHover {
             digit_id,
             area: Area::Empty,
-            new_area: new_area,
+            new_area,
         })
     }
     
@@ -449,7 +449,7 @@ impl CxFingers {
     
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum DigitDevice {
     Mouse {
         button: usize
@@ -472,7 +472,8 @@ impl DigitDevice {
     // pub fn xr_input(&self) -> Option<usize> {if let DigitDevice::XR(input) = self {Some(*input)}else {None}}
 }
 
-#[derive(Clone, Debug)]
+
+#[derive(Clone, Copy, Debug)]
 pub struct FingerDownEvent {
     pub window_id: WindowId,
     pub abs: DVec2,
@@ -493,7 +494,7 @@ impl FingerDownEvent {
     pub fn mod_logo(&self) -> bool {self.modifiers.logo}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FingerMoveEvent {
     pub window_id: WindowId,
     pub abs: DVec2,
@@ -515,7 +516,7 @@ impl FingerMoveEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FingerUpEvent {
     pub window_id: WindowId,
     pub abs: DVec2,
@@ -545,7 +546,7 @@ impl FingerUpEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HoverState {
     In,
     Over,
@@ -558,7 +559,7 @@ impl Default for HoverState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FingerHoverEvent {
     pub window_id: WindowId,
     pub abs: DVec2,
@@ -569,7 +570,7 @@ pub struct FingerHoverEvent {
     pub rect: Rect,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FingerScrollEvent {
     pub window_id: WindowId,
     pub digit_id: DigitId,
@@ -591,18 +592,36 @@ pub enum HitTouch {
 // Status
 
 
-#[derive(Clone, Debug, Default)]
-pub struct HitOptions {
+#[derive(Clone, Debug)]
+pub struct HitOptions<H: FnMut(&Hit) -> bool = fn(&Hit) -> bool> {
     pub margin: Option<Margin>,
     pub sweep_area: Area,
     pub capture_overload: bool,
+    /// A callback that can be used to mark a `Hit` as handled.
+    /// If `None`, the default behavior is to return `true`, i.e.,
+    /// to mark the `Hit` as handled.
+    ///
+    /// Marking a `Hit` as "handled" means that it will not be delivered
+    /// to child widgets. This is useful when you want to prevent
+    /// a `Hit` from being delivered to a child widget.
+    ///
+    /// If the callback returns `false`, the `Hit` is not marked as handled.
+    /// This is useful when you want to allow a `Hit` to be handled in a given widget
+    /// AND to be handled by that widgets' child widgets.
+    pub mark_as_handled_fn: Option<H>,
+}
+impl Default for HitOptions {
+    fn default() -> Self {
+        Self {
+            margin: None,
+            sweep_area: Area::Empty,
+            capture_overload: false,
+            mark_as_handled_fn: None,
+        }
+    }
 }
 
-impl HitOptions {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    
+impl<H: FnMut(&Hit) -> bool> HitOptions<H> {
     pub fn with_sweep_area(self, area: Area) -> Self {
         Self {
             sweep_area: area,
@@ -621,36 +640,75 @@ impl HitOptions {
             ..self
         }
     }
+
+    /// See [`HitOptions::mark_as_handled_fn`].
+    pub fn with_mark_as_handled_fn(self, mark_as_handled_fn: H) -> Self {
+        Self {
+            mark_as_handled_fn: Some(mark_as_handled_fn),
+            ..self
+        }
+    }
+
+    fn run_mark_as_handled_fn(&mut self, fei: &Hit) -> bool {
+        if let Some(mark_as_handled_fn) = self.mark_as_handled_fn.as_mut() {
+            mark_as_handled_fn(fei)
+        } else {
+            true
+        }
+    }
 }
 
 
 impl Event {
-    
     pub fn hits(&self, cx: &mut Cx, area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::default())
     }
 
-    pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, hit_test:F) -> Hit 
+    pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, hit_test: F) -> Hit
     where F: Fn(DVec2, &Rect, &Option<Margin>)->bool{
-        self.hits_with_options_and_test(cx, area,  HitOptions::new(), hit_test)
+        self.hits_with_options_and_test(cx, area,  HitOptions::default(), hit_test)
     }
 
     pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area: Area) -> Hit {
-        self.hits_with_options(cx, area, HitOptions::new().with_sweep_area(sweep_area))
+        self.hits_with_options(cx, area, HitOptions::default().with_sweep_area(sweep_area))
     }
     
     pub fn hits_with_capture_overload(&self, cx: &mut Cx, area: Area, capture_overload: bool) -> Hit {
-        self.hits_with_options(cx, area, HitOptions::new().with_capture_overload(capture_overload))
+        self.hits_with_options(cx, area, HitOptions::default().with_capture_overload(capture_overload))
     }
-    
-    pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
+
+    /// See [`HitOptions::mark_as_handled_fn`].
+    pub fn hits_with_mark_as_handled_fn<H>(&self, cx: &mut Cx, area: Area, mark_as_handled_fn: H) -> Hit
+    where
+        H: FnMut(&Hit) -> bool
+    {
+        self.hits_with_options(
+            cx,
+            area,
+            HitOptions::<H> {
+                margin: None,
+                sweep_area: Area::Empty,
+                capture_overload: false,
+                mark_as_handled_fn: Some(mark_as_handled_fn),
+            }
+        )
+    }
+
+    /// See [`HitOptions::mark_as_handled_fn`] for mroe info about the `H` parameter.
+    pub fn hits_with_options<H>(&self, cx: &mut Cx, area: Area, options: HitOptions<H>) -> Hit
+    where
+        H: FnMut(&Hit) -> bool,
+    {
         self.hits_with_options_and_test(cx, area, options, |abs, rect, margin|{
             Margin::rect_contains_with_margin(abs, rect, margin)
         })
     }
-    
-    pub fn hits_with_options_and_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
-    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool
+
+    /// See [`HitOptions::mark_as_handled_fn`] for mroe info about the `H` parameter.
+    pub fn hits_with_options_and_test<F, H>(&self, cx: &mut Cx, area: Area, mut options: HitOptions<H>, hit_test: F) -> Hit
+    where
+        F: Fn(DVec2, &Rect, &Option<Margin>) -> bool,
+        H: FnMut(&Hit) -> bool,
     {
         if !area.is_valid(cx) {
             return Hit::Nothing
@@ -704,7 +762,7 @@ impl Event {
                         window_id: e.window_id,
                         digit_id,
                         device,
-                        modifiers: e.modifiers.clone(),
+                        modifiers: e.modifiers,
                         time: e.time,
                         scroll: e.scroll
                     })
@@ -737,18 +795,21 @@ impl Event {
                             }
                             
                             cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, t.abs);
-                            
-                            t.handled.set(area);
-                            return Hit::FingerDown(FingerDownEvent {
+
+                            let fde = Hit::FingerDown(FingerDownEvent {
                                 window_id: e.window_id,
                                 abs: t.abs,
                                 digit_id,
                                 device,
                                 tap_count: cx.fingers.tap_count(),
-                                modifiers: e.modifiers.clone(),
+                                modifiers: e.modifiers,
                                 time: e.time,
                                 rect,
-                            })
+                            });
+                            if options.run_mark_as_handled_fn(&fde) {
+                                t.handled.set(area);
+                            }
+                            return fde;
                         }
                         TouchState::Stop => {
                             let tap_count = cx.fingers.tap_count();
@@ -756,14 +817,14 @@ impl Event {
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
-                                    rect: rect,
+                                    rect,
                                     window_id: e.window_id,
                                     abs: t.abs,
                                     digit_id,
                                     device,
                                     tap_count,
                                     capture_time: capture.time,
-                                    modifiers: e.modifiers.clone(),
+                                    modifiers: e.modifiers,
                                     time: e.time,
                                     is_over: rect.contains(t.abs),
                                     is_sweep: false,
@@ -781,33 +842,40 @@ impl Event {
                                     if capture.switch_capture.is_none()
                                         && hit_test(t.abs, &rect, &options.margin) {
                                         if t.handled.get().is_empty() {
-                                            t.handled.set(area);
                                             if capture.area == area {
-                                                return Hit::FingerMove(FingerMoveEvent {
+                                                let fme = Hit::FingerMove(FingerMoveEvent {
                                                     window_id: e.window_id,
                                                     abs: t.abs,
                                                     digit_id,
                                                     device,
                                                     tap_count,
-                                                    modifiers: e.modifiers.clone(),
+                                                    modifiers: e.modifiers,
                                                     time: e.time,
                                                     abs_start: capture.abs_start,
                                                     rect,
                                                     is_over: true,
-                                                })
+                                                });
+                                                if options.run_mark_as_handled_fn(&fme) {
+                                                    t.handled.set(area);
+                                                }
+                                                return fme;
                                             }
                                             else if capture.sweep_area == options.sweep_area { // take over the capture
                                                 capture.switch_capture = Some(area);
-                                                return Hit::FingerDown(FingerDownEvent {
+                                                let fde = Hit::FingerDown(FingerDownEvent {
                                                     window_id: e.window_id,
                                                     abs: t.abs,
                                                     digit_id,
                                                     device,
                                                     tap_count: cx.fingers.tap_count(),
-                                                    modifiers: e.modifiers.clone(),
+                                                    modifiers: e.modifiers,
                                                     time: e.time,
-                                                    rect: rect,
-                                                })
+                                                    rect,
+                                                });
+                                                if options.run_mark_as_handled_fn(&fde) {
+                                                    t.handled.set(area);
+                                                }
+                                                return fde;
                                             }
                                         }
                                     }
@@ -817,14 +885,14 @@ impl Event {
                                         }
                                         return Hit::FingerUp(FingerUpEvent {
                                             abs_start: capture.abs_start,
-                                            rect: rect,
+                                            rect,
                                             window_id: e.window_id,
                                             abs: t.abs,
                                             digit_id,
                                             device,
                                             tap_count,
                                             capture_time: capture.time,
-                                            modifiers: e.modifiers.clone(),
+                                            modifiers: e.modifiers,
                                             time: e.time,
                                             is_sweep: true,
                                             is_over: false,
@@ -839,7 +907,7 @@ impl Event {
                                     digit_id,
                                     device,
                                     tap_count,
-                                    modifiers: e.modifiers.clone(),
+                                    modifiers: e.modifiers,
                                     time: e.time,
                                     abs_start: capture.abs_start,
                                     rect,
@@ -872,34 +940,41 @@ impl Event {
                             if capture.switch_capture.is_none()
                                 && hit_test(e.abs, &rect, &options.margin) {
                                 if e.handled.get().is_empty() {
-                                    e.handled.set(area);
                                     if capture.area == area {
-                                        return Hit::FingerMove(FingerMoveEvent {
+                                        let fme = Hit::FingerMove(FingerMoveEvent {
                                             window_id: e.window_id,
                                             abs: e.abs,
                                             digit_id,
                                             device,
                                             tap_count,
-                                            modifiers: e.modifiers.clone(),
+                                            modifiers: e.modifiers,
                                             time: e.time,
                                             abs_start: capture.abs_start,
                                             rect,
                                             is_over: true,
-                                        })
+                                        });
+                                        if options.run_mark_as_handled_fn(&fme) {
+                                            e.handled.set(area);
+                                        }
+                                        return fme;
                                     }
                                     else if capture.sweep_area == options.sweep_area { // take over the capture
                                         capture.switch_capture = Some(area);
                                         cx.fingers.new_hover_area(digit_id, area);
-                                        return Hit::FingerDown(FingerDownEvent {
+                                        let fde = Hit::FingerDown(FingerDownEvent {
                                             window_id: e.window_id,
                                             abs: e.abs,
                                             digit_id,
                                             device,
                                             tap_count: cx.fingers.tap_count(),
-                                            modifiers: e.modifiers.clone(),
+                                            modifiers: e.modifiers,
                                             time: e.time,
                                             rect,
-                                        })
+                                        });
+                                        if options.run_mark_as_handled_fn(&fde) {
+                                            e.handled.set(area);
+                                        }
+                                        return fde;
                                     }
                                 }
                             }
@@ -916,7 +991,7 @@ impl Event {
                                     device,
                                     tap_count,
                                     capture_time: capture.time,
-                                    modifiers: e.modifiers.clone(),
+                                    modifiers: e.modifiers,
                                     time: e.time,
                                     is_sweep: true,
                                     is_over: false,
@@ -932,7 +1007,7 @@ impl Event {
                             digit_id,
                             device,
                             tap_count,
-                            modifiers: e.modifiers.clone(),
+                            modifiers: e.modifiers,
                             time: e.time,
                             abs_start: capture.abs_start,
                             rect,
@@ -954,27 +1029,33 @@ impl Event {
                         abs: e.abs,
                         digit_id,
                         device,
-                        modifiers: e.modifiers.clone(),
+                        modifiers: e.modifiers,
                         time: e.time,
                         rect,
                     };
                     
                     if hover_last == area {
                         if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
-                            e.handled.set(area);
+                            let fhe = Hit::FingerHoverOver(fhe);
+                            if options.run_mark_as_handled_fn(&fhe) {
+                                e.handled.set(area);
+                            }
                             cx.fingers.new_hover_area(digit_id, area);
-                            return Hit::FingerHoverOver(fhe)
+                            return fhe;
                         }
                         else {
-                            return Hit::FingerHoverOut(fhe)
+                            return Hit::FingerHoverOut(fhe);
                         }
                     }
                     else {
                         if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
-                            e.handled.set(area);
-                            return Hit::FingerHoverIn(fhe)
+                            let fhi = Hit::FingerHoverIn(fhe);
+                            if options.run_mark_as_handled_fn(&fhi) {
+                                e.handled.set(area);
+                            }
+                            return fhi;
                         }
                     }
                 }
@@ -1008,18 +1089,21 @@ impl Event {
                 }
                 
                 cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, e.abs);
-                e.handled.set(area);
                 cx.fingers.new_hover_area(digit_id, area);
-                return Hit::FingerDown(FingerDownEvent {
+                let fde = Hit::FingerDown(FingerDownEvent {
                     window_id: e.window_id,
                     abs: e.abs,
                     digit_id,
                     device,
                     tap_count: cx.fingers.tap_count(),
-                    modifiers: e.modifiers.clone(),
+                    modifiers: e.modifiers,
                     time: e.time,
-                    rect: rect,
-                })
+                    rect,
+                });
+                if options.run_mark_as_handled_fn(&fde) {
+                    e.handled.set(area);
+                }
+                return fde;
             },
             Event::MouseUp(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
@@ -1042,14 +1126,14 @@ impl Event {
                     let is_over = hit_test(e.abs, &rect, &options.margin);
                     let event = Hit::FingerUp(FingerUpEvent {
                         abs_start: capture.abs_start,
-                        rect: rect,
+                        rect,
                         window_id: e.window_id,
                         abs: e.abs,
                         digit_id,
                         device,
                         tap_count,
                         capture_time: capture.time,
-                        modifiers: e.modifiers.clone(),
+                        modifiers: e.modifiers,
                         time: e.time,
                         is_over,
                         is_sweep: false,
@@ -1075,7 +1159,7 @@ impl Event {
                     abs: e.abs,
                     digit_id,
                     device,
-                    modifiers: e.modifiers.clone(),
+                    modifiers: e.modifiers,
                     time: e.time,
                     rect,
                 };

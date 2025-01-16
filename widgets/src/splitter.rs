@@ -183,7 +183,7 @@ impl Widget for Splitter {
         let uid = self.widget_uid();
         
         self.animator_handle_event(cx, event);
-        match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
+        match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::default().with_margin(self.margin())) {
             Hit::FingerHoverIn(_) => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),

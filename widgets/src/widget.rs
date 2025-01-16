@@ -388,7 +388,7 @@ impl WidgetRef {
     ///     if self.animator_handle_event(cx, event).must_redraw() {
     ///         self.draw_button.redraw(cx);
     ///     }
-    ///     match event.hits_with_options(cx, self.draw_button.area(), HitOptions::new().with_sweep_area(sweep_area) ) {
+    ///     match event.hits_with_options(cx, self.draw_button.area(), HitOptions::default().with_sweep_area(sweep_area) ) {
     ///         Hit::FingerDown(f_down) => {
     ///             if self.grab_key_focus {
     ///                  cx.set_key_focus(self.sweep_area);
