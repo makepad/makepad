@@ -738,7 +738,7 @@ live_design!{
             instance drag: float
 
             uniform gap: 90.
-            uniform padding: 4.0
+            uniform padding: 2.0
             uniform handle_color: (ROTARY_HANDLE_COLOR);
             uniform val_color_a: (ROTARY_VAL_COLOR_A);
             uniform val_color_b: (ROTARY_VAL_COLOR_B);
@@ -862,6 +862,7 @@ live_design!{
                         self.drag
                     )
                 )
+
 
                 // Handle
                 sdf.arc_round_caps(
@@ -1137,7 +1138,7 @@ live_design!{
                         self.drag
                     )
                 )
-                sdf.stroke(mix(ROTARY_FLAT_BORDER_COLOR_A, ROTARY_FLAT_BG_COLOR_A, self.drag), outline_width);
+                sdf.stroke(ROTARY_FLAT_BORDER_COLOR_A, outline_width);
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
