@@ -554,7 +554,7 @@ live_design!{
                         draw_slider: {
                             gap: 60.,
                             width: 20.
-                            padding: 10.,
+                            padding: 2.,
                         }
                     }
                 }
@@ -604,6 +604,7 @@ live_design!{
                             gap: 90.,
                             padding: 10.,
                             width: 20.,
+                            padding: 2.
                             handle_color: #f0f,
                         }
                     }
