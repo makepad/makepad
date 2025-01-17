@@ -372,7 +372,7 @@ impl BuildManager {
                                         time: e.time,
                                         x: e.abs.x,
                                         y: e.abs.y,
-                                        button: e.button,
+                                        raw_button: e.button,
                                         modifiers: StdinKeyModifiers::from_key_modifiers(
                                             &e.modifiers,
                                         ),
@@ -397,7 +397,7 @@ impl BuildManager {
             Event::MouseUp(e) => {
                 self.broadcast_to_stdin(HostToStdin::MouseUp(StdinMouseUp {
                     time: e.time,
-                    button: e.button,
+                    raw_button: e.button,
                     x: e.abs.x,
                     y: e.abs.y,
                     modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers),
