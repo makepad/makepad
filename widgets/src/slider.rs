@@ -614,8 +614,8 @@ live_design!{
     pub ROTARY_BG_COLOR_B = (THEME_COLOR_D_2);
     pub ROTARY_BG_HOVER_COLOR_B = (THEME_COLOR_D_2);
     pub ROTARY_BG_DRAG_COLOR_B = (THEME_COLOR_D_2);
-    pub ROTARY_VAL_COLOR_A = #6;
-    pub ROTARY_VAL_COLOR_B = #8;
+    pub ROTARY_VAL_COLOR_A = (THEME_COLOR_U_4_OPAQUE);
+    pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_2_OPAQUE);
     pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
     pub Rotary = <SliderBase> {
@@ -979,11 +979,11 @@ live_design!{
     pub ROTARY_FLAT_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
     pub ROTARY_FLAT_LABEL_COLOR = (THEME_COLOR_TEXT_DEFAULT);
     pub ROTARY_FLAT_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
-    pub ROTARY_FLAT_BG_COLOR_A = (THEME_COLOR_D_HIDDEN);
-    pub ROTARY_FLAT_BG_DRAG_COLOR_A = (THEME_COLOR_D_1);
-    pub ROTARY_FLAT_BORDER_COLOR_A = (THEME_COLOR_BEVEL_SHADOW);
-    pub ROTARY_FLAT_VAL_COLOR_A = #6;
-    pub ROTARY_FLAT_VAL_COLOR_B = #8;
+    pub ROTARY_FLAT_BG_COLOR = (THEME_COLOR_D_HIDDEN);
+    pub ROTARY_FLAT_BG_DRAG_COLOR = (THEME_COLOR_D_1);
+    pub ROTARY_FLAT_BORDER_COLOR = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_FLAT_VAL_COLOR_A = (THEME_COLOR_U_2);
+    pub ROTARY_FLAT_VAL_COLOR_B = (THEME_COLOR_U_4);
     pub ROTARY_FLAT_HANDLE_COLOR = (THEME_COLOR_U_3);
 
     pub RotaryFlat = <SliderBase> {
@@ -1141,15 +1141,15 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            ROTARY_FLAT_BG_COLOR_A,
-                            ROTARY_FLAT_BG_COLOR_A,
+                            ROTARY_FLAT_BG_COLOR,
+                            ROTARY_FLAT_BG_COLOR,
                             self.hover
                         ),
-                        ROTARY_FLAT_BG_DRAG_COLOR_A,
+                        ROTARY_FLAT_BG_DRAG_COLOR,
                         self.drag
                     )
                 )
-                sdf.stroke(ROTARY_FLAT_BORDER_COLOR_A, outline_width);
+                sdf.stroke(ROTARY_FLAT_BORDER_COLOR, outline_width);
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
@@ -1293,8 +1293,6 @@ live_design!{
     pub ROTARY_SOLID_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
     pub ROTARY_SOLID_BG_COLOR_A = (THEME_COLOR_D_2);
     pub ROTARY_SOLID_BG_COLOR_B = (THEME_COLOR_D_4);
-    pub ROTARY_SOLID_VAL_COLOR_A = #6;
-    pub ROTARY_SOLID_VAL_COLOR_B = #f00;
     pub ROTARY_SOLID_HANDLE_COLOR = #FFA;
 
     pub RotarySolid = <SliderBase> {
@@ -1408,8 +1406,6 @@ live_design!{
             uniform gap: 90.
             uniform width: 10.
             uniform handle_color: (ROTARY_SOLID_HANDLE_COLOR);
-            uniform val_color_a: (ROTARY_SOLID_VAL_COLOR_A);
-            uniform val_color_b: (ROTARY_SOLID_VAL_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
