@@ -291,15 +291,16 @@ impl Win32Window {
             WM_MBUTTONUP => window.send_mouse_up(MouseButton::MIDDLE, Self::get_key_modifiers()),
             // All other mouse buttons are handled as "XBUTTON"s.
             // Their specific button value is obtained via the "hiword" (bits 16..32) of the `wparam` value.
-            // The back mosue button is XBUTTON1 (value 0x1); the forward button is XBUTTON2 (value 0x2).
+            // The back mouse button is XBUTTON1 (value 0x1); the forward button is XBUTTON2 (value 0x2).
+            // Thus, we add `2` to the XBUTTON value in order to get the `MouseButton` value of `3` for BACK and `4` for FORWARD.
             WM_XBUTTONDOWN => {
                 let wparam_hiword = (wparam.0 >> 16) & 0xFFFF;
-                let raw_button = wparam_hiword + 2; // MouseButton::BACK is 3, MouseButton::FORWARD is 4.
+                let raw_button = wparam_hiword + 2;
                 window.send_mouse_down(MouseButton::from_raw_button(raw_button), Self::get_key_modifiers());
             }
             WM_XBUTTONUP => {
                 let wparam_hiword = (wparam.0 >> 16) & 0xFFFF;
-                let raw_button = wparam_hiword + 2; // MouseButton::BACK is 3, MouseButton::FORWARD is 4.
+                let raw_button = wparam_hiword + 2;
                 window.send_mouse_up(MouseButton::from_raw_button(raw_button), Self::get_key_modifiers());
             }   
             WM_KEYDOWN | WM_SYSKEYDOWN => {
