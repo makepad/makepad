@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use {
     std::{
         cell::{
@@ -11,7 +13,7 @@ use {
         os::windows::ffi::OsStrExt,
         mem,
     },
-    
+
     crate::{
         windows::{
             core::PCWSTR,
@@ -112,6 +114,8 @@ use {
                         WM_RBUTTONUP,
                         WM_MBUTTONDOWN,
                         WM_MBUTTONUP,
+                        WM_XBUTTONDOWN,
+                        WM_XBUTTONUP,
                         WM_KEYDOWN,
                         WM_SYSKEYDOWN,
                         WM_CLOSE,
@@ -516,13 +520,27 @@ impl Win32Window {
             WM_LBUTTONDOWN => {
                 // hack for drag/drop: save which window was last clicked on in win32_app
                 get_win32_app_global().currently_clicked_window_id = Some(window.window_id);
-                window.send_mouse_down(0, Self::get_key_modifiers());
+                window.send_mouse_down(MouseButton::PRIMARY, Self::get_key_modifiers());
             },
-            WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
-            WM_RBUTTONDOWN => window.send_mouse_down(1, Self::get_key_modifiers()),
-            WM_RBUTTONUP => window.send_mouse_up(1, Self::get_key_modifiers()),
-            WM_MBUTTONDOWN => window.send_mouse_down(2, Self::get_key_modifiers()),
-            WM_MBUTTONUP => window.send_mouse_up(2, Self::get_key_modifiers()),
+            WM_LBUTTONUP => window.send_mouse_up(MouseButton::PRIMARY, Self::get_key_modifiers()),
+            WM_RBUTTONDOWN => window.send_mouse_down(MouseButton::SECONDARY, Self::get_key_modifiers()),
+            WM_RBUTTONUP => window.send_mouse_up(MouseButton::SECONDARY, Self::get_key_modifiers()),
+            WM_MBUTTONDOWN => window.send_mouse_down(MouseButton::MIDDLE, Self::get_key_modifiers()),
+            WM_MBUTTONUP => window.send_mouse_up(MouseButton::MIDDLE, Self::get_key_modifiers()),
+            // All other mouse buttons are handled as "XBUTTON"s.
+            // Their specific button value is obtained via the "hiword" (bits 16..32) of the `wparam` value.
+            // The back mouse button is XBUTTON1 (value 0x1); the forward button is XBUTTON2 (value 0x2).
+            // Thus, we add `2` to the XBUTTON value in order to get the `MouseButton` value of `3` for BACK and `4` for FORWARD.
+            WM_XBUTTONDOWN => {
+                let wparam_hiword = (wparam.0 >> 16) & 0xFFFF;
+                let raw_button = wparam_hiword + 2;
+                window.send_mouse_down(MouseButton::from_raw_button(raw_button), Self::get_key_modifiers());
+            }
+            WM_XBUTTONUP => {
+                let wparam_hiword = (wparam.0 >> 16) & 0xFFFF;
+                let raw_button = wparam_hiword + 2;
+                window.send_mouse_up(MouseButton::from_raw_button(raw_button), Self::get_key_modifiers());
+            }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
@@ -997,7 +1015,7 @@ impl Win32Window {
         self.do_callback(Win32Event::AppLostFocus);
     }
     
-    pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
+    pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {
         if self.mouse_buttons_down == 0 {
             unsafe {SetCapture(self.hwnd);}
         }
@@ -1012,7 +1030,7 @@ impl Win32Window {
         }));
     }
     
-    pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
+    pub fn send_mouse_up(&mut self, button: MouseButton, modifiers: KeyModifiers) {
         if self.mouse_buttons_down > 1 {
             self.mouse_buttons_down -= 1;
         }
