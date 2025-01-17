@@ -326,7 +326,6 @@ impl XlibApp {
                 },
                 x11_sys::ButtonPress => { // mouse down
                     let button = event.xbutton;
-                    println!("x11_sys ButtonPress: {:?}", button.button);
                     let time_now = self.time_now();
                     if let Some(window_ptr) = self.window_map.get(&button.window) {
                         let window = &mut (**window_ptr);
