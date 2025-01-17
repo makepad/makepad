@@ -337,8 +337,8 @@ impl StdinKeyModifiers{
 
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinMouseDown{
-   pub raw_button: usize,
+pub struct StdinMouseDown {
+   pub button_raw_bits: u32,
    pub x: f64,
    pub y: f64,
    pub time: f64,
@@ -347,9 +347,9 @@ pub struct StdinMouseDown{
 
 impl StdinMouseDown {
     pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseDownEvent {
-        MouseDownEvent{
+        MouseDownEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: MouseButton::from_raw_button(self.raw_button),
+            button: MouseButton::from_bits_retain(self.button_raw_bits),
             window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
@@ -379,9 +379,9 @@ impl StdinMouseMove {
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinMouseUp{
+pub struct StdinMouseUp {
    pub time: f64,
-   pub raw_button: usize,
+   pub button_raw_bits: u32,
    pub x: f64,
    pub y: f64,
    pub modifiers: StdinKeyModifiers
@@ -398,9 +398,9 @@ pub struct StdinTextInput{
 
 impl StdinMouseUp {
    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseUpEvent {
-        MouseUpEvent{
+        MouseUpEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: MouseButton::from_raw_button(self.raw_button),
+            button: MouseButton::from_bits_retain(self.button_raw_bits),
             window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
