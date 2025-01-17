@@ -1,47 +1,285 @@
+#![allow(non_snake_case)]
+
 use {
+    std::{
+        cell::{
+            RefCell,
+            Cell,
+        },
+        sync::Arc,
+        sync::Mutex,
+        rc::Rc,
+        ffi::OsStr,
+        os::windows::ffi::OsStrExt,
+        mem,
+    },
+
     crate::{
-        area::Area, cursor::MouseCursor, event::*, makepad_math::*, os::windows::{
-            droptarget::*, win32_app::{
-                encode_wide, get_win32_app_global, Win32App, FALSE
-            }, win32_event::*
-        }, window::WindowId, windows::{
+        windows::{
             core::PCWSTR,
             //core::IntoParam,
             //core::Result as coreResult,
             //core::HRESULT,
             Win32::{
                 Foundation::{
-                    HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM
-                }, Graphics::{
-                    Dwm::DwmExtendFrameIntoClientArea,
-                    Gdi::ScreenToClient,
-                }, System::{
+                    HWND,
+                    HANDLE,
+                    HGLOBAL,
+                    WPARAM,
+                    LPARAM,
+                    LRESULT,
+                    RECT,
+                    POINT,
+                    POINTL,
+                },
+                System::{
+                    Memory::{
+                        GlobalLock,
+                        GlobalAlloc,
+                        GlobalSize,
+                        GlobalUnlock,
+                        GLOBAL_ALLOC_FLAGS,
+                    },
+                    Ole::{
+                        CF_UNICODETEXT,
+                        RegisterDragDrop,
+                        IDropTarget,
+                        DROPEFFECT,
+                        DROPEFFECT_COPY,
+                        DROPEFFECT_MOVE,
+                        DROPEFFECT_LINK,
+                    },
+                    SystemServices::{
+                        MODIFIERKEYS_FLAGS,
+                        MK_CONTROL,
+                        MK_SHIFT,
+                    },
+                    WindowsProgramming::GMEM_DDESHARE,
                     DataExchange::{
-                        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData
-                    }, LibraryLoader::GetModuleHandleW, Memory::{
-                        GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GLOBAL_ALLOC_FLAGS
-                    }, Ole::{
-                        IDropTarget, RegisterDragDrop, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE
-                    }, SystemServices::{
-                        MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS
-                    }, WindowsProgramming::GMEM_DDESHARE
-                }, UI::{
+                        OpenClipboard,
+                        EmptyClipboard,
+                        GetClipboardData,
+                        SetClipboardData,
+                        CloseClipboard,
+                    },
+                    LibraryLoader::GetModuleHandleW,
+                },
+                UI::{
+                    WindowsAndMessaging::{
+                        CreateWindowExW,
+                        SetWindowLongPtrW,
+                        GetWindowLongPtrW,
+                        DefWindowProcW,
+                        ShowWindow,
+                        PostMessageW,
+                        GetWindowRect,
+                        DestroyWindow,
+                        SetWindowPos,
+                        GetWindowPlacement,
+                        WINDOWPLACEMENT,
+                        GetClientRect,
+                        MoveWindow,
+                        GWL_EXSTYLE,
+                        HWND_TOPMOST,
+                        HWND_NOTOPMOST,
+                        WS_SIZEBOX,
+                        WS_MAXIMIZEBOX,
+                        WS_MINIMIZEBOX,
+                        WS_POPUP,
+                        WS_CLIPSIBLINGS,
+                        WS_CLIPCHILDREN,
+                        WS_SYSMENU,
+                        WS_EX_WINDOWEDGE,
+                        WS_EX_APPWINDOW,
+                        WS_EX_ACCEPTFILES,
+                        WS_EX_TOPMOST,
+                        CW_USEDEFAULT,
+                        GWLP_USERDATA,
+                        SW_SHOW,
+                        SW_RESTORE,
+                        SW_MAXIMIZE,
+                        SW_MINIMIZE,
+                        SWP_NOMOVE,
+                        SWP_NOSIZE,
+                        WM_ACTIVATE,
+                        WM_NCCALCSIZE,
+                        WM_NCHITTEST,
+                        WA_ACTIVE,
+                        WM_ERASEBKGND,
+                        WM_MOUSEMOVE,
+                        WM_MOUSEWHEEL,
+                        WM_LBUTTONDOWN,
+                        WM_LBUTTONUP,
+                        WM_RBUTTONDOWN,
+                        WM_RBUTTONUP,
+                        WM_MBUTTONDOWN,
+                        WM_MBUTTONUP,
+                        WM_XBUTTONDOWN,
+                        WM_XBUTTONUP,
+                        WM_KEYDOWN,
+                        WM_SYSKEYDOWN,
+                        WM_CLOSE,
+                        WM_KEYUP,
+                        WM_SYSKEYUP,
+                        WM_CHAR,
+                        WM_ENTERSIZEMOVE,
+                        WM_EXITSIZEMOVE,
+                        WM_SIZE,
+                        WM_DPICHANGED,
+                        WM_DESTROY,
+                        HTTOPLEFT,
+                        HTBOTTOMLEFT,
+                        HTLEFT,
+                        HTTOPRIGHT,
+                        HTBOTTOMRIGHT,
+                        HTRIGHT,
+                        HTTOP,
+                        HTBOTTOM,
+                        HTCLIENT,
+                        HTCAPTION,
+                        HTSYSMENU
+                    },
                     Controls::{
                         MARGINS,
                         WM_MOUSELEAVE
-                    }, Input::KeyboardAndMouse::{
-                        GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_ADD, VK_B, VK_BACK, VK_C, VK_CAPITAL, VK_CONTROL, VK_D, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_F, VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_G, VK_H, VK_HOME, VK_I, VK_INSERT, VK_J, VK_K, VK_L, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_M, VK_MENU, VK_MULTIPLY, VK_N, VK_NEXT, VK_NUMLOCK, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_O, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_P, VK_PAUSE, VK_PRIOR, VK_Q, VK_R, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_SUBTRACT, VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X, VK_Y, VK_Z
-                    }, WindowsAndMessaging::{
-                        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, MoveWindow, PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX, WS_SYSMENU
-                    }
-                }
+                    },
+                    Input::KeyboardAndMouse::{
+                        VIRTUAL_KEY,
+                        ReleaseCapture,
+                        SetCapture,
+                        TrackMouseEvent,
+                        GetKeyState,
+                        TRACKMOUSEEVENT,
+                        TME_LEAVE,
+                        VK_CONTROL,
+                        VK_SHIFT,
+                        VK_MENU,
+                        VK_LWIN,
+                        VK_RWIN,
+                        VK_ESCAPE,
+                        VK_OEM_3,
+                        VK_0,
+                        VK_1,
+                        VK_2,
+                        VK_3,
+                        VK_4,
+                        VK_5,
+                        VK_6,
+                        VK_7,
+                        VK_8,
+                        VK_9,
+                        VK_OEM_MINUS,
+                        VK_OEM_PLUS,
+                        VK_BACK,
+                        VK_TAB,
+                        VK_Q,
+                        VK_W,
+                        VK_E,
+                        VK_R,
+                        VK_T,
+                        VK_Y,
+                        VK_U,
+                        VK_I,
+                        VK_O,
+                        VK_P,
+                        VK_OEM_4,
+                        VK_OEM_6,
+                        VK_RETURN,
+                        VK_A,
+                        VK_S,
+                        VK_D,
+                        VK_F,
+                        VK_G,
+                        VK_H,
+                        VK_J,
+                        VK_K,
+                        VK_L,
+                        VK_OEM_1,
+                        VK_OEM_7,
+                        VK_OEM_5,
+                        VK_Z,
+                        VK_X,
+                        VK_C,
+                        VK_V,
+                        VK_B,
+                        VK_N,
+                        VK_M,
+                        VK_OEM_COMMA,
+                        VK_OEM_PERIOD,
+                        VK_OEM_2,
+                        VK_LCONTROL,
+                        VK_RCONTROL,
+                        VK_LMENU,
+                        VK_RMENU,
+                        VK_LSHIFT,
+                        VK_RSHIFT,
+                        VK_SPACE,
+                        VK_CAPITAL,
+                        VK_F1,
+                        VK_F2,
+                        VK_F3,
+                        VK_F4,
+                        VK_F5,
+                        VK_F6,
+                        VK_F7,
+                        VK_F8,
+                        VK_F9,
+                        VK_F10,
+                        VK_F11,
+                        VK_F12,
+                        VK_SNAPSHOT,
+                        VK_SCROLL,
+                        VK_PAUSE,
+                        VK_INSERT,
+                        VK_DELETE,
+                        VK_HOME,
+                        VK_END,
+                        VK_PRIOR,
+                        VK_NEXT,
+                        VK_NUMPAD0,
+                        VK_NUMPAD1,
+                        VK_NUMPAD2,
+                        VK_NUMPAD3,
+                        VK_NUMPAD4,
+                        VK_NUMPAD5,
+                        VK_NUMPAD6,
+                        VK_NUMPAD7,
+                        VK_NUMPAD8,
+                        VK_NUMPAD9,
+                        VK_SUBTRACT,
+                        VK_ADD,
+                        VK_DECIMAL,
+                        VK_MULTIPLY,
+                        VK_DIVIDE,
+                        VK_NUMLOCK,
+                        VK_UP,
+                        VK_DOWN,
+                        VK_LEFT,
+                        VK_RIGHT,
+                    },
+                },
+                Graphics::{
+                    Dwm::DwmExtendFrameIntoClientArea,
+                    Gdi::ScreenToClient,
+                },
             },
-        }
-    }, std::{
-        cell::{
-            Cell, RefCell
-        }, ffi::OsStr, mem, os::windows::ffi::OsStrExt, rc::Rc, sync::{Arc, Mutex}
-    }, windows::Win32::UI::WindowsAndMessaging::{WM_XBUTTONDOWN, WM_XBUTTONUP}
+        },
+        event::*,
+        area::Area,
+        os::windows::{
+            win32_app::{
+                Win32App,
+                encode_wide,
+                FALSE,
+                get_win32_app_global,
+            },
+            win32_event::*,
+            droptarget::*,
+        },
+        window::WindowId,
+        makepad_math::*,
+        cursor::MouseCursor,
+    },
 };
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
@@ -302,7 +540,7 @@ impl Win32Window {
                 let wparam_hiword = (wparam.0 >> 16) & 0xFFFF;
                 let raw_button = wparam_hiword + 2;
                 window.send_mouse_up(MouseButton::from_raw_button(raw_button), Self::get_key_modifiers());
-            }   
+            }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
