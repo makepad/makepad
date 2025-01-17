@@ -7,39 +7,36 @@ live_design!{
     use link::widgets::*;
     
     App = {{App}} {
-        ui: <Root>{
-            main_window = <Window>{
-                body = <View>{
-                    flow: Down,
-                    spacing: 10,
-                    align: {
-                        x: 0.5,
-                        y: 0.5
+        ui: <Window> {
+            show_bg: true
+            width: Fill,
+            height: Fill
+
+            body = <ScrollXYView> {
+                flow: Down,
+                spacing: 20,
+                align: {
+                    x: 0.5,
+                    y: 0.5
+                },
+                draw_bg: {
+                    fn pixel(self) -> vec4 {
+                        return mix(#7, #3, self.pos.y);
+                    }
+                }
+                button1 = <Button> {
+                    text: "Click me!"
+                    draw_text:{
+                        color:#fff,
+                        text_style: { font_size: 14 }
+                    }
+                }
+                label1 = <Label> {
+                    draw_text: {
+                        color: #f
+                        text_style: { font_size: 14 }
                     },
-                    show_bg: true,
-                    draw_bg:{
-                        fn pixel(self) -> vec4 {
-                            let center = vec2(0.5, 0.5);
-                            let uv = self.pos - center;
-                            let radius = length(uv);
-                            let angle = atan(uv.y, uv.x);
-                            let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
-                            let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
-                            return mix(color1, color2, radius);
-                        }
-                    }
-                    b0= <Button> {
-                        text: "Click me 123"
-                        draw_text:{color:#fff}
-                    }
-                    button1 = <Button> {
-                        text: "Click me 123"
-                        draw_text:{color:#fff}
-                    }
-                    button2 = <Button> {
-                        text: "Click me 345"
-                        draw_text:{color:#fff}
-                    }
+                    text: "Counter: 0"
                 }
             }
         }
@@ -60,17 +57,27 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
-            self.counter += 1;
-        }
-    }
-}
-
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
+        if let Event::Actions(actions) = event {
+            if self.ui.button(id!(button1)).clicked(&actions) {
+                log!("BUTTON CLICKED {}", self.counter); 
+                self.counter += 1;
+                let label = self.ui.label(id!(label1));
+                label.set_text(cx,&format!("Counter: {}", self.counter));
+            }
+        }
+
+        match event.hits(cx, self.ui.area()) {
+            Hit::FingerDown(fe) => {
+                log!("FingerDown: button {:?}", fe.device.mouse_button());
+            },
+            Hit::FingerUp(fe) => {
+                log!("FingerUp: button {:?}", fe.device.mouse_button());
+            },
+            _ => ()
+        }
+
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

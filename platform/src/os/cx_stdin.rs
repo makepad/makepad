@@ -7,7 +7,7 @@ use {
         cursor::MouseCursor,
         makepad_micro_serde::*,
         makepad_math::{dvec2,DVec2},
-        window::{WindowId},
+        window::WindowId,
         area::Area,
         event::{
             KeyModifiers,
@@ -16,6 +16,7 @@ use {
             TimerEvent,
             KeyEvent,
             ScrollEvent,
+            MouseButton,
             MouseDownEvent,
             MouseUpEvent,
             MouseMoveEvent,
@@ -337,7 +338,7 @@ impl StdinKeyModifiers{
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinMouseDown{
-   pub button: usize,
+   pub raw_button: usize,
    pub x: f64,
    pub y: f64,
    pub time: f64,
@@ -348,8 +349,8 @@ impl StdinMouseDown {
     pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseDownEvent {
         MouseDownEvent{
             abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: self.button,
-            window_id: window_id,
+            button: MouseButton::from_raw_button(self.raw_button),
+            window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
             handled: Cell::new(Area::Empty),
@@ -369,7 +370,7 @@ impl StdinMouseMove {
     pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseMoveEvent {
         MouseMoveEvent{
             abs: dvec2(self.x - pos.x, self.y - pos.y),
-            window_id: window_id,
+            window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
             handled: Cell::new(Area::Empty),
@@ -380,7 +381,7 @@ impl StdinMouseMove {
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct StdinMouseUp{
    pub time: f64,
-   pub button: usize,
+   pub raw_button: usize,
    pub x: f64,
    pub y: f64,
    pub modifiers: StdinKeyModifiers
@@ -390,7 +391,7 @@ pub struct StdinMouseUp{
 pub struct StdinTextInput{
     pub time: f64,
     pub window_id: usize,
-    pub button: usize,
+    pub raw_button: usize,
     pub x: f64,
     pub y: f64
 }
@@ -399,8 +400,8 @@ impl StdinMouseUp {
    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseUpEvent {
         MouseUpEvent{
             abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: self.button,
-            window_id: window_id,
+            button: MouseButton::from_raw_button(self.raw_button),
+            window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
         }
