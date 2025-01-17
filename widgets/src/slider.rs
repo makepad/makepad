@@ -24,6 +24,7 @@ live_design!{
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
         height: Fit,
+        hover_actions_enabled: false,
         
         draw_slider: {
             instance hover: float
@@ -1293,7 +1294,7 @@ live_design!{
     pub ROTARY_SOLID_BG_COLOR_A = (THEME_COLOR_D_2);
     pub ROTARY_SOLID_BG_COLOR_B = (THEME_COLOR_D_4);
     pub ROTARY_SOLID_VAL_COLOR_A = #6;
-    pub ROTARY_SOLID_VAL_COLOR_B = #8;
+    pub ROTARY_SOLID_VAL_COLOR_B = #f00;
     pub ROTARY_SOLID_HANDLE_COLOR = #FFA;
 
     pub RotarySolid = <SliderBase> {
@@ -1307,7 +1308,7 @@ live_design!{
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         text: "Label",
 
-        align: { x: 0., y: 0.0 }
+        align: { x: 0., y: 0. }
         label_walk: {
             margin: <THEME_MSPACE_1> {},
             width: Fill, height: Fit
@@ -1315,7 +1316,7 @@ live_design!{
 
         // Label
         draw_text: {
-            instance hover: 0.0;
+            instance hover: 0.;
             uniform color: (ROTARY_SOLID_LABEL_COLOR),
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (ROTARY_SOLID_LABEL_FONTSIZE)
@@ -1456,7 +1457,7 @@ live_design!{
 
                 sdf.fill(
                     mix(
-                        mix((THEME_COLOR_U_1), (THEME_COLOR_U_1), gradient_y),
+                        mix((THEME_COLOR_U_1), (THEME_COLOR_U_2), gradient_y),
                         mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_U_2), gradient_y),
                         self.drag
                     )
@@ -1469,7 +1470,7 @@ live_design!{
                     radius_scaled - radius_width_compensation
                 );
 
-                sdf.stroke(mix((THEME_COLOR_BEVEL_SHADOW), (THEME_COLOR_BEVEL_LIGHT), gradient_y), 1.5);
+                sdf.stroke(mix((THEME_COLOR_U_HIDDEN), (THEME_COLOR_BEVEL_LIGHT), gradient_y), 1.5);
 
                 // inner rim
                 sdf.circle(
@@ -1494,27 +1495,6 @@ live_design!{
                         self.rect_size.x * 0.05,
                         effective_height * 0.05
                     );
-
-                // Value
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
-                            mix(
-                                mix(self.val_color_a, #f, 0.1),
-                                mix(self.val_color_b, #f, 0.1),
-                                self.slide_pos
-                            ),
-                            self.hover
-                        ),
-                        mix(
-                            mix(self.val_color_a, #0, 0.1),
-                            mix(self.val_color_b, #0, 0.1),
-                            self.slide_pos
-                        ),
-                        self.drag
-                    )
-                )
 
                 // Handle
                 sdf.arc_round_caps(
