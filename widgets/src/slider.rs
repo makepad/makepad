@@ -1441,8 +1441,11 @@ live_design!{
                 let rotary_solid_h = radius_scaled * 2. / self.rect_size.y * arc_h_norm;
                 let gradient_y = pow(self.pos.y, 2.) / rotary_solid_h - label_offset_norm;
 
+                let texture = Math::random_2d(self.pos.xy);
+
                 sdf.fill(
-                    mix(ROTARY_SOLID_BG_COLOR_A, ROTARY_SOLID_BG_COLOR_B, gradient_y)
+
+                    mix(ROTARY_SOLID_BG_COLOR_A * texture, ROTARY_SOLID_BG_COLOR_B, gradient_y)
                 )
 
                 sdf.circle(
