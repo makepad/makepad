@@ -675,7 +675,7 @@ live_design!{
                 instance focus: 0.0
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
                 fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_ize);
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
                         0.,
                         0.,
@@ -1043,7 +1043,7 @@ live_design!{
                 instance focus: 0.0
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
                 fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_ize);
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
                         0.,
                         0.,
@@ -1352,7 +1352,7 @@ live_design!{
                 instance focus: 0.0
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
                 fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_ize);
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
                         0.,
                         0.,
