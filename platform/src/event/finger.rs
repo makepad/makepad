@@ -67,19 +67,23 @@ bitflags::bitflags! {
     /// This is a bit mask because it is possible for multiple buttons
     /// to be pressed simultaneously during a given input event.
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    #[doc(alias = "click")]
     pub struct MouseButton: u32 {
         /// The primary mouse button, typically the left-click button.
+        #[doc(alias("left", "left-click"))]
         const PRIMARY =   1 << 0;
         /// The secondary mouse button, typically the right-click button.
+        #[doc(alias("right", "right-click"))]
         const SECONDARY = 1 << 1;
         /// The middle mouse button, typically the scroll-wheel click button.
+        #[doc(alias("scroll", "wheel"))]
         const MIDDLE =    1 << 2;
         /// The fourth mouse button, typically used for back navigation.
         const BACK =      1 << 3;
         /// The fifth mouse button, typically used for forward navigation.
         const FORWARD =   1 << 4;
 
-        // Ensure that all bit values are valid flags and will not be truncated.
+        // Ensure that all bits are valid, such that no bits get truncated.
         const _ = !0;
     }
 }
@@ -104,7 +108,15 @@ impl MouseButton {
     pub fn is_forward(&self) -> bool {
         self.contains(MouseButton::FORWARD)
     }
-    /// Returns true if the `n`-th button is pressed.
+    /// Returns true if the `n`th button is pressed.
+    ///
+    /// The button values are:
+    /// * n = 0: PRIMARY
+    /// * n = 1: SECONDARY
+    /// * n = 2: MIDDLE
+    /// * n = 3: BACK
+    /// * n = 4: FORWARD
+    /// * n > 4: other/custom
     pub fn is_other_button(&self, n: u8) -> bool {
         self.bits() & (1 << n) != 0
     }
