@@ -326,6 +326,7 @@ impl XlibApp {
                 },
                 x11_sys::ButtonPress => { // mouse down
                     let button = event.xbutton;
+                    println!("x11_sys ButtonPress: {:?}", button.button);
                     let time_now = self.time_now();
                     if let Some(window_ptr) = self.window_map.get(&button.window) {
                         let window = &mut (**window_ptr);
@@ -403,7 +404,10 @@ impl XlibApp {
                                 }
                             }
                             else {
-                                window.send_mouse_down(button.button as usize, self.xkeystate_to_modifiers(button.state))
+                                window.send_mouse_down(
+                                    self.xbutton_to_mouse_button(button.button),
+                                    self.xkeystate_to_modifiers(button.state)
+                                );
                             }
                         }
                     }
@@ -414,7 +418,10 @@ impl XlibApp {
                     let button = event.xbutton;
                     if let Some(window_ptr) = self.window_map.get(&button.window) {
                         let window = &mut (**window_ptr);
-                        window.send_mouse_up(button.button as usize, self.xkeystate_to_modifiers(button.state))
+                        window.send_mouse_up(
+                            self.xbutton_to_mouse_button(button.button),
+                            self.xkeystate_to_modifiers(button.state),
+                        );
                     }
                 },
                 x11_sys::KeyPress => {
@@ -725,6 +732,20 @@ impl XlibApp {
                 }
                 x11_sys::XFreeCursor(self.display, x11_cursor);
             }
+        }
+    }
+
+    fn xbutton_to_mouse_button(&self, button: u32) -> MouseButton {
+        match button {
+            0 => MouseButton::empty(), 
+            1 => MouseButton::PRIMARY,
+            2 => MouseButton::MIDDLE,
+            3 => MouseButton::SECONDARY,
+            // Button values 4, 5, 6, 7 are scroll directions
+            4..=7 => MouseButton::empty(), 
+            8 => MouseButton::BACK,
+            9 => MouseButton::FORWARD,
+            10.. => MouseButton::from_raw_button(button as usize - 4),
         }
     }
 
