@@ -117,10 +117,7 @@ impl Cx {
                     );
                     let (window_id,pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                     let mouse_down_event = e.into_event(window_id, pos);
-                    self.fingers.mouse_down(
-                        mouse_down_event.button,
-                        window_id,
-                    );
+                    self.fingers.mouse_down(mouse_down_event.button, window_id);
                     self.call_event_handler(&Event::MouseDown(mouse_down_event));
                 }
                 HostToStdin::MouseMove(e) => {
