@@ -247,7 +247,6 @@ pub struct ToWasmMouseDown {
 
 impl From<ToWasmMouseDown> for MouseDownEvent {
     fn from(v:ToWasmMouseDown) -> Self {
-        crate::log!("ToWasmMouseDown: button: {:?}", v.mouse.button);
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
             button: wmouse_to_mouse_button(v.mouse.button),
@@ -285,7 +284,6 @@ pub struct ToWasmMouseUp {
 
 impl From<ToWasmMouseUp> for MouseUpEvent {
     fn from(v:ToWasmMouseUp) -> Self {
-        crate::log!("ToWasmMouseUp: button: {:?}", v.mouse.button);
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
             button: wmouse_to_mouse_button(v.mouse.button),
