@@ -903,9 +903,9 @@ impl RawInput {
                     _ => ()
                 };
                 match code {
-                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
+                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE | EvKeyCodes::BTN_SIDE | EvKeyCodes::BTN_EXTRA => {
                         dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                            button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
+                            button: MouseButton::from_raw_button((evt.code - EvKeyCodes::BTN_LEFT as u16) as usize),
                             abs: self.abs,
                             window_id,
                             modifiers: self.modifiers,
@@ -915,7 +915,7 @@ impl RawInput {
                     },
                     EvKeyCodes::BTN_TOUCH => {
                         dir_evts.push(DirectEvent::MouseDown(MouseDownEvent {
-                            button: 0usize,
+                            button: MouseButton::PRIMARY,
                             abs: self.abs,
                             window_id,
                             modifiers: self.modifiers,
@@ -954,9 +954,9 @@ impl RawInput {
                     _ => ()
                 };
                 match code {
-                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE => {
+                    EvKeyCodes::BTN_LEFT | EvKeyCodes::BTN_RIGHT | EvKeyCodes::BTN_MIDDLE | EvKeyCodes::BTN_SIDE | EvKeyCodes::BTN_EXTRA => {
                         dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                            button: (evt.code - EvKeyCodes::BTN_LEFT as u16) as usize,
+                            button: MouseButton::from_raw_button((evt.code - EvKeyCodes::BTN_LEFT as u16) as usize),
                             abs: self.abs,
                             window_id,
                             modifiers: self.modifiers,
@@ -965,7 +965,7 @@ impl RawInput {
                     },
                     EvKeyCodes::BTN_TOUCH => {
                         dir_evts.push(DirectEvent::MouseUp(MouseUpEvent {
-                            button: 0usize,
+                            button: MouseButton::PRIMARY,
                             abs: self.abs,
                             window_id,
                             modifiers: self.modifiers,
