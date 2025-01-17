@@ -61,7 +61,7 @@ impl KeyModifiers{
 
 
 bitflags::bitflags! {
-    /// A bit mask of all mouse buttons that were pressed
+    /// A `u32` bit mask of all mouse buttons that were pressed
     /// during a given mouse event.
     ///
     /// This is a bit mask because it is possible for multiple buttons
