@@ -547,7 +547,6 @@ impl Html {
 
 impl Widget for Html {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // log!("HTML WIDGET EVENT: {:?}", event);
         self.text_flow.handle_event(cx, event, scope);
     }
     
@@ -716,24 +715,26 @@ impl Widget for HtmlLink {
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerUp(fe) => {
-                    if fe.is_over {
+                Hit::FingerUp(fu) => {
+                    if fu.is_over {
+                        cx.set_cursor(MouseCursor::Hand);
+                        self.animator_play(cx, id!(hover.on));
+                    } else {
+                        self.animator_play(cx, id!(hover.off));
+                    }
+
+                    if fu.is_over
+                        && fu.is_primary_hit()
+                        && fu.was_tap()
+                    {
                         cx.widget_action(
                             self.widget_uid(),
                             &scope.path,
                             HtmlLinkAction::Clicked {
                                 url: self.url.clone(),
-                                key_modifiers: fe.modifiers,
+                                key_modifiers: fu.modifiers,
                             },
                         );
-
-                        if fe.device.has_hovers() {
-                            self.animator_play(cx, id!(hover.on));
-                        } else {
-                            self.animator_play(cx, id!(hover.off));
-                        }
-                    } else {
-                        self.animator_play(cx, id!(hover.off));
                     }
                 }
                 _ => (),
