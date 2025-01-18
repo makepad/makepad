@@ -1,11 +1,32 @@
 #![allow(unused)]
 #![allow(dead_code)]
 use {
+    std::{cell::Cell, ops::Deref},
     crate::{
-        area::Area, cx::Cx, event::event::{Event, Hit}, live_traits::{Apply, LiveApply, LiveApplyReset, LiveApplyValue, LiveHook, LiveHookDeref, LiveNew, LiveRegister}, makepad_derive_live::*, makepad_live_compiler::{
-            LiveFieldKind, LiveId, LiveModuleId, LiveNode, LiveNodeSliceApi, LivePropType, LiveType, LiveTypeField, LiveTypeInfo
-        }, makepad_live_id::{live_id, live_id_num, FromLiveId}, makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin}, makepad_math::*, makepad_micro_serde::*, window::WindowId
-    }, std::{cell::Cell, ops::Deref}
+        makepad_micro_serde::*,
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
+        makepad_live_compiler::{
+            LivePropType,
+            LiveType,
+            LiveTypeField,
+            LiveFieldKind,
+            LiveNode,
+            LiveId,
+            LiveModuleId,
+            LiveTypeInfo,
+            LiveNodeSliceApi
+        },
+        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply,LiveApplyReset, Apply},
+        makepad_derive_live::*,
+        makepad_math::*,
+        makepad_live_id::{FromLiveId, live_id, live_id_num},
+        event::{
+            event::{Event, Hit}
+        },
+        window::WindowId,
+        cx::Cx,
+        area::Area,
+    },
 };
 
 // Mouse events
