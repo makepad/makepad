@@ -373,7 +373,7 @@ impl Widget for Button {
             // If it's not enabled, we still show the button, but we set
             // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
             match event.hits(cx, self.draw_bg.area()) {
-                Hit::FingerDown(fe) if self.enabled => {
+                Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
@@ -391,13 +391,12 @@ impl Widget for Button {
                 Hit::FingerHoverOut(_) if self.enabled => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerUp(fe) if self.enabled => {
+                Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
                     if fe.is_over {
                         cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                         if self.reset_hover_on_click {
                             self.animator_cut(cx, id!(hover.off));
-                        } else if fe.device.has_hovers() {
-                            self.animator_play(cx, id!(hover.on));
+                        } else if fe.has_hovers() {
                             self.animator_play(cx, id!(hover.on));
                         } else {
                             self.animator_play(cx, id!(hover.off));
@@ -504,17 +503,17 @@ impl Button {
 impl ButtonRef {
     /// See [`Button::clicked()`].
     pub fn clicked(&self, actions: &Actions) -> bool {
-        self.borrow().map_or(false, |inner| inner.clicked(actions))
+        self.borrow().is_some_and(|inner| inner.clicked(actions))
     }
 
     /// See [`Button::pressed()`].
     pub fn pressed(&self, actions: &Actions) -> bool {
-        self.borrow().map_or(false, |inner| inner.pressed(actions))
+        self.borrow().is_some_and(|inner| inner.pressed(actions))
     }
 
     /// See [`Button::released()`].
     pub fn released(&self, actions: &Actions) -> bool {
-        self.borrow().map_or(false, |inner| inner.released(actions))
+        self.borrow().is_some_and(|inner| inner.released(actions))
     }
 
     /// See [`Button::clicked_modifiers()`].
@@ -532,23 +531,24 @@ impl ButtonRef {
         self.borrow().and_then(|inner| inner.released_modifiers(actions))
     }
 
-    pub fn set_visible(&self, cx:&mut Cx, visible: bool) {
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible;
             inner.redraw(cx);
         }
     }
 
-    pub fn set_enabled(&self, cx:&mut Cx, enabled: bool) {
+    pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.enabled = enabled;
             inner.redraw(cx);
         }
     }
 
-    /// Resets the hover state of this button. This is useful in certain cases the
-    /// hover state should be reseted in a specific way that is not the default behavior
-    /// which is based on the mouse cursor position and movement.
+    /// Resets the hover state of this button.
+    ///
+    /// This is useful in certain cases where the hover state should be reset 
+    /// (cleared) regardelss of whether the mouse is over it.
     pub fn reset_hover(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.animator_cut(cx, id!(hover.off));
