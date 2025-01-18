@@ -1005,8 +1005,9 @@ impl Widget for Slider {
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 rect,
+                device,
                 ..
-            }) => {
+            }) if device.is_primary_hit() => {
                 // cx.set_key_focus(self.slider.area());
                 self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
@@ -1021,7 +1022,7 @@ impl Widget for Slider {
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             },
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 self.text_input.is_read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.force_new_edit_group();
