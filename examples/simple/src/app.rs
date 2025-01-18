@@ -9,7 +9,7 @@ live_design!{
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
-                body = <ScrollXYView>{
+                body = <View>{
                     flow: Down,
                     spacing: 10,
                     align: {
@@ -27,6 +27,10 @@ live_design!{
                             let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
                             return mix(color1, color2, radius);
                         }
+                    }
+                    b0= <Button> {
+                        text: "Click me 123"
+                        draw_text:{color:#fff}
                     }
                     button1 = <Button> {
                         text: "Click me 123"
@@ -57,7 +61,7 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
         }

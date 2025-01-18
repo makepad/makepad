@@ -102,8 +102,8 @@ impl Widget for Tooltip {
         DrawStep::done()
     }
 
-    fn set_text(&mut self, text: &str) {
-        self.label(id!(tooltip_label)).set_text(text);
+    fn set_text(&mut self, cx:&mut Cx, text: &str) {
+        self.label(id!(tooltip_label)).set_text(cx, text);
     }
 }
 
@@ -123,7 +123,7 @@ impl Tooltip {
     }
 
     pub fn show_with_options(&mut self, cx: &mut Cx, pos: DVec2, text: &str) {
-        self.set_text(text);
+        self.set_text(cx, text);
         self.set_pos(cx, pos);
         self.show(cx);
     }
@@ -135,9 +135,9 @@ impl Tooltip {
 }
 
 impl TooltipRef {
-    pub fn set_text(&self, text: &str) {
+    pub fn set_text(&mut self, cx:&mut Cx, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_text(text);
+            inner.set_text(cx, text);
         }
     }
 

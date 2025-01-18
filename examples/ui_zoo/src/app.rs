@@ -1673,28 +1673,28 @@ live_design!{
             log!("TEXTBOX CHANGED {}", self.counter);
             self.counter += 1;
             let lbl = self.ui.label(id!(simpletextinput_outputbox));
-            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, txt));
+            lbl.set_text(cx,&format!("{} {}" , self.counter, txt));
         }
 
         if self.ui.button(id!(basicbutton)).clicked(&actions) {
             log!("BASIC BUTTON CLICKED {}", self.counter);
             self.counter += 1;
             let btn = self.ui.button(id!(basicbutton));
-            btn.set_text_and_redraw(cx,&format!("Clicky clicky! {}", self.counter));
+            btn.set_text(cx,&format!("Clicky clicky! {}", self.counter));
         }
 
         if self.ui.button(id!(styledbutton)).clicked(&actions) {
             log!("STYLED BUTTON CLICKED {}", self.counter);
             self.counter += 1;
             let btn = self.ui.button(id!(styledbutton));
-            btn.set_text_and_redraw(cx,&format!("Styled button clicked: {}", self.counter));
+            btn.set_text(cx,&format!("Styled button clicked: {}", self.counter));
         }
 
         if self.ui.button(id!(iconbutton)).clicked(&actions) {
             log!("ICON BUTTON CLICKED {}", self.counter);
             self.counter += 1;
             let btn = self.ui.button(id!(iconbutton));
-            btn.set_text_and_redraw(cx,&format!("Icon button clicked: {}", self.counter));
+            btn.set_text(cx,&format!("Icon button clicked: {}", self.counter));
         }
 
 
@@ -1702,7 +1702,7 @@ live_design!{
             log!("CHECK BUTTON CLICKED {} {}", self.counter, check);
             self.counter += 1;
             let lbl = self.ui.label(id!(simplecheckbox_output));
-            lbl.set_text_and_redraw(cx,&format!("{} {}" , self.counter, check));
+            lbl.set_text(cx,&format!("{} {}" , self.counter, check));
         }
 
         if self.ui.fold_button(id!(folderbutton)).opening(actions) {

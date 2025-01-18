@@ -11,6 +11,9 @@ use std::sync::mpsc;
 use std::cell::RefCell;
 use std::sync::{Arc,Mutex};
 use crate::whisper::*;
+use std::net::UdpSocket;
+use std::time::{Duration};
+use std::collections::HashMap;
    
 live_design!{
     use link::widgets::*;
@@ -82,11 +85,17 @@ impl Machine {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-       Machine::new("10.0.0.124:8188", live_id!(m1)),
-       Machine::new("10.0.0.107:8188", live_id!(m2)),
-       //Machine::new("192.168.8.231:8188", id_lut!(m1)),
+        Machine::new("10.0.0.113:8188", live_id!(m1)),
+        Machine::new("10.0.0.127:8188", live_id!(m2)),
+        Machine::new("10.0.0.107:8188", live_id!(m3)),
+        Machine::new("10.0.0.120:8188", live_id!(m4)),
+        Machine::new("10.0.0.106:8188", live_id!(m7)),
+        Machine::new("10.0.0.123:8188", live_id!(m8)),
+        //Machine::new("192.168.8.231:8188", id_lut!(m1)),
     ])] machines: Vec<Machine>,
     
+    #[rust(cx.midi_input())] midi_input: MidiInput,
+        
     #[rust(Database::new(cx))] db: Database,
     
     #[rust] filtered: FilteredDb,
@@ -100,6 +109,11 @@ pub struct App {
     #[rust] llm_chat: Vec<(LLMMsg,String)>,
     #[rust] voice_input: Option<WhisperProcess>,
     #[rust] delay_timer: Timer,
+    
+    #[rust] hue_light_change: ToUIReceiver<(usize,HueLight)>,
+    #[rust] hue_light_last: HashMap<usize, HueLight>,
+    #[rust] hue_light_set: HashMap<usize, HueLight>,
+    #[rust] hue_poll: Timer,
 }
 
 enum LLMMsg{
@@ -107,6 +121,27 @@ enum LLMMsg{
     Human,
     Progress
 }
+
+pub const DMXOUTPUT_HEADER: [u8;18] = [
+    b'A',b'r',b't',b'-',b'N',b'e',b't',b'\0', 
+    0, // opcode hi 
+    0x50, // opcode lo = output
+    0, // proto hi
+    0xe, // proto lo = 14
+    0, // sequence
+    0, // physical 
+    0,  // sub uni
+    0,  // net
+    2,  // buffer hi size (512)
+    0   // buffer lo
+];
+
+#[derive(Debug, Clone, PartialEq)]
+enum HueLight{
+    Switch{on: bool},
+    Color{on: bool, hue: f32, sat: f32, val: f32}
+}
+
 
 impl LiveRegister for App{
     fn live_register(cx: &mut Cx) {
@@ -140,7 +175,7 @@ impl App {
             let prompt = self.ui.text_input(id!(prompt_input)).text();
             let seed = if self.ui.check_box(id!(random_check_box)).selected(cx) {
                 let seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
-                self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}",seed));
+                self.ui.text_input(id!(seed_input)).set_text(cx, &format!("{}",seed));
                 seed
             }
             else{ // read seed from box
@@ -151,7 +186,7 @@ impl App {
             let mut request = HttpRequest::new(url, HttpMethod::POST);
                         
             let model = LiveId::from_str(&self.ui.drop_down(&[machine.id, live_id!(model)]).selected_label().to_lowercase());
-            self.ui.label(id!((machine.id).last_set)).set_text_and_redraw(cx, &prompt);
+            self.ui.label(id!((machine.id).last_set)).set_text(cx, &prompt);
             let res = self.ui.drop_down(id!((machine.id).(model).resolution)).selected_label();
             let (width,height) = split_res(&res);
             
@@ -165,10 +200,10 @@ impl App {
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
             match model{
-                live_id!(flux)=>{
+                live_id!(fluxfusion)=>{
                     let steps = self.ui.slider(id!((machine.id).(model).steps_slider)).value().unwrap_or(8.0) as usize;
                     // lets check which workspace we are in
-                    let ws = fs::read_to_string("examples/genai/workspace_flux.json").unwrap();
+                    let ws = fs::read_to_string("examples/genai/workspace_fluxfusion.json").unwrap();
                     let ws = ws.replace("CLIENT_ID", "1234");
                     let ws = ws.replace("PROMPT", &prompt.replace("\n", "").replace("\"", ""));
                     let ws = ws.replace("11223344", &format!("{}", seed));
@@ -177,22 +212,32 @@ impl App {
                     let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", height));
                     request.set_body(ws.as_bytes().to_vec());
                 }
-                live_id!(fluxhd)=>{
+                live_id!(fluxdev)=>{
                     
-                    let lora = self.ui.drop_down(id!((machine.id).(model).lora)).selected_label();
-                    let lora_power = self.ui.slider(id!((machine.id).(model).lora_slider)).value().unwrap_or(0.0);
-                    
+                    let lora1 = self.ui.drop_down(id!((machine.id).(model).lora1)).selected_label();
+                    let lora1_power = self.ui.slider(id!((machine.id).(model).lora1_slider)).value().unwrap_or(0.0);
+                    let lora2 = self.ui.drop_down(id!((machine.id).(model).lora2)).selected_label();
+                    let lora2_power = self.ui.slider(id!((machine.id).(model).lora2_slider)).value().unwrap_or(0.0);
+                    let lora3 = self.ui.drop_down(id!((machine.id).(model).lora3)).selected_label();
+                    let lora3_power = self.ui.slider(id!((machine.id).(model).lora3_slider)).value().unwrap_or(0.0);
+                    let guidance = self.ui.slider(id!((machine.id).(model).guidance_slider)).value().unwrap_or(4.0);
+                                                          
                     let steps = self.ui.slider(id!((machine.id).(model).steps_slider)).value().unwrap_or(30.0) as usize;
                     // lets check which workspace we are in
-                    let ws = fs::read_to_string("examples/genai/workspace_fluxhd.json").unwrap();
+                    let ws = fs::read_to_string("examples/genai/workspace_fluxdev.json").unwrap();
                     let ws = ws.replace("CLIENT_ID", "1234");
                     let ws = ws.replace("PROMPT", &prompt.replace("\n", "").replace("\"", ""));
                     let ws = ws.replace("11223344", &format!("{}", seed));
                     let ws = ws.replace("\"steps\": 50", &format!("\"steps\": {}", steps));
                     let ws = ws.replace("\"width\": 1920", &format!("\"width\": {}", width));
                     let ws = ws.replace("\"height\": 1088", &format!("\"height\": {}", height));
-                    let ws = ws.replace("FantasyWizardWitchesFluxV2-000001", &lora);
-                    let ws = ws.replace("0.23", &format!("{}", lora_power));
+                    let ws = ws.replace("FantasyWizardWitchesFluxV2-000001", &lora1);
+                    let ws = ws.replace("0.23", &format!("{}", lora1_power));
+                    let ws = ws.replace("Flux.1_Turbo_Detailer", &lora2);
+                    let ws = ws.replace("0.24", &format!("{}", lora2_power));
+                    let ws = ws.replace("aesthetic2-cdo-0.5", &lora3);
+                    let ws = ws.replace("0.25", &format!("{}", lora3_power));
+                    let ws = ws.replace("4.1000000000000005", &format!("{}", guidance));
                     request.set_body(ws.as_bytes().to_vec());
                 }
                 live_id!(hunyuan)=>{
@@ -210,7 +255,7 @@ impl App {
                 _=>()
             }
             
-            self.ui.label(id!((machine.id).progress)).set_text_and_redraw(cx, &format!("Started:"));
+            self.ui.label(id!((machine.id).progress)).set_text(cx, &format!("Started:"));
            
             request.set_metadata_id(machine.id);
             cx.http_request(live_id!(prompt), request);
@@ -281,7 +326,7 @@ impl App {
     
     fn cancel_machine(&mut self, cx: &mut Cx, machine_id:LiveId) {
         let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
-        self.ui.label(id!((machine.id).progress)).set_text_and_redraw(cx, &format!("Stopping:"));
+        self.ui.label(id!((machine.id).progress)).set_text(cx, &format!("Stopping:"));
         
         let url = format!("http://{}/queue", machine.ip);
         let mut request = HttpRequest::new(url, HttpMethod::POST);
@@ -305,7 +350,7 @@ impl App {
         cx.http_request(live_id!(image), request);
     }
     
-    fn open_web_socket(&mut self) {
+    fn open_web_sockets(&mut self) {
         for machine in &mut self.machines {
             let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
             let request = HttpRequest::new(url, HttpMethod::GET);
@@ -313,12 +358,19 @@ impl App {
         }
     }
     
+    fn open_web_socket(&mut self, machine_id:LiveId) {
+        let machine = self.machines.iter_mut().find( | v | v.id == machine_id).unwrap();
+        let url = format!("ws://{}/ws?clientId={}", machine.ip, "1234");
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        machine.web_socket = Some(WebSocket::open(request));
+    }
+    
     fn load_seed_from_current_image(&mut self, cx: &mut Cx) {
         if let Some(current_image) = &self.current_image {
             if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
                 //self.last_seed = image.seed;
                 //self.update_seed_display(cx);
-                self.ui.text_input(id!(seed_input)).set_text_and_redraw(cx, &format!("{}",image.seed));
+                self.ui.text_input(id!(seed_input)).set_text(cx, &format!("{}",image.seed));
                 
             }
         }
@@ -348,14 +400,14 @@ impl App {
         
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.text_input(id!(prompt_input)).set_text(&prompt_file.prompt.prompt);
+            self.ui.text_input(id!(prompt_input)).set_text(cx, &prompt_file.prompt.prompt);
             self.ui.redraw(cx);
         }
     }
     
     fn load_last_sent_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.text_input(id!(last_sent)).set_text(&prompt_file.prompt.prompt);
+            self.ui.text_input(id!(last_sent)).set_text(cx, &prompt_file.prompt.prompt);
             self.ui.redraw(cx);
         }
     }
@@ -407,7 +459,7 @@ impl App {
         let prompt_hash = self.prompt_hash_from_current_image();
         
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.label(id!(second_image.prompt)).set_text(&prompt_file.prompt.prompt);
+            self.ui.label(id!(second_image.prompt)).set_text(cx, &prompt_file.prompt.prompt);
         }
     }
     
@@ -532,20 +584,510 @@ impl App {
             voice_input.stop();
         }
     }
+    
+    pub fn start_artnet_client(&mut self, cx:&mut Cx){
+        let socket = UdpSocket::bind("0.0.0.0:6454").unwrap();
+        let broadcast_addr = "255.255.255.255:6454";
+        socket.set_broadcast(true).unwrap();
+        socket.set_read_timeout(Some(Duration::from_nanos(1))).unwrap();
+        let mut buffer = [0u8; 2048];
+        
+        #[derive(Debug,Default,SerRon, DeRon)]
+        struct State{ 
+            fade:[f32;9],
+            tempo: f32,
+            //dial_a:[f32;8], 
+            //dial_b:[f32;8], 
+            dial_0:[f32;8],
+            dial_1:[f32;8],
+            dial_2:[f32;8],
+            dial_3:[f32;8],
+            dial_4:[f32;8],
+            dial_5:[f32;8],
+            dial_6:[f32;8],
+            dial_7:[f32;8],
+            dial_top:[f32;8],
+        }
+        #[derive(Debug,Clone,Default)]
+        struct Buttons{
+            //mute:[bool;8],
+            //rec:[bool;8],
+            preset:[bool;13],
+            write_preset: bool,
+            //solo:bool,
+            power: bool,
+            //bank_left:bool,
+            // bank_right:bool
+        }
+        impl Buttons{
+            fn preset_id(&self)->Option<usize>{
+                for i in 0..13{
+                    if self.preset[i]{
+                        return Some(i)
+                    }
+                }
+                None
+            }
+            fn delta(old:&Buttons, new:&Buttons)->Self{
+                //let mut mute = [false;8];
+                //let mut rec = [false;8];
+                let mut preset = [false;13];
+                let write_preset = !old.write_preset && new.write_preset;
+                for i in 0..8{
+                    //mute[i] = !old.mute[i] && new.mute[i];
+                    //rec[i] = !old.rec[i] && new.rec[i];
+                    preset[i] = !old.preset[i] && new.preset[i];
+                }
+                Self{
+                    write_preset,
+                    //mute,
+                    //rec,
+                    preset,
+                    power: new.power ,
+                }
+            }
+        }
+        
+        let mut state = State::default();
+        
+        if let Ok(result) = std::fs::read_to_string("dmx.ron"){
+            if let Ok(load) = State::deserialize_ron(&result){
+                state = load   
+            }
+        }
+        // alright the sender thread where we at 44hz poll our midi input and set up a DMX packet
+        let mut midi_input = cx.midi_input();
+        let mut hue_sender = self.hue_light_change.sender();
+        
+        std::thread::spawn(move || {
+            let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
+                        
+            let mut new_buttons = Buttons::default();
+            let mut old_buttons = Buttons::default();
+            
+            fn map_color(val:f32, fade:f32)->Vec4{
+                let colors = ["fff", "ff7", "f00","ff0","0f0","0ff","00f","f0f"];
+                let len = (colors.len()-1) as f32;
+                // pick where we are in between
+                let a = (val * len).floor();
+                let b = (val * len).ceil();
+                let gap = val * len - a; 
+                use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
+                let c1 = Vec4::from_u32(hex_bytes_to_u32(colors[a as usize].as_bytes()).unwrap());
+                let c2 = Vec4::from_u32(hex_bytes_to_u32(colors[b as usize].as_bytes()).unwrap());
+                let c = Vec4::from_lerp(c1, c2, gap) * fade;
+                c
+            }
+            
+            fn map_wargb(val:f32, fade:f32, out:&mut [u8], bases: &[usize]){
+                let c = map_color(val, fade);
+                for base in bases{
+                    out[base-1] = (c.x * 255.0) as u8;
+                    out[base+0] = (c.y * 255.0) as u8;
+                    out[base+1] = (c.z * 255.0) as u8;
+                }
+            }
+            
+            fn hue_wargb(sender: &mut ToUISender<(usize, HueLight)>,val:f32, fade:f32, hueids: &[usize]){
+                let c = map_color(val, fade);
+                let c = c.to_hsva();
+                for id in hueids{
+                    let _ = sender.send((*id,HueLight::Color{
+                        on: if fade>0.01{true}else{false},
+                        hue: c.x,
+                        sat: c.y,
+                        val: c.z
+                    }));
+                }
+            }
+            
+            fn hue_switch(sender: &mut ToUISender<(usize, HueLight)>, on:bool, hueids:&[usize]){
+                for id in hueids{
+                    let _ = sender.send((*id,HueLight::Switch{
+                        on,
+                    }));
+                }
+            }
+            
+            fn dmx_u8(val: u8, out:&mut[u8], bases:&[usize], chan:usize){
+                for base in bases{
+                    out[base - 1 + chan - 1] = val
+                }
+            }
+            fn dmx_f32(val: f32, out:&mut[u8], bases:&[usize], chan:usize){
+                for base in bases{
+                    out[base - 1 + chan - 1] = (val *255.0).min(255.0).max(0.0) as u8
+                }
+            }
+                        
+            for i in 0..DMXOUTPUT_HEADER.len(){universe[i] = DMXOUTPUT_HEADER[i];}
+            let mut counter = 0;
+            let mut clock = 0.0f64;
+            loop {
+                //while let Ok((_length, _addr)) = socket.recv_from(&mut buffer){
+                    //log!("READ {:x?}",&buffer[0..length]);
+                //} 
+                // lets poll midi
+                while let Some((_port,data)) = midi_input.receive(){
+                    match data.decode() {
+                        MidiEvent::ControlChange(cc) => {
+                            if cc.param == 13{
+                                if cc.value == 1{ // down
+                                    state.tempo += 0.02;
+                                    if state.tempo > 1.0{
+                                        state.tempo = 1.0;
+                                    }                                }
+                                else{ // up
+                                    state.tempo -= 0.02;
+                                    if state.tempo < 0.0{
+                                        state.tempo = 0.0;
+                                    }
+                                }
+                            }
+                            let v = cc.value as f32 / 127.0;
+                            if cc.param == 7{
+                                match cc.channel{
+                                    0..8=>state.fade[cc.channel as usize] = v,
+                                    _=>()
+                                }
+                            }
+                            if cc.param >= 16 && cc.param <=23{
+                                match cc.channel{
+                                    0=>state.dial_0[cc.param as usize - 16] = v,
+                                    1=>state.dial_1[cc.param as usize - 16] = v,
+                                    2=>state.dial_2[cc.param as usize - 16] = v,
+                                    3=>state.dial_3[cc.param as usize - 16] = v,
+                                    4=>state.dial_4[cc.param as usize - 16] = v,
+                                    5=>state.dial_5[cc.param as usize - 16] = v,
+                                    6=>state.dial_6[cc.param as usize - 16] = v,
+                                    7=>state.dial_7[cc.param as usize - 16] = v,
+                                    _=>()
+                                }
+                            }
+                            if cc.channel == 0{
+                                match cc.param{
+                                    48=>state.dial_top[0] = v,
+                                    49=>state.dial_top[1] = v,
+                                    50=>state.dial_top[2] = v,
+                                    51=>state.dial_top[3] = v,
+                                    52=>state.dial_top[4] = v,
+                                    53=>state.dial_top[5] = v,
+                                    54=>state.dial_top[6] = v,
+                                    55=>state.dial_top[7] = v,
+                                    _=>{
+                                        log!("{} {}", cc.param, cc.value);
+                                    }
+                                }
+                            
+                                /*
+                                match cc.param{
+                                    16=>state.dial_a[0] = v,
+                                    17=>state.dial_b[0] = v,
+                                    18=>state.dial_c[0] = v,
+                                    19=>state.fade[0] = v,
+                                    20=>state.dial_a[1] = v,
+                                    21=>state.dial_b[1] = v,
+                                    22=>state.dial_c[1] = v,
+                                    23=>state.fade[1] = v,
+                                    24=>state.dial_a[2] = v,
+                                    25=>state.dial_b[2] = v,
+                                    26=>state.dial_c[2] = v,
+                                    27=>state.fade[2] = v,
+                                    28=>state.dial_a[3] = v,
+                                    29=>state.dial_b[3] = v,
+                                    30=>state.dial_c[3] = v,
+                                    31=>state.fade[3] = v,                               
+                                    46=>state.dial_a[4] = v,
+                                    47=>state.dial_b[4] = v,
+                                    48=>state.dial_c[4] = v,
+                                    49=>state.fade[4] = v, 
+                                    50=>state.dial_a[5] = v,
+                                    51=>state.dial_b[5] = v,
+                                    52=>state.dial_c[5] = v,
+                                    53=>state.fade[5] = v,
+                                    54=>state.dial_a[6] = v,
+                                    55=>state.dial_b[6] = v,
+                                    56=>state.dial_c[6] = v,
+                                    57=>state.fade[6] = v,
+                                    58=>state.dial_a[7] = v,
+                                    59=>state.dial_b[7] = v,
+                                    60=>state.dial_c[7] = v,
+                                    61=>state.fade[7] = v,
+                                    62=>state.fade[8] = v,
+                                    _=>{
+                                        log!("{} {}", cc.param, cc.value);
+                                    }
+                                }*/
+                            }
+                            
+                        }
+                        MidiEvent::Note(n)=>match n.note_number{
+                            81=>new_buttons.write_preset = n.is_on,
+                            89=>new_buttons.power = n.is_on,
+                            52=>{
+                                new_buttons.preset[n.channel as usize] = n.is_on;
+                            }
+                            82..87=>{
+                                new_buttons.preset[n.note_number as usize - 82 + 8] = n.is_on;
+                            }
+                            //48..=55=>new_buttons.mute[n.note_number as usize -48] = n.is_on,
+                            //56..=63=>new_buttons.rec[n.note_number as usize -56] = n.is_on,
+                            //25=>new_buttons.bank_left = n.is_on,
+                            //26=>new_buttons.bank_right = n.is_on,
+                            //27=>new_buttons.solo = n.is_on,
+                            x=>{log!("{}",x)}
+                        }
+                        x=>log!("{:?}",x)
+                    }
+                    //log!("{:?}",data.decode());
+                }
+                let buttons = Buttons::delta(&old_buttons,&new_buttons);
+                old_buttons = new_buttons.clone();
+                universe[12] = counter as u8;
+                if counter > 255{ counter = 0}
+                clock += 1.0/44.0;
+                counter += 1;
+                let dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
+                
+                // alright so these things are now Hue ids
+                // except we need to throttle them
+                // and turn them into HSV values
+                
+                // RIGHT KITCHEN (A) - 3
+                // RIGHT WINDOW (B) - 8
+                // LEFT WINDOW (A) - 19
+                // DINNER TABLE2 (A) - 22
+                // DINNER TABLE3 (B) - 23
+                // DINNER TABLE1 (C) - 24
+                // DINNER TABLE4 (C) - 25
+                // FRONT DOOR 23 (A) - 29
+                // CENTER WINDOW (C) - 32
+                // KITCHEN CENTER (C) - 33
+                // KITCHEN LEFT (B) - 34
+                // KITCHEN STRIP (C) - 38
+                // DESK (B)  - 39
+                // TABLE (B) - 40
+                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[3, 19, 22, 29]);
+                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[8, 23, 34, 40, 39]);
+                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[24, 25, 32, 33, 38]);
+                
+                // all these buttons become preset= slots
+                
+                // main power 
+                hue_switch(&mut hue_sender,/*buttons.power*/true, &[41]);
+                
+                if new_buttons.write_preset{ // write a preset
+                    if let Some(idx) = new_buttons.preset_id(){
+                        //println!("{} {:?}", idx, new_buttons);
+                        std::fs::write(format!("dmx{}.ron", idx), state.serialize_ron().as_bytes()).unwrap();
+                    }
+                }
+                else{ // read a preset
+                    if let Some(idx) = new_buttons.preset_id(){
+                        if let Ok(result) = std::fs::read_to_string(format!("dmx{}.ron", idx)){
+                            if let Ok(load) = State::deserialize_ron(&result){
+                                let ts = state;
+                                state = load;
+                                for i in 0..8{
+                                    state.dial_0[i] = ts.dial_0[i];
+                                }
+                            }
+                        }
+                    }
+                }
+                /*
+                if buttons.mute[6]{
+                    hue_wargb(&mut hue_sender,0.0, 1.0, &[12,13]);
+                }
+                else if buttons.rec[6]{
+                    hue_wargb(&mut hue_sender,0.0, 0.0, &[12,13]);
+                }
+                
+                if buttons.mute[5]{
+                    hue_wargb(&mut hue_sender,0.0, 1.0, &[18]);
+                }
+                else if buttons.rec[5]{
+                    hue_wargb(&mut hue_sender,0.0, 0.0, &[18]);
+                }                
+                */
+                
+                      
+                 
+                map_wargb(state.dial_top[3], 1.0, dmx, &[110+2-1]); // RGB laser color
+                // lets set the laser mode with the slider
+                let rgb_laser_addr = 110;
+                match (state.fade[3] * 3.0) as usize{
+                    0=>{ // laser off
+                        dmx_u8(0, dmx, &[rgb_laser_addr], 1);
+                    }
+                    1=>{ // laser on left
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    2=>{ // laser on right
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    _=>{}
+                }
+                // overload the other laser onto the this laser
+                let rgb_laser_addr = 110;
+                map_wargb(state.dial_top[3], 1.0, dmx, &[rgb_laser_addr+2-1]); // RGB laser color
+                match (state.fade[3] * 4.0) as usize{
+                    0=>{ // laser off
+                        dmx_u8(0, dmx, &[rgb_laser_addr], 1);
+                    }
+                    1=>{ // laser on left
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    2=>{ // laser on right
+                        dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                        dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
+                        dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+                    }
+                    3=>{
+                        dmx_u8(0, dmx, &[rgb_laser_addr], 1);
+                    }
+                    _=>{} 
+                }
+                /*
+                let multi_fx_addr = 100;
+                dmx_f32((state.fade[3]-0.5).max(0.0)*2.0, dmx, &[multi_fx_addr], 3);
+                dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 1);
+                dmx_f32(state.fade[4], dmx, &[multi_fx_addr], 2);
+                dmx_f32(state.dial_c[4], dmx, &[multi_fx_addr], 4);
+                */
+                let rgb_strobe = 120;
+                map_wargb(state.dial_top[3], state.fade[3], dmx, &[rgb_strobe+3-1]); // Strobe RGB
+                dmx_f32(1.0, dmx, &[rgb_strobe], 1);
+                dmx_f32(state.tempo, dmx, &[rgb_strobe], 10);
+                //dmx_f32(1.0-(state.fade[3].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
+                
+                // strobe
+                dmx_f32(state.fade[4], dmx, &[rgb_strobe], 6);
+                dmx_f32(state.tempo, dmx, &[rgb_strobe], 8);
+                
+                
+                /*
+                dmx_f32(state.dial_b[0], dmx, &[rgb_strobe], 7);
+                dmx_f32(state.dial_b[1], dmx, &[rgb_strobe], 11);
+                dmx_f32(state.dial_b[2], dmx, &[rgb_strobe], 9);
+                dmx_f32(state.dial_b[3], dmx, &[rgb_strobe], 13);
+                */      
+                // and finally the moving head
+                let spot1 = 200;
+                let spot2 = 250;
+                
+                // the gobo options
+                dmx_f32(state.fade[1], dmx, &[spot1, spot2], 6);
+                dmx_f32(state.dial_1[0], dmx, &[spot1], 1);
+                dmx_f32(state.dial_1[0], dmx, &[spot2], 1);
+                dmx_f32(state.dial_1[1], dmx, &[spot1, spot2], 3);
+                dmx_f32(state.dial_top[1], dmx, &[spot1, spot2], 8);
+                dmx_f32(state.dial_1[4], dmx, &[spot1, spot2], 12);
+                dmx_f32(state.dial_1[3], dmx, &[spot1, spot2], 13);
+                dmx_f32(state.dial_1[2], dmx, &[spot1, spot2], 10);
+                
+                // the outer one
+                dmx_f32(state.fade[2], dmx, &[spot1, spot2], 14); 
+                map_wargb(state.dial_top[2], 1.0, dmx, &[spot1+16-1, spot2+16-1]); // Strobe RGB
+                
+                
+                // smoke machine
+                let smoke = 300;
+                // ok so depending on the state of c_[7] we do a percentage of a 
+                let slot = 101.0f64;
+                let needed = slot * state.dial_0[0] as f64;
+                let t = clock.rem_euclid(slot);
+                if t < needed{
+                    dmx_f32(1.0, dmx, &[smoke], 1);
+                }
+                else{
+                    dmx_f32(0.0, dmx, &[smoke], 1);
+                }
+                // in time modulus 
+                let smoke2 = 310;
+                dmx_f32(state.dial_0[2], dmx, &[smoke2], 1);
+                dmx_f32(state.dial_0[1], dmx, &[smoke2], 2);
+                
+                // laser: 400
+                let laser1 = 400;
+                let laser2 = 420;
+                let laser3 = 440;
+                let laser4 = 460;
+                let laser5 = 480;
+                let lasers = [laser1,laser2,laser3,laser4,laser5];
+                                
+                dmx_f32(state.fade[5], dmx, &lasers, 1);
+                dmx_f32(state.dial_5[0], dmx, &lasers, 2);
+                dmx_f32(state.dial_top[5], dmx, &lasers, 11); 
+                dmx_f32(state.dial_5[1], dmx, &lasers, 12); 
+                dmx_f32(0.5, dmx, &lasers, 3);
+                dmx_f32(0.3, dmx, &lasers, 4);
+                dmx_f32(state.dial_5[2], dmx, &lasers, 5);
+                dmx_f32(state.dial_5[3], dmx, &lasers, 6);
+                dmx_f32(0.5, dmx, &lasers, 7);
+                dmx_f32(0.5, dmx, &lasers, 8); 
+                dmx_f32(0.5, dmx, &lasers, 10); 
+                dmx_f32(0.5, dmx, &lasers, 9); // y position
+                
+                let uv1 = 500;
+                let uv2 = 502;
+                let uv3 = 504;        
+                let uv = [uv1, uv2, uv3];
+                dmx_f32(state.fade[6], dmx, &uv, 1);
+                dmx_f32(if state.tempo<0.1{0.0}else{state.tempo}, dmx, &uv, 2);
+                //let buf = [(state.dial_b[7]*255.0) as u8, (state.dial_b[6]*255.0) as u8, (state.dial_b[5]*255.0) as u8];
+                //let _ = rc_car_socket.send_to(&buf, rc_car_send_addr);
+                // UV SPOT
+                if state.fade[7]>0.5{
+                    hue_switch(&mut hue_sender,true,  &[42]);
+                }
+                else {
+                    hue_switch(&mut hue_sender,false,  &[42]); 
+                }
+                                
+                //map_wargb(state.dial[7], 1.0, dmx, &[spot + 16 - 1]); // Strobe RGB
+                //dmx_f32(state.fade[7], dmx, &[spot], 6);
+                                
+                // alright so we want dial 
+                // alright slider 4 = laser mode +RGB dial
+                // slider 5 = matrix / uv mode
+                // slider 6 = strobe white - slider = speed, dial =  mode
+                // slider 7 = strobe RGB  - slider = mode, dial = color
+                // slider 8 = moving head mode dial + thing
+                
+                // alright lets send out this thing \
+                socket.send_to(&universe, broadcast_addr).unwrap();
+                
+                std::fs::write("dmx.ron", state.serialize_ron().as_bytes()).unwrap();
+                //socket.send(&universe, broadcast_add.into());
+                // lets sleep 1/44th of a second
+                std::thread::sleep(Duration::from_secs_f64(1.0/44.0))
+            }
+        });
+    }
 }
 
 impl MatchEvent for App {
-    fn handle_midi_ports(&mut self, _cx: &mut Cx, _ports: &MidiPortsEvent) {
-        //cx.use_midi_inputs(&ports.all_inputs());
+    fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
+        println!("HANDLING {:?}", ports.all_inputs());
+        cx.use_midi_inputs(&ports.all_inputs());
     }
     
     fn handle_startup(&mut self, cx:&mut Cx){
-        self.open_web_socket();
+        self.open_web_sockets();
         let _ = self.db.load_database();
         self.filtered.filter_db(&self.db, "", false);
         self.delay_timer = cx.start_interval(0.016);
         //self.update_seed_display(cx);
         self.start_http_server();
+        self.start_artnet_client(cx);
+        
     }
     
     fn handle_timer(&mut self, cx: &mut Cx, e:&TimerEvent){
@@ -566,14 +1108,14 @@ impl MatchEvent for App {
                     Ok(WebSocketMessage::String(s))=>{
                         if s.contains("execution_interrupted"){
                             self.machines[m].running = MachineRunning::Stopped;
-                            self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx,"Ready:");
+                            self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text(cx,"Ready:");
                         } 
                         else if s.contains("crystools.monitor") {
                                                                                      
                         }
                         else if s.contains("execution_error") { // i dont care to expand the json def for this one
                             self.machines[m].running = MachineRunning::Stopped;
-                            self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx,"Ready:");
+                            self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text(cx,"Ready:");
                             log!("Got execution error for {} {}", self.machines[m].id, s);
                         }
                         else {
@@ -598,7 +1140,7 @@ impl MatchEvent for App {
                                                     self.machines[m].running = MachineRunning::Stopped;
                                                     //self.ui.text_input(id!(settings_total_steps.input)).set_text(&format!("{}", running.steps_counter));
                                                     //Self::update_progress(cx, &self.ui, self.machines[m].id, false, 0, 1);
-                                                    self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx,"Ready:");
+                                                    self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text(cx,"Ready:");
                                                     
                                                     self.fetch_image(cx, self.machines[m].id, &image.filename);
                                                 }
@@ -607,7 +1149,7 @@ impl MatchEvent for App {
                                     }
                                     else if data._type == "progress"{
                                         // lets check which machine it is
-                                        self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text_and_redraw(cx, &format!("Step: {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)));
+                                        self.ui.label(&[self.machines[m].id, live_id!(progress)]).set_text(cx, &format!("Step: {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)));
                                     }
                                 }
                                 Err(err) => {
@@ -620,6 +1162,19 @@ impl MatchEvent for App {
                     }
                     _=>()
                 }
+            }
+        }
+        
+        while let Some((_, data)) = self.midi_input.receive() {
+            println!("{:?}", data);
+            match data.decode() {
+                MidiEvent::Note(n) if n.is_on=>{
+                    if n.note_number <= 39{
+                        // ok lets play a video X
+                        self.set_current_image_by_item_id_and_row(cx, n.note_number as usize, 0);
+                    }
+                }
+                _=>()
             }
         }
         
@@ -665,7 +1220,7 @@ impl MatchEvent for App {
                                         let val = val.strip_prefix("assistant").unwrap_or(val);
                                         let val = val.to_string().replace("\"","");
                                         let val = val.trim();
-                                        self.ui.text_input(id!(prompt_input)).set_text(&val);
+                                        self.ui.text_input(id!(prompt_input)).set_text(cx, &val);
                                         self.llm_chat.push((LLMMsg::AI,val.into()));
                                         self.ui.widget(id!(llm_chat)).redraw(cx);
                                     }
@@ -747,7 +1302,7 @@ impl MatchEvent for App {
                         LLMMsg::Progress=>live_id!(AI)
                     };
                     let item = llm_chat.item(cx, item_id, template);
-                    item.set_text(msg);
+                    item.set_text(cx, msg);
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -762,7 +1317,7 @@ impl MatchEvent for App {
                             ImageListItem::Prompt {prompt_hash} => {
                                 let group = self.db.prompt_files.iter().find( | v | v.prompt_hash == *prompt_hash).unwrap();
                                 let item = image_list.item(cx, item_id, live_id!(PromptGroup));
-                                item.label(id!(prompt)).set_text(&group.prompt.prompt);
+                                item.label(id!(prompt)).set_text(cx, &group.prompt.prompt);
                                 item.draw_all(cx, &mut Scope::empty());
                             }
                             ImageListItem::ImageRow {prompt_hash: _, image_count, image_files} => {
@@ -811,18 +1366,18 @@ impl MatchEvent for App {
             }
             KeyEvent {is_repeat: false, key_code: KeyCode::KeyR, modifiers, ..} => {
                 if modifiers.control || modifiers.logo {
-                    self.open_web_socket();
+                    self.open_web_sockets();
                 }
             }
             KeyEvent {is_repeat: false, key_code: KeyCode::KeyP, modifiers, ..} => {
                 if modifiers.control || modifiers.logo {
                     let prompt_frame = self.ui.view(id!(second_image.prompt_frame));
                     if prompt_frame.visible() {
-                        prompt_frame.set_visible_and_redraw(cx, false);
+                        prompt_frame.set_visible(cx, false);
                     }
                     else {
                         //cx.set_cursor(MouseCursor::Hidden);
-                        prompt_frame.set_visible_and_redraw(cx, true);
+                        prompt_frame.set_visible(cx, true);
                     }
                 }
             }
@@ -852,7 +1407,7 @@ impl MatchEvent for App {
     fn handle_video_inputs(&mut self, _cx: &mut Cx, devices:&VideoInputsEvent){
         //log!("{:?}", devices);
         let _input = devices.find_highest_at_res(devices.find_device("Logitech BRIO"), 1600, 896, 31.0);
-        //cx.use_video_input(&input);
+        //cx.use_video_input(&1input);
     }
     
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
@@ -860,10 +1415,10 @@ impl MatchEvent for App {
             if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
                 if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).selected(cx){
                     if *clear{
-                        self.ui.text_input(id!(prompt_input)).set_text("");
+                        self.ui.text_input(id!(prompt_input)).set_text(cx, "");
                     }
                     let t = self.ui.text_input(id!(prompt_input)).text();
-                    self.ui.text_input(id!(prompt_input)).set_text_and_redraw(cx, &format!("{} {}",t, text));
+                    self.ui.text_input(id!(prompt_input)).set_text(cx, &format!("{} {}",t, text));
                 }
             }
         }
@@ -885,7 +1440,7 @@ impl MatchEvent for App {
 
         let chat = self.ui.text_input(id!(chat));
         if let Some(val) = chat.returned(&actions){
-            chat.set_text_and_redraw(cx, "");
+            chat.set_text(cx, "");
             chat.set_cursor(0,0);
             self.llm_chat.push((LLMMsg::Human, val));
             self.llm_chat.push((LLMMsg::Progress, "... Thinking ...".into()));
@@ -902,13 +1457,20 @@ impl MatchEvent for App {
             if let Some(label) = action.widget().as_drop_down().changed_label(&actions){
                 let id = LiveId::from_str(&label.to_lowercase());
                 let group = action.path.from_end(2);
-                self.ui.page_flip(id!((group).page_flip)).set_active_page_and_redraw(cx, id);
+                self.ui.page_flip(id!((group).page_flip)).set_active_page(cx, id);
             }
         }
         for action in self.ui.widget_set(ids!(cancel_button)).filter_actions(&actions){
             if action.widget().as_button().clicked(&actions){
                 let machine = action.path.from_end(2);
                 self.cancel_machine(cx, machine);
+            }
+        }
+        for action in self.ui.widget_set(ids!(reconnect_button)).filter_actions(&actions){
+            if action.widget().as_button().clicked(&actions){
+                let machine = action.path.from_end(2);
+                
+                self.open_web_socket(machine);
             }
         }
         if let Some(voice) = self.ui.check_box(id!(voice_check_box)).changed(&actions) {

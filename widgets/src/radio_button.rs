@@ -417,7 +417,7 @@ impl Widget for RadioButton {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, id!(selected.off)) {
                     self.animator_play(cx, id!(selected.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
@@ -442,8 +442,9 @@ impl Widget for RadioButton {
         self.text.as_ref().to_string()
     }
             
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
+        self.redraw(cx);
     }
 }
 

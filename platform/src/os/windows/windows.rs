@@ -60,6 +60,7 @@ impl Cx {
                 cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
+        // the signal poll timer
         get_win32_app_global().start_timer(0, 0.008, true);
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
@@ -205,12 +206,12 @@ impl Cx {
                 // send MouseUp
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent {
                     abs: dvec2(-100000.0, -100000.0),
-                    button: 0,
+                    button: MouseButton::PRIMARY,
                     window_id: CxWindowPool::id_zero(),
                     modifiers: Default::default(),
                     time: 0.0
                 }));
-                self.fingers.mouse_up(0);
+                self.fingers.mouse_up(MouseButton::PRIMARY);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
             Win32Event::KeyDown(e) => {

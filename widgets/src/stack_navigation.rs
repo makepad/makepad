@@ -217,7 +217,7 @@ impl StackNavigationView {
         // or if the Android back navigation "action"/gesture occurred.
         if self.state == StackNavigationViewState::Active {
             let back_mouse_button_released = match event {
-                Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
+                Event::MouseUp(mouse) => mouse.button.is_back(),
                 _ => false,
             };
 
@@ -450,10 +450,10 @@ impl StackNavigationRef {
         }
     }
 
-    pub fn set_title(&self, stack_view_id: LiveId, title: &str) {
+    pub fn set_title(&self, cx:&mut Cx, stack_view_id: LiveId, title: &str) {
         if let Some(inner) = self.borrow_mut() {
             let stack_view_ref = inner.stack_navigation_view(&[stack_view_id]);
-            stack_view_ref.label(id!(title)).set_text(title);
+            stack_view_ref.label(id!(title)).set_text(cx, title);
         }
     }
 }

@@ -7,7 +7,11 @@ live_design!(
     use crate::ui::*;
 
     App = {{App}} {
-        ui: <Ui> {}
+        ui:<Root>{
+            <Window>{
+                body = <Ui> {}
+            }
+        } 
     }
 );
 

@@ -580,13 +580,14 @@ impl Widget for Html {
         self.body.as_ref().to_string()
     }
     
-    fn set_text(&mut self, v:&str){
+    fn set_text(&mut self, cx:&mut Cx, v:&str){
         self.body.set(v);
         let mut errors = Some(Vec::new());
         self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
         if errors.as_ref().unwrap().len()>0{
             log!("HTML parser returned errors {:?}", errors)
         }
+        self.redraw(cx);
     }
 } 
 
@@ -612,7 +613,7 @@ fn handle_custom_widget(
     // log!("FOUND CUSTOM WIDGET! template: {template:?}, id: {id:?}, attrs: {attrs:?}");
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
-        item.set_text(node.find_text().unwrap_or(""));
+        item.set_text(cx, node.find_text().unwrap_or(""));
         let mut draw_scope = Scope::with_data(tf);
         item.draw_all(cx, &mut draw_scope);
     }
@@ -701,7 +702,7 @@ impl Widget for HtmlLink {
 
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(_fe) => {
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
@@ -723,9 +724,8 @@ impl Widget for HtmlLink {
                     }
                     
                     if fu.is_over
+                        && fu.is_primary_hit()
                         && fu.was_tap()
-                        // TODO: fix mouse buttons
-                        && fu.device.mouse_button().is_some_and(|button| button == 0)
                     {
                         cx.widget_action(
                             self.widget_uid(),
@@ -787,8 +787,9 @@ impl Widget for HtmlLink {
         self.text.as_ref().to_string()
     }
 
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
+        self.redraw(cx);
     }
 }
 

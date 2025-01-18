@@ -711,6 +711,7 @@ impl Widget for TextInput {
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 tap_count,
+                device,
                 ..
             }) => {
                 let event = DrawEvent::default();
@@ -721,12 +722,14 @@ impl Widget for TextInput {
                     abs - padded_rect.pos
                 );
                 self.move_cursor_to(index_affinity, false);
-                if tap_count == 2 {
-                    self.select_word();
-                } else if tap_count == 3 {
-                    self.select_all();
+                if device.is_primary_hit() {
+                    if tap_count == 2 {
+                        self.select_word();
+                    } else if tap_count == 3 {
+                        self.select_all();
+                    }
+                    self.set_key_focus(&mut *cx);
                 }
-                self.set_key_focus(&mut *cx);
                 self.draw_bg.redraw(&mut *cx);
             }
             Hit::FingerMove(FingerMoveEvent {
@@ -829,7 +832,7 @@ impl Widget for TextInput {
         self.text.to_string()
     }
     
-    fn set_text(&mut self, text: &str) {
+    fn set_text(&mut self, cx:&mut Cx, text: &str) {
         if self.text == text {
             return;
         }
@@ -837,6 +840,7 @@ impl Widget for TextInput {
         self.cursor.head.index = self.cursor.head.index.min(text.len());
         self.cursor.tail.index = self.cursor.tail.index.min(text.len());
         self.history.clear();
+        self.redraw(cx);
     }
 }
 

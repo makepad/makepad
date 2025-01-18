@@ -115,12 +115,12 @@ pub trait Widget: WidgetNode {
         String::new()
     }
 
-    fn set_text(&mut self, _v: &str) {}
+    fn set_text(&mut self, _cx:&mut Cx, _v: &str) {}
 
-    fn set_text_and_redraw(&mut self, cx: &mut Cx, v: &str) {
+    /*fn set_text_and_redraw(&mut self, cx: &mut Cx, v: &str) {
         self.set_text(v);
         self.redraw(cx);
-    }
+    }*/
     /*
     fn create_child(
         &mut self,
@@ -287,18 +287,12 @@ impl WidgetSet {
         Self::default()
     }
     
-    pub fn set_text(&self, v: &str) {
+    pub fn set_text(&self, cx: &mut Cx, v: &str) {
         for item in &self.0 {
-            item.set_text(v)
+            item.set_text(cx, v)
         }
     }
 
-    pub fn set_text_and_redraw(&self, cx: &mut Cx, v: &str) {
-        for item in &self.0 {
-            item.set_text_and_redraw(cx, v)
-        }
-    }
-    
     pub fn iter(&self)->WidgetSetIterator{
         return WidgetSetIterator{
             widget_set: self,
@@ -631,15 +625,9 @@ impl WidgetRef {
         }
     }
 
-    pub fn set_text(&self, v: &str) {
+    pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.widget.set_text(v)
-        }
-    }
-
-    pub fn set_text_and_redraw(&self, cx: &mut Cx, v: &str) {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.widget.set_text_and_redraw(cx, v);
+            inner.widget.set_text(cx, v)
         }
     }
 
@@ -674,11 +662,6 @@ impl WidgetRef {
     pub fn apply_over(&self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, &mut ApplyFrom::Over.into(), 0, nodes);
     }
-
-    pub fn apply_over_and_redraw(&self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, &mut ApplyFrom::Over.into(), 0, nodes);
-        self.redraw(cx);
-    }
     
     fn store_designer_backref(&self, cx:&mut Cx, apply:&mut Apply, index:usize){
         if let Some(scope) = &mut apply.scope{
@@ -699,7 +682,9 @@ impl WidgetRef {
                     log!("TYPECHANGE {:?}", nodes[index]);
                 } else {
                     self.store_designer_backref(cx, apply, index);
-                    return component.widget.apply(cx, apply, index, nodes);
+                    let idx = component.widget.apply(cx, apply, index, nodes);
+                    component.widget.redraw(cx);
+                    return idx;
                 }
             }
             if let Some(component) = cx
@@ -716,7 +701,9 @@ impl WidgetRef {
                 *inner = Some(WidgetRefInner { widget: component });
                 self.store_designer_backref(cx, apply, index);
                 if let Some(component) = &mut *inner {
-                    return component.widget.apply(cx, apply, index, nodes);
+                    let idx = component.widget.apply(cx, apply, index, nodes);
+                    component.widget.redraw(cx);
+                    return idx;
                 }
             } else {
                 cx.apply_error_cant_find_target(
@@ -728,9 +715,12 @@ impl WidgetRef {
             }
         } else if let Some(component) = &mut *inner {
             self.store_designer_backref(cx, apply, index);
-            return component.widget.apply(cx, apply, index, nodes);
+            let idx = component.widget.apply(cx, apply, index, nodes);
+            component.widget.redraw(cx);
+            return idx;
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
+        
         nodes.skip_node(index)
     }
     

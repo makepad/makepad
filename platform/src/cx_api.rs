@@ -275,7 +275,25 @@ impl Cx {
         }
         return 1.0;
     }
-
+    
+    pub fn get_pass_window_id(&self, pass_id: PassId) -> Option<WindowId> {
+         let mut pass_id_walk = pass_id;
+         for _ in 0..25 {
+             match self.passes[pass_id_walk].parent {
+                 CxPassParent::Window(window_id) => {
+                     return Some(window_id)
+                 }
+                 CxPassParent::Pass(next_pass_id) => {
+                     pass_id_walk = next_pass_id;
+                 }
+                 _ => {
+                     break;
+                 }
+             }
+         }
+         None
+     }
+    
     pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f64 {
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
@@ -390,7 +408,13 @@ impl Cx {
             self.redraw_list(draw_list_id);
         }
     }
-
+    
+    pub fn redraw_area_in_draw(&mut self, area: Area) {
+        if let Some(draw_list_id) = area.draw_list_id() {
+            self.redraw_list_in_draw(draw_list_id);
+        }
+    }
+    
     pub fn redraw_area_and_children(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_and_children(draw_list_id);
@@ -398,12 +422,19 @@ impl Cx {
     }
 
     pub fn redraw_list(&mut self, draw_list_id: DrawListId) {
+        if self.in_draw_event{
+            return
+        }
+        self.redraw_list_in_draw(draw_list_id);
+    }
+    
+    pub fn redraw_list_in_draw(&mut self, draw_list_id: DrawListId) {
         if self
-            .new_draw_event
-            .draw_lists
-            .iter()
-            .position(|v| *v == draw_list_id)
-            .is_some()
+        .new_draw_event
+        .draw_lists
+        .iter()
+        .position(|v| *v == draw_list_id)
+        .is_some()
         {
             return;
         }
@@ -411,6 +442,9 @@ impl Cx {
     }
 
     pub fn redraw_list_and_children(&mut self, draw_list_id: DrawListId) {
+        if self.in_draw_event{
+            return
+        }
         if self
             .new_draw_event
             .draw_lists_and_children

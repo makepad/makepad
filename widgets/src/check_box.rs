@@ -389,7 +389,7 @@ impl Widget for CheckBox {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, id!(selected.on)) {
                     self.animator_play(cx, id!(selected.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
@@ -418,8 +418,9 @@ impl Widget for CheckBox {
         self.text.as_ref().to_string()
     }
     
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
+        self.redraw(cx);
     }
 }
 

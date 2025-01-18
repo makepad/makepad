@@ -31,6 +31,7 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod portal_list;
+//pub mod portal_list2;
 pub mod stack_navigation;
 pub mod expandable_panel;
 pub mod desktop_button;
@@ -210,6 +211,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::drop_down::live_design(cx);
     crate::multi_window::live_design(cx);
     crate::portal_list::live_design(cx);
+    //crate::portal_list2::live_design(cx);
     crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);
     crate::tab::live_design(cx);

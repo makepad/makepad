@@ -110,8 +110,8 @@ pub struct CommandTextInput {
 }
 
 impl Widget for CommandTextInput {
-    fn set_text(&mut self, v: &str) {
-        self.text_input_ref().set_text(v);
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+        self.text_input_ref().set_text(cx, v);
     }
 
     fn text(&self) -> String {
@@ -201,7 +201,7 @@ impl Widget for CommandTextInput {
                     match action.cast::<TextInputAction>() {
                         TextInputAction::Change(search) => {
                             // disallow multiline input
-                            search_input.set_text(search.lines().next().unwrap_or_default());
+                            search_input.set_text(cx, search.lines().next().unwrap_or_default());
 
                             cx.widget_action(
                                 self.widget_uid(),
@@ -214,11 +214,11 @@ impl Widget for CommandTextInput {
                         }
                         TextInputAction::Escape => {
                             self.is_text_input_focus_pending = true;
-                            self.hide_popup();
+                            self.hide_popup(cx);
                             self.redraw(cx);
                         }
                         TextInputAction::KeyFocusLost => {
-                            self.hide_popup();
+                            self.hide_popup(cx);
                             self.redraw(cx);
                         }
                         _ => {}
@@ -253,13 +253,13 @@ impl CommandTextInput {
     fn select_item(&mut self, cx: &mut Cx, scope: &mut Scope, selected: WidgetRef) {
         self.last_selected_widget = selected;
         cx.widget_action(self.widget_uid(), &scope.path, InternalAction::ItemSelected);
-        self.hide_popup();
+        self.hide_popup(cx);
         self.is_text_input_focus_pending = true;
-        self.try_remove_trigger_grapheme();
+        self.try_remove_trigger_grapheme(cx);
         self.redraw(cx);
     }
 
-    fn try_remove_trigger_grapheme(&mut self) {
+    fn try_remove_trigger_grapheme(&mut self, cx:&mut Cx) {
         let head = get_head(&self.text_input_ref());
 
         if head == 0 {
@@ -284,29 +284,29 @@ impl CommandTextInput {
                 })
                 .collect::<String>();
 
-            self.set_text(&at_removed);
+            self.set_text(cx, &at_removed);
         }
     }
 
     fn show_popup(&mut self, cx: &mut Cx) {
-        self.view(id!(popup)).set_visible(true);
+        self.view(id!(popup)).set_visible(cx, true);
         self.view(id!(popup)).redraw(cx);
     }
 
-    fn hide_popup(&mut self) {
-        self.clear_popup();
-        self.view(id!(popup)).set_visible(false);
+    fn hide_popup(&mut self, cx:&mut Cx) {
+        self.clear_popup(cx);
+        self.view(id!(popup)).set_visible(cx, false);
     }
 
     /// Clear all text and hide the popup going back to initial state.
-    pub fn reset(&mut self) {
-        self.clear_popup();
-        self.hide_popup();
-        self.text_input_ref().set_text("");
+    pub fn reset(&mut self, cx:&mut Cx) {
+        self.clear_popup(cx);
+        self.hide_popup(cx);
+        self.text_input_ref().set_text(cx, "");
     }
 
-    fn clear_popup(&mut self) {
-        self.search_input_ref().set_text("");
+    fn clear_popup(&mut self, cx:&mut Cx) {
+        self.search_input_ref().set_text(cx, "");
         self.search_input_ref().set_cursor(0, 0);
         self.clear_items();
     }
@@ -498,9 +498,9 @@ impl CommandTextInputRef {
     }
 
     /// See [`CommandTextInput::reset()`].
-    pub fn reset(&self) {
+    pub fn reset(&self,cx:&mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.reset();
+            inner.reset(cx);
         }
     }
 

@@ -193,7 +193,7 @@ impl App {
                     wire_data.clear();
                     wire_packet.ser_bin(&mut wire_data);
                     // send to all peers
-                    write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();
+                    write_audio.send_to(&wire_data, "10.0.0.255:41531").unwrap();
                 };
             }
         });

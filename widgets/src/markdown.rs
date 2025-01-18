@@ -331,10 +331,11 @@ impl Widget for Markdown {
         self.body.as_ref().to_string()
     } 
     
-    fn set_text(&mut self, v:&str){
+    fn set_text(&mut self, cx:&mut Cx, v:&str){
         if self.body.as_ref() != v{
             self.body.set(v);
             self.parse_text();
+            self.redraw(cx);
         }
     }
 }
@@ -403,7 +404,7 @@ impl Markdown {
                 MarkdownNode::Link{start, url_start, end}=>{
                     self.auto_id += 1;
                     let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
-                    item.set_text(&doc.decoded[*start..*url_start]);
+                    item.set_text(cx, &doc.decoded[*start..*url_start]);
                     item.as_markdown_link()
                     .set_href(&doc.decoded[*url_start..*end]);
                     item.draw_all_unscoped(cx);
@@ -466,7 +467,7 @@ impl Markdown {
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
                         tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
-                            item.widget(id!(code_view)).set_text(cbs);
+                            item.widget(id!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
                         });
                     }
@@ -504,9 +505,9 @@ impl Markdown {
 }
 
 impl MarkdownRef {
-    pub fn set_text(&self, v:&str) {
+    pub fn set_text(&mut self, cx:&mut Cx, v:&str) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        inner.set_text(v)
+        inner.set_text(cx, v)
     }
 }
 
@@ -544,8 +545,8 @@ impl Widget for MarkdownLink {
         self.link.text()
     }
 
-    fn set_text(&mut self, v: &str) {
-        self.link.set_text(v);
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+        self.link.set_text(cx, v);
     }
 }
 

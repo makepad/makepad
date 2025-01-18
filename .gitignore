@@ -19,10 +19,13 @@ mandelbrot_presets.json
 makepad_settings.ron
 makepad_state.ron
 key.ron
+dmx*.ron
+makepad_designer.ron
 .vscode
 rustc*.txt
 
 OPENAI_KEY
+CLAUDE_KEY
 
 /local
 

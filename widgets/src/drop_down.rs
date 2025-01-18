@@ -477,7 +477,7 @@ impl Widget for DropDown {
                 },
                 _ => ()
             }
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.set_open(cx);
                 self.animator_play(cx, id!(hover.pressed));
@@ -489,7 +489,7 @@ impl Widget for DropDown {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if fe.is_over {
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
@@ -510,13 +510,8 @@ impl Widget for DropDown {
 }
 
 impl DropDownRef {
-    pub fn set_labels(&self, labels: Vec<String>) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.labels = labels
-        }
-    }
     
-    pub fn set_labels_with<F:FnMut(&mut String)>(&self, mut f:F) {
+    pub fn set_labels_with<F:FnMut(&mut String)>(&self, cx: &mut Cx, mut f:F) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut i = 0;
             loop {
@@ -532,10 +527,11 @@ impl DropDownRef {
                 i+=1;
             }
             inner.labels.truncate(i);
+            inner.draw_bg.redraw(cx);
         }
     }
     
-    pub fn set_labels_and_redraw(&self, cx: &mut Cx, labels: Vec<String>) {
+    pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;
             inner.draw_bg.redraw(cx);
@@ -571,13 +567,8 @@ impl DropDownRef {
         }
         None
     }
-    pub fn set_selected_item(&self, item: usize) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.selected_item = item.min(inner.labels.len().max(1) - 1)
-        }
-    }
     
-    pub fn set_selected_item_and_redraw(&self, cx: &mut Cx, item: usize) {
+    pub fn set_selected_item(&self, cx: &mut Cx, item: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             let new_selected = item.min(inner.labels.len().max(1) - 1);
             if new_selected != inner.selected_item{
@@ -600,15 +591,7 @@ impl DropDownRef {
         "".to_string()
     }
     
-    pub fn set_selected_by_label(&self, label: &str) {
-        if let Some(mut inner) = self.borrow_mut() {
-            if let Some(index) = inner.labels.iter().position( | v | v == label) {
-                inner.selected_item = index
-            }
-        }
-    }
-    
-    pub fn set_selected_by_label_and_redraw(&self, label: &str, cx: &mut Cx) {
+    pub fn set_selected_by_label(&self, label: &str, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             if let Some(index) = inner.labels.iter().position( | v | v == label) {
                 if inner.selected_item != index{

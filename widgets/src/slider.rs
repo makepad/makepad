@@ -810,9 +810,9 @@ pub enum SliderType {
 }
 
 impl LiveHook for Slider{
-    fn after_new_from_doc(&mut self, _cx:&mut Cx){
+    fn after_new_from_doc(&mut self, cx:&mut Cx){
         self.set_internal(self.default);
-        self.update_text_input();
+        self.update_text_input(cx);
     }
 }
 
@@ -891,7 +891,7 @@ impl Slider {
         old != self.relative_value
     }
     
-    pub fn update_text_input(&mut self) {
+    pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
         self.text_input.text = match self.precision{
             0=>format!("{:.0}",e),
@@ -905,10 +905,6 @@ impl Slider {
             _=>format!("{}",e)
         };
         self.text_input.select_all();
-    }
-    
-    pub fn update_text_input_and_redraw(&mut self, cx: &mut Cx) {
-        self.update_text_input();
         self.text_input.redraw(cx);
     }
     
@@ -935,11 +931,11 @@ impl Slider {
         self.to_external()
     }
 
-    pub fn set_value(&mut self, v: f64) {
+    pub fn set_value(&mut self, cx:&mut Cx, v: f64) {
         let prev_value = self.value();
         self.set_internal(v);
         if v != prev_value {
-            self.update_text_input();
+            self.update_text_input(cx);
         }
     }
 }
@@ -974,11 +970,11 @@ impl Widget for Slider {
                     if let Ok(v) = value.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
-                    self.update_text_input_and_redraw(cx);
+                    self.update_text_input(cx);
                     cx.widget_action(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escape => {
-                    self.update_text_input_and_redraw(cx);
+                    self.update_text_input(cx);
                 }
                 _ => ()
             }
@@ -1009,11 +1005,12 @@ impl Widget for Slider {
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 rect,
+                device,
                 ..
-            }) => {
+            }) if device.is_primary_hit() => {
                 // cx.set_key_focus(self.slider.area());
                 self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
-                self.update_text_input_and_redraw(cx);
+                self.update_text_input(cx);
 
                 self.text_input.is_read_only = true;
                 self.text_input.set_key_focus(cx);
@@ -1025,7 +1022,7 @@ impl Widget for Slider {
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             },
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 self.text_input.is_read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.force_new_edit_group();
@@ -1046,7 +1043,7 @@ impl Widget for Slider {
                     self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.label_size as f64)).max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
-                    self.update_text_input_and_redraw(cx);
+                    self.update_text_input(cx);
                     cx.widget_action(uid, &scope.path, SliderAction::Slide(self.to_external()));
                 }
             }
@@ -1075,7 +1072,7 @@ impl Widget for Slider {
                 if self.set_internal(value) {
                     self.redraw(cx)
                 }
-                self.update_text_input_and_redraw(cx);
+                self.update_text_input(cx);
             }
         }
     }
@@ -1084,10 +1081,10 @@ impl Widget for Slider {
         format!("{}", self.to_external())
     }
         
-    fn set_text(&mut self, v: &str) {
+    fn set_text(&mut self, cx:&mut Cx, v: &str) {
         if let Ok(v) = v.parse::<f64>(){
             self.set_internal(v);
-            self.update_text_input()
+            self.update_text_input(cx);
         }
     }
         
@@ -1102,9 +1099,9 @@ impl SliderRef{
         return None
     }
 
-    pub fn set_value(&self, v: f64) {
+    pub fn set_value(&self, cx:&mut Cx, v: f64) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_value(v)
+            inner.set_value(cx, v)
         }
     }
     
