@@ -417,7 +417,7 @@ impl Widget for RadioButton {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, id!(selected.off)) {
                     self.animator_play(cx, id!(selected.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);

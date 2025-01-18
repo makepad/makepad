@@ -477,7 +477,7 @@ impl Widget for DropDown {
                 },
                 _ => ()
             }
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.set_open(cx);
                 self.animator_play(cx, id!(hover.pressed));
@@ -489,7 +489,7 @@ impl Widget for DropDown {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if fe.is_over {
                     if fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));

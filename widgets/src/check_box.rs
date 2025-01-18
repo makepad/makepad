@@ -389,7 +389,7 @@ impl Widget for CheckBox {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, id!(selected.on)) {
                     self.animator_play(cx, id!(selected.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
