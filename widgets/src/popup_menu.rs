@@ -246,12 +246,12 @@ impl PopupMenuItem {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
                 self.animator_play(cx, id!(hover.on));
                 self.animator_play(cx, id!(select.on));
             }
-            Hit::FingerUp(se) => {
+            Hit::FingerUp(se) if se.is_primary_hit() => {
                 if !se.is_sweep {
                     //if se.was_tap() { // ok this only goes for the first time
                     //    dispatch_action(cx, PopupMenuItemAction::MightBeSelected);

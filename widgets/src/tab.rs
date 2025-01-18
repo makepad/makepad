@@ -291,8 +291,13 @@ impl Tab {
                     self.is_dragging = false;
                 }
             }
-            Hit::FingerDown(_) => {
-                dispatch_action(cx, TabAction::WasPressed);
+            Hit::FingerDown(fde) => {
+                // A primary click/touch selects the tab, but a middle click closes it.
+                if fde.is_primary_hit() {
+                    dispatch_action(cx, TabAction::WasPressed);
+                } else if fde.mouse_button().is_some_and(|b| b.is_middle()) {
+                    dispatch_action(cx, TabAction::CloseWasPressed);
+                }
             }
             _ => {}
         }
