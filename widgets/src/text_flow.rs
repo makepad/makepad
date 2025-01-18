@@ -792,12 +792,12 @@ impl Widget for TextFlowLink {
         
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
                     self.animator_play(cx, id!(hover.pressed));
-                    if self. click_on_down{
+                    if self.click_on_down{
                         cx.widget_action_with_data(
                             &self.action_data,
                             self.widget_uid(),
@@ -815,7 +815,7 @@ impl Widget for TextFlowLink {
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerUp(fe) => {
+                Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     if fe.is_over {
                         if !self.click_on_down{
                             cx.widget_action_with_data(
