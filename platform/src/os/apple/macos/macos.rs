@@ -234,7 +234,6 @@ impl Cx {
         metal_cx: &mut MetalCx,
         metal_windows: &mut Vec<MetalWindow>
     ) -> EventFlow {
-        
         if let  EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx){
             self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit
@@ -355,13 +354,14 @@ impl Cx {
                     e.time
                 );
                 self.fingers.mouse_down(e.button, e.window_id);
-                self.call_event_handler(&Event::MouseDown(e.into()))
+                self.call_event_handler(&Event::MouseDown(e.into()));
             }
             MacosEvent::MouseMove(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
+                self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
             }
             MacosEvent::MouseUp(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
@@ -430,7 +430,7 @@ impl Cx {
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0 */|| paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
             EventFlow::Poll
         } else {
             EventFlow::Wait

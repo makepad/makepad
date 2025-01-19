@@ -531,6 +531,7 @@ impl CodeEditor {
         );
         
         self.scroll_bars.end(cx);
+        
         if session.update_folds() {
             cx.redraw_area_in_draw(self.scroll_bars.area());
         } else if self.keep_cursor_in_view.is_locked() {
