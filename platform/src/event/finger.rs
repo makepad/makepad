@@ -1,7 +1,7 @@
 #![allow(unused)]
 #![allow(dead_code)]
 use {
-    std::cell::{Cell},
+    std::{cell::Cell, ops::Deref},
     crate::{
         makepad_micro_serde::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
@@ -59,14 +59,90 @@ impl KeyModifiers{
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+
+bitflags::bitflags! {
+    /// A `u32` bit mask of all mouse buttons that were pressed
+    /// during a given mouse event.
+    ///
+    /// This is a bit mask because it is possible for multiple buttons
+    /// to be pressed simultaneously during a given input event.
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    #[doc(alias = "click")]
+    pub struct MouseButton: u32 {
+        /// The primary mouse button, typically the left-click button.
+        #[doc(alias("left", "left-click"))]
+        const PRIMARY =   1 << 0;
+        /// The secondary mouse button, typically the right-click button.
+        #[doc(alias("right", "right-click"))]
+        const SECONDARY = 1 << 1;
+        /// The middle mouse button, typically the scroll-wheel click button.
+        #[doc(alias("scroll", "wheel"))]
+        const MIDDLE =    1 << 2;
+        /// The fourth mouse button, typically used for back navigation.
+        const BACK =      1 << 3;
+        /// The fifth mouse button, typically used for forward navigation.
+        const FORWARD =   1 << 4;
+
+        // Ensure that all bits are valid, such that no bits get truncated.
+        const _ = !0;
+    }
+}
+impl MouseButton {
+    /// Returns true if the primary mouse button is pressed.
+    pub fn is_primary(&self) -> bool {
+        self.contains(MouseButton::PRIMARY)
+    }
+    /// Returns true if the secondary mouse button is pressed.
+    pub fn is_secondary(&self) -> bool {
+        self.contains(MouseButton::SECONDARY)
+    }
+    /// Returns true if the middle mouse button is pressed.
+    pub fn is_middle(&self) -> bool {
+        self.contains(MouseButton::MIDDLE)
+    }
+    /// Returns true if the back mouse button is pressed.
+    pub fn is_back(&self) -> bool {
+        self.contains(MouseButton::BACK)
+    }
+    /// Returns true if the forward mouse button is pressed.
+    pub fn is_forward(&self) -> bool {
+        self.contains(MouseButton::FORWARD)
+    }
+    /// Returns true if the `n`th button is pressed.
+    ///
+    /// The button values are:
+    /// * n = 0: PRIMARY
+    /// * n = 1: SECONDARY
+    /// * n = 2: MIDDLE
+    /// * n = 3: BACK
+    /// * n = 4: FORWARD
+    /// * n > 4: other/custom
+    pub fn is_other_button(&self, n: u8) -> bool {
+        self.bits() & (1 << n) != 0
+    }
+    /// Returns a `MouseButton` bit mask based on the raw button value: `1 << raw`.
+    ///
+    /// A raw button value is a number that represents a mouse button, like so:
+    /// * 0: MouseButton::PRIMARY
+    /// * 1: MouseButton::SECONDARY
+    /// * 2: MouseButton::MIDDLE
+    /// * 3: MouseButton::BACK
+    /// * 4: MouseButton::FORWARD
+    /// * etc.
+    pub fn from_raw_button(raw: usize) -> MouseButton {
+        MouseButton::from_bits_retain(1 << raw)
+    }
+}
+
+
+#[derive(Clone, Debug)]
 pub struct MouseDownEvent {
     pub abs: DVec2,
-    pub button: usize,
+    pub button: MouseButton,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub handled: Cell<Area>,
-    pub time: f64
+    pub time: f64,
 }
 
 
@@ -82,7 +158,7 @@ pub struct MouseMoveEvent {
 #[derive(Clone, Debug)]
 pub struct MouseUpEvent {
     pub abs: DVec2,
-    pub button: usize,
+    pub button: MouseButton,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64
@@ -231,7 +307,7 @@ pub struct CxDigitHover {
 
 #[derive(Default, Clone)]
 pub struct CxFingers {
-    pub first_mouse_button: Option<(usize, WindowId)>,
+    pub first_mouse_button: Option<(MouseButton, WindowId)>,
     captures: Vec<CxDigitCapture>,
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
@@ -403,9 +479,9 @@ impl CxFingers {
         self.switch_captures();
     }
     
-    pub (crate) fn mouse_down(&mut self, button: usize, window_id:WindowId) {
+    pub (crate) fn mouse_down(&mut self, button: MouseButton, window_id: WindowId) {
         if self.first_mouse_button.is_none() {
-            self.first_mouse_button = Some((button,window_id));
+            self.first_mouse_button = Some((button, window_id));
         }
     }
     
@@ -418,11 +494,14 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn mouse_up(&mut self, button: usize) {
-        if self.first_mouse_button.is_some() && self.first_mouse_button.unwrap().0 == button {
-            self.first_mouse_button = None;
-            let digit_id = live_id!(mouse).into();
-            self.release_digit(digit_id);
+    pub (crate) fn mouse_up(&mut self, button: MouseButton) {
+        match self.first_mouse_button {
+            Some((fmb, _)) if fmb == button => {
+                self.first_mouse_button = None;
+                let digit_id = live_id!(mouse).into();
+                self.release_digit(digit_id);
+            }
+            _ => { }
         }
     }
     
@@ -452,7 +531,7 @@ impl CxFingers {
 #[derive(Clone, Debug)]
 pub enum DigitDevice {
     Mouse {
-        button: usize
+        button: MouseButton,
     },
     Touch {
         uid: u64
@@ -461,14 +540,28 @@ pub enum DigitDevice {
 }
 
 impl DigitDevice {
+    /// Returns true if this device is a touch device.
     pub fn is_touch(&self) -> bool {if let DigitDevice::Touch {..} = self {true}else {false}}
+    /// Returns true if this device is a mouse.
     pub fn is_mouse(&self) -> bool {if let DigitDevice::Mouse {..} = self {true}else {false}}
+    /// Returns true if this device is an XR device.
     pub fn is_xr(&self) -> bool {if let DigitDevice::XR {..} = self {true}else {false}}
-    
+
+    /// Returns true if this device can hover: either a mouse or an XR device.
     pub fn has_hovers(&self) -> bool {self.is_mouse() || self.is_xr()}
-    
-    pub fn mouse_button(&self) -> Option<usize> {if let DigitDevice::Mouse {button} = self {Some(*button)}else {None}}
+    /// Returns the `MouseButton` if this device is a mouse; otherwise `None`.
+    pub fn mouse_button(&self) -> Option<MouseButton> {if let DigitDevice::Mouse {button} = self {Some(*button)}else {None}}
+    /// Returns the `uid` of the touch device if this device is a touch device; otherwise `None`.
     pub fn touch_uid(&self) -> Option<u64> {if let DigitDevice::Touch {uid} = self {Some(*uid)}else {None}}
+
+    /// Returns true if this is a *primary* mouse button hit *or* any touch hit.
+    pub fn is_primary_hit(&self) -> bool {
+        match self {
+            DigitDevice::Mouse { button } => button.is_primary(),
+            DigitDevice::Touch {..} => true,
+            DigitDevice::XR { } => false,
+        }
+    }
     // pub fn xr_input(&self) -> Option<usize> {if let DigitDevice::XR(input) = self {Some(*input)}else {None}}
 }
 
@@ -485,7 +578,12 @@ pub struct FingerDownEvent {
     pub time: f64,
     pub rect: Rect,
 }
-
+impl Deref for FingerDownEvent {
+    type Target = DigitDevice;
+    fn deref(&self) -> &DigitDevice {
+        &self.device
+    }
+}
 impl FingerDownEvent {
     pub fn mod_control(&self) -> bool {self.modifiers.control}
     pub fn mod_alt(&self) -> bool {self.modifiers.alt}
@@ -508,7 +606,12 @@ pub struct FingerMoveEvent {
     pub rect: Rect,
     pub is_over: bool,
 }
-
+impl Deref for FingerMoveEvent {
+    type Target = DigitDevice;
+    fn deref(&self) -> &DigitDevice {
+        &self.device
+    }
+}
 impl FingerMoveEvent {
     pub fn move_distance(&self) -> f64 {
         ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
@@ -532,7 +635,12 @@ pub struct FingerUpEvent {
     pub is_over: bool,
     pub is_sweep: bool
 }
-
+impl Deref for FingerUpEvent {
+    type Target = DigitDevice;
+    fn deref(&self) -> &DigitDevice {
+        &self.device
+    }
+}
 impl FingerUpEvent {
     pub fn was_tap(&self) -> bool {
         self.time - self.capture_time < TAP_COUNT_TIME &&
@@ -545,17 +653,12 @@ impl FingerUpEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum HoverState {
     In,
+    #[default]
     Over,
     Out
-}
-
-impl Default for HoverState {
-    fn default() -> HoverState {
-        HoverState::Over
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -696,7 +799,7 @@ impl Event {
                 if hit_test(e.abs, &rect, &options.margin) {
                     //fe.handled = true;
                     let device = DigitDevice::Mouse {
-                        button: 0,
+                        button: MouseButton::PRIMARY,
                     };
                     return Hit::FingerScroll(FingerScrollEvent {
                         abs: e.abs,
@@ -944,7 +1047,7 @@ impl Event {
                 }
                 else {
                     let device = DigitDevice::Mouse {
-                        button: 0,
+                        button: MouseButton::PRIMARY,
                     };
                     
                     let handled_area = e.handled.get();
@@ -1064,7 +1167,7 @@ impl Event {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing;
                 }
-                let device = DigitDevice::Mouse { button: 0 };
+                let device = DigitDevice::Mouse { button: MouseButton::empty() };
                 let digit_id = live_id!(mouse).into();
                 let rect = area.clipped_rect(&cx);
                 let hover_last = cx.fingers.find_hover_area(digit_id);

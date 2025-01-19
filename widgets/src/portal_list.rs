@@ -880,7 +880,10 @@ impl Widget for PortalList {
                     },
                     _ => ()
                 }
-                Hit::FingerDown(e) => {
+                Hit::FingerDown(fe) => {
+                    // We allow other mouse buttons to grab key focus and stop the tail range behavior,
+                    // but we only want the primary button (or touch) to actually scroll via dragging.
+
                     //log!("Finger down {} {}", e.time, e.abs);
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
@@ -889,9 +892,9 @@ impl Widget for PortalList {
                     if self.tail_range {
                         self.tail_range = false;
                     }
-                    if self.drag_scrolling{
+                    if self.drag_scrolling && fe.is_primary_hit() {
                         self.scroll_state = ScrollState::Drag {
-                            samples: vec![ScrollSample{abs:e.abs.index(vi),time:e.time}]
+                            samples: vec![ScrollSample{abs: fe.abs.index(vi), time: fe.time}]
                         };
                     }
                 }
@@ -912,7 +915,7 @@ impl Widget for PortalList {
                         _=>()
                     }
                 }
-                Hit::FingerUp(_e) => {
+                Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     //log!("Finger up {} {}", e.time, e.abs);
                     match &mut self.scroll_state {
                         ScrollState::Drag {samples}=>{

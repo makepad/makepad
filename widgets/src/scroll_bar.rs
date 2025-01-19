@@ -431,7 +431,7 @@ impl ScrollBar {
             }
             
             match event.hits(cx, self.draw_bar.area()) {
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     self.animator_play(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
@@ -457,7 +457,7 @@ impl ScrollBar {
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
                 },
-                Hit::FingerUp(fe) => {
+                Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     self.drag_point = None;
                     if fe.is_over && fe.device.has_hovers() {
                         self.animator_play(cx, id!(hover.on));

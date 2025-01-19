@@ -206,12 +206,12 @@ impl Cx {
                 // send MouseUp
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent {
                     abs: dvec2(-100000.0, -100000.0),
-                    button: 0,
+                    button: MouseButton::PRIMARY,
                     window_id: CxWindowPool::id_zero(),
                     modifiers: Default::default(),
                     time: 0.0
                 }));
-                self.fingers.mouse_up(0);
+                self.fingers.mouse_up(MouseButton::PRIMARY);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
             Win32Event::KeyDown(e) => {

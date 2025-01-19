@@ -217,7 +217,7 @@ impl StackNavigationView {
         // or if the Android back navigation "action"/gesture occurred.
         if self.state == StackNavigationViewState::Active {
             let back_mouse_button_released = match event {
-                Event::MouseUp(mouse) => mouse.button == 3, // the "back" button on the mouse
+                Event::MouseUp(mouse) => mouse.button.is_back(),
                 _ => false,
             };
 

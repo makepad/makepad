@@ -499,17 +499,16 @@ impl Video {
 
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.hold_to_pause {
                     self.pause_playback(cx);
                 }
             }
-            Hit::FingerUp(_fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if self.hold_to_pause {
                     self.resume_playback(cx);
                 }
             }
-            
             _ => (),
         }
     }

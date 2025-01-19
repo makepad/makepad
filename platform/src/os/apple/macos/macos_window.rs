@@ -17,6 +17,7 @@ use {
         },
         area::Area,
         event::{
+            finger::MouseButton,
             ScrollEvent,
             MouseUpEvent,
             MouseDownEvent,
@@ -348,7 +349,7 @@ impl MacosWindow {
         }
     }
     
-    pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
+    pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {
         let () = unsafe {msg_send![self.window, makeFirstResponder: self.view]};
         self.do_callback(MacosEvent::MouseDown(MouseDownEvent {
             button,
@@ -360,7 +361,7 @@ impl MacosWindow {
         }));
     }
     
-    pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
+    pub fn send_mouse_up(&mut self, button: MouseButton, modifiers: KeyModifiers) {
         self.do_callback(MacosEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,

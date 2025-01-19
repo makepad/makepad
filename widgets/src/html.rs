@@ -703,7 +703,7 @@ impl Widget for HtmlLink {
 
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(_fe) => {
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
