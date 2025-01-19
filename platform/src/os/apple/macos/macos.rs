@@ -430,7 +430,7 @@ impl Cx {
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0*/ || paint_dirty {
             EventFlow::Poll
         } else {
             EventFlow::Wait
