@@ -298,7 +298,7 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
     else{
         SocketAddr::new("127.0.0.1".parse().unwrap(), port)
     };
-    println!("Starting webserver on {:?}", addr);
+    println!("Starting webserver on http://{:?}", addr);
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
             
     start_http_server(HttpServer {

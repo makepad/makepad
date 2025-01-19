@@ -162,6 +162,19 @@ cargo run -p makepad-example-simple
 
 And there should be a desktop application window now running (may need to click on the icon on MacOS's Dock to show it)
 
+### Building for the Linux direct target
+
+To build and run for the Linux direct target (which bypasses X11), first install the following dependencies:
+```shell
+sudo apt-get install libinput-dev libgbm-dev libdrm-dev
+```
+
+and then run the same cargo command with the `MAKEPAD` environment variable set:
+```shell
+MAKEPAD=linux_direct cargo run -p makepad-example-simple
+```
+
+
 ## 4. Android Build
 
 ### Install Android toolchain (First time)

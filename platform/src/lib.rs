@@ -177,6 +177,7 @@ pub use {
             KeyModifiers,
             DrawEvent,
             DigitDevice,
+            MouseButton,
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
