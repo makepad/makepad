@@ -14,6 +14,7 @@ use {
             XRUpdateEvent,
             KeyCode,
             KeyModifiers,
+            MouseButton,
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
@@ -229,6 +230,16 @@ pub struct WMouse {
     pub time: f64,
 }
 
+/// Convert a raw Web mouse button code to a Makepad `MouseButton`.
+fn wmouse_to_mouse_button(button: u32) -> MouseButton {
+    match button {
+        0 => MouseButton::PRIMARY,
+        1 => MouseButton::MIDDLE,
+        2 => MouseButton::SECONDARY,
+        n => MouseButton::from_raw_button(n as usize),
+    }
+}
+
 #[derive(ToWasm)]
 pub struct ToWasmMouseDown {
     pub mouse: WMouse,
@@ -238,7 +249,7 @@ impl From<ToWasmMouseDown> for MouseDownEvent {
     fn from(v:ToWasmMouseDown) -> Self {
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
-            button: v.mouse.button as usize,
+            button: wmouse_to_mouse_button(v.mouse.button),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
             handled: Cell::new(Area::Empty),
@@ -275,7 +286,7 @@ impl From<ToWasmMouseUp> for MouseUpEvent {
     fn from(v:ToWasmMouseUp) -> Self {
         Self {
             abs: dvec2(v.mouse.x, v.mouse.y),
-            button: v.mouse.button as usize,
+            button: wmouse_to_mouse_button(v.mouse.button),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
             time: v.mouse.time
