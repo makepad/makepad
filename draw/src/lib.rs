@@ -10,6 +10,7 @@ pub mod shader;
 pub mod turtle;
 pub mod font_atlas;
 pub mod font_cache;
+pub mod font_loader;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
