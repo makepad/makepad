@@ -3,12 +3,14 @@
 //! using `Rc<Vec<u8>>` instead of `Vec<u8>` (to avoid cloning any font bytes).
 
 use makepad_rustybuzz::Face;
+use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::rc::Rc;
 
 pub use makepad_rustybuzz::ttf_parser::FaceParsingError;
 
+#[derive(Debug)]
 pub struct OwnedFace(Pin<Box<FaceWithFontData>>);
 
 impl OwnedFace {
@@ -70,5 +72,11 @@ impl Drop for FaceWithFontData {
         // Drop `self.face` early, so no destructors that borrow `self.font_data`
         // can possibly ever run after `self.font_data` is dropped.
         drop(self.face.take());
+    }
+}
+
+impl fmt::Debug for FaceWithFontData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FaceWithFontData").finish()
     }
 }
