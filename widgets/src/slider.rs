@@ -36,6 +36,7 @@ live_design!{
                 let nub_size = mix(3, 5, self.hover);
                 let nubbg_size = mix(0, 13, self.hover)
                 
+
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 
                 let slider_bg_color = mix(mix(THEME_COLOR_AMOUNT_TRACK_DEFAULT, THEME_COLOR_AMOUNT_TRACK_HOVER, self.hover), THEME_COLOR_AMOUNT_TRACK_ACTIVE, self.focus);
@@ -142,8 +143,6 @@ live_design!{
                     ease: OutQuad
                     apply: {
                         draw_slider: { hover: 0.0 },
-                        // draw_text: { hover: 0.0 }
-                        // text_input: { draw_bg: { hover: 0.0}}
                     }
                 }
                 on = {
@@ -151,8 +150,6 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: { hover: 1.0 },
-                        // draw_text: { hover: 1.0 }
-                        // text_input: { draw_bg: { hover: 1.0}}
                     }
                 }
             }
@@ -189,12 +186,7 @@ live_design!{
     pub SliderBig = <Slider> {
         height: 36
         text: "CutOff1"
-        // draw_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_5)}
         text_input: {
-            // cursor_margin_bottom: (THEME_SPACE_1),
-            // cursor_margin_top: (THEME_SPACE_1),
-            // select_pad_edges: (THEME_SPACE_1),
-            // cursor_size: (THEME_SPACE_1),
             empty_message: "0",
             is_numeric_only: true,
             draw_bg: {
@@ -918,15 +910,14 @@ live_design!{
                     }
                 }
                 on = {
-                    //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
                         draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 }
                         text_input: {
                             draw_selection: { hover: 1.0},
-                            draw_bg: { hover: 1.0},
-                            draw_text: { hover: 1.0},
+                            draw_bg: { hover: 1.0 },
+                            draw_text: { hover: 1.0 },
                         }
                     }
                 }
@@ -953,11 +944,6 @@ live_design!{
                     apply:
                         {
                             draw_slider: {drag: 0.0},
-                            text_input: {
-                                draw_selection: { hover: 0.0},
-                                draw_bg: { hover: 0.0},
-                                draw_text: { hover: 0.0},
-                            }
                         }
                 }
                 on = {
@@ -965,11 +951,6 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: {drag: 1.0},
-                        text_input: {
-                            draw_selection: { hover: 0.0},
-                            draw_bg: { hover: 0.0},
-                            draw_text: { hover: 0.0},
-                        }
                     }
                 }
             }
@@ -1002,6 +983,7 @@ live_design!{
             margin: <THEME_MSPACE_1> {},
             width: Fill, height: Fit
         }
+
 
         // Label
         draw_text: {
@@ -1265,11 +1247,6 @@ live_design!{
                     apply:
                         {
                             draw_slider: {drag: 0.0},
-                            text_input: {
-                                draw_selection: { hover: 0.0},
-                                draw_bg: { hover: 0.0},
-                                draw_text: { hover: 0.0},
-                            }
                         }
                 }
                 on = {
@@ -1277,11 +1254,6 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: {drag: 1.0},
-                        text_input: {
-                            draw_selection: { hover: 0.0},
-                            draw_bg: { hover: 0.0},
-                            draw_text: { hover: 0.0},
-                        }
                     }
                 }
             }
@@ -1589,11 +1561,6 @@ live_design!{
                     apply:
                         {
                             draw_slider: {drag: 0.0},
-                            text_input: {
-                                draw_selection: { hover: 0.0},
-                                draw_bg: { hover: 0.0},
-                                draw_text: { hover: 0.0},
-                            }
                         }
                 }
                 on = {
@@ -1601,11 +1568,6 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: {drag: 1.0},
-                        text_input: {
-                            draw_selection: { hover: 0.0},
-                            draw_bg: { hover: 0.0},
-                            draw_text: { hover: 0.0},
-                        }
                     }
                 }
             }
