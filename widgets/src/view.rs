@@ -9,7 +9,7 @@ live_design! {
 
 // maybe we should put an enum on the bools like
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, Clone, Copy)]
 #[live_ignore]
 pub enum ViewOptimize {
     #[pick]
