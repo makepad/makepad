@@ -714,108 +714,6 @@ pub struct CxFont {
     pub owned_font_face: crate::owned_font_face::OwnedFace,
     pub glyph_ids: Box<[Option<GlyphId>]>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
-    pub shape_cache: OldShapeCache,
-}
-
-impl CxFont {
-    pub fn shape(&mut self, direction: Direction, string: &str) -> &GlyphBuffer {
-        if !self.shape_cache.contains(direction, string) {
-            let mut buffer = UnicodeBuffer::new();
-            buffer.set_direction(direction);
-            buffer.push_str(string);
-            let buffer = self.owned_font_face.with_ref(|face| {
-                makepad_rustybuzz::shape(face, &[], buffer)
-            });
-            self.shape_cache.insert(direction, Rc::from(string), buffer);
-        }
-        self.shape_cache.get(direction, string).unwrap()
-    }
-}
-
-#[derive(Debug)]
-pub struct OldShapeCache {
-    pub keys: VecDeque<(Direction, Rc<str>)>,
-    pub buffers: FxHashMap<(Direction, Rc<str>), GlyphBuffer>,
-}
-
-impl OldShapeCache {
-    const MAX_SIZE: usize = 4096;
-
-    pub fn new() -> Self {
-        Self {
-            keys: VecDeque::new(),
-            buffers: FxHashMap::default(),
-        }
-    }
-
-    pub fn contains(&self, direction: Direction, string: &str) -> bool {
-        self.buffers.contains_key(&(direction, string) as &(dyn OldShapeKey))
-    }
-
-    pub fn get(&mut self, direction: Direction, string: &str) -> Option<&GlyphBuffer> {
-        self.buffers.get(&(direction, string) as &(dyn OldShapeKey))
-    }
-
-    pub fn insert(&mut self, direction: Direction, string: Rc<str>, buffer: GlyphBuffer) {
-        if self.keys.len() == Self::MAX_SIZE {
-            let (direction, string) = self.keys.pop_front().unwrap();
-            self.buffers.remove(&(direction, string));
-        }
-        self.keys.push_back((direction, string.clone()));
-        self.buffers.insert((direction, string), buffer);
-    }
-}
-
-pub trait OldShapeKey {
-    fn direction(&self) -> Direction;
-    fn string(&self) -> &str;
-}
-
-impl<'a> Borrow<dyn OldShapeKey + 'a> for (Direction, Rc<str>) {
-    fn borrow(&self) -> &(dyn OldShapeKey + 'a) {
-        self
-    }
-}
-
-impl Eq for dyn OldShapeKey + '_ {}
-
-impl Hash for dyn OldShapeKey + '_ {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.direction().hash(hasher);
-        self.string().hash(hasher);
-    }
-}
-
-impl PartialEq for dyn OldShapeKey + '_ {
-    fn eq(&self, other: &Self) -> bool {
-        if self.direction() != other.direction() {
-            return false;
-        }
-        if self.string() != other.string() {
-            return false;
-        }
-        true
-    }
-}
-
-impl OldShapeKey for (Direction, &str) {
-    fn direction(&self) -> Direction {
-        self.0
-    }
-
-    fn string(&self) -> &str {
-        self.1
-    }
-}
-
-impl OldShapeKey for (Direction, Rc<str>) {
-    fn direction(&self) -> Direction {
-        self.0
-    }
-
-    fn string(&self) -> &str {
-        &self.1
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -846,7 +744,6 @@ impl CxFont {
             owned_font_face,
             glyph_ids: vec![None; 0x10FFFF].into_boxed_slice(),
             atlas_pages: Vec::new(),
-            shape_cache: OldShapeCache::new(),
         })
     }
 
