@@ -181,7 +181,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-                    self.handle_action_receiver();
+                    if SignalToUI::check_and_clear_action_signal() {
+                        self.handle_action_receiver();
+                    }
+
                 }
                 else {
                     self.call_event_handler(&Event::Timer(e))

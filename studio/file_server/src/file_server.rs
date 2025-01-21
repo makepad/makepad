@@ -179,8 +179,7 @@ impl FileServerConnection {
         let notification_sender = self._notification_sender.clone();
         let stop_observation = self.stop_observation.clone();
         thread::spawn(move || {
-            let stop = *stop_observation.lock().unwrap();
-            while !stop{
+            while !*stop_observation.lock().unwrap(){
                 if let Ok(mut files) = open_files.lock(){
                     for (path, file_id, last_content) in files.iter_mut() {
                         let full_path = {
