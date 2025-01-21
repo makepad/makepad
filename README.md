@@ -289,6 +289,26 @@ cargo makepad wasm install-toolchain
 cargo makepad wasm run -p makepad-example-simple --release
 ```
 
+### If you need `wasm-bindgen` compatibility
+
+By default, Makepad uses it's own bridge. Web crates outside of Makepad
+usually depend on `wasm-bindgen` for web integration so they will fail
+at runtime if added to your project.
+
+However, we can build with opt-in `wasm-bindgen` support to solve this
+issue.
+
+To enable wasm-bindgen integration you should build like this:
+
+```bash
+# Ensure wasm-bindgen CLI is installed.
+cargo install -f wasm-bindgen-cli
+
+# Run with `--bindgen` option
+cargo makepad wasm --bindgen run -p makepad-example-hello-widgets --release
+```
+
+
 ---
 
 ## Makepad Commands Quick Reference
