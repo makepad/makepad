@@ -288,7 +288,7 @@ impl DrawText {
         let mut font_atlas = font_atlas_rc.0.borrow_mut();
         let font_atlas = &mut *font_atlas;
 
-        if font_atlas.fonts[font_id].is_none() {
+        if font_atlas.font_loader[font_id].is_none() {
             return DVec2::default();
         }
 
@@ -296,7 +296,7 @@ impl DrawText {
         let line_height = compute_line_height(font_ids, font_size, font_atlas) * self.text_style.line_scale;
         let line_spacing = line_height * self.text_style.line_spacing;
 
-        let font = font_atlas.fonts[font_id].as_mut().unwrap();
+        let font = font_atlas.font_loader[font_id].as_mut().unwrap();
         let slot = font.owned_font_face.with_ref( | face | face.glyph_index('!').map_or(0, | id | id.0 as usize));
         let glyph = font.get_glyph_by_id(slot).unwrap();
 
@@ -1068,7 +1068,7 @@ impl DrawText {
 
         let mut position = position;
         for glyph_info in glyph_infos {
-            let font = font_atlas.fonts[glyph_info.font_id].as_mut().unwrap();
+            let font = font_atlas.font_loader[glyph_info.font_id].as_mut().unwrap();
             let units_per_em = font.ttf_font.units_per_em;
             let ascender = units_to_lpxs(font.ttf_font.ascender, units_per_em, font_size) * self.text_style.line_scale;
 
@@ -1407,7 +1407,7 @@ fn compute_line_height(
     font_atlas: &CxFontAtlas,
 ) -> f64 {
     font_ids.iter().map(|&font_id| {
-        let font = font_atlas.fonts[font_id].as_ref().unwrap();
+        let font = font_atlas.font_loader[font_id].as_ref().unwrap();
         let units_per_em = font.ttf_font.units_per_em;
         let line_height = font.ttf_font.ascender - font.ttf_font.descender;
         units_to_lpxs(line_height, units_per_em, font_size)
@@ -1420,7 +1420,7 @@ fn compute_glyph_width(
     font_size: f64,
     font_atlas: &mut CxFontAtlas,
 ) -> f64 {
-    let font = font_atlas.fonts[font_id].as_mut().unwrap();
+    let font = font_atlas.font_loader[font_id].as_mut().unwrap();
     let units_per_em = font.ttf_font.units_per_em;
     let glyph_width = font.owned_font_face.with_ref(|face| {
         let glyph = font.ttf_font.get_glyph_by_id(face, glyph_id as usize).unwrap();
