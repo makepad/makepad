@@ -22,14 +22,23 @@ use {
 pub struct SignalToUI(Arc<AtomicBool>);
 
 pub (crate) static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
+pub (crate) static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
 
 impl SignalToUI {
     pub fn set_ui_signal() {
         UI_SIGNAL.store(true, Ordering::SeqCst)
     }
     
+    pub fn set_action_signal() {
+        ACTION_SIGNAL.store(true, Ordering::SeqCst)
+    }
+    
     pub (crate) fn check_and_clear_ui_signal() -> bool {
         UI_SIGNAL.swap(false, Ordering::SeqCst)
+    }
+    
+    pub (crate) fn check_and_clear_action_signal() -> bool {
+        ACTION_SIGNAL.swap(false, Ordering::SeqCst)
     }
     
     pub fn new() -> Self {
