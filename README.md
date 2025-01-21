@@ -300,11 +300,29 @@ issue.
 
 To enable wasm-bindgen integration you should build like this:
 
-```bash
-# Ensure wasm-bindgen CLI is installed.
-cargo install -f wasm-bindgen-cli
+1. Ensure wasm-bindgen CLI is installed.
 
-# Run with `--bindgen` option
+```bash
+cargo install -f wasm-bindgen-cli
+```
+
+2. Add `wasm-bindgen` dependency to your `Cargo.toml` file.
+
+```bash
+cargo add wasm-bindgen
+```
+
+3. Ensure you are using the crate somewhere like in `main.rs`.
+
+```rust
+use wasm_bindgen::prelude::*;
+```
+
+> **Note:** If you forget this, you may see a compile error like `failed to find __wbindgen_malloc`.
+
+4. Now, run with the `--bindgen` option.
+
+```bash
 cargo makepad wasm --bindgen run -p makepad-example-hello-widgets --release
 ```
 
