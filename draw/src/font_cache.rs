@@ -176,8 +176,8 @@ impl Key {
         Self(
             LiveId::empty()
                 .bytes_append(font_path.as_bytes())
-                .bytes_append(&font_size.to_ne_bytes())
-                .bytes_append(&glyph_id.to_ne_bytes()),
+                .bytes_append(&glyph_id.to_ne_bytes())
+                .bytes_append(&font_size.to_ne_bytes()),
         )
     }
 }
