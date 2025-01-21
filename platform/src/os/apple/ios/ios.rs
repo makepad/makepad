@@ -317,7 +317,7 @@ impl Cx {
                 CxOsOp::SelectFileDialog(_) => todo!(),
                 CxOsOp::SaveFolderDialog(_) => todo!(),
                 CxOsOp::SelectFolderDialog(_) => todo!(),
-
+                CxOsOp::ShowInDock(_) =>{}
             }
         }
     }
