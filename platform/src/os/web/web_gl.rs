@@ -55,6 +55,10 @@ impl Cx {
                     continue;
                 }
                 
+                if sh.mapping.uses_time {
+                    self.demo_time_repaint = true;
+                }
+                
                 if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
                     if draw_item.os.inst_vb_id.is_none() {
@@ -355,9 +359,7 @@ impl Cx {
                 }
                 if cx_shader.os_shader_id.is_none() {
                     let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
-                    if cx_shader.mapping.uses_time {
-                        self.demo_time_repaint = true;
-                    }
+                    
 
                     self.os.from_wasm(FromWasmCompileWebGLShader{
                         shader_id: item.draw_shader_id,
