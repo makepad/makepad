@@ -506,50 +506,227 @@ live_design!{
                                 draw_slider: {label_size: 150. },
                             }
                         }
-                        <View> {
-                            width: Fill, height: Fit,
-                            flow: Down,
-                            <Rotary> {
-                                text: "Colored",
-                                draw_slider: {
-                                    val_color_a: (#FFCC00),
-                                    val_color_b: #f00,
-                                    handle_color_a: #0,
-                                    handle_color_b: #0,
-                               }
-                            }
-                            <Rotary> {
-                                text: "Solid",
-                                draw_text: {
-                                    color: #0ff;
-                                }
-                                draw_slider: {
-                                    val_color_a: #f08,
-                                    val_color_b: #f08,
-                                    handle_color_a: #FFFF,
-                                    handle_color_b: #FFF0,
-                                }
-                            }
-                            <Rotary> {
-                                text: "Solid",
-                                draw_slider: {
-                                    val_color_a: #6,
-                                    val_color_b: #6,
-                                    handle_color_a: #0,
-                                    handle_color_b: #C,
-                                }
-                            }
-                            <Rotary> { text: "min/max", min: 0., max: 100. }
-                            <Rotary> { text: "precision", precision: 20 }
-                            <Rotary> { text: "stepped", step: 0.1 }
-                            <Rotary> {
-                                text: "label_size",
-                                draw_slider: {label_size: 150. },
-                            }
-                        }
                     }
                 }
 
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <Rotary> {
+                        width: 100, height: 100,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 90.,
+                            width: 20.
+                            padding: 2.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 100, height: 200,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 60.,
+                            width: 10.,
+                            padding: 4.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 200, height: 100,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 75.,
+                            width: 20.
+                            padding: 4,
+                        }
+                    }
+                    <Rotary> {
+                        width: 200, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 90.,
+                            width: 20.
+                            padding: 4.,
+                        }
+                    }
+                    <Rotary> {
+                        width: Fill, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 60.,
+                            width: 20.
+                            padding: 2.,
+                        }
+                    }
+                }
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <Rotary> {
+                        width: 100., height: 100.,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 0.,
+                            width: 20.
+                            padding: 0.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 120., height: 120.,
+                        text: "Solid",
+                        draw_text: {
+                            color: #0ff;
+                        }
+                        draw_slider: {
+                            val_color_a: #ff0,
+                            val_color_b: #f00,
+                            handle_color: #f,
+                            gap: 180.,
+                            width: 20.,
+                            padding: 2.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 120., height: 120.,
+                        text: "Solid",
+                        draw_slider: {
+                            val_color_a: #0ff,
+                            val_color_b: #ff0,
+                            handle_color: #f,
+                            gap: 90.,
+                            width: 20.,
+                            padding: 2.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 100., height: 90.,
+                        text: "Solid",
+                        draw_slider: {
+                            gap: 90.,
+                            padding: 10.,
+                            width: 20.,
+                            padding: 2.
+                            handle_color: #f0f,
+                        }
+                    }
+                    <Rotary> {
+                        width: 150., height: 150.,
+                        text: "Solid",
+                        draw_slider: {
+                            val_color_a: #0ff,
+                            val_color_b: #0ff,
+                            gap: 180.,
+                            padding: 4.,
+                            width: 6.,
+                        }
+                    }
+                    <Rotary> {
+                        width: 150., height: 150.,
+                        text: "Solid",
+                        draw_slider: {
+                            gap: 0.,
+                            width: 10.0,
+                            padding: 4.,
+                        }
+                    }
+                }
+                
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <RotaryFlat> {
+                        width: 100., height: 100.,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 0.,
+                            width: 20.
+                            padding: 0.,
+                        }
+                    }
+                    <RotaryFlat> {
+                        width: 120., height: 120.,
+                        text: "Solid",
+                        draw_text: {
+                            color: #0ff;
+                        }
+                        draw_slider: {
+                            val_color_a: #ff0,
+                            val_color_b: #f00,
+                            handle_color: #f,
+                            gap: 180.,
+                            width: 20.,
+                            padding: 2.,
+                        }
+                    }
+                    <RotaryFlat> {
+                        width: 120., height: 120.,
+                        text: "Solid",
+                        draw_slider: {
+                            val_color_a: #0ff,
+                            val_color_b: #ff0,
+                            handle_color: #f,
+                            gap: 90.,
+                            width: 20.,
+                            padding: 2.,
+                        }
+                    }
+                    <RotaryFlat> {
+                        width: 100., height: 90.,
+                        text: "Solid",
+                        draw_slider: {
+                            gap: 90.,
+                            padding: 10.,
+                            width: 20.,
+                            handle_color: #f0f,
+                        }
+                    }
+                    <RotaryFlat> {
+                        width: 150., height: 150.,
+                        text: "Solid",
+                        draw_slider: {
+                            val_color_a: #0ff,
+                            val_color_b: #0ff,
+                            gap: 180.,
+                            padding: 4.,
+                            width: 6.,
+                        }
+                    }
+                    <RotaryFlat> {
+                        width: Fill, height: 150.,
+                        text: "Solid",
+                        draw_slider: {
+                            val_color_a: #8;
+                            val_color_b: #ff0;
+                            gap: 75.,
+                            width: 40.0,
+                            padding: 4.,
+                        }
+                    }
+                }
+                <View> {
+                    width: Fill, height: Fit,
+                    flow: Right,
+                    <RotarySolid> {
+                        width: 100, height: 100,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 90.,
+                        }
+                    }
+                    <RotarySolid> {
+                        width: 200, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 180.,
+                        }
+                    }
+                    <RotarySolid> {
+                        width: Fill, height: 150,
+                        text: "Colored",
+                        draw_slider: {
+                            gap: 60.,
+                        }
+                    }
+                }
                 <ZooHeader> {
                     title = {text:"<DropDown>"}
                     title = {text:"<DropDown>"}
@@ -964,225 +1141,225 @@ live_design!{
                 }
 
                 // TODO: SHOW
-                <ZooHeader> {
-                    title = {text:"<Dock>"}
-                    <ZooDesc> {text:"Dock"}
-                    <CachedRoundedView> {
-                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
-                        width: Fill, height: Fit,
-                            <View> {
-                                height: Fit, width: Fill
-                                show_bg: true,
-                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-                                <Dock> {
-                                    height: 500., width: Fill
+                // <ZooHeader> {
+                //     title = {text:"<Dock>"}
+                //     <ZooDesc> {text:"Dock"}
+                //     <CachedRoundedView> {
+                //         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                //         width: Fill, height: Fit,
+                //             <View> {
+                //                 height: Fit, width: Fill
+                //                 show_bg: true,
+                //                 draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
+                //                 <Dock> {
+                //                     height: 500., width: Fill
 
-                                    root = Splitter {
-                                        axis: Horizontal,
-                                        align: FromA(300.0),
-                                        a: tab_set_1,
-                                        b: tab_set_2
-                                    }
+                //                     root = Splitter {
+                //                         axis: Horizontal,
+                //                         align: FromA(300.0),
+                //                         a: tab_set_1,
+                //                         b: tab_set_2
+                //                     }
 
-                                    tab_set_1 = Tabs {
-                                        tabs: [tab_a, tab_b],
-                                        selected: 1
-                                    }
+                //                     tab_set_1 = Tabs {
+                //                         tabs: [tab_a, tab_b],
+                //                         selected: 1
+                //                     }
 
-                                    tab_set_2 = Tabs {
-                                        tabs: [tab_c, tab_d, tab_e, tab_f],
-                                        selected: 1
-                                    }
+                //                     tab_set_2 = Tabs {
+                //                         tabs: [tab_c, tab_d, tab_e, tab_f],
+                //                         selected: 1
+                //                     }
 
-                                    tab_a = Tab {
-                                        name: "Tab A"
-                                        template: PermanentTab,
-                                        kind: Container_A
-                                    }
+                //                     tab_a = Tab {
+                //                         name: "Tab A"
+                //                         template: PermanentTab,
+                //                         kind: Container_A
+                //                     }
 
-                                    tab_b = Tab {
-                                        name: "Tab B"
-                                        template: PermanentTab,
-                                        kind: Container_B
-                                    }
+                //                     tab_b = Tab {
+                //                         name: "Tab B"
+                //                         template: PermanentTab,
+                //                         kind: Container_B
+                //                     }
 
-                                    tab_c = Tab {
-                                        name: "Tab C"
-                                        template: CloseableTab,
-                                        kind: Container_C
-                                    }
+                //                     tab_c = Tab {
+                //                         name: "Tab C"
+                //                         template: CloseableTab,
+                //                         kind: Container_C
+                //                     }
 
-                                    tab_d = Tab {
-                                        name: "Tab D"
-                                        template: CloseableTab,
-                                        kind: Container_D
-                                    }
+                //                     tab_d = Tab {
+                //                         name: "Tab D"
+                //                         template: CloseableTab,
+                //                         kind: Container_D
+                //                     }
 
-                                    tab_e = Tab {
-                                        name: "Tab E"
-                                        template: CloseableTab,
-                                        kind: Container_E
-                                    }
+                //                     tab_e = Tab {
+                //                         name: "Tab E"
+                //                         template: CloseableTab,
+                //                         kind: Container_E
+                //                     }
 
-                                    tab_f = Tab {
-                                        name: "Tab F"
-                                        template: CloseableTab,
-                                        kind: Container_F
-                                    }
+                //                     tab_f = Tab {
+                //                         name: "Tab F"
+                //                         template: CloseableTab,
+                //                         kind: Container_F
+                //                     }
 
-                                    Container_A = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        <Label> {text: "Hallo"}
-                                    }
+                //                     Container_A = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         <Label> {text: "Hallo"}
+                //                     }
 
-                                    Container_B = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        <Label> {text: "Kuckuck"}
-                                    }
+                //                     Container_B = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         <Label> {text: "Kuckuck"}
+                //                     }
 
-                                    Container_C = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        <Label> {text: "Ahoy"}
-                                    }
+                //                     Container_C = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         <Label> {text: "Ahoy"}
+                //                     }
 
-                                    Container_D = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        <Label> {text: "Hi"}
-                                    }
+                //                     Container_D = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         <Label> {text: "Hi"}
+                //                     }
 
-                                    Container_E = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        <Label> {text: "Ahoy"}
-                                    }
+                //                     Container_E = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         <Label> {text: "Ahoy"}
+                //                     }
 
-                                    Container_F = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        <Label> {text: "Hi"}
-                                    }
-                                }
+                //                     Container_F = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         <Label> {text: "Hi"}
+                //                     }
+                //                 }
 
-                            }
-                        }
-                    }
+                //             }
+                //         }
+                //     }
 
-                <ZooHeader> {
-                    title = {text:"<DockMinimal>"}
-                    <ZooDesc> {text:"DockMinimal"}
-                    <CachedRoundedView> {
-                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
-                        width: Fill, height: Fit,
-                            <View> {
-                                height: Fit, width: Fill
-                                show_bg: true,
-                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-                                <DockMinimal> {
-                                    height: 500., width: Fill
+                // <ZooHeader> {
+                //     title = {text:"<DockMinimal>"}
+                //     <ZooDesc> {text:"DockMinimal"}
+                //     <CachedRoundedView> {
+                //         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
+                //         width: Fill, height: Fit,
+                //             <View> {
+                //                 height: Fit, width: Fill
+                //                 show_bg: true,
+                //                 draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
+                //                 <DockMinimal> {
+                //                     height: 500., width: Fill
 
-                                    root = Splitter {
-                                        axis: Horizontal,
-                                        align: FromA(300.0),
-                                        a: tab_set_1,
-                                        b: tab_set_2
-                                    }
+                //                     root = Splitter {
+                //                         axis: Horizontal,
+                //                         align: FromA(300.0),
+                //                         a: tab_set_1,
+                //                         b: tab_set_2
+                //                     }
 
-                                    tab_set_1 = Tabs {
-                                        tabs: [tab_a, tab_b],
-                                        selected: 1
-                                    }
+                //                     tab_set_1 = Tabs {
+                //                         tabs: [tab_a, tab_b],
+                //                         selected: 1
+                //                     }
 
-                                    tab_set_2 = Tabs {
-                                        tabs: [tab_c, tab_d, tab_e, tab_f],
-                                        selected: 1
-                                    }
+                //                     tab_set_2 = Tabs {
+                //                         tabs: [tab_c, tab_d, tab_e, tab_f],
+                //                         selected: 1
+                //                     }
 
-                                    tab_a = Tab {
-                                        name: "Tab A"
-                                        template: CloseableTab,
-                                        kind: Container_A
-                                    }
+                //                     tab_a = Tab {
+                //                         name: "Tab A"
+                //                         template: CloseableTab,
+                //                         kind: Container_A
+                //                     }
 
-                                    tab_b = Tab {
-                                        name: "Tab B"
-                                        template: PermanentTab,
-                                        kind: Container_B
-                                    }
+                //                     tab_b = Tab {
+                //                         name: "Tab B"
+                //                         template: PermanentTab,
+                //                         kind: Container_B
+                //                     }
 
-                                    tab_c = Tab {
-                                        name: "Tab C"
-                                        template: CloseableTab,
-                                        kind: Container_C
-                                    }
+                //                     tab_c = Tab {
+                //                         name: "Tab C"
+                //                         template: CloseableTab,
+                //                         kind: Container_C
+                //                     }
 
-                                    tab_d = Tab {
-                                        name: "Tab D"
-                                        template: CloseableTab,
-                                        kind: Container_D
-                                    }
+                //                     tab_d = Tab {
+                //                         name: "Tab D"
+                //                         template: CloseableTab,
+                //                         kind: Container_D
+                //                     }
 
-                                    tab_e = Tab {
-                                        name: "Tab E"
-                                        template: CloseableTab,
-                                        kind: Container_E
-                                    }
+                //                     tab_e = Tab {
+                //                         name: "Tab E"
+                //                         template: CloseableTab,
+                //                         kind: Container_E
+                //                     }
 
-                                    tab_f = Tab {
-                                        name: "Tab F"
-                                        template: CloseableTab,
-                                        kind: Container_F
-                                    }
+                //                     tab_f = Tab {
+                //                         name: "Tab F"
+                //                         template: CloseableTab,
+                //                         kind: Container_F
+                //                     }
 
-                                    Container_A = <RectView> {
-                                        height: Fill, width: Fill
-                                        padding: 10.,
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        <Label> {text: "Hallo"}
-                                    }
+                //                     Container_A = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         padding: 10.,
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         <Label> {text: "Hallo"}
+                //                     }
 
-                                    Container_B = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Kuckuck"}
-                                    }
+                //                     Container_B = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Kuckuck"}
+                //                     }
 
-                                    Container_C = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Ahoy"}
-                                    }
+                //                     Container_C = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Ahoy"}
+                //                     }
 
-                                    Container_D = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Hi"}
-                                    }
+                //                     Container_D = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Hi"}
+                //                     }
 
-                                    Container_E = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Ahoy"}
-                                    }
+                //                     Container_E = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Ahoy"}
+                //                     }
 
-                                    Container_F = <RectView> {
-                                        height: Fill, width: Fill
-                                        draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                                        padding: 10.,
-                                        <Label> {text: "Hi"}
-                                    }
-                                }
+                //                     Container_F = <RectView> {
+                //                         height: Fill, width: Fill
+                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
+                //                         padding: 10.,
+                //                         <Label> {text: "Hi"}
+                //                     }
+                //                 }
 
-                            }
-                        }
-                    }
+                //             }
+                //         }
+                //     }
 
                 <ZooHeader> {
                     title = {text:"Docs tests"}
