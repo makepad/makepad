@@ -185,6 +185,7 @@ impl Cx {
                 live_id!(ToWasmSignal) =>{
                     self.handle_media_signals();
                     self.call_event_handler(&Event::Signal);
+                    self.handle_action_receiver();
                 }
                 
                 live_id!(ToWasmTimerFired) => {
