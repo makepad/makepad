@@ -368,7 +368,6 @@ impl Event{
         match self{
             Self::MouseDown(_)|
             Self::MouseMove(_)|
-            Self::MouseUp(_)|
             Self::TouchUpdate(_)|
             Self::Scroll(_)=>true,
             _=>false
