@@ -1,7 +1,7 @@
 use {
     crate::{
-        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{self, CxFontAtlas, CxFontsAtlasTodo, CxShapeCache, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk},
-        font_loader::FontLoader,
+        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{self, CxFontAtlas, CxFontsAtlasTodo, TextShaper, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk},
+        font_loader::FontLoader, text_shaper::GlyphInfo,
     },
     makepad_rustybuzz::Direction,
     unicode_segmentation::UnicodeSegmentation,
@@ -384,15 +384,15 @@ impl DrawText {
         let mut font_loader_ref = font_loader_rc.borrow_mut();
         let font_loader = &mut *font_loader_ref;
 
+        // Borrow the text shaper from the context.
+        let text_shaper_rc = cx.text_shaper.clone();
+        let mut text_shaper_ref = text_shaper_rc.borrow_mut();
+        let text_shaper = &mut *text_shaper_ref;
+
         // Borrow the font atlas from the context.
         let font_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
         let font_atlas = &mut *font_atlas_ref;
-
-        // Borrow the shape cache from the context.
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
-        let shape_cache = &mut *shape_cache_ref;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -422,7 +422,7 @@ impl DrawText {
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             |position, index, event, _| {
                 match event {
                     LayoutEvent::Newline { .. } => {
@@ -446,8 +446,9 @@ impl DrawText {
             });
         }
 
-        drop(shape_cache_ref);
+        drop(text_shaper_ref);
         drop(font_atlas_ref);
+        drop(font_loader_ref);
 
         if let Some(rect) = rects.last_mut() {
             let end_position = self.index_affinity_to_position(
@@ -518,9 +519,9 @@ impl DrawText {
         let font_atlas = &mut *font_atlas_ref;
 
         // Borrow the shape cache from the context.
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
-        let shape_cache = &mut *shape_cache_ref;
+        let text_shaper_rc = cx.text_shaper.clone();
+        let mut text_shaper_ref = text_shaper_rc.borrow_mut();
+        let text_shaper = &mut *text_shaper_ref;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -551,7 +552,7 @@ impl DrawText {
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             |position, start, event, font_loader| {
                 match event {
                     LayoutEvent::Chunk {
@@ -643,9 +644,9 @@ impl DrawText {
         let font_atlas = &mut *font_atlas_ref;
 
         // Borrow the shape cache from the context.
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
-        let shape_cache = &mut *shape_cache_ref;
+        let text_shaper_rc = cx.text_shaper.clone();
+        let mut text_shaper_ref = text_shaper_rc.borrow_mut();
+        let text_shaper = &mut *text_shaper_ref;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -675,7 +676,7 @@ impl DrawText {
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             |position, start, event, font_loader| {
                 match event {
                     LayoutEvent::Chunk {
@@ -744,9 +745,9 @@ impl DrawText {
         let font_loader = &mut *font_loader;
 
         // Borrow the shape cache from the context.
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache_ref = shape_cache_rc.0.borrow_mut();
-        let shape_cache = &mut *shape_cache_ref;
+        let text_shaper_rc = cx.text_shaper.clone();
+        let mut text_shaper_ref = text_shaper_rc.borrow_mut();
+        let text_shaper = &mut *text_shaper_ref;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -765,7 +766,7 @@ impl DrawText {
             line_spacing,
             None,
             font_loader,
-            shape_cache,
+            text_shaper,
             |position, _, event, font_loader| {
                 if let LayoutEvent::Chunk {
                     glyph_infos,
@@ -825,9 +826,9 @@ impl DrawText {
         let font_atlas = &mut *font_atlas;
 
         // Borrow the shape cache from the context.
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache = shape_cache_rc.0.borrow_mut();
-        let shape_cache = &mut *shape_cache;
+        let text_shaper_rc = cx.text_shaper.clone();
+        let mut text_shaper = text_shaper_rc.borrow_mut();
+        let text_shaper = &mut *text_shaper;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -866,7 +867,7 @@ impl DrawText {
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             |position, _, event, _| {
                 if let LayoutEvent::Chunk {
                     width,
@@ -911,7 +912,7 @@ impl DrawText {
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             |position, _, event, font_loader| {
                 if let LayoutEvent::Chunk {
                     glyph_infos,
@@ -984,9 +985,9 @@ impl DrawText {
         let font_atlas = &mut *font_atlas;
 
         // Borrow the shape cache from the context.
-        let shape_cache_rc = cx.shape_cache_rc.clone();
-        let mut shape_cache = shape_cache_rc.0.borrow_mut();
-        let shape_cache = &mut *shape_cache;
+        let text_shaper_rc = cx.text_shaper.clone();
+        let mut text_shaper = text_shaper_rc.borrow_mut();
+        let text_shaper = &mut *text_shaper;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -1015,7 +1016,7 @@ impl DrawText {
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             |_, _, event, font_loader| {
                 match event {
                     LayoutEvent::Chunk {
@@ -1076,7 +1077,7 @@ impl DrawText {
         cx: &mut Cx2d,
         position: DVec2,
         font_size: f64,
-        glyph_infos: &[font_atlas::GlyphInfo],
+        glyph_infos: &[GlyphInfo],
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
     ) {
@@ -1230,7 +1231,7 @@ fn layout_text(
     line_spacing: f64,
     wrap_width: Option<f64>,
     font_loader: &mut FontLoader,
-    shape_cache: &mut CxShapeCache,
+    text_shaper: &mut TextShaper,
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut FontLoader) -> bool,
 ) -> bool {
     for (index, line) in lines(text).enumerate() {
@@ -1254,7 +1255,7 @@ fn layout_text(
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             &mut f,
         ) {
             return true;
@@ -1274,7 +1275,7 @@ fn layout_line(
     line_spacing: f64,
     wrap_width: Option<f64>,
     font_loader: &mut FontLoader,
-    shape_cache: &mut CxShapeCache,
+    text_shaper: &mut TextShaper,
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut FontLoader) -> bool,
 ) -> bool {
     let line = &text[line_start..line_end];
@@ -1293,7 +1294,7 @@ fn layout_line(
             line_spacing,
             wrap_width,
             font_loader,
-            shape_cache,
+            text_shaper,
             &mut f,
         ) {
             return true;
@@ -1314,11 +1315,11 @@ fn layout_word(
     line_spacing: f64,
     wrap_width: Option<f64>,
     font_loader: &mut FontLoader,
-    shape_cache: &mut CxShapeCache,
+    text_shaper: &mut TextShaper,
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut FontLoader) -> bool,
 ) -> bool {
     let word = &text[word_start..word_end];
-    let glyph_infos = shape(is_secret, word, font_ids, font_loader, shape_cache);
+    let glyph_infos = shape(is_secret, word, font_ids, font_loader, text_shaper);
     let width: f64 = glyph_infos.iter().map(|glyph_info| {
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_loader)
     }).sum();
@@ -1345,7 +1346,7 @@ fn layout_word(
                 line_spacing,
                 wrap_width,
                 font_loader,
-                shape_cache,
+                text_shaper,
                 &mut f,
             ) {
                 return true;
@@ -1376,11 +1377,11 @@ fn layout_grapheme(
     line_spacing: f64,
     wrap_width: Option<f64>,
     font_loader: &mut FontLoader,
-    shape_cache: &mut CxShapeCache,
+    text_shaper: &mut TextShaper,
     mut f: impl FnMut(DVec2, usize, LayoutEvent, &mut FontLoader) -> bool,
 ) -> bool {
     let grapheme = &text[grapheme_start..grapheme_end];
-    let glyph_infos = shape(is_secret, grapheme, font_ids, font_loader, shape_cache);
+    let glyph_infos = shape(is_secret, grapheme, font_ids, font_loader, text_shaper);
     let width: f64 = glyph_infos.iter().map(|glyph_info| {
         compute_glyph_width(glyph_info.font_id, glyph_info.glyph_id, font_size, font_loader)
     }).sum();
@@ -1406,7 +1407,7 @@ enum LayoutEvent<'a> {
     Chunk {
         width: f64,
         string: &'a str,
-        glyph_infos: &'a [font_atlas::GlyphInfo],
+        glyph_infos: &'a [GlyphInfo],
     },
     Newline {
         is_soft: bool
@@ -1490,13 +1491,12 @@ fn shape<'a>(
     string: &str,
     font_ids: &[usize],
     font_loader: &mut FontLoader,
-    shape_cache: &'a mut CxShapeCache,
-) -> Cow<'a, [font_atlas::GlyphInfo]> {
-    shape_cache.shape(
+    text_shaper: &'a mut TextShaper,
+) -> &'a [GlyphInfo] {
+    text_shaper.get_or_shape(
+        font_loader,
         is_secret,
-        Direction::LeftToRight,
         string,
         font_ids,
-        font_loader
     )
 }
