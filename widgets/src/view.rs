@@ -638,9 +638,9 @@ impl Widget for View {
             self.find_cache.borrow_mut().clear();
         }
         
-        if !self.visible && event.requires_visibility(){
-            return
-        }
+        //if !self.visible && event.requires_visibility(){
+        //    return
+        //}
 
         match &self.event_order {
             EventOrder::Up => {
