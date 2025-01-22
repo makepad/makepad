@@ -975,12 +975,21 @@ impl Widget for Dock {
                 }
             };
         }
-        for (id,(_templ_id, item)) in self.items.iter_mut() {
-            scope.with_id(*id, |scope|{
-               item.handle_event(cx, event, scope);
-            });
+        if event.requires_visibility(){
+            for (id, item) in self.visible_items(){
+                scope.with_id(id, |scope|{
+                    item.handle_event(cx, event, scope);
+                });
+            }
         }
-
+        else{
+            for (id,(_templ_id, item)) in self.items.iter_mut() {
+                scope.with_id(*id, |scope|{
+                item.handle_event(cx, event, scope);
+                });
+            }
+        }
+    
         if let Event::DragEnd = event {
             // end our possible dragstate
             self.drop_state = None;
