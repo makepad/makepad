@@ -239,15 +239,7 @@ impl std::ops::IndexMut<usize> for CxDrawItems {
 
 impl CxDrawItems{
     pub fn len(&self)->usize{self.used}
-    pub fn clear(&mut self,reset:&mut Vec<DrawListId>){
-        for i in 0..self.used{
-            if let CxDrawKind::SubList(id) = &self.buffer[i].kind{
-                reset.push(*id);
-            }
-        }
-        self.used = 0
-    }
-    
+    pub fn clear(&mut self){self.used = 0}
     pub fn push_item(&mut self, redraw_id: u64, kind:CxDrawKind)->&mut CxDrawItem{
         let draw_item_id = self.used;
         if self.used >= self.buffer.len() {
@@ -392,9 +384,9 @@ impl CxDrawList {
         )
     }
     
-    pub fn clear_draw_items(&mut self, redraw_id: u64, reset:&mut Vec<DrawListId>) {
+    pub fn clear_draw_items(&mut self, redraw_id: u64) {
         self.redraw_id = redraw_id;
-        self.draw_items.clear(reset);
+        self.draw_items.clear();
         self.rect_areas.clear();
         self.find_appendable_draw_shader_id.clear();
     }
