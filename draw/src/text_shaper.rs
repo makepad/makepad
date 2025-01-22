@@ -1,13 +1,13 @@
 use {
-    crate::font_loader::{FontLoader, FontId},
+    crate::font_loader::{FontId, FontLoader},
     makepad_rustybuzz::UnicodeBuffer,
-    unicode_segmentation::UnicodeSegmentation,
     std::{
         borrow::Borrow,
         collections::{HashMap, VecDeque},
         hash::{Hash, Hasher},
         rc::Rc,
     },
+    unicode_segmentation::UnicodeSegmentation,
 };
 
 const MAX_CACHE_SIZE: usize = 4096;
@@ -84,13 +84,13 @@ impl TextShaper {
         }) else {
             return Vec::new();
         };
-        text.grapheme_indices(true).map(|(index, _)| {
-            GlyphInfo {
+        text.grapheme_indices(true)
+            .map(|(index, _)| GlyphInfo {
                 font_id,
                 glyph_id,
                 cluster: index,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     fn shape_no_secret(
@@ -100,13 +100,7 @@ impl TextShaper {
         font_ids: &[FontId],
     ) -> Vec<GlyphInfo> {
         let mut glyph_infos = Vec::new();
-        self.shape_no_secret_recursive(
-            font_loader,
-            text,
-            font_ids,
-            0,
-            &mut glyph_infos,
-        );
+        self.shape_no_secret_recursive(font_loader, text, font_ids, 0, &mut glyph_infos);
         glyph_infos
     }
 
@@ -118,93 +112,66 @@ impl TextShaper {
         base_cluster: usize,
         output: &mut Vec<GlyphInfo>,
     ) -> bool {
-        // Get the preferred font to be used currently.
-        let Some((&font_id, remaining_font_ids)) = font_ids.split_first() else {
-            return false;
+        let mut font_ids = font_ids;
+        let (font_id, font) = loop {
+            let Some((&font_id, remaining_font_ids)) = font_ids.split_first() else {
+                return false;
+            };
+            font_ids = remaining_font_ids;
+            if let Some(font) = &font_loader[font_id] {
+                break (font_id, font);
+            };
         };
 
-        // Verify if the font is available, and if not, try the fallback font.
-        let Some(font) = &font_loader[font_id] else {
-            return self.shape_no_secret_recursive(
-                font_loader,
-                text,
-                remaining_font_ids,
-                base_cluster,
-                output,
-            );
-        };
-
-        // Create and configure the HarfBuzz buffer.
         let mut buffer = self.buffers.pop().unwrap_or_else(|| UnicodeBuffer::new());
         buffer.push_str(text);
-
-        // Shape the text using HarfBuzz.
-        let buffer = font.owned_font_face.with_ref(|face| {
-            makepad_rustybuzz::shape(face, &[], buffer)
-        });
-
-        let infos = buffer.glyph_infos();
-
-        // Track the processed text position to avoid reprocessing characters
-        // that have already been handled through font fallback
-        let mut skip_to = 0;
-
-        let mut info_iter = infos.iter();
-        while let Some(info) = info_iter.next() {
-            // If this position has already been processed, skip it.
-            if (info.cluster as usize) < skip_to {
-                continue;
-            }
-            // Calculate the absolute cluster position.
-            let absolute_cluster = base_cluster + info.cluster as usize;
-
-            // Handle valid glyphs.
-            if info.glyph_id != 0 {
-                output.push(GlyphInfo {
-                    font_id,
-                    glyph_id: info.glyph_id as usize,
-                    cluster: absolute_cluster,
-                });
-                continue;
+        let buffer = font
+            .owned_font_face
+            .with_ref(|face| makepad_rustybuzz::shape(face, &[], buffer));
+        let glyph_infos = buffer.glyph_infos();
+        
+        let mut start_glyph = 0;
+        while start_glyph < glyph_infos.len() {
+            let start_glyph_is_missing = glyph_infos[start_glyph].glyph_id == 0;
+            let mut end_glyph = start_glyph;
+            while end_glyph < glyph_infos.len() {
+                let end_glyph_is_missing = glyph_infos[end_glyph].glyph_id == 0;
+                if start_glyph_is_missing != end_glyph_is_missing {
+                    break;
+                }
+                end_glyph += 1;
             }
 
-            // Handle missing glyphs.
-            let start = info.cluster as usize;
-
-            // Find the position of the next valid glyph.
-            let next_cluster = {
-                let mut preview_iter = info_iter.clone();
-                let next_valid = preview_iter
-                    .find(|next| next.glyph_id != 0)
-                    .map(|next| next.cluster as usize)
-                    .unwrap_or(text.len());
-                next_valid
+            let start_cluster = glyph_infos[start_glyph].cluster.try_into().unwrap();
+            let end_cluster: usize = if end_glyph < glyph_infos.len() {
+                glyph_infos[end_glyph].cluster.try_into().unwrap()
+            } else {
+                text.len()
             };
 
-            // Allow cluster values to remain the same or increase.
             debug_assert!(
-                start <= next_cluster,
+                start_cluster <= end_cluster,
                 "HarfBuzz guarantees monotonic cluster values"
             );
 
-            // Recursively call,
-            // trying to process the current character with the fallback font.
-            if self.shape_no_secret_recursive(
+            if start_glyph_is_missing && self.shape_no_secret_recursive(
                 font_loader,
-                &text[start..next_cluster],
-                remaining_font_ids,
-                base_cluster + start,
+                &text[start_cluster..end_cluster],
+                font_ids,
+                base_cluster + start_cluster,
                 output,
             ) {
-                skip_to = next_cluster;
-                continue;
+                start_glyph = end_glyph;
             }
-
-            output.push(GlyphInfo {
-                font_id,
-                glyph_id: info.glyph_id as usize,
-                cluster: absolute_cluster,
-            });
+            while start_glyph < end_glyph {
+                let start_cluster: usize = glyph_infos[start_glyph].cluster.try_into().unwrap();
+                output.push(GlyphInfo {
+                    font_id,
+                    glyph_id: glyph_infos[start_glyph].glyph_id.try_into().unwrap(),
+                    cluster: base_cluster + start_cluster,
+                });
+                start_glyph += 1;
+            }
         }
 
         self.buffers.push(buffer.clear());
