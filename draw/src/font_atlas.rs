@@ -41,7 +41,6 @@ pub(crate) const ATLAS_HEIGHT: usize = 4096;
 
 #[derive(Debug)]
 pub struct CxFontAtlas {
-    pub font_loader: FontLoader,
     pub texture_sdf: Texture,
     pub texture_svg: Texture,
     pub clear_buffer: bool,
@@ -68,12 +67,12 @@ impl CxShapeCache {
         direction: Direction,
         text: &str,
         font_ids: &[usize],
-        font_atlas: &mut CxFontAtlas,
+        font_loader: &mut FontLoader,
     ) -> Cow<'a, [GlyphInfo]> {
         if is_secret {
-            Cow::Owned(self.shape_secret(direction, text, font_ids, font_atlas))
+            Cow::Owned(self.shape_secret(direction, text, font_ids, font_loader))
         } else {
-            Cow::Borrowed(self.shape_full(direction, text, font_ids, font_atlas))
+            Cow::Borrowed(self.shape_full(direction, text, font_ids, font_loader))
         }
     }
 
@@ -82,10 +81,10 @@ impl CxShapeCache {
         _direction: Direction,
         text: &str,
         font_ids: &[usize],
-        font_atlas: &mut CxFontAtlas,
+        font_loader: &mut FontLoader,
     ) -> Vec<GlyphInfo> {
         let Some((font_id, glyph_id)) = font_ids.iter().copied().find_map(|font_id| {
-            let font = font_atlas.font_loader[font_id].as_mut().unwrap();
+            let font = font_loader[font_id].as_mut().unwrap();
             let glyph_id = font.glyph_id('•').0 as usize;
             if glyph_id == 0 {
                 None
@@ -109,7 +108,7 @@ impl CxShapeCache {
         direction: Direction,
         text: &str,
         font_ids: &[usize],
-        font_atlas: &CxFontAtlas,
+        font_loader: &FontLoader,
     ) -> &'a [GlyphInfo] {
         if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
             let shape_key = (direction, text.into(), font_ids.into());
@@ -117,7 +116,7 @@ impl CxShapeCache {
             let _ = self.shape_full_recursive(
                 text,
                 font_ids,
-                font_atlas,
+                font_loader,
                 &mut glyph_infos,
                 0,
             );
@@ -135,7 +134,7 @@ impl CxShapeCache {
         &mut self,
         text: &str,
         font_ids: &[usize],
-        font_atlas: &CxFontAtlas,
+        font_loader: &FontLoader,
         glyph_infos: &mut Vec<GlyphInfo>,
         // Used to pass the current cluster index value after the font switch.
         base_cluster: usize,
@@ -147,11 +146,11 @@ impl CxShapeCache {
         };
 
         // Verify if the font is available, and if not, try the fallback font.
-        let Some(font) = &font_atlas.font_loader[font_id] else {
+        let Some(font) = &font_loader[font_id] else {
             return self.shape_full_recursive(
                 text,
                 remaining_font_ids,
-                font_atlas,
+                font_loader,
                 glyph_infos,
                 base_cluster
             );
@@ -215,7 +214,7 @@ impl CxShapeCache {
             if let Ok(()) = self.shape_full_recursive(
                 &text[start..next_cluster],
                 remaining_font_ids,
-                font_atlas,
+                font_loader,
                 glyph_infos,
                 base_cluster + start,
             ) {
@@ -326,7 +325,6 @@ pub struct CxFontsAtlasSdfConfig {
 impl CxFontAtlas {
     pub fn new(texture_sdf: Texture, texture_svg: Texture, os_type: &OsType) -> Self {
         Self {
-            font_loader: FontLoader::new(),
             texture_sdf,
             texture_svg,
             clear_buffer: false,
@@ -429,19 +427,15 @@ pub struct ShapeCacheRc(pub Rc<RefCell<CxShapeCache>>);
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        Cx2d::lazy_construct_font_atlas(cx);
-        let atlas = cx.get_global::<CxFontsAtlasRc>().clone();
-        self.font_id = Some(atlas.0.borrow_mut().get_or_load_font(cx, self.path.as_str()));
+        Cx2d::lazy_construct_font_loader(cx);
+        let loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
+        self.font_id = Some(loader.borrow_mut().get_or_load(cx, self.path.as_str()));
     }
 }
 
 impl CxFontAtlas {
-    pub fn get_or_load_font(&mut self, cx: &mut Cx, path: &str) -> usize {
-        self.font_loader.get_or_load(cx, path)
-    }
-
-    pub fn reset_fonts_atlas(&mut self) {
-        for (_, _, cxfont) in &mut self.font_loader {
+    pub fn reset_fonts_atlas(&mut self, font_loader: &mut FontLoader) {
+        for (_, _, cxfont) in font_loader {
             if let Some(cxfont) = cxfont {
                 cxfont.atlas_pages.clear();
             }
@@ -460,6 +454,12 @@ impl CxFontAtlas {
 }
 
 impl<'a> Cx2d<'a> {
+    pub fn lazy_construct_font_loader(cx: &mut Cx) {
+        if !cx.has_global::<Rc<RefCell<FontLoader>>>() {
+            cx.set_global(Rc::new(RefCell::new(FontLoader::new())));
+        }
+    }
+
     pub fn lazy_construct_font_atlas(cx: &mut Cx){
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
@@ -490,51 +490,58 @@ impl<'a> Cx2d<'a> {
         }
     }
 
-    pub fn reset_fonts_atlas(cx:&mut Cx){
+    pub fn reset_fonts_atlas(cx:&mut Cx,) {
         if cx.has_global::<CxFontsAtlasRc>() {
+            let mut font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
             let mut fonts_atlas = cx.get_global::<CxFontsAtlasRc>().0.borrow_mut();
-            fonts_atlas.reset_fonts_atlas();
+            fonts_atlas.reset_fonts_atlas(&mut *font_loader.borrow_mut());
         }
     }
 
     pub fn draw_font_atlas(&mut self) {
+        let font_loader_rc = self.font_loader.clone();
+        let mut font_loader_ref = font_loader_rc.borrow_mut();
+        let font_loader = &mut *font_loader_ref;
+
         let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
 
         if fonts_atlas.alloc.full {
-            fonts_atlas.reset_fonts_atlas();
+            fonts_atlas.reset_fonts_atlas(font_loader);
         }
 
         // Will be automatically filled after the first use.
         let mut reuse_sdfer_bufs = None;
 
         for todo in mem::take(&mut fonts_atlas.alloc.todo) {
-            self.swrast_atlas_todo(fonts_atlas, todo, &mut reuse_sdfer_bufs);
+            self.swrast_atlas_todo(font_loader, fonts_atlas, todo, &mut reuse_sdfer_bufs);
         }
     }
 
     fn swrast_atlas_todo(
         &mut self,
+        font_loader: &mut FontLoader,
         fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
-        let cxfont = fonts_atlas.font_loader[todo.font_id].as_mut().unwrap();
+        let cxfont = font_loader[todo.font_id].as_mut().unwrap();
         let _atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
         let _glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
 
-        self.swrast_atlas_todo_sdf(fonts_atlas, todo, reuse_sdfer_bufs);
+        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, todo, reuse_sdfer_bufs);
     }
 
     fn swrast_atlas_todo_sdf(
         &mut self,
+        font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
-        let font_path = font_atlas.font_loader.path(todo.font_id).unwrap().clone();
-        let font = font_atlas.font_loader[todo.font_id].as_mut().unwrap();
+        let font_path = font_loader.path(todo.font_id).unwrap().clone();
+        let font = font_loader[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
 
         if ['\t', '\n', '\r'].iter().any(|&c| {
@@ -555,6 +562,7 @@ impl<'a> Cx2d<'a> {
             bytes,
         } = font_cache.get_or_insert_with(font_cache_key, |bytes| {
             self.rasterize_sdf(
+                font_loader,
                 font_atlas,
                 todo,
                 reuse_sdfer_bufs,
@@ -562,7 +570,7 @@ impl<'a> Cx2d<'a> {
             )
         });
 
-        let font = font_atlas.font_loader[todo.font_id].as_mut().unwrap();
+        let font = font_loader[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
         let atlas_glyph = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
 
@@ -597,12 +605,13 @@ impl<'a> Cx2d<'a> {
 
     fn rasterize_sdf(
         &mut self,
+        font_loader: &mut FontLoader,
         fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
         reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
         bytes: &mut Vec<u8>
     ) -> SizeUsize {
-        let font = fonts_atlas.font_loader[todo.font_id].as_mut().unwrap();
+        let font = font_loader[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
         let glyph = font.owned_font_face.with_ref(|face| font.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
         let atlas_glyph = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
