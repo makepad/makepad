@@ -29,6 +29,7 @@ pub use {
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
         makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
+        text_shaper::TextShaper,
     },
     fxhash::FxHashMap,
     makepad_rustybuzz::{Direction, GlyphBuffer},
@@ -46,264 +47,6 @@ pub struct CxFontAtlas {
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc,
     pub font_cache: Option<FontCache>,
-}
-
-pub struct CxShapeCache {
-    shape_keys: VecDeque<OwnedShapeKey>,
-    shapes: FxHashMap<OwnedShapeKey, Box<[GlyphInfo]>>,
-}
-
-impl CxShapeCache {
-    pub fn new() -> Self {
-        Self {
-            shape_keys: VecDeque::new(),
-            shapes: FxHashMap::default(),
-        }
-    }
-
-    pub fn shape<'a>(
-        &'a mut self,
-        is_secret: bool,
-        direction: Direction,
-        text: &str,
-        font_ids: &[usize],
-        font_loader: &mut FontLoader,
-    ) -> Cow<'a, [GlyphInfo]> {
-        if is_secret {
-            Cow::Owned(self.shape_secret(direction, text, font_ids, font_loader))
-        } else {
-            Cow::Borrowed(self.shape_full(direction, text, font_ids, font_loader))
-        }
-    }
-
-    fn shape_secret(
-        &mut self,
-        _direction: Direction,
-        text: &str,
-        font_ids: &[usize],
-        font_loader: &mut FontLoader,
-    ) -> Vec<GlyphInfo> {
-        let Some((font_id, glyph_id)) = font_ids.iter().copied().find_map(|font_id| {
-            let font = font_loader[font_id].as_mut().unwrap();
-            let glyph_id = font.glyph_id('•').0 as usize;
-            if glyph_id == 0 {
-                None
-            } else {
-                Some((font_id, glyph_id))
-            }
-        }) else {
-            return Vec::new();
-        };
-        text.grapheme_indices(true).map(|(index, _)| {
-            GlyphInfo {
-                font_id,
-                glyph_id,
-                cluster: index,
-            }
-        }).collect()
-    }
-
-    fn shape_full<'a>(
-        &'a mut self,
-        direction: Direction,
-        text: &str,
-        font_ids: &[usize],
-        font_loader: &FontLoader,
-    ) -> &'a [GlyphInfo] {
-        if !self.shapes.contains_key(&(direction, text, font_ids) as &(dyn ShapeKey)) {
-            let shape_key = (direction, text.into(), font_ids.into());
-            let mut glyph_infos = Vec::new();
-            let _ = self.shape_full_recursive(
-                text,
-                font_ids,
-                font_loader,
-                &mut glyph_infos,
-                0,
-            );
-            if self.shape_keys.len() == 4096 {
-                let shape_key = self.shape_keys.pop_front().unwrap();
-                self.shapes.remove(&shape_key as &(dyn ShapeKey));
-            }
-            self.shape_keys.push_back(shape_key.clone());
-            self.shapes.insert(shape_key, glyph_infos.into());
-        }
-        &self.shapes[&(direction, text, font_ids) as &(dyn ShapeKey)]
-    }
-
-    fn shape_full_recursive(
-        &mut self,
-        text: &str,
-        font_ids: &[usize],
-        font_loader: &FontLoader,
-        glyph_infos: &mut Vec<GlyphInfo>,
-        // Used to pass the current cluster index value after the font switch.
-        base_cluster: usize,
-    ) -> Result<(), ()> {
-
-        // Get the preferred font to be used currently.
-        let Some((&font_id, remaining_font_ids)) = font_ids.split_first() else {
-            return Err(());
-        };
-
-        // Verify if the font is available, and if not, try the fallback font.
-        let Some(font) = &font_loader[font_id] else {
-            return self.shape_full_recursive(
-                text,
-                remaining_font_ids,
-                font_loader,
-                glyph_infos,
-                base_cluster
-            );
-        };
-
-        // Create and configure the HarfBuzz buffer.
-        let mut buffer = UnicodeBuffer::new();
-        buffer.push_str(text);
-
-        // Shape the text using HarfBuzz.
-        let buffer = font.owned_font_face.with_ref(|face| {
-            makepad_rustybuzz::shape(face, &[], buffer)
-        });
-
-        let infos = buffer.glyph_infos();
-
-        // Track the processed text position to avoid reprocessing characters
-        // that have already been handled through font fallback
-        let mut skip_to = 0;
-
-        let mut info_iter = infos.iter();
-        while let Some(info) = info_iter.next() {
-            // If this position has already been processed, skip it.
-            if (info.cluster as usize) < skip_to {
-                continue;
-            }
-            // Calculate the absolute cluster position.
-            let absolute_cluster = base_cluster + info.cluster as usize;
-
-            // Handle valid glyphs.
-            if info.glyph_id != 0 {
-                glyph_infos.push(GlyphInfo {
-                    font_id,
-                    glyph_id: info.glyph_id as usize,
-                    cluster: absolute_cluster,
-                });
-                continue;
-            }
-
-            // Handle missing glyphs.
-            let start = info.cluster as usize;
-
-            // Find the position of the next valid glyph.
-            let next_cluster = {
-                let mut preview_iter = info_iter.clone();
-                let next_valid = preview_iter
-                    .find(|next| next.glyph_id != 0)
-                    .map(|next| next.cluster as usize)
-                    .unwrap_or(text.len());
-                next_valid
-            };
-
-            // Allow cluster values to remain the same or increase.
-            debug_assert!(
-                start <= next_cluster,
-                "HarfBuzz guarantees monotonic cluster values"
-            );
-
-            // Recursively call,
-            // trying to process the current character with the fallback font.
-            if let Ok(()) = self.shape_full_recursive(
-                &text[start..next_cluster],
-                remaining_font_ids,
-                font_loader,
-                glyph_infos,
-                base_cluster + start,
-            ) {
-                skip_to = next_cluster;
-                continue;
-            }
-
-            glyph_infos.push(GlyphInfo {
-                font_id,
-                glyph_id: info.glyph_id as usize,
-                cluster: absolute_cluster,
-            });
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct GlyphInfo {
-    pub font_id: usize,
-    pub glyph_id: usize,
-    pub cluster: usize,
-}
-
-trait ShapeKey {
-    fn direction(&self) -> Direction;
-    fn text(&self) -> &str;
-    fn font_ids(&self) -> &[usize];
-}
-
-impl<'a> Borrow<dyn ShapeKey + 'a> for (Direction, Rc<str>, Rc<[usize]>) {
-    fn borrow(&self) -> &(dyn ShapeKey + 'a) {
-        self
-    }
-}
-
-impl Eq for dyn ShapeKey + '_ {}
-
-impl Hash for dyn ShapeKey + '_ {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.direction().hash(hasher);
-        self.text().hash(hasher);
-        self.font_ids().hash(hasher);
-    }
-}
-
-impl PartialEq for dyn ShapeKey + '_ {
-    fn eq(&self, other: &Self) -> bool {
-        if self.direction() != other.direction() {
-            return false;
-        }
-        if self.text() != other.text() {
-            return false;
-        }
-        true
-    }
-}
-
-type OwnedShapeKey = (Direction, Rc<str>, Rc<[usize]>);
-
-impl ShapeKey for OwnedShapeKey {
-    fn direction(&self) -> Direction {
-        self.0
-    }
-
-    fn text(&self) -> &str {
-        &self.1
-    }
-
-    fn font_ids(&self) -> &[usize] {
-        &self.2
-    }
-}
-
-type BorrowedShapeKey<'a> = (Direction, &'a str, &'a [usize]);
-
-impl<'a> ShapeKey for BorrowedShapeKey<'a> {
-    fn direction(&self) -> Direction {
-        self.0
-    }
-
-    fn text(&self) -> &str {
-        &self.1
-    }
-
-    fn font_ids(&self) -> &[usize] {
-        &self.2
-    }
 }
 
 #[derive(Debug, Default)]
@@ -422,9 +165,6 @@ pub struct Font {
 #[derive(Clone)]
 pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontAtlas>>);
 
-#[derive(Clone)]
-pub struct ShapeCacheRc(pub Rc<RefCell<CxShapeCache>>);
-
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         Cx2d::lazy_construct_font_loader(cx);
@@ -460,6 +200,12 @@ impl<'a> Cx2d<'a> {
         }
     }
 
+    pub fn lazy_construct_text_shaper(cx: &mut Cx) {
+        if !cx.has_global::<Rc<RefCell<TextShaper>>>() {
+            cx.set_global(Rc::new(RefCell::new(TextShaper::new())));
+        }
+    }
+
     pub fn lazy_construct_font_atlas(cx: &mut Cx){
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
@@ -481,12 +227,6 @@ impl<'a> Cx2d<'a> {
 
             let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg, cx.os_type());
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
-        }
-    }
-
-    pub fn lazy_construct_shape_cache(cx: &mut Cx) {
-        if !cx.has_global::<ShapeCacheRc>() {
-            cx.set_global(ShapeCacheRc(Rc::new(RefCell::new(CxShapeCache::new()))));
         }
     }
 

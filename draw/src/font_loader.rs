@@ -22,28 +22,18 @@ impl FontLoader {
         }
     }
 
-    /// Returns true if the loader has loaded a font with the given id.
-    pub fn loaded_id(&self, id: usize) -> bool {
-        self.paths_by_id.contains_key(&id)
-    }
-
-    /// Returns true if the loader has loaded font with the given path.
-    pub fn loaded_path(&self, path: &str) -> bool {
-        self.ids_by_path.contains_key(path)
-    }
-
     /// Returns the id of the font with the given path, if it has been loaded.
-    pub fn id(&self, path: &str) -> Option<usize> {
+    pub fn id(&self, path: &str) -> Option<FontId> {
         self.ids_by_path.get(path).copied()
     }
 
     /// Returns the path of the font with the given id, if it has been loaded.
-    pub fn path(&self, id: usize) -> Option<&Rc<str>> {
+    pub fn path(&self, id: FontId) -> Option<&Rc<str>> {
         self.paths_by_id.get(&id)
     }
 
     /// Returns a reference to the font with the given id, if it has been loaded.
-    pub fn get(&self, id: usize) -> Option<&Option<CxFont>> {
+    pub fn get(&self, id: FontId) -> Option<&Option<CxFont>> {
         self.fonts.get(id)
     }
 
@@ -61,7 +51,7 @@ impl FontLoader {
     }
 
     /// Returns a mutable reference to the font with the given id, if it has been loaded.
-    pub fn get_mut(&mut self, id: usize) -> Option<&mut Option<CxFont>> {
+    pub fn get_mut(&mut self, id: FontId) -> Option<&mut Option<CxFont>> {
         self.fonts.get_mut(id)
     }
 
@@ -79,19 +69,19 @@ impl FontLoader {
     }
 
     /// Loads a font at the given path and returns its id.
-    pub fn load(&mut self, cx: &mut Cx, path: &str) -> usize {
+    pub fn load(&mut self, cx: &mut Cx, path: &str) -> FontId {
         let id = self.fonts.len();
         self.fonts.push(load(cx, path));
-        let path: Rc<str> = path.into();
-        self.paths_by_id.insert(id, path.clone());
-        self.ids_by_path.insert(path.clone(), id);
         id
     }
 
     /// Returns the id of the font with the given path, or loads it if it doesn't exist.
-    pub fn get_or_load(&mut self, cx: &mut Cx, path: &str) -> usize {
-        if !self.loaded_path(path) {
-            self.load(cx, path);
+    pub fn get_or_load(&mut self, cx: &mut Cx, path: &str) -> FontId {
+        if !self.ids_by_path.contains_key(path) {
+            let id = self.load(cx, path);
+            let path: Rc<str> = path.into();
+            self.paths_by_id.insert(id, path.clone());
+            self.ids_by_path.insert(path.clone(), id);
         }
         self.id(path).unwrap()
     }
@@ -100,19 +90,19 @@ impl FontLoader {
 impl Index<usize> for FontLoader {
     type Output = Option<CxFont>;
 
-    fn index(&self, id: usize) -> &Self::Output {
+    fn index(&self, id: FontId) -> &Self::Output {
         self.get(id).unwrap()
     }
 }
 
 impl IndexMut<usize> for FontLoader {
-    fn index_mut(&mut self, id: usize) -> &mut Self::Output {
+    fn index_mut(&mut self, id: FontId) -> &mut Self::Output {
         self.get_mut(id).unwrap()
     }
 }
 
 impl<'a> IntoIterator for &'a FontLoader {
-    type Item = (usize, &'a str, &'a Option<CxFont>);
+    type Item = (FontId, &'a str, &'a Option<CxFont>);
     type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -121,7 +111,7 @@ impl<'a> IntoIterator for &'a FontLoader {
 }
 
 impl<'a> IntoIterator for &'a mut FontLoader {
-    type Item = (usize, &'a str, &'a mut Option<CxFont>);
+    type Item = (FontId, &'a str, &'a mut Option<CxFont>);
     type IntoIter = IterMut<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -135,11 +125,11 @@ impl<'a> IntoIterator for &'a mut FontLoader {
 #[derive(Clone, Debug)]
 pub struct Iter<'a> {
     iter: Enumerate<slice::Iter<'a, Option<CxFont>>>,
-    paths_by_id: &'a HashMap<usize, Rc<str>>,
+    paths_by_id: &'a HashMap<FontId, Rc<str>>,
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = (usize, &'a str, &'a Option<CxFont>);
+    type Item = (FontId, &'a str, &'a Option<CxFont>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (id, font) = self.iter.next()?;
@@ -154,11 +144,11 @@ impl<'a> Iterator for Iter<'a> {
 #[derive(Debug)]
 pub struct IterMut<'a> {
     iter: Enumerate<slice::IterMut<'a, Option<CxFont>>>,
-    paths_by_id: &'a HashMap<usize, Rc<str>>,
+    paths_by_id: &'a HashMap<FontId, Rc<str>>,
 }
 
 impl<'a> Iterator for IterMut<'a> {
-    type Item = (usize, &'a str, &'a mut Option<CxFont>);
+    type Item = (FontId, &'a str, &'a mut Option<CxFont>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (id, font) = self.iter.next()?;
@@ -166,6 +156,8 @@ impl<'a> Iterator for IterMut<'a> {
         Some((id, path, font))
     }
 }
+
+pub type FontId = usize;
 
 fn load(cx: &mut Cx, path: &str) -> Option<CxFont> {
     match cx.take_dependency(&path) {
