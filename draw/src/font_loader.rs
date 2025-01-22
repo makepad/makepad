@@ -4,12 +4,12 @@ use {
     std::{collections::HashMap, iter::{Enumerate, IntoIterator}, ops::{Index, IndexMut}, rc::Rc, slice},
 };
 
-/// A font loader.
+/// A loader for fonts.
 #[derive(Debug)]
 pub struct FontLoader {
-    pub fonts: Vec<Option<CxFont>>,
-    pub ids_by_path: HashMap<Rc<str>, usize>,
-    pub paths_by_id: HashMap<usize, Rc<str>>,
+    fonts: Vec<Option<CxFont>>,
+    ids_by_path: HashMap<Rc<str>, usize>,
+    paths_by_id: HashMap<usize, Rc<str>>,
 }
 
 impl FontLoader {
