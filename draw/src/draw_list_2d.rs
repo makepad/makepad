@@ -115,23 +115,13 @@ impl DrawList2d {
             cx.passes[pass_id].paint_dirty = true;
         }
         
-        self.reset_draw_list(cx, redraw_id);// alright so. we now need to iterate over the reset list but the list might expand
+        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
         
         cx.nav_list_clear(self.draw_list.id());
         
         cx.draw_list_stack.push(self.draw_list.id());
     }
     
-    pub fn reset_draw_list(&mut self, cx:&mut Cx2d, redraw_id:u64){
-        cx.draw_list_reset.clear();
-        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id, &mut cx.draw_list_reset);
-        let mut i = 0;
-        while i < cx.draw_list_reset.len(){
-            let id = cx.draw_list_reset[i];
-            cx.cx.draw_lists[id].clear_draw_items(redraw_id, &mut cx.draw_list_reset);
-            i = i + 1;
-        }
-    }
     
     pub fn begin_always(&mut self, cx: &mut Cx2d) {
         self.begin_maybe(cx, None).expect_redraw();
@@ -191,7 +181,7 @@ impl DrawList2d {
             cx.passes[pass_id].paint_dirty = true;
         }
         
-        self.reset_draw_list(cx, redraw_id);
+        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
         
         cx.nav_list_clear(self.draw_list.id());
         
