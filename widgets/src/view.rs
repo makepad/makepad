@@ -614,6 +614,11 @@ impl WidgetNode for View {
 
 impl Widget for View {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+                
+        if !self.visible && event.requires_visibility(){
+            return
+        }
+        
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
@@ -636,10 +641,6 @@ impl Widget for View {
         // we need to clear the cache and re-query widgets.
         if cx.widget_query_invalidation_event.is_some() {
             self.find_cache.borrow_mut().clear();
-        }
-        
-        if !self.visible && event.requires_visibility(){
-            return
         }
 
         match &self.event_order {
