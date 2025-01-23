@@ -379,8 +379,10 @@ impl ViewRef {
 
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.visible = visible;
-            inner.redraw(cx);
+            if inner.visible != visible{
+                inner.visible = visible;
+                inner.redraw(cx);
+            }
         }
     }
 
