@@ -1,9 +1,12 @@
 use {
     std::{
+        cell::RefCell,
         ops::Deref,
-        ops::DerefMut
+        ops::DerefMut,
+        rc::Rc,
     },
     crate::{
+        font_loader::FontLoader,
         makepad_math::DVec2,
         makepad_platform::{
             DrawEvent,
@@ -18,8 +21,9 @@ use {
         },
         nav::CxNavTreeRc,
         icon_atlas::CxIconAtlasRc,
-        font_atlas::{CxFontsAtlasRc, ShapeCacheRc},
+        font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
+        text_shaper::TextShaper,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     },
     makepad_rustybuzz::UnicodeBuffer,
@@ -44,8 +48,9 @@ pub struct Cx2d<'a> {
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
     pub (crate) align_list: Vec<AlignEntry>,
+    pub font_loader: Rc<RefCell<FontLoader>>,
+    pub text_shaper: Rc<RefCell<TextShaper>>,
     pub fonts_atlas_rc: CxFontsAtlasRc,
-    pub shape_cache_rc: ShapeCacheRc,
     pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
     pub rustybuzz_buffer: Option<UnicodeBuffer>, 
@@ -78,19 +83,22 @@ impl<'a> Cx2d<'a> {
     }*/
     
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
+        Self::lazy_construct_font_loader(cx);
+        Self::lazy_construct_text_shaper(cx);
         Self::lazy_construct_font_atlas(cx);
-        Self::lazy_construct_shape_cache(cx);
         Self::lazy_construct_nav_tree(cx);
         Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
+        let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
+        let text_shaper=  cx.get_global::<Rc<RefCell<TextShaper>>>().clone();
         let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
-        let shape_cache_rc = cx.get_global::<ShapeCacheRc>().clone();
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let icon_atlas_rc = cx.get_global::<CxIconAtlasRc>().clone();
         Self {
             overlay_id: None,
+            font_loader,
+            text_shaper,
             fonts_atlas_rc,
-            shape_cache_rc,
             cx: cx,
             draw_event,
             // overlay_sweep_lock: None,

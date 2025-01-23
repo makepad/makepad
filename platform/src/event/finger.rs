@@ -851,11 +851,14 @@ impl Event {
                 }
             },
             Event::Scroll(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    // log!("Skipping Scroll sweep_area: {:?}", options.sweep_area);
+                    return Hit::Nothing
+                }
                 let digit_id = live_id!(mouse).into();
                 
                 let rect = area.clipped_rect(&cx);
                 if hit_test(e.abs, &rect, &options.margin) {
-                    //fe.handled = true;
                     let device = DigitDevice::Mouse {
                         button: MouseButton::PRIMARY,
                     };
@@ -873,6 +876,7 @@ impl Event {
             },
             Event::TouchUpdate(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    // log!("Skipping TouchUpdate, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 for t in &e.touches {
@@ -1024,6 +1028,7 @@ impl Event {
             }
             Event::MouseMove(e) => { // ok so we dont get hovers
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    // log!("Skipping MouseMove, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
@@ -1165,6 +1170,7 @@ impl Event {
             },
             Event::MouseDown(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    // log!("Skipping MouseDown, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
@@ -1210,6 +1216,7 @@ impl Event {
             },
             Event::MouseUp(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    // log!("Skipping MouseUp, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
@@ -1249,6 +1256,7 @@ impl Event {
             },
             Event::MouseLeave(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    // log!("Skipping MouseLeave, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing;
                 }
                 let device = DigitDevice::Mouse { button: MouseButton::empty() };

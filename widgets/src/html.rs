@@ -722,7 +722,7 @@ impl Widget for HtmlLink {
                     } else {
                         self.animator_play(cx, id!(hover.off));
                     }
-                    
+
                     if fu.is_over
                         && fu.is_primary_hit()
                         && fu.was_tap()

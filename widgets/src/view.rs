@@ -614,6 +614,11 @@ impl WidgetNode for View {
 
 impl Widget for View {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+                
+        if !self.visible && event.requires_visibility(){
+            return
+        }
+        
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);

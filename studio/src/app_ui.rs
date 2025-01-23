@@ -444,6 +444,7 @@ live_design!{
             }
             
             EditFirst = <RectView> {
+                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
                 <View> {
                     width: Fill, height: Fill,
                     align: { x: 0., y: 0. }
@@ -463,6 +464,7 @@ live_design!{
                 }
             }
             OutlineFirst = <RectView> {
+                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
                 <View> {
                     width: Fill, height: Fill,
                     align: { x: 0.5, y: 0.5 }
@@ -476,6 +478,7 @@ live_design!{
                 }
             }
             DesignFirst = <RectView> {
+                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
                 <View> {
                     width: Fill, height: Fill
                     flow: Down
@@ -488,6 +491,7 @@ live_design!{
                 }
             }
             AiFirst = <RectView> {
+                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
                 <View> {
                     width: Fill, height: Fill
                     flow: Down
@@ -500,6 +504,7 @@ live_design!{
                 }
             }
             RunFirst = <RectView> {
+                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
                 <View> {
                     width: Fill, height: Fill,
                     flow: Down
@@ -530,7 +535,8 @@ live_design!{
                 <RunList> {}
             }
             Search = <RectView> {
-            flow: Down,
+                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
+                flow: Down,
                 <DockToolbar> {
                     content = {
                         spacing: (THEME_SPACE_2)
