@@ -85,32 +85,33 @@ impl Widget for Modal {
             return;
         }
 
-        // When passing down events we need to suspend the sweep lock
-        // because regular View instances won't respond to events if the sweep lock is active.
-        cx.sweep_unlock(self.draw_bg.area());
-        self.content.handle_event(cx, event, scope);
-        cx.sweep_lock(self.draw_bg.area());
+        let area = self.draw_bg.area();
 
-        // A closure to check if a finger up event occurred in the modal's background area.
-        let mut is_finger_up_in_bg = || {
-            if let Hit::FingerUp(fe) = event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
-                !self.content.area().rect(cx).contains(fe.abs)
-            } else {
-                false
-            }
-        };
+        // When passing down events to the inner `content` view,
+        // we must temporarily suspend the sweep lock to allow the overlaid `content` View
+        // to correctly respond to events/hits.
+        cx.sweep_unlock(area);
+        self.content.handle_event(cx, event, scope);
+        cx.sweep_lock(area);
+
+        // Consume any hit that occurred in the bg area, which prevents the hit
+        // from being handled by any views underneath this modal.
+        let consumed_hit = event.hits_with_sweep_area(cx, area, area);
 
         // Close the modal if any of the following conditions occur:
+        // * If the back navigational action/gesture was triggered (e.g., on Android)
         // * If the Escape key was pressed
-        // * If the back navigational action/gesture on Android was triggered
-        // * If there was a click/press in the background area outside of the inner content
-        if matches!(event, Event::BackPressed)
+        // * If there was a click/press in the background area, outside of the inner `content` view
+        let should_close = matches!(event, Event::BackPressed)
             || matches!(event, Event::KeyUp(KeyEvent { key_code: KeyCode::Escape, .. }))
-            || is_finger_up_in_bg()
-        {
-            self.close(cx);
+            || match consumed_hit {
+                Hit::FingerUp(fe) => !self.content.area().rect(cx).contains(fe.abs),
+                _ => false,
+            };
+        if should_close {
             let widget_uid = self.content.widget_uid();
             cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
+            self.close(cx);
         }
     }
 
@@ -150,7 +151,7 @@ impl Modal {
         );
         self.opened = false;
         self.draw_bg.redraw(cx);
-        cx.sweep_unlock(self.draw_bg.area())
+        cx.sweep_unlock(self.draw_bg.area());
     }
 
     pub fn dismissed(&self, actions: &Actions) -> bool {
