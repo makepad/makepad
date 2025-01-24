@@ -7,6 +7,7 @@ use {
     },
     crate::{
         font_loader::FontLoader,
+        sdf_rasterizer::SdfRasterizer,
         makepad_math::DVec2,
         makepad_platform::{
             DrawEvent,
@@ -51,6 +52,7 @@ pub struct Cx2d<'a> {
     pub (crate) draw_list_reset: Vec<DrawListId>,
     pub font_loader: Rc<RefCell<FontLoader>>,
     pub text_shaper: Rc<RefCell<TextShaper>>,
+    pub sdf_rasterizer: Rc<RefCell<SdfRasterizer>>,
     pub fonts_atlas_rc: CxFontsAtlasRc,
     pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
@@ -86,12 +88,14 @@ impl<'a> Cx2d<'a> {
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
         Self::lazy_construct_font_loader(cx);
         Self::lazy_construct_text_shaper(cx);
+        Self::lazy_construct_sdf_rasterizer(cx);
         Self::lazy_construct_font_atlas(cx);
         Self::lazy_construct_nav_tree(cx);
         Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
         let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
         let text_shaper=  cx.get_global::<Rc<RefCell<TextShaper>>>().clone();
+        let sdf_rasterizer = cx.get_global::<Rc<RefCell<SdfRasterizer>>>().clone();
         let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let icon_atlas_rc = cx.get_global::<CxIconAtlasRc>().clone();
@@ -99,6 +103,7 @@ impl<'a> Cx2d<'a> {
             overlay_id: None,
             font_loader,
             text_shaper,
+            sdf_rasterizer,
             fonts_atlas_rc,
             cx: cx,
             draw_event,
