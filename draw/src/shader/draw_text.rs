@@ -1,11 +1,9 @@
 use {
     crate::{
-        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{self, CxFontAtlas, CxFontsAtlasTodo, TextShaper, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk},
+        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{CxFontAtlas, CxFontsAtlasTodo, TextShaper, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk},
         font_loader::FontLoader, text_shaper::GlyphInfo,
     },
-    makepad_rustybuzz::Direction,
     unicode_segmentation::UnicodeSegmentation,
-    std::borrow::Cow,
 };
 
 const ZBIAS_STEP: f32 = 0.00001;
@@ -289,11 +287,6 @@ impl DrawText {
         let mut font_loader = font_loader_rc.borrow_mut();
         let font_loader = &mut *font_loader;
 
-        // Borrow the font atlas from the context.
-        let font_atlas_rc = cx.fonts_atlas_rc.clone();
-        let mut font_atlas = font_atlas_rc.0.borrow_mut();
-        let font_atlas = &mut *font_atlas;
-
         if font_loader[font_id].is_none() {
             return DVec2::default();
         }
@@ -334,11 +327,6 @@ impl DrawText {
         let font_loader_rc = cx.font_loader.clone();
         let mut font_loader_ref = font_loader_rc.borrow_mut();
         let font_loader = &mut *font_loader_ref;
-
-        // Borrow the font atlas from the context.
-        let font_atlas_rc = cx.fonts_atlas_rc.clone();
-        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
-        let font_atlas = &mut *font_atlas_ref;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -388,11 +376,6 @@ impl DrawText {
         let text_shaper_rc = cx.text_shaper.clone();
         let mut text_shaper_ref = text_shaper_rc.borrow_mut();
         let text_shaper = &mut *text_shaper_ref;
-
-        // Borrow the font atlas from the context.
-        let font_atlas_rc = cx.fonts_atlas_rc.clone();
-        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
-        let font_atlas = &mut *font_atlas_ref;
 
         let font_size = self.text_style.font_size * self.font_scale;
         let line_height = compute_line_height(font_ids, font_size, font_loader) * self.text_style.line_scale;
@@ -447,7 +430,6 @@ impl DrawText {
         }
 
         drop(text_shaper_ref);
-        drop(font_atlas_ref);
         drop(font_loader_ref);
 
         if let Some(rect) = rects.last_mut() {
@@ -512,11 +494,6 @@ impl DrawText {
         let font_loader_rc = cx.font_loader.clone();
         let mut font_loader_ref = font_loader_rc.borrow_mut();
         let font_loader = &mut *font_loader_ref;
-
-        // Borrow the font atlas from the context.
-        let font_atlas_rc = cx.fonts_atlas_rc.clone();
-        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
-        let font_atlas = &mut *font_atlas_ref;
 
         // Borrow the shape cache from the context.
         let text_shaper_rc = cx.text_shaper.clone();
@@ -637,11 +614,6 @@ impl DrawText {
         let font_loader_rc = cx.font_loader.clone();
         let mut font_loader = font_loader_rc.borrow_mut();
         let font_loader = &mut *font_loader;
-        
-        // Borrow the font atlas from the context.
-        let font_atlas_rc = cx.fonts_atlas_rc.clone();
-        let mut font_atlas_ref = font_atlas_rc.0.borrow_mut();
-        let font_atlas = &mut *font_atlas_ref;
 
         // Borrow the shape cache from the context.
         let text_shaper_rc = cx.text_shaper.clone();

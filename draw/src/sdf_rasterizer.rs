@@ -3,17 +3,9 @@ use {
         font_atlas::CxFontAtlas,
         font_loader::{FontId, FontLoader},
         makepad_platform::{math_f64, math_usize::SizeUsize},
-        makepad_vector::{
-            geometry::{AffineTransformation, Transform, Vector},
-            path::PathCommand,
-        },
+        makepad_vector::geometry::{AffineTransformation, Transform, Vector},
     },
-    ab_glyph_rasterizer::Rasterizer,
-    sdfer::{
-        esdt,
-        esdt::{Params, ReusableBuffers},
-        Image2d, Unorm8,
-    },
+    sdfer::esdt::{Params, ReusableBuffers},
     std::fmt,
 };
 
