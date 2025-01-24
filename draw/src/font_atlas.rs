@@ -1,5 +1,3 @@
-use makepad_rustybuzz::UnicodeBuffer;
-
 pub use {
     std::{
         borrow::{Borrow, Cow},
@@ -239,7 +237,7 @@ impl<'a> Cx2d<'a> {
 
     pub fn reset_fonts_atlas(cx:&mut Cx,) {
         if cx.has_global::<CxFontsAtlasRc>() {
-            let mut font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
+            let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
             let mut fonts_atlas = cx.get_global::<CxFontsAtlasRc>().0.borrow_mut();
             fonts_atlas.reset_fonts_atlas(&mut *font_loader.borrow_mut());
         }
@@ -258,11 +256,8 @@ impl<'a> Cx2d<'a> {
             fonts_atlas.reset_fonts_atlas(font_loader);
         }
 
-        // Will be automatically filled after the first use.
-        let mut reuse_sdfer_bufs = None;
-
         for todo in mem::take(&mut fonts_atlas.alloc.todo) {
-            self.swrast_atlas_todo(font_loader, fonts_atlas, todo, &mut reuse_sdfer_bufs);
+            self.swrast_atlas_todo(font_loader, fonts_atlas, todo);
         }
     }
 
@@ -271,13 +266,12 @@ impl<'a> Cx2d<'a> {
         font_loader: &mut FontLoader,
         fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
-        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
         let cxfont = font_loader[todo.font_id].as_mut().unwrap();
         let _atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
         let _glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
 
-        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, todo, reuse_sdfer_bufs);
+        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, todo);
     }
 
     fn swrast_atlas_todo_sdf(
@@ -285,7 +279,6 @@ impl<'a> Cx2d<'a> {
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
-        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
         let font_path = font_loader.path(todo.font_id).unwrap().clone();
         let font = font_loader[todo.font_id].as_mut().unwrap();
@@ -312,7 +305,6 @@ impl<'a> Cx2d<'a> {
                 font_loader,
                 font_atlas,
                 todo,
-                reuse_sdfer_bufs,
                 bytes
             )
         });
@@ -355,7 +347,6 @@ impl<'a> Cx2d<'a> {
         font_loader: &mut FontLoader,
         fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
-        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
         bytes: &mut Vec<u8>
     ) -> SizeUsize {
         let font_rasterizer_rc = self.sdf_rasterizer.clone();
