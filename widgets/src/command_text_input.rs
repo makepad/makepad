@@ -23,9 +23,15 @@ live_design! {
             flow: Down,
             height: Fit,
             visible: false,
-            search_input = <TextInput> {
-                width: Fill,
+
+            // Wrapper workaround to hide search input when inline search is enabled
+            // as we currently can't hide the search input avoiding events.
+            search_input_wrapper = <RoundedView> {
                 height: Fit,
+                search_input = <TextInput> {
+                    width: Fill,
+                    height: Fit,
+                }
             }
 
             list = <List> {
@@ -74,6 +80,13 @@ pub struct CommandTextInput {
     #[live]
     pub trigger: Option<String>,
 
+    /// Handle search within the main text input instead of using a separate
+    /// search input.
+    ///
+    /// Note: Any kind of whitespace will terminate search.
+    #[live]
+    pub inline_search: bool,
+
     /// Strong color to highlight the item that would be submitted if `Return` is pressed.
     #[live]
     pub keyboard_focus_color: Vec4,
@@ -107,10 +120,18 @@ pub struct CommandTextInput {
     /// To deal with widgets not being `Send`.
     #[rust]
     last_selected_widget: WidgetRef,
+
+    /// Remember where trigger was inserted to support `inline_search`.
+    #[rust]
+    trigger_position: Option<usize>,
+
+    /// Remmeber which was the last cursor position handled, to support `inline_search`.
+    #[rust]
+    prev_cursor_position: usize,
 }
 
 impl Widget for CommandTextInput {
-    fn set_text(&mut self, cx:&mut Cx, v: &str) {
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text_input_ref().set_text(cx, v);
     }
 
@@ -139,23 +160,46 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.deref.handle_event(cx, event, scope);
 
-        if let Event::TextInput(input_event) = event {
-            if cx.has_key_focus(self.text_input_ref().area()) {
+        if cx.has_key_focus(self.text_input_ref().area()) {
+            if let Event::TextInput(input_event) = event {
                 self.on_text_inserted(cx, scope, &input_event.input);
+            }
+
+            if self.inline_search {
+                if let Some(trigger_pos) = self.trigger_position {
+                    let current_pos = get_head(&self.text_input_ref());
+                    let current_search = self.search_text();
+
+                    if current_pos < trigger_pos || graphemes(&current_search).any(is_whitespace) {
+                        self.hide_popup(cx);
+                        self.redraw(cx);
+                    } else if self.prev_cursor_position != current_pos {
+                        // mimic how discord updates the filter when moving the cursor
+                        cx.widget_action(
+                            self.widget_uid(),
+                            &scope.path,
+                            InternalAction::ShouldBuildItems,
+                        );
+                    }
+                }
             }
         }
 
-        if let Event::KeyDown(key_event) = event {
-            if cx.has_key_focus(self.search_input_ref().area()) {
-                let delta = match key_event.key_code {
-                    KeyCode::ArrowDown => 1,
-                    KeyCode::ArrowUp => -1,
-                    _ => 0,
+        if cx.has_key_focus(self.key_controller_text_input_ref().area()) {
+            if let Event::KeyDown(key_event) = event {
+                match key_event.key_code {
+                    KeyCode::ArrowDown => self.on_keyboard_move(cx, 1),
+                    KeyCode::ArrowUp => self.on_keyboard_move(cx, -1),
+                    KeyCode::ReturnKey => {
+                        self.on_keyboard_controller_input_submit(cx, scope);
+                    }
+                    KeyCode::Escape => {
+                        self.is_text_input_focus_pending = true;
+                        self.hide_popup(cx);
+                        self.redraw(cx);
+                    }
+                    _ => {}
                 };
-
-                if delta != 0 {
-                    self.on_keyboard_move(cx, delta);
-                }
             }
         }
 
@@ -194,38 +238,31 @@ impl Widget for CommandTextInput {
                 self.select_item(cx, scope, selected);
             }
 
-            let search_input = self.search_input_ref();
-
             for action in actions.iter().filter_map(|a| a.as_widget_action()) {
-                if action.widget_uid == search_input.widget_uid() {
-                    match action.cast::<TextInputAction>() {
-                        TextInputAction::Change(search) => {
-                            // disallow multiline input
-                            search_input.set_text(cx, search.lines().next().unwrap_or_default());
+                if action.widget_uid == self.key_controller_text_input_ref().widget_uid() {
+                    if let TextInputAction::KeyFocusLost = action.cast() {
+                        self.hide_popup(cx);
+                        self.redraw(cx);
+                    }
+                }
 
-                            cx.widget_action(
-                                self.widget_uid(),
-                                &scope.path,
-                                InternalAction::ShouldBuildItems,
-                            );
-                        }
-                        TextInputAction::Return(_) => {
-                            self.on_search_input_submit(cx, scope);
-                        }
-                        TextInputAction::Escape => {
-                            self.is_text_input_focus_pending = true;
-                            self.hide_popup(cx);
-                            self.redraw(cx);
-                        }
-                        TextInputAction::KeyFocusLost => {
-                            self.hide_popup(cx);
-                            self.redraw(cx);
-                        }
-                        _ => {}
+                if action.widget_uid == self.search_input_ref().widget_uid() {
+                    if let TextInputAction::Change(search) = action.cast() {
+                        // disallow multiline input
+                        self.search_input_ref()
+                            .set_text(cx, search.lines().next().unwrap_or_default());
+
+                        cx.widget_action(
+                            self.widget_uid(),
+                            &scope.path,
+                            InternalAction::ShouldBuildItems,
+                        );
                     }
                 }
             }
         }
+
+        self.prev_cursor_position = get_head(&self.text_input_ref());
     }
 }
 
@@ -233,7 +270,15 @@ impl CommandTextInput {
     fn on_text_inserted(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
         if graphemes(inserted).last() == self.trigger_grapheme() {
             self.show_popup(cx);
-            self.is_search_input_focus_pending = true;
+            self.trigger_position = Some(get_head(&self.text_input_ref()));
+
+            if self.inline_search {
+                self.view(id!(search_input_wrapper)).set_visible(cx, false);
+            } else {
+                self.view(id!(search_input_wrapper)).set_visible(cx, true);
+                self.is_search_input_focus_pending = true;
+            }
+
             cx.widget_action(
                 self.widget_uid(),
                 &scope.path,
@@ -242,7 +287,7 @@ impl CommandTextInput {
         }
     }
 
-    fn on_search_input_submit(&mut self, cx: &mut Cx, scope: &mut Scope) {
+    fn on_keyboard_controller_input_submit(&mut self, cx: &mut Cx, scope: &mut Scope) {
         let Some(idx) = self.keyboard_focus_index else {
             return;
         };
@@ -259,7 +304,7 @@ impl CommandTextInput {
         self.redraw(cx);
     }
 
-    fn try_remove_trigger_grapheme(&mut self, cx:&mut Cx) {
+    fn try_remove_trigger_grapheme(&mut self, cx: &mut Cx) {
         let head = get_head(&self.text_input_ref());
 
         if head == 0 {
@@ -293,19 +338,19 @@ impl CommandTextInput {
         self.view(id!(popup)).redraw(cx);
     }
 
-    fn hide_popup(&mut self, cx:&mut Cx) {
+    fn hide_popup(&mut self, cx: &mut Cx) {
         self.clear_popup(cx);
         self.view(id!(popup)).set_visible(cx, false);
     }
 
     /// Clear all text and hide the popup going back to initial state.
-    pub fn reset(&mut self, cx:&mut Cx) {
-        self.clear_popup(cx);
+    pub fn reset(&mut self, cx: &mut Cx) {
         self.hide_popup(cx);
         self.text_input_ref().set_text(cx, "");
     }
 
-    fn clear_popup(&mut self, cx:&mut Cx) {
+    fn clear_popup(&mut self, cx: &mut Cx) {
+        self.trigger_position = None;
         self.search_input_ref().set_text(cx, "");
         self.search_input_ref().set_cursor(0, 0);
         self.clear_items();
@@ -343,7 +388,22 @@ impl CommandTextInput {
     ///
     /// You probably want this for filtering purposes when updating the items.
     pub fn search_text(&self) -> String {
-        self.search_input_ref().text()
+        if self.inline_search {
+            if let Some(trigger_pos) = self.trigger_position {
+                let text = self.text();
+                let head = get_head(&self.text_input_ref());
+
+                if head > trigger_pos {
+                    text[trigger_pos..head].to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            self.search_input_ref().text()
+        }
     }
 
     /// Checks if any item has been selected in the given `actions`
@@ -387,6 +447,14 @@ impl CommandTextInput {
 
     fn trigger_grapheme(&self) -> Option<&str> {
         self.trigger.as_ref().and_then(|t| graphemes(t).next())
+    }
+
+    fn key_controller_text_input_ref(&self) -> TextInputRef {
+        if self.inline_search {
+            self.text_input_ref()
+        } else {
+            self.search_input_ref()
+        }
     }
 
     fn on_keyboard_move(&mut self, cx: &mut Cx, delta: i32) {
@@ -498,7 +566,7 @@ impl CommandTextInputRef {
     }
 
     /// See [`CommandTextInput::reset()`].
-    pub fn reset(&self,cx:&mut Cx) {
+    pub fn reset(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.reset(cx);
         }
@@ -532,6 +600,10 @@ fn inserted_grapheme_with_pos(text: &str, cursor_pos: usize) -> Option<(usize, &
 
 fn get_head(text_input: &TextInputRef) -> usize {
     text_input.borrow().map_or(0, |p| p.get_cursor().head.index)
+}
+
+fn is_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
 }
 
 /// Reduced and adapted copy of the `List` widget from Moly.
