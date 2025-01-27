@@ -304,41 +304,33 @@ impl CommandTextInput {
     }
 
     fn select_item(&mut self, cx: &mut Cx, scope: &mut Scope, selected: WidgetRef) {
+        self.try_remove_trigger_and_inline_search(cx);
         self.last_selected_widget = selected;
         cx.widget_action(self.widget_uid(), &scope.path, InternalAction::ItemSelected);
         self.hide_popup(cx);
         self.is_text_input_focus_pending = true;
-        self.try_remove_trigger_grapheme(cx);
         self.redraw(cx);
     }
 
-    fn try_remove_trigger_grapheme(&mut self, cx: &mut Cx) {
-        let head = get_head(&self.text_input_ref());
+    fn try_remove_trigger_and_inline_search(&mut self, cx: &mut Cx) {
+        let mut to_remove = self.trigger_grapheme().unwrap_or_default().to_string();
 
-        if head == 0 {
-            return;
+        if self.inline_search {
+            to_remove.push_str(&self.search_text());
         }
 
         let text = self.text();
-        let Some((inserted_grapheme_pos, inserted_grapheme)) =
-            inserted_grapheme_with_pos(&text, head)
-        else {
+        let end = get_head(&self.text_input_ref());
+        let Some(start) = end.checked_sub(graphemes(&to_remove).count()) else {
             return;
         };
 
-        if self.trigger_grapheme() == Some(inserted_grapheme) {
-            let at_removed = graphemes_with_pos(&text)
-                .filter_map(|(p, g)| {
-                    if p == inserted_grapheme_pos {
-                        None
-                    } else {
-                        Some(g)
-                    }
-                })
-                .collect::<String>();
+        let text = graphemes_with_pos(&text)
+            .filter_map(|(p, g)| if p < start || p >= end { Some(g) } else { None })
+            .collect::<String>();
 
-            self.set_text(cx, &at_removed);
-        }
+        self.text_input_ref().set_cursor(start, start);
+        self.set_text(cx, &text);
     }
 
     fn show_popup(&mut self, cx: &mut Cx) {
