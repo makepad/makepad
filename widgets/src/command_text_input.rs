@@ -321,13 +321,11 @@ impl CommandTextInput {
 
         let text = self.text();
         let end = get_head(&self.text_input_ref());
-        let Some(start) = end.checked_sub(graphemes(&to_remove).count()) else {
+        let Some(start) = end.checked_sub(to_remove.len()) else {
             return;
         };
 
-        let text = graphemes_with_pos(&text)
-            .filter_map(|(p, g)| if p < start || p >= end { Some(g) } else { None })
-            .collect::<String>();
+        let text = text[..start].to_string() + &text[end..];
 
         self.text_input_ref().set_cursor(start, start);
         self.set_text(cx, &text);
@@ -588,14 +586,6 @@ impl CommandTextInputRef {
 
 fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
     text.graphemes(true)
-}
-
-fn graphemes_with_pos(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
-    text.grapheme_indices(true)
-}
-
-fn inserted_grapheme_with_pos(text: &str, cursor_pos: usize) -> Option<(usize, &str)> {
-    graphemes_with_pos(text).rfind(|(i, _)| *i < cursor_pos)
 }
 
 fn get_head(text_input: &TextInputRef) -> usize {
