@@ -1465,7 +1465,7 @@ fn shape<'a>(
     font_loader: &mut FontLoader,
     text_shaper: &'a mut TextShaper,
 ) -> &'a [GlyphInfo] {
-    text_shaper.get_or_shape(
+    text_shaper.get_or_shape_text(
         font_loader,
         is_secret,
         string,
