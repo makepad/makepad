@@ -14,10 +14,8 @@ pub use {
         path::Path,
     },
     crate::{
-        font_cache,
-        font_cache::FontCache,
+        glyph_rasterizer::{RasterizedGlyph, GlyphRasterizer},
         font_loader::FontLoader,
-        sdf_rasterizer::SdfRasterizer,
         makepad_platform::*,
         cx_2d::Cx2d,
         turtle::{Walk, Layout},
@@ -45,7 +43,6 @@ pub struct CxFontAtlas {
     pub texture_svg: Texture,
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc,
-    pub font_cache: Option<FontCache>,
 }
 
 #[derive(Debug, Default)]
@@ -90,7 +87,6 @@ impl CxFontAtlas {
                     },
                 })
             },
-            font_cache: Some(FontCache::new(os_type.get_cache_dir())),
         }
     }
 }
@@ -205,9 +201,11 @@ impl<'a> Cx2d<'a> {
         }
     }
 
-    pub fn lazy_construct_sdf_rasterizer(cx: &mut Cx) {
-        if !cx.has_global::<Rc<RefCell<SdfRasterizer>>>() {
-            cx.set_global(Rc::new(RefCell::new(SdfRasterizer::new())));
+    pub fn lazy_construct_glyph_rasterizer(cx: &mut Cx) {
+        if !cx.has_global::<Rc<RefCell<GlyphRasterizer>>>() {
+            let cache_dir = cx.os_type().get_cache_dir();
+            let cache_dir = cache_dir.as_ref().map(|string| Path::new(string));
+            cx.set_global(Rc::new(RefCell::new(GlyphRasterizer::new(cache_dir))));
         }
     }
 
@@ -290,24 +288,20 @@ impl<'a> Cx2d<'a> {
             return;
         }
 
-        let glyph_id = todo.glyph_id;
-        let font_size = atlas_page.font_size_in_device_pixels;
-
-        let font_cache_key = font_cache::Key::new(&font_path, glyph_id, font_size);
-
-        let mut font_cache = font_atlas.font_cache.take().unwrap();
-
-        let font_cache::Entry {
+        let glyph_rasterizer_rc = self.glyph_rasterizer.clone();
+        let mut glyph_rasterizer_ref = glyph_rasterizer_rc.borrow_mut();
+        let glyph_rasterizer = &mut *glyph_rasterizer_ref;
+        
+        let RasterizedGlyph {
             size,
             bytes,
-        } = font_cache.get_or_insert_with(font_cache_key, |bytes| {
-            self.rasterize_sdf(
-                font_loader,
-                font_atlas,
-                todo,
-                bytes
-            )
-        });
+        } = glyph_rasterizer.get_or_rasterize_glyph(
+            font_loader,
+            font_atlas,
+            todo.font_id,
+            todo.atlas_page_id,
+            todo.glyph_id,
+        );
 
         let font = font_loader[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
@@ -338,29 +332,6 @@ impl<'a> Cx2d<'a> {
             PointUsize::new(atlas_x0, atlas_h - atlas_y0 - size.height),
             size,
         )));
-
-        font_atlas.font_cache = Some(font_cache);
-    }
-
-    fn rasterize_sdf(
-        &mut self,
-        font_loader: &mut FontLoader,
-        fonts_atlas: &mut CxFontAtlas,
-        todo: CxFontsAtlasTodo,
-        bytes: &mut Vec<u8>
-    ) -> SizeUsize {
-        let font_rasterizer_rc = self.sdf_rasterizer.clone();
-        let mut font_rasterizer_ref = font_rasterizer_rc.borrow_mut();
-        let font_rasterizer = &mut *font_rasterizer_ref;
-        
-        font_rasterizer.rasterize(
-            font_loader,
-            fonts_atlas,
-            todo.font_id,
-            todo.atlas_page_id,
-            todo.glyph_id,
-            bytes
-        )
     }
 }
 

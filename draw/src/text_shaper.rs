@@ -26,7 +26,7 @@ impl TextShaper {
         }
     }
 
-    pub fn get_or_shape<'a>(
+    pub fn get_or_shape_text<'a>(
         &'a mut self,
         font_loader: &mut FontLoader,
         is_secret: bool,
@@ -39,7 +39,7 @@ impl TextShaper {
                 text,
                 font_ids,
             },
-            || self.inner.shape(font_loader, is_secret, text, font_ids),
+            || self.inner.shape_text(font_loader, is_secret, text, font_ids),
         )
     }
 }
@@ -63,7 +63,7 @@ impl TextShaperInner {
         }
     }
 
-    fn shape(
+    fn shape_text(
         &mut self,
         font_loader: &mut FontLoader,
         is_secret: bool,
@@ -71,13 +71,13 @@ impl TextShaperInner {
         font_ids: &[FontId],
     ) -> Vec<GlyphInfo> {
         if is_secret {
-            self.shape_secret(font_loader, text, font_ids)
+            self.shape_text_secret(font_loader, text, font_ids)
         } else {
-            self.shape_no_secret(font_loader, text, font_ids)
+            self.shape_text_no_secret(font_loader, text, font_ids)
         }
     }
 
-    fn shape_secret(
+    fn shape_text_secret(
         &mut self,
         font_loader: &mut FontLoader,
         text: &str,
@@ -103,18 +103,18 @@ impl TextShaperInner {
             .collect()
     }
 
-    fn shape_no_secret(
+    fn shape_text_no_secret(
         &mut self,
         font_loader: &mut FontLoader,
         text: &str,
         font_ids: &[FontId],
     ) -> Vec<GlyphInfo> {
         let mut glyph_infos = Vec::new();
-        self.shape_no_secret_recursive(font_loader, text, font_ids, 0, &mut glyph_infos);
+        self.shape_text_no_secret_recursive(font_loader, text, font_ids, 0, &mut glyph_infos);
         glyph_infos
     }
 
-    fn shape_no_secret_recursive(
+    fn shape_text_no_secret_recursive(
         &mut self,
         font_loader: &mut FontLoader,
         text: &str,
@@ -165,7 +165,7 @@ impl TextShaperInner {
             );
 
             if start_glyph_is_missing
-                && self.shape_no_secret_recursive(
+                && self.shape_text_no_secret_recursive(
                     font_loader,
                     &text[start_cluster..end_cluster],
                     font_ids,

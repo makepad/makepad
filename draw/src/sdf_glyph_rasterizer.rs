@@ -9,12 +9,12 @@ use {
     std::fmt,
 };
 
-pub struct SdfRasterizer {
+pub struct SdfGlyphRasterizer {
     params: Params,
     buffers: Option<ReusableBuffers>,
 }
 
-impl SdfRasterizer {
+impl SdfGlyphRasterizer {
     pub fn new() -> Self {
         Self {
             params: Params {
@@ -27,7 +27,7 @@ impl SdfRasterizer {
         }
     }
 
-    pub fn rasterize(
+    pub fn rasterize_sdf_glyph(
         &mut self,
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
@@ -136,7 +136,7 @@ impl SdfRasterizer {
     }
 }
 
-impl fmt::Debug for SdfRasterizer {
+impl fmt::Debug for SdfGlyphRasterizer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("FontRasterizer").finish()
     }
