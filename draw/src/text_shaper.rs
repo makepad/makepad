@@ -14,17 +14,15 @@ const MAX_CACHE_SIZE: usize = 4096;
 
 #[derive(Debug)]
 pub struct TextShaper {
-    cache_keys: VecDeque<OwnedCacheKey>,
-    cache: HashMap<OwnedCacheKey, Vec<GlyphInfo>>,
-    buffers: Vec<UnicodeBuffer>,
+    inner: TextShaperInner,
+    cache: Cache,
 }
 
 impl TextShaper {
     pub fn new() -> Self {
         Self {
-            cache_keys: VecDeque::new(),
-            cache: HashMap::new(),
-            buffers: Vec::new(),
+            inner: TextShaperInner::new(),
+            cache: Cache::new(),
         }
     }
 
@@ -35,22 +33,34 @@ impl TextShaper {
         text: &str,
         font_ids: &[FontId],
     ) -> &'a [GlyphInfo] {
-        let cache_key = BorrowedCacheKey {
-            is_secret,
-            text,
-            font_ids,
-        };
-        if !self.cache.contains_key(&cache_key as &dyn CacheKey) {
-            let cache_key = cache_key.to_owned();
-            let glyph_infos = self.shape(font_loader, is_secret, text, font_ids);
-            if self.cache_keys.len() == MAX_CACHE_SIZE {
-                let cache_key = self.cache_keys.pop_front().unwrap();
-                self.cache.remove(&cache_key);
-            }
-            self.cache_keys.push_back(cache_key.clone());
-            self.cache.insert(cache_key, glyph_infos);
+        self.cache.get_or_insert_with(
+            &BorrowedCacheKey {
+                is_secret,
+                text,
+                font_ids,
+            },
+            || self.inner.shape(font_loader, is_secret, text, font_ids),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphInfo {
+    pub font_id: FontId,
+    pub glyph_id: usize,
+    pub cluster: usize,
+}
+
+#[derive(Debug)]
+struct TextShaperInner {
+    buffers: Vec<UnicodeBuffer>,
+}
+
+impl TextShaperInner {
+    fn new() -> Self {
+        Self {
+            buffers: Vec::new()
         }
-        &self.cache[&cache_key as &dyn CacheKey]
     }
 
     fn shape(
@@ -129,7 +139,7 @@ impl TextShaper {
             .owned_font_face
             .with_ref(|face| makepad_rustybuzz::shape(face, &[], buffer));
         let glyph_infos = buffer.glyph_infos();
-        
+
         let mut start_glyph = 0;
         while start_glyph < glyph_infos.len() {
             let start_glyph_is_missing = glyph_infos[start_glyph].glyph_id == 0;
@@ -154,13 +164,15 @@ impl TextShaper {
                 "HarfBuzz guarantees monotonic cluster values"
             );
 
-            if start_glyph_is_missing && self.shape_no_secret_recursive(
-                font_loader,
-                &text[start_cluster..end_cluster],
-                font_ids,
-                base_cluster + start_cluster,
-                output,
-            ) {
+            if start_glyph_is_missing
+                && self.shape_no_secret_recursive(
+                    font_loader,
+                    &text[start_cluster..end_cluster],
+                    font_ids,
+                    base_cluster + start_cluster,
+                    output,
+                )
+            {
                 start_glyph = end_glyph;
             }
             while start_glyph < end_glyph {
@@ -179,11 +191,47 @@ impl TextShaper {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct GlyphInfo {
-    pub font_id: FontId,
-    pub glyph_id: usize,
-    pub cluster: usize,
+#[derive(Debug)]
+struct Cache {
+    keys: VecDeque<OwnedCacheKey>,
+    values: HashMap<OwnedCacheKey, Vec<GlyphInfo>>,
+}
+
+impl Cache {
+    fn new() -> Self {
+        Self {
+            keys: VecDeque::new(),
+            values: HashMap::new(),
+        }
+    }
+
+    fn contains_key(&self, key: &BorrowedCacheKey) -> bool {
+        self.values.contains_key(key as &dyn CacheKey)
+    }
+
+    fn get(&self, key: &BorrowedCacheKey) -> Option<&[GlyphInfo]> {
+        self.values.get(key as &dyn CacheKey).map(Vec::as_slice)
+    }
+
+    fn insert(&mut self, key: OwnedCacheKey, value: Vec<GlyphInfo>) {
+        if self.keys.len() == MAX_CACHE_SIZE {
+            let key = self.keys.pop_front().unwrap();
+            self.values.remove(&key);
+        }
+        self.keys.push_back(key.clone());
+        self.values.insert(key, value);
+    }
+
+    fn get_or_insert_with(
+        &mut self,
+        key: &BorrowedCacheKey,
+        f: impl FnOnce() -> Vec<GlyphInfo>,
+    ) -> &[GlyphInfo] {
+        if !self.contains_key(key) {
+            self.insert(key.to_owned(), f());
+        }
+        self.get(key).unwrap()
+    }
 }
 
 trait CacheKey {
