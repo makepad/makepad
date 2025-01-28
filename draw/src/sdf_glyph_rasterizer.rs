@@ -1,23 +1,24 @@
 use {
     crate::{
         font_atlas::CxFontAtlas,
-        font_loader::{FontId, FontLoader},
+        font_loader::FontLoader,
+        glyph_rasterizer::Params,
         makepad_platform::{math_f64, math_usize::SizeUsize},
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
     },
-    sdfer::esdt::{Params, ReusableBuffers},
+    sdfer::esdt::{Params as SdfParams, ReusableBuffers},
     std::fmt,
 };
 
 pub struct SdfGlyphRasterizer {
-    params: Params,
+    params: SdfParams,
     buffers: Option<ReusableBuffers>,
 }
 
 impl SdfGlyphRasterizer {
     pub fn new() -> Self {
         Self {
-            params: Params {
+            params: SdfParams {
                 pad: 4,
                 radius: 8.0,
                 cutoff: 0.25,
@@ -31,9 +32,11 @@ impl SdfGlyphRasterizer {
         &mut self,
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
-        font_id: FontId,
-        atlas_page_id: usize,
-        glyph_id: usize,
+        Params {
+            font_id,
+            atlas_page_id,
+            glyph_id,
+        }: Params,
         output: &mut Vec<u8>,
     ) -> SizeUsize {
         let font = font_loader[font_id].as_mut().unwrap();

@@ -1,7 +1,8 @@
 use {
     crate::{
-        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{CxFontAtlas, CxFontsAtlasTodo, TextShaper, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk},
+        cx_2d::Cx2d, draw_list_2d::ManyInstances, font_atlas::{CxFontAtlas, TextShaper, Font}, geometry::GeometryQuad2D, makepad_platform::*, turtle::{Align, Flow, Size, Walk},
         font_loader::FontLoader, text_shaper::GlyphInfo,
+        glyph_rasterizer::{Command, Mode, Params},
     },
     unicode_segmentation::UnicodeSegmentation,
 };
@@ -1138,10 +1139,13 @@ impl DrawText {
                     .alloc_atlas_glyph(
                         padded_glyph_size_dpx.x / self.font_scale,
                         padded_glyph_size_dpx.y / self.font_scale,
-                        CxFontsAtlasTodo {
-                            font_id: glyph_info.font_id,
-                            atlas_page_id,
-                            glyph_id: glyph_info.glyph_id as usize,
+                        Command {
+                            mode: Mode::Sdf,
+                            params: Params {
+                                font_id: glyph_info.font_id,
+                                atlas_page_id,
+                                glyph_id: glyph_info.glyph_id as usize,
+                            },
                         }
                     )
             });
