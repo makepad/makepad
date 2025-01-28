@@ -363,7 +363,6 @@ impl Cx {
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
-                self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
             }
             MacosEvent::MouseUp(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
@@ -375,7 +374,6 @@ impl Cx {
             MacosEvent::Scroll(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::Scroll(e.into()));
-                self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
             }
             MacosEvent::WindowDragQuery(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
