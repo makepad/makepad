@@ -1,5 +1,3 @@
-use makepad_rustybuzz::UnicodeBuffer;
-
 pub use {
     std::{
         borrow::{Borrow, Cow},
@@ -16,8 +14,7 @@ pub use {
         path::Path,
     },
     crate::{
-        font_cache,
-        font_cache::FontCache,
+        glyph_rasterizer::{RasterizedGlyph, GlyphRasterizer},
         font_loader::FontLoader,
         makepad_platform::*,
         cx_2d::Cx2d,
@@ -46,7 +43,6 @@ pub struct CxFontAtlas {
     pub texture_svg: Texture,
     pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc,
-    pub font_cache: Option<FontCache>,
 }
 
 #[derive(Debug, Default)]
@@ -91,7 +87,6 @@ impl CxFontAtlas {
                     },
                 })
             },
-            font_cache: Some(FontCache::new(os_type.get_cache_dir())),
         }
     }
 }
@@ -206,6 +201,14 @@ impl<'a> Cx2d<'a> {
         }
     }
 
+    pub fn lazy_construct_glyph_rasterizer(cx: &mut Cx) {
+        if !cx.has_global::<Rc<RefCell<GlyphRasterizer>>>() {
+            let cache_dir = cx.os_type().get_cache_dir();
+            let cache_dir = cache_dir.as_ref().map(|string| Path::new(string));
+            cx.set_global(Rc::new(RefCell::new(GlyphRasterizer::new(cache_dir))));
+        }
+    }
+
     pub fn lazy_construct_font_atlas(cx: &mut Cx){
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxFontsAtlasRc>() {
@@ -232,7 +235,7 @@ impl<'a> Cx2d<'a> {
 
     pub fn reset_fonts_atlas(cx:&mut Cx,) {
         if cx.has_global::<CxFontsAtlasRc>() {
-            let mut font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
+            let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
             let mut fonts_atlas = cx.get_global::<CxFontsAtlasRc>().0.borrow_mut();
             fonts_atlas.reset_fonts_atlas(&mut *font_loader.borrow_mut());
         }
@@ -251,11 +254,8 @@ impl<'a> Cx2d<'a> {
             fonts_atlas.reset_fonts_atlas(font_loader);
         }
 
-        // Will be automatically filled after the first use.
-        let mut reuse_sdfer_bufs = None;
-
         for todo in mem::take(&mut fonts_atlas.alloc.todo) {
-            self.swrast_atlas_todo(font_loader, fonts_atlas, todo, &mut reuse_sdfer_bufs);
+            self.swrast_atlas_todo(font_loader, fonts_atlas, todo);
         }
     }
 
@@ -264,13 +264,12 @@ impl<'a> Cx2d<'a> {
         font_loader: &mut FontLoader,
         fonts_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
-        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
         let cxfont = font_loader[todo.font_id].as_mut().unwrap();
         let _atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
         let _glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
 
-        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, todo, reuse_sdfer_bufs);
+        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, todo);
     }
 
     fn swrast_atlas_todo_sdf(
@@ -278,7 +277,6 @@ impl<'a> Cx2d<'a> {
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
         todo: CxFontsAtlasTodo,
-        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
     ) {
         let font_path = font_loader.path(todo.font_id).unwrap().clone();
         let font = font_loader[todo.font_id].as_mut().unwrap();
@@ -290,25 +288,20 @@ impl<'a> Cx2d<'a> {
             return;
         }
 
-        let glyph_id = todo.glyph_id;
-        let font_size = atlas_page.font_size_in_device_pixels;
-
-        let font_cache_key = font_cache::Key::new(&font_path, glyph_id, font_size);
-
-        let mut font_cache = font_atlas.font_cache.take().unwrap();
-
-        let font_cache::Entry {
+        let glyph_rasterizer_rc = self.glyph_rasterizer.clone();
+        let mut glyph_rasterizer_ref = glyph_rasterizer_rc.borrow_mut();
+        let glyph_rasterizer = &mut *glyph_rasterizer_ref;
+        
+        let RasterizedGlyph {
             size,
             bytes,
-        } = font_cache.get_or_insert_with(font_cache_key, |bytes| {
-            self.rasterize_sdf(
-                font_loader,
-                font_atlas,
-                todo,
-                reuse_sdfer_bufs,
-                bytes
-            )
-        });
+        } = glyph_rasterizer.get_or_rasterize_glyph(
+            font_loader,
+            font_atlas,
+            todo.font_id,
+            todo.atlas_page_id,
+            todo.glyph_id,
+        );
 
         let font = font_loader[todo.font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[todo.atlas_page_id];
@@ -339,121 +332,6 @@ impl<'a> Cx2d<'a> {
             PointUsize::new(atlas_x0, atlas_h - atlas_y0 - size.height),
             size,
         )));
-
-        font_atlas.font_cache = Some(font_cache);
-    }
-
-    fn rasterize_sdf(
-        &mut self,
-        font_loader: &mut FontLoader,
-        fonts_atlas: &mut CxFontAtlas,
-        todo: CxFontsAtlasTodo,
-        reuse_sdfer_bufs: &mut Option<sdfer::esdt::ReusableBuffers>,
-        bytes: &mut Vec<u8>
-    ) -> SizeUsize {
-        let font = font_loader[todo.font_id].as_mut().unwrap();
-        let atlas_page = &font.atlas_pages[todo.atlas_page_id];
-        let glyph = font.owned_font_face.with_ref(|face| font.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
-        let atlas_glyph = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
-
-        let font_scale_pixels = atlas_page.font_size_in_device_pixels;
-
-        // HACK(eddyb) ideally these values computed by `DrawText::draw_inner`
-        // would be kept in each `CxFontsAtlasTodo`, to avoid recomputation here.
-        let render_pad_dpx = 2.0;
-        let render_wh = dvec2(
-            ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels).ceil() + render_pad_dpx * 2.0,
-            ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels).ceil() + render_pad_dpx * 2.0,
-        );
-
-        // NOTE(eddyb) `+ 1.0` is because the texture coordinate rectangle
-        // formed by `t1` and `t2` is *inclusive*, see also the comment in
-        // `alloc_atlas_glyph` (about its `- 1` counterpart to this `+ 1.0`).
-        let atlas_alloc_wh = dvec2(
-            (atlas_glyph.t2.x - atlas_glyph.t1.x) as f64 * fonts_atlas.alloc.texture_size.x + 1.0,
-            (atlas_glyph.t2.y - atlas_glyph.t1.y) as f64 * fonts_atlas.alloc.texture_size.y + 1.0,
-        );
-
-        // HACK(eddyb) because `render_wh` can be larger than the `glyph.bounds`
-        // scaled by `font_scale_pixels`, and `alloc_atlas_glyph` performs some
-        // non-trivial scaling on `render_wh` to get better SDF quality, this
-        // division is required to properly map the glyph outline into atlas
-        // space, *without* encroaching into the extra space `render_wh` added.
-        let atlas_scaling = atlas_alloc_wh / render_wh;
-
-        let transform = AffineTransformation::identity()
-            .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-            .uniform_scale(font_scale_pixels)
-            .translate(Vector::new(render_pad_dpx, render_pad_dpx))
-            .scale(Vector::new(atlas_scaling.x, atlas_scaling.y));
-        let commands = glyph
-            .outline
-            .iter()
-            .map(move |command| command.transform(&transform));
-
-        // FIXME(eddyb) try reusing this buffer.
-        let mut glyph_rast = sdfer::Image2d::<_, Vec<_>>::new(
-            atlas_alloc_wh.x.ceil() as usize,
-            atlas_alloc_wh.y.ceil() as usize,
-        );
-
-        let mut cur = ab_glyph_rasterizer::point(0.0, 0.0);
-        let to_ab = |p: makepad_vector::geometry::Point| ab_glyph_rasterizer::point(p.x as f32, p.y as f32);
-        commands
-        .fold(ab_glyph_rasterizer::Rasterizer::new(
-            glyph_rast.width(),
-            glyph_rast.height()
-        ), |mut rasterizer, cmd| match cmd {
-            makepad_vector::path::PathCommand::MoveTo(p) => {
-                cur = to_ab(p);
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::LineTo(p1) => {
-                let (p0, p1) = (cur, to_ab(p1));
-                rasterizer.draw_line(p0, p1);
-                cur = p1;
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::ArcTo(..) => {
-                unreachable!("font glyphs should not use arcs");
-            }
-            makepad_vector::path::PathCommand::QuadraticTo(p1, p2) => {
-                let (p0, p1, p2) = (cur, to_ab(p1), to_ab(p2));
-                rasterizer.draw_quad(p0, p1, p2);
-                cur = p2;
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::CubicTo(p1, p2, p3) => {
-                let (p0, p1, p2, p3) = (cur, to_ab(p1), to_ab(p2), to_ab(p3));
-                rasterizer.draw_cubic(p0, p1, p2, p3);
-                cur = p3;
-                rasterizer
-            }
-            makepad_vector::path::PathCommand::Close => rasterizer
-        })
-        .for_each_pixel_2d(|x, y, a| {
-            glyph_rast[(x as usize, y as usize)] = sdfer::Unorm8::encode(a);
-        });
-
-        let glyph_out = if let Some(sdf_config) = &fonts_atlas.alloc.sdf {
-            let (glyph_sdf, new_reuse_bufs) = sdfer::esdt::glyph_to_sdf(
-                &mut glyph_rast,
-                sdf_config.params,
-                reuse_sdfer_bufs.take(),
-            );
-            *reuse_sdfer_bufs = Some(new_reuse_bufs);
-            glyph_sdf
-        } else {
-            glyph_rast
-        };
-
-        for y in 0..glyph_out.height() {
-            for x in 0..glyph_out.width() {
-                bytes.push(glyph_out[(x, y)].to_bits());
-            }
-        }
-
-        SizeUsize::new(glyph_out.width(), glyph_out.height())
     }
 }
 
