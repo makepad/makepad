@@ -1,5 +1,9 @@
 use {
-    crate::{font_atlas::CxFontAtlas, font_loader::{FontLoader, FontId}, sdf_glyph_rasterizer::SdfGlyphRasterizer},
+    crate::{
+        font_atlas::CxFontAtlas,
+        font_loader::{FontId, FontLoader},
+        sdf_glyph_rasterizer::SdfGlyphRasterizer,
+    },
     makepad_platform::*,
     std::{
         collections::HashMap,
@@ -20,35 +24,38 @@ impl GlyphRasterizer {
     pub fn new(cache_dir: Option<&Path>) -> Self {
         Self {
             sdf_glyph_rasterizer: SdfGlyphRasterizer::new(),
-            cache: Cache::new(cache_dir).expect("failed to initialize glyph raster cache"),
+            cache: Cache::new(cache_dir).expect("failed to load glyph raster cache"),
         }
     }
 
-    pub fn get_or_rasterize_glyph<'a>(
-        &'a mut self,
+    pub fn get_or_rasterize_glyph(
+        &mut self,
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
         font_id: FontId,
         atlas_page_id: usize,
         glyph_id: usize,
-    ) -> RasterizedGlyph<'a> {
+    ) -> RasterizedGlyph<'_> {
         let font = font_loader[font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[atlas_page_id];
         let font_size = atlas_page.font_size_in_device_pixels;
         let font_path = font_loader.path(font_id).unwrap();
         let key = CacheKey::new(&font_path, glyph_id, font_size);
-        self.cache
-            .get_or_insert_with(key, |output| {
-                self.sdf_glyph_rasterizer.rasterize_sdf_glyph(
-                    font_loader,
-                    font_atlas,
-                    font_id,
-                    atlas_page_id,
-                    glyph_id,
-                    output,
-                )
-            })
-            .expect("failed to update glyph raster cache")
+        if !self.cache.contains_key(&key) {
+            self.cache
+                .insert_with(key, |output| {
+                    self.sdf_glyph_rasterizer.rasterize_sdf_glyph(
+                        font_loader,
+                        font_atlas,
+                        font_id,
+                        atlas_page_id,
+                        glyph_id,
+                        output,
+                    )
+                })
+                .expect("failed to update glyph raster cache")
+        }
+        self.cache.get(key).unwrap()
     }
 }
 
@@ -118,6 +125,10 @@ impl Cache {
         })
     }
 
+    fn contains_key(&self, key: &CacheKey) -> bool {
+        self.index.contains_key(key)
+    }
+
     fn get(&self, key: CacheKey) -> Option<RasterizedGlyph<'_>> {
         let CacheIndexEntry { size, offset, len } = self.index.get(&key).copied()?;
         Some(RasterizedGlyph {
@@ -146,17 +157,6 @@ impl Cache {
             index_file.write_all(&buffer)?;
         }
         Ok(())
-    }
-
-    pub fn get_or_insert_with(
-        &mut self,
-        key: CacheKey,
-        f: impl FnOnce(&mut Vec<u8>) -> SizeUsize,
-    ) -> io::Result<RasterizedGlyph<'_>> {
-        if !self.index.contains_key(&key) {
-            self.insert_with(key, f)?;
-        }
-        Ok(self.get(key).unwrap())
     }
 }
 

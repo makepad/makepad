@@ -14,14 +14,14 @@ const MAX_CACHE_SIZE: usize = 4096;
 
 #[derive(Debug)]
 pub struct TextShaper {
-    inner: TextShaperInner,
+    buffers: Vec<UnicodeBuffer>,
     cache: Cache,
 }
 
 impl TextShaper {
     pub fn new() -> Self {
         Self {
-            inner: TextShaperInner::new(),
+            buffers: Vec::new(),
             cache: Cache::new(),
         }
     }
@@ -33,34 +33,16 @@ impl TextShaper {
         text: &str,
         font_ids: &[FontId],
     ) -> &'a [GlyphInfo] {
-        self.cache.get_or_insert_with(
-            &BorrowedCacheKey {
-                is_secret,
-                text,
-                font_ids,
-            },
-            || self.inner.shape_text(font_loader, is_secret, text, font_ids),
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct GlyphInfo {
-    pub font_id: FontId,
-    pub glyph_id: usize,
-    pub cluster: usize,
-}
-
-#[derive(Debug)]
-struct TextShaperInner {
-    buffers: Vec<UnicodeBuffer>,
-}
-
-impl TextShaperInner {
-    fn new() -> Self {
-        Self {
-            buffers: Vec::new()
+        let key = BorrowedCacheKey {
+            is_secret,
+            text,
+            font_ids,
+        };
+        if !self.cache.contains_key(&key) {
+            let glyph_infos = self.shape_text(font_loader, is_secret, text, font_ids);
+            self.cache.insert(key.to_owned(), glyph_infos);
         }
+        self.cache.get(&key).unwrap()
     }
 
     fn shape_text(
@@ -191,6 +173,13 @@ impl TextShaperInner {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphInfo {
+    pub font_id: FontId,
+    pub glyph_id: usize,
+    pub cluster: usize,
+}
+
 #[derive(Debug)]
 struct Cache {
     keys: VecDeque<OwnedCacheKey>,
@@ -220,17 +209,6 @@ impl Cache {
         }
         self.keys.push_back(key.clone());
         self.values.insert(key, value);
-    }
-
-    fn get_or_insert_with(
-        &mut self,
-        key: &BorrowedCacheKey,
-        f: impl FnOnce() -> Vec<GlyphInfo>,
-    ) -> &[GlyphInfo] {
-        if !self.contains_key(key) {
-            self.insert(key.to_owned(), f());
-        }
-        self.get(key).unwrap()
     }
 }
 

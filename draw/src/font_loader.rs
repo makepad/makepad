@@ -1,7 +1,13 @@
 use {
     crate::font_atlas::CxFont,
     makepad_platform::*,
-    std::{collections::HashMap, iter::{Enumerate, IntoIterator}, ops::{Index, IndexMut}, rc::Rc, slice},
+    std::{
+        collections::HashMap,
+        iter::{Enumerate, IntoIterator},
+        ops::{Index, IndexMut},
+        rc::Rc,
+        slice,
+    },
 };
 
 /// A loader for fonts.
@@ -38,7 +44,7 @@ impl FontLoader {
     }
 
     /// Returns an iterator over references to the loaded fonts.
-    /// 
+    ///
     /// Yields tuples of:
     /// - The id of the font.
     /// - The path of the font.
@@ -56,7 +62,7 @@ impl FontLoader {
     }
 
     /// Returns an iterator over mutable references to the loaded fonts.
-    /// 
+    ///
     /// Yields tuples of:
     /// - The id of the font.
     /// - The path of the font.
@@ -120,7 +126,7 @@ impl<'a> IntoIterator for &'a mut FontLoader {
 }
 
 /// An iterator over references to the loaded fonts.
-/// 
+///
 /// This struct is created by the `iter` method on `FontLoader`. See its documentation for more.
 #[derive(Clone, Debug)]
 pub struct Iter<'a> {
@@ -139,7 +145,7 @@ impl<'a> Iterator for Iter<'a> {
 }
 
 /// A mutable iterator over references to the loaded fonts.
-/// 
+///
 /// This struct is created by the `iter_mut` method on `FontLoader`. See its documentation for more.
 #[derive(Debug)]
 pub struct IterMut<'a> {
