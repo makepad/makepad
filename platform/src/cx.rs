@@ -19,7 +19,7 @@ use {
         makepad_shader_compiler::ShaderRegistry,
         draw_shader::CxDrawShaders,
         draw_matrix::CxDrawMatrixPool,
-        os::{CxOs},
+        os::CxOs,
         debug::Debug,
         display_context::DisplayContext,
         performance_stats::PerformanceStats,
