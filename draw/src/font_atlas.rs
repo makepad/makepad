@@ -21,6 +21,7 @@ pub use {
         turtle::{Walk, Layout},
         draw_list_2d::{ManyInstances, DrawList2d, RedrawingApi},
         geometry::GeometryQuad2D,
+        glyph_rasterizer::{Command, Params},
         makepad_vector::font::Glyph,
         makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
@@ -52,7 +53,7 @@ pub struct CxFontsAtlasAlloc {
     pub xpos: usize,
     pub ypos: usize,
     pub hmax: usize,
-    pub todo: Vec<CxFontsAtlasTodo>,
+    pub commands: Vec<Command>,
     pub sdf: Option<CxFontsAtlasSdfConfig>,
 }
 
@@ -62,7 +63,7 @@ pub struct CxFontsAtlasSdfConfig {
 }
 
 impl CxFontAtlas {
-    pub fn new(texture_sdf: Texture, texture_svg: Texture, os_type: &OsType) -> Self {
+    pub fn new(texture_sdf: Texture, texture_svg: Texture) -> Self {
         Self {
             texture_sdf,
             texture_svg,
@@ -76,7 +77,7 @@ impl CxFontAtlas {
                 xpos: 0,
                 ypos: 0,
                 hmax: 0,
-                todo: Vec::new(),
+                commands: Vec::new(),
                 // Set this to `None` to use CPU-rasterized glyphs instead of SDF.
                 sdf: Some(CxFontsAtlasSdfConfig {
                     params: sdfer::esdt::Params {
@@ -91,7 +92,7 @@ impl CxFontAtlas {
     }
 }
 impl CxFontsAtlasAlloc {
-    pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64, todo: CxFontsAtlasTodo) -> CxFontAtlasGlyph {
+    pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64, command: Command) -> CxFontAtlasGlyph {
         // In SDF mode, leave enough room around each glyph (i.e. padding).
         let pad = self.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
 
@@ -132,7 +133,7 @@ impl CxFontsAtlasAlloc {
 
         self.xpos += w;
 
-        self.todo.push(todo);
+        self.commands.push(command);
 
         CxFontAtlasGlyph {
             t1: (dvec2(
@@ -175,7 +176,7 @@ impl CxFontAtlas {
                 cxfont.atlas_pages.clear();
             }
         }
-        self.alloc.todo.clear();
+        self.alloc.commands.clear();
         self.alloc.full = false;
         self.alloc.xpos = 0;
         self.alloc.ypos = 0;
@@ -228,7 +229,7 @@ impl<'a> Cx2d<'a> {
                 updated: TextureUpdated::Full,
             });
 
-            let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg, cx.os_type());
+            let fonts_atlas = CxFontAtlas::new(texture_sdf, texture_svg);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
     }
@@ -254,7 +255,7 @@ impl<'a> Cx2d<'a> {
             fonts_atlas.reset_fonts_atlas(font_loader);
         }
 
-        for todo in mem::take(&mut fonts_atlas.alloc.todo) {
+        for todo in mem::take(&mut fonts_atlas.alloc.commands) {
             self.swrast_atlas_todo(font_loader, fonts_atlas, todo);
         }
     }
@@ -263,27 +264,40 @@ impl<'a> Cx2d<'a> {
         &mut self,
         font_loader: &mut FontLoader,
         fonts_atlas: &mut CxFontAtlas,
-        todo: CxFontsAtlasTodo,
+        command @ Command {
+            params: Params {
+                font_id,
+                atlas_page_id,
+                glyph_id,
+            },
+            ..
+        }: Command
     ) {
-        let cxfont = font_loader[todo.font_id].as_mut().unwrap();
-        let _atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
-        let _glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, todo.glyph_id).unwrap());
+        let cxfont = font_loader[font_id].as_mut().unwrap();
+        let _atlas_page = &cxfont.atlas_pages[atlas_page_id];
+        let _glyph = cxfont.owned_font_face.with_ref(|face| cxfont.ttf_font.get_glyph_by_id(face, glyph_id).unwrap());
 
-        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, todo);
+        self.swrast_atlas_todo_sdf(font_loader, fonts_atlas, command);
     }
 
     fn swrast_atlas_todo_sdf(
         &mut self,
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
-        todo: CxFontsAtlasTodo,
+        command @ Command {
+            params: Params {
+                font_id,
+                atlas_page_id,
+                glyph_id,
+            },
+            ..
+        }: Command
     ) {
-        let font_path = font_loader.path(todo.font_id).unwrap().clone();
-        let font = font_loader[todo.font_id].as_mut().unwrap();
-        let atlas_page = &font.atlas_pages[todo.atlas_page_id];
+        let font = font_loader[font_id].as_mut().unwrap();
+        let atlas_page = &font.atlas_pages[atlas_page_id];
 
         if ['\t', '\n', '\r'].iter().any(|&c| {
-            Some(todo.glyph_id) == font.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
+            Some(glyph_id) == font.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
         }) {
             return;
         }
@@ -298,14 +312,12 @@ impl<'a> Cx2d<'a> {
         } = glyph_rasterizer.get_or_rasterize_glyph(
             font_loader,
             font_atlas,
-            todo.font_id,
-            todo.atlas_page_id,
-            todo.glyph_id,
+            command,
         );
 
-        let font = font_loader[todo.font_id].as_mut().unwrap();
-        let atlas_page = &font.atlas_pages[todo.atlas_page_id];
-        let atlas_glyph = atlas_page.atlas_glyphs.get(&todo.glyph_id).unwrap();
+        let font = font_loader[font_id].as_mut().unwrap();
+        let atlas_page = &font.atlas_pages[atlas_page_id];
+        let atlas_glyph = atlas_page.atlas_glyphs.get(&glyph_id).unwrap();
 
         let mut atlas_data = font_atlas.texture_sdf.take_vec_u8(self.cx);
         let (atlas_w, atlas_h) = font_atlas.texture_sdf.get_format(self.cx).vec_width_height().unwrap();
@@ -353,13 +365,6 @@ pub struct CxFontAtlasPage {
 pub struct CxFontAtlasGlyph {
     pub t1: Vec2,
     pub t2: Vec2,
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-pub struct CxFontsAtlasTodo {
-    pub font_id: usize,
-    pub atlas_page_id: usize,
-    pub glyph_id: usize,
 }
 
 impl CxFont {
