@@ -24,6 +24,10 @@ use {
         font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
         glyph_rasterizer::GlyphRasterizer,
+        text::{
+            fonts::{Definitions, FontsWithTextures},
+            geometry::Size,
+        },
         text_shaper::TextShaper,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     },
@@ -49,6 +53,7 @@ pub struct Cx2d<'a> {
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
     pub (crate) align_list: Vec<AlignEntry>,
+    pub fonts: Rc<RefCell<FontsWithTextures>>,
     pub font_loader: Rc<RefCell<FontLoader>>,
     pub text_shaper: Rc<RefCell<TextShaper>>,
     pub glyph_rasterizer: Rc<RefCell<GlyphRasterizer>>,
@@ -63,6 +68,7 @@ impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {se
 
 impl<'a> Drop for Cx2d<'a> {
     fn drop(&mut self) {
+        self.update_fonts_textures();
         self.draw_font_atlas();
         self.draw_icon_atlas();
     }
@@ -85,6 +91,7 @@ impl<'a> Cx2d<'a> {
     }*/
     
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
+        Self::lazy_construct_fonts(cx);
         Self::lazy_construct_font_loader(cx);
         Self::lazy_construct_text_shaper(cx);
         Self::lazy_construct_glyph_rasterizer(cx);
@@ -92,6 +99,7 @@ impl<'a> Cx2d<'a> {
         Self::lazy_construct_nav_tree(cx);
         Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
+        let fonts = cx.get_global::<Rc<RefCell<FontsWithTextures>>>().clone();
         let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
         let text_shaper=  cx.get_global::<Rc<RefCell<TextShaper>>>().clone();
         let glyph_rasterizer = cx.get_global::<Rc<RefCell<GlyphRasterizer>>>().clone();
@@ -100,6 +108,7 @@ impl<'a> Cx2d<'a> {
         let icon_atlas_rc = cx.get_global::<CxIconAtlasRc>().clone();
         Self {
             overlay_id: None,
+            fonts,
             font_loader,
             text_shaper,
             glyph_rasterizer,
@@ -224,4 +233,18 @@ impl<'a> Cx2d<'a> {
         dl.append_sub_list(self.cx.redraw_id, draw_list_2d.draw_list_id());
     }
     
+    pub fn lazy_construct_fonts(cx: &mut Cx) {
+        if !cx.has_global::<Rc<RefCell<FontsWithTextures>>>() {
+            let fonts = FontsWithTextures::new(
+                cx,
+                Size::new(4096, 4096),
+                Definitions::default(),
+            );
+            cx.set_global(Rc::new(RefCell::new(fonts)));
+        }
+    }
+
+    pub fn update_fonts_textures(&mut self) {
+        self.fonts.borrow_mut().update_textures(&mut self.cx);
+    }
 }
