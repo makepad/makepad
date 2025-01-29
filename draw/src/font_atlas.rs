@@ -42,7 +42,6 @@ pub(crate) const ATLAS_HEIGHT: usize = 4096;
 pub struct CxFontAtlas {
     pub texture_sdf: Texture,
     pub texture_svg: Texture,
-    pub clear_buffer: bool,
     pub alloc: CxFontsAtlasAlloc,
 }
 
@@ -67,7 +66,6 @@ impl CxFontAtlas {
         Self {
             texture_sdf,
             texture_svg,
-            clear_buffer: false,
             alloc: CxFontsAtlasAlloc {
                 full: false,
                 texture_size: DVec2 {
@@ -181,7 +179,6 @@ impl CxFontAtlas {
         self.alloc.xpos = 0;
         self.alloc.ypos = 0;
         self.alloc.hmax = 0;
-        self.clear_buffer = true;
     }
 
     pub fn get_internal_font_atlas_texture_id(&self) -> Texture {
