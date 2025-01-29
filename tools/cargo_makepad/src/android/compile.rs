@@ -42,6 +42,7 @@ pub struct BuildResult {
 }
 
 fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->String{
+    let label = "Robrix";
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
     <manifest xmlns:android="http://schemas.android.com/apk/res/android"
         xmlns:tools="http://schemas.android.com/tools"
@@ -49,6 +50,7 @@ fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->Stri
         <application
             android:label="{label}"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:resizeableActivity="false"
             android:allowBackup="true"
             android:supportsRtl="true"
             android:debuggable="true"
@@ -58,6 +60,8 @@ fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->Stri
             <activity
                 android:name=".{class_name}"
                 android:configChanges="orientation|screenSize|keyboardHidden"
+                android:screenOrientation="portrait"
+                android:resizeableActivity="false"
                 android:exported="true">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
