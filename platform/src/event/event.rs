@@ -437,7 +437,12 @@ impl DrawEvent{
                 if vw == draw_list_id {
                     return true
                 }
-                next = cx.draw_lists[vw].codeflow_parent_id;
+                if let Some(n) = cx.draw_lists.checked_index(vw){
+                    next = n.codeflow_parent_id;
+                }
+                else{ // a drawlist in our redraw lists was reused
+                    break;
+                }
             }
         }
         // figure out if areas are in some way a parent of view_id, then redraw
@@ -447,7 +452,12 @@ impl DrawEvent{
                 if vw == *check_draw_list_id {
                     return true
                 }
-                next = cx.draw_lists[vw].codeflow_parent_id;
+                if let Some(n) = cx.draw_lists.checked_index(vw){
+                    next = n.codeflow_parent_id;
+                }
+                else{ // a drawlist in our redraw lists was reused
+                    break;
+                }
             }
         }
         false
