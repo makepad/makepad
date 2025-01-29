@@ -1176,7 +1176,6 @@ impl DrawText {
             // Use the padded glyph size in device pixels to get the atlas glyph from the atlas page.
             let atlas_glyph = *atlas_page.atlas_glyphs.entry(glyph_info.glyph_id as usize).or_insert_with(|| {
                 font_atlas
-                    .alloc
                     .alloc_atlas_glyph(
                         padded_glyph_size_dpx.x / self.font_scale,
                         padded_glyph_size_dpx.y / self.font_scale,
