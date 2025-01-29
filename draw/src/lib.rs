@@ -16,6 +16,7 @@ pub mod svg_glyph_rasterizer;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
+pub mod text;
 pub mod text_shaper;
 
 mod owned_font_face;
