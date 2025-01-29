@@ -3,13 +3,13 @@ use {
         font_atlas::CxFontAtlas,
         font_loader::{FontId, FontLoader},
         sdf_glyph_rasterizer::SdfGlyphRasterizer,
+        svg_glyph_rasterizer::SvgGlyphRasterizer,
     },
     makepad_platform::*,
     std::{
         collections::HashMap,
         fs::{File, OpenOptions},
-        io,
-        io::{Read, Write},
+        io::{self, Read, Write},
         path::Path,
     },
 };
@@ -17,6 +17,7 @@ use {
 #[derive(Debug)]
 pub struct GlyphRasterizer {
     sdf_glyph_rasterizer: SdfGlyphRasterizer,
+    svg_glyph_rasterizer: SvgGlyphRasterizer,
     cache: Cache,
 }
 
@@ -24,6 +25,7 @@ impl GlyphRasterizer {
     pub fn new(cache_dir: Option<&Path>) -> Self {
         Self {
             sdf_glyph_rasterizer: SdfGlyphRasterizer::new(),
+            svg_glyph_rasterizer: SvgGlyphRasterizer::new(),
             cache: Cache::new(cache_dir).expect("failed to load glyph raster cache"),
         }
     }
@@ -32,9 +34,16 @@ impl GlyphRasterizer {
         &mut self,
         font_loader: &mut FontLoader,
         font_atlas: &mut CxFontAtlas,
-        font_id: FontId,
-        atlas_page_id: usize,
-        glyph_id: usize,
+        Command {
+            mode,
+            params:
+                params @ Params {
+                    font_id,
+                    atlas_page_id,
+                    glyph_id,
+                },
+            ..
+        }: Command,
     ) -> RasterizedGlyph<'_> {
         let font = font_loader[font_id].as_mut().unwrap();
         let atlas_page = &font.atlas_pages[atlas_page_id];
@@ -43,20 +52,43 @@ impl GlyphRasterizer {
         let key = CacheKey::new(&font_path, glyph_id, font_size);
         if !self.cache.contains_key(&key) {
             self.cache
-                .insert_with(key, |output| {
-                    self.sdf_glyph_rasterizer.rasterize_sdf_glyph(
+                .insert_with(key, |output| match mode {
+                    Mode::Sdf => self.sdf_glyph_rasterizer.rasterize_sdf_glyph(
                         font_loader,
                         font_atlas,
-                        font_id,
-                        atlas_page_id,
-                        glyph_id,
+                        params,
                         output,
-                    )
+                    ),
+                    Mode::Svg => self.svg_glyph_rasterizer.rasterize_svg_glyph(
+                        font_loader,
+                        font_atlas,
+                        params,
+                        output,
+                    ),
                 })
                 .expect("failed to update glyph raster cache")
         }
         self.cache.get(key).unwrap()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Command {
+    pub mode: Mode,
+    pub params: Params,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Mode {
+    Svg,
+    Sdf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Params {
+    pub font_id: FontId,
+    pub atlas_page_id: usize,
+    pub glyph_id: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -161,7 +193,7 @@ impl Cache {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CacheKey(LiveId);
+struct CacheKey(LiveId);
 
 impl CacheKey {
     fn new(font_path: &str, glyph_id: usize, font_size: f64) -> Self {

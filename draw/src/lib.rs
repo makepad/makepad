@@ -12,6 +12,7 @@ pub mod font_atlas;
 pub mod glyph_rasterizer;
 pub mod font_loader;
 pub mod sdf_glyph_rasterizer;
+pub mod svg_glyph_rasterizer;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
