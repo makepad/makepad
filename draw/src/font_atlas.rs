@@ -42,11 +42,6 @@ pub(crate) const ATLAS_HEIGHT: usize = 4096;
 pub struct CxFontAtlas {
     pub texture_sdf: Texture,
     pub texture_svg: Texture,
-    pub alloc: CxFontsAtlasAlloc,
-}
-
-#[derive(Debug, Default)]
-pub struct CxFontsAtlasAlloc {
     pub texture_size: DVec2,
     pub full: bool,
     pub xpos: usize,
@@ -66,30 +61,29 @@ impl CxFontAtlas {
         Self {
             texture_sdf,
             texture_svg,
-            alloc: CxFontsAtlasAlloc {
-                full: false,
-                texture_size: DVec2 {
-                    x: ATLAS_WIDTH as f64,
-                    y: ATLAS_HEIGHT as f64
-                },
-                xpos: 0,
-                ypos: 0,
-                hmax: 0,
-                commands: Vec::new(),
-                // Set this to `None` to use CPU-rasterized glyphs instead of SDF.
-                sdf: Some(CxFontsAtlasSdfConfig {
-                    params: sdfer::esdt::Params {
-                        pad: 4,
-                        radius: 8.0,
-                        cutoff: 0.25,
-                        ..Default::default()
-                    },
-                })
+            full: false,
+            texture_size: DVec2 {
+                x: ATLAS_WIDTH as f64,
+                y: ATLAS_HEIGHT as f64
             },
+            xpos: 0,
+            ypos: 0,
+            hmax: 0,
+            commands: Vec::new(),
+            // Set this to `None` to use CPU-rasterized glyphs instead of SDF.
+            sdf: Some(CxFontsAtlasSdfConfig {
+                params: sdfer::esdt::Params {
+                    pad: 4,
+                    radius: 8.0,
+                    cutoff: 0.25,
+                    ..Default::default()
+                },
+            })
         }
     }
 }
-impl CxFontsAtlasAlloc {
+
+impl CxFontAtlas {
     pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64, command: Command) -> CxFontAtlasGlyph {
         // In SDF mode, leave enough room around each glyph (i.e. padding).
         let pad = self.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
@@ -174,11 +168,11 @@ impl CxFontAtlas {
                 cxfont.atlas_pages.clear();
             }
         }
-        self.alloc.commands.clear();
-        self.alloc.full = false;
-        self.alloc.xpos = 0;
-        self.alloc.ypos = 0;
-        self.alloc.hmax = 0;
+        self.commands.clear();
+        self.full = false;
+        self.xpos = 0;
+        self.ypos = 0;
+        self.hmax = 0;
     }
 
     pub fn get_internal_font_atlas_texture_id(&self) -> Texture {
@@ -248,11 +242,11 @@ impl<'a> Cx2d<'a> {
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
 
-        if fonts_atlas.alloc.full {
+        if fonts_atlas.full {
             fonts_atlas.reset_fonts_atlas(font_loader);
         }
 
-        for todo in mem::take(&mut fonts_atlas.alloc.commands) {
+        for todo in mem::take(&mut fonts_atlas.commands) {
             self.swrast_atlas_todo(font_loader, fonts_atlas, todo);
         }
     }
@@ -324,9 +318,9 @@ impl<'a> Cx2d<'a> {
             assert_eq!(atlas_data.len(), atlas_w * atlas_h);
         }
 
-        let sdf_pad = font_atlas.alloc.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
-        let atlas_x0 = (atlas_glyph.t1.x as f64 * font_atlas.alloc.texture_size.x) as usize - sdf_pad;
-        let atlas_y0 = (atlas_glyph.t1.y as f64 * font_atlas.alloc.texture_size.y) as usize - sdf_pad;
+        let sdf_pad = font_atlas.sdf.as_ref().map_or(0, |sdf| sdf.params.pad);
+        let atlas_x0 = (atlas_glyph.t1.x as f64 * font_atlas.texture_size.x) as usize - sdf_pad;
+        let atlas_y0 = (atlas_glyph.t1.y as f64 * font_atlas.texture_size.y) as usize - sdf_pad;
 
         let mut index = 0;
         for y in 0..size.height {

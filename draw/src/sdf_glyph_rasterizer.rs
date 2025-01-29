@@ -62,8 +62,8 @@ impl SdfGlyphRasterizer {
         // formed by `t1` and `t2` is *inclusive*, see also the comment in
         // `alloc_atlas_glyph` (about its `- 1` counterpart to this `+ 1.0`).
         let atlas_alloc_wh = math_f64::dvec2(
-            (atlas_glyph.t2.x - atlas_glyph.t1.x) as f64 * font_atlas.alloc.texture_size.x + 1.0,
-            (atlas_glyph.t2.y - atlas_glyph.t1.y) as f64 * font_atlas.alloc.texture_size.y + 1.0,
+            (atlas_glyph.t2.x - atlas_glyph.t1.x) as f64 * font_atlas.texture_size.x + 1.0,
+            (atlas_glyph.t2.y - atlas_glyph.t1.y) as f64 * font_atlas.texture_size.y + 1.0,
         );
 
         // HACK(eddyb) because `render_wh` can be larger than the `glyph.bounds`
