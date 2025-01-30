@@ -318,7 +318,8 @@ impl MacosApp {
         }
     }*/
     pub fn startup_focus_hack(&mut self) {
-        
+        /*
+         *
         unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
@@ -348,6 +349,7 @@ impl MacosApp {
                 }
             }
         }
+        */
     }
     
     pub fn time_now(&self) -> f64 {
