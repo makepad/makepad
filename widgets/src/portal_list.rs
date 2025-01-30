@@ -1142,12 +1142,12 @@ impl PortalListRef {
         if target_id > inner.first_id {
             // Scrolling down to a larger item index
             scroll_direction = -1.0;
-            starting_id = ((target_id - inner.first_id) > max_items_to_show)
-                .then_some(target_id - max_items_to_show);
+            starting_id = ((target_id.saturating_sub(inner.first_id)) > max_items_to_show)
+                .then_some(target_id.saturating_sub(max_items_to_show));
         } else {
             // Scrolling up to a smaller item index
             scroll_direction = 1.0;
-            starting_id = ((inner.first_id - target_id) > max_items_to_show)
+            starting_id = ((inner.first_id.saturating_sub(target_id)) > max_items_to_show)
                 .then_some(target_id + max_items_to_show);
         };
 
