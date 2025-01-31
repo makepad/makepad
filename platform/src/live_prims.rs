@@ -124,6 +124,14 @@ live_primitive!(
                 *self = *val != 0;
                 index + 1
             }
+            LiveValue::Float64(val) => {
+                *self = val.abs()>0.00001;
+                index + 1
+            }
+            LiveValue::Float32(val) => {
+                *self = val.abs()>0.00001;
+                index + 1
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply, index, nodes);
