@@ -106,7 +106,7 @@ pub struct CommandTextInput {
     /// Index from `selectable_widgets` that would be submitted if `Return` is pressed.
     /// `None` if there are no selectable widgets.
     #[rust]
-    keyboard_focus_index: Option<usize>,
+    pub keyboard_focus_index: Option<usize>,
 
     /// Index from `selectable_widgets` that the pointer is hovering over.
     /// `None` if there are no selectable widgets.
