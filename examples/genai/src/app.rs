@@ -88,7 +88,7 @@ pub struct App {
         Machine::new("192.0.2.49:8188", live_id!(m1)),
         Machine::new("192.0.2.64:8188", live_id!(m2)),
         Machine::new("192.0.2.46:8188", live_id!(m3)),
-        Machine::new("192.0.2.57:8188", live_id!(m4)),
+        Machine::new("192.0.2.48:8188", live_id!(m4)),
         Machine::new("192.0.2.45:8188", live_id!(m7)),
         Machine::new("192.0.2.59:8188", live_id!(m8)),
         //Machine::new("198.51.100.35:8188", id_lut!(m1)),
