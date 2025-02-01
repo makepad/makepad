@@ -106,7 +106,7 @@ pub struct CommandTextInput {
     /// Index from `selectable_widgets` that would be submitted if `Return` is pressed.
     /// `None` if there are no selectable widgets.
     #[rust]
-    pub keyboard_focus_index: Option<usize>,
+    keyboard_focus_index: Option<usize>,
 
     /// Index from `selectable_widgets` that the pointer is hovering over.
     /// `None` if there are no selectable widgets.
@@ -279,6 +279,21 @@ impl Widget for CommandTextInput {
 }
 
 impl CommandTextInput {
+
+    pub fn keyboard_focus_index(&self) -> Option<usize> {
+        self.keyboard_focus_index
+    }
+
+    /// Sets the keyboard focus index for the list of selectable items
+    /// Only updates the visual highlight state of the dropdown items
+    pub fn set_keyboard_focus_index(&mut self, idx: usize) {
+        // Only process if popup is visible and we have items
+        if !self.selectable_widgets.is_empty() {
+            // Simply update the focus index within valid bounds
+            self.keyboard_focus_index = Some(idx.clamp(0, self.selectable_widgets.len() - 1));
+        }
+    }
+
     fn on_text_inserted(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
         if graphemes(inserted).last() == self.trigger_grapheme() {
             self.show_popup(cx);
