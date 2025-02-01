@@ -400,6 +400,7 @@ impl IosApp {
                     get_ios_app_global().timers.remove(i);
                 }
                 IosApp::do_callback(IosEvent::Timer(TimerEvent {timer_id: timer_id, time:Some(time)}));
+                return
             }
         }
     }
