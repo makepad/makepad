@@ -84,7 +84,7 @@ pub struct Drawer {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText,
+    draw_text: DrawText2,
     #[live]
     label_walk: Walk,
     #[walk]
