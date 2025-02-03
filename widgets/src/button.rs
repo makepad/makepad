@@ -157,13 +157,13 @@ live_design! {
         margin: 0.
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.fill(#f00)
-                return sdf.result
-            }
-        }
+        // draw_bg: {
+        //     fn pixel(self) -> vec4 {
+        //         let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+        //         sdf.fill(#f00)
+        //         return sdf.result
+        //     }
+        // }
         
         draw_text: {
             instance hover: 0.0,

@@ -317,7 +317,7 @@ live_design!{
         draw_text: {
             instance hover: 0.0;
             uniform color: (SLIDER_ALT1_LABEL_COLOR),
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: <THEME_FONT_BOLD> {
                 font_size: (SLIDER_ALT1_LABEL_FONTSIZE)
             }
 
