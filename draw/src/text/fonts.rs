@@ -1,11 +1,11 @@
 use {
     super::{
-        font::{Font, FontId},
+        atlas::Atlas,
         faces::Faces,
+        font::{Font, FontId},
         font_family::{FontFamily, FontFamilyId},
         geom::{Point, Size},
         image::Subimage,
-        atlas::Atlas,
         pixels::{Bgra, R},
         shaper::ShaperWithCache,
     },
@@ -34,7 +34,7 @@ impl FontsWithTextures {
                 TextureFormat::VecRu8 {
                     width: options.grayscale_atlas_size.width,
                     height: options.grayscale_atlas_size.height,
-                    data: Some(vec![]),
+                    data: Some(vec![0; options.grayscale_atlas_size.width * options.grayscale_atlas_size.height]),
                     unpack_row_length: None,
                     updated: TextureUpdated::Empty,
                 },
@@ -44,7 +44,7 @@ impl FontsWithTextures {
                 TextureFormat::VecBGRAu8_32 {
                     width: options.color_atlas_size.width,
                     height: options.color_atlas_size.height,
-                    data: Some(vec![]),
+                    data: Some(vec![0; options.grayscale_atlas_size.width * options.grayscale_atlas_size.height * 4]),
                     updated: TextureUpdated::Empty,
                 },
             ),
@@ -75,20 +75,18 @@ impl FontsWithTextures {
     fn update_grayscale_texture(&mut self, cx: &mut Cx) {
         let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
         let atlas_size = self.fonts.grayscale_atlas_size();
-        let dirty_rect = self
-            .fonts
-            .take_dirty_grayscale_image_with(|dirty_image| {
-                let dirty_rect = dirty_image.bounds();
-                for src_y in 0..dirty_rect.size.height {
-                    for src_x in 0..dirty_rect.size.width {
-                        let dst_x = dirty_rect.origin.x + src_x;
-                        let dst_y = dirty_rect.origin.y + src_y;
-                        let pixel = dirty_image[Point::new(src_x, src_y)];
-                        texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
-                    }
+        let dirty_rect = self.fonts.take_dirty_grayscale_image_with(|dirty_image| {
+            let dirty_rect = dirty_image.bounds();
+            for src_y in 0..dirty_rect.size.height {
+                for src_x in 0..dirty_rect.size.width {
+                    let dst_x = dirty_rect.origin.x + src_x;
+                    let dst_y = dirty_rect.origin.y + src_y;
+                    let pixel = dirty_image[Point::new(src_x, src_y)];
+                    texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
                 }
-                dirty_rect
-            });
+            }
+            dirty_rect
+        });
         self.grayscale_texture.put_back_vec_u8(
             cx,
             texture_data,
@@ -146,7 +144,9 @@ pub struct Fonts {
 impl Fonts {
     pub fn new(options: Options, definitions: Definitions) -> Self {
         Self {
-            shaper: Rc::new(RefCell::new(ShaperWithCache::new(options.shaper_cache_size))),
+            shaper: Rc::new(RefCell::new(ShaperWithCache::new(
+                options.shaper_cache_size,
+            ))),
             grayscale_atlas: Rc::new(RefCell::new(Atlas::new(options.grayscale_atlas_size))),
             color_atlas: Rc::new(RefCell::new(Atlas::new(options.color_atlas_size))),
             definitions,
@@ -315,8 +315,11 @@ mod tests {
         let file = File::create("/Users/ejpbruel/Desktop/grayscale.png").unwrap();
         let writer = BufWriter::new(file);
         let atlas = fonts.grayscale_atlas.borrow();
-        let mut encoder =
-            png::Encoder::new(writer, fonts.grayscale_atlas_size().width as u32, fonts.grayscale_atlas_size().height as u32);
+        let mut encoder = png::Encoder::new(
+            writer,
+            fonts.grayscale_atlas_size().width as u32,
+            fonts.grayscale_atlas_size().height as u32,
+        );
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
@@ -328,8 +331,11 @@ mod tests {
         let file = File::create("/Users/ejpbruel/Desktop/color.png").unwrap();
         let writer = BufWriter::new(file);
         let atlas = fonts.color_atlas.borrow();
-        let mut encoder =
-            png::Encoder::new(writer, fonts.color_atlas_size().width as u32, fonts.color_atlas_size().height as u32);
+        let mut encoder = png::Encoder::new(
+            writer,
+            fonts.color_atlas_size().width as u32,
+            fonts.color_atlas_size().height as u32,
+        );
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
