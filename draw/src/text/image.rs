@@ -1,5 +1,5 @@
 use {
-    super::geom::{Point, Rect, Size},
+    super::{geom::{Point, Rect, Size}, num::Zero},
     std::ops::{Index, IndexMut},
 };
 
@@ -18,6 +18,10 @@ impl<T> Image<T> {
             size,
             pixels: vec![Default::default(); size.width * size.height],
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size() == Size::ZERO
     }
 
     pub fn size(&self) -> Size<usize> {
@@ -76,6 +80,10 @@ pub struct Subimage<'a, T> {
 }
 
 impl<'a, T> Subimage<'a, T> {
+    pub fn is_empty(&self) -> bool {
+        self.bounds().is_empty()
+    }
+
     pub fn bounds(&self) -> Rect<usize> {
         self.bounds
     }
@@ -100,6 +108,10 @@ pub struct SubimageMut<'a, T> {
 }
 
 impl<'a, T> SubimageMut<'a, T> {
+    pub fn is_empty(&self) -> bool {
+        self.bounds().is_empty()
+    }
+
     pub fn bounds(&self) -> Rect<usize> {
         self.bounds
     }
