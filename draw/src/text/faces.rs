@@ -5,11 +5,11 @@ use {
 };
 
 #[derive(Debug)]
-pub struct FontFaces(Pin<Box<FontFacesInner>>);
+pub struct Faces(Pin<Box<FacesInner>>);
 
-impl FontFaces {
+impl Faces {
     pub fn from_data_and_index(data: Rc<Cow<'static, [u8]>>, index: u32) -> Option<Self> {
-        let mut inner = Box::pin(FontFacesInner {
+        let mut inner = Box::pin(FacesInner {
             data,
             ttf_parser_face: None,
             rustybuzz_face: None,
@@ -35,14 +35,14 @@ impl FontFaces {
     }
 }
 
-struct FontFacesInner {
+struct FacesInner {
     data: Rc<Cow<'static, [u8]>>,
     ttf_parser_face: Option<ttf_parser::Face<'static>>,
     rustybuzz_face: Option<rustybuzz::Face<'static>>,
     _pinned: PhantomPinned,
 }
 
-impl fmt::Debug for FontFacesInner {
+impl fmt::Debug for FacesInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FontFacesInner").finish_non_exhaustive()
     }

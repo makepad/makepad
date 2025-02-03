@@ -1,16 +1,16 @@
 use {
     super::{
-        font_faces::FontFaces,
-        geometry::{Point, Rect, Size},
-        glyph_outline,
-        glyph_outline::GlyphOutline,
-        glyph_raster_image::GlyphRasterImage,
-        image_atlas::ImageAtlas,
+        faces::Faces,
+        geom::{Point, Rect, Size},
+        outline,
+        outline::Outline,
+        raster_image::GlyphRasterImage,
+        atlas::Atlas,
         pixels::{Bgra, R},
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
-    std::{cell::RefCell, rc::Rc},
+    std::{cell::RefCell, hash::{Hash, Hasher}, rc::Rc},
 };
 
 pub type FontId = String;
@@ -18,17 +18,17 @@ pub type FontId = String;
 #[derive(Debug)]
 pub struct Font {
     id: FontId,
-    grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
-    color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
-    faces: FontFaces,
+    grayscale_atlas: Rc<RefCell<Atlas<R<u8>>>>,
+    color_atlas: Rc<RefCell<Atlas<Bgra<u8>>>>,
+    faces: Faces,
 }
 
 impl Font {
     pub fn new(
         id: FontId,
-        grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
-        color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
-        faces: FontFaces,
+        grayscale_atlas: Rc<RefCell<Atlas<R<u8>>>>,
+        color_atlas: Rc<RefCell<Atlas<Bgra<u8>>>>,
+        faces: Faces,
     ) -> Self {
         Self {
             id,
@@ -54,10 +54,10 @@ impl Font {
         self.ttf_parser_face().units_per_em() as f32
     }
 
-    pub fn glyph_outline(&self, id: GlyphId, pxs_per_em: f32) -> Option<GlyphOutline> {
+    pub fn glyph_outline(&self, id: GlyphId, pxs_per_em: f32) -> Option<Outline> {
         let face = self.ttf_parser_face();
         let glyph_id = ttf_parser::GlyphId(id);
-        let mut builder = glyph_outline::Builder::new();
+        let mut builder = outline::Builder::new();
         let bounds = face.outline_glyph(glyph_id, &mut builder)?;
         let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
         let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
@@ -99,6 +99,20 @@ impl Font {
             });
         }
         None
+    }
+}
+
+impl Eq for Font {}
+
+impl Hash for Font {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialEq for Font {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
     }
 }
 
