@@ -8,6 +8,7 @@ live_design!{
 
     Thumbnail = <View> {
         width: Fit,
+
         <Image> {
             width: 100.,
             fit: Biggest,
@@ -15,48 +16,62 @@ live_design!{
         }
     }
 
+    SlideshowPrev = <Button> {
+        height: Fill, width: 50.,
+        icon_walk: { width: 9. }
+        draw_bg: {
+            bodytop: #fff0,
+            bodybottom: #fff2,
+        }
+        draw_icon: {
+            svg_file: dep("crate://self/resources/icon_larr.svg")
+        }
+
+        text: ""
+    }
+
+    SlideshowNext = <SlideshowPrev> {
+        draw_icon: { svg_file: dep("crate://self/resources/icon_rarr.svg") }
+    }
+
     SlideshowMenu = <View> {
-            align: { x: 0., y: 0.9}
-            height: Fill, width: Fill,
-            padding: { left: 0., right: 0.}
-            spacing: 10.,
-            <ButtonFlat> {
-                text: ""
-                height: Fill, width: 50.,
-                icon_walk: { width: 9. }
-                draw_icon: {
-                    svg_file: dep("crate://self/resources/icon_larr.svg"),
-                }
+        height: Fill,
+        width: Fill,
+        padding: { left: 0., right: 0.}
+        align: { x: 0., y: 0.92}
+        spacing: 10.,
+
+        <SlideshowPrev> {}
+        <Filler> {}
+        <RectShadowView> {
+            visible: true; // make this an animated property so that the thumbs only show up on mouse over.
+
+            width: Fit, height: 100.,
+            spacing: 1.,
+            align: { x: 0., y: 0.5}
+            draw_bg: {
+                shadow_radius: 20.,
             }
-            <Filler> {}
-            <RoundedShadowView> {
-                align: { x: 0., y: 0.5}
-                flow: Right,
-                spacing: 1.,
-                width: Fit, height: 100.,
-                <Thumbnail> {}
-                <Thumbnail> {}
-                <Thumbnail> {}
-                <Thumbnail> {}
-            }
-            <ButtonFlat> {
-                text: ""
-                height: Fill, width: 50.,
-                icon_walk: { width: 9. }
-                draw_icon: {
-                    svg_file: dep("crate://self/resources/icon_rarr.svg"),
-                }
-            }
+
+            <Thumbnail> {}
+            <Thumbnail> {}
+            <Thumbnail> {}
+            <Thumbnail> {}
+
+        }
+        <SlideshowNext> {}
     }
 
     Slideshow = <View> {
         flow: Overlay,
+
         <Image> {
             width: Fill, height: Fill,
             fit: Biggest,
             source: dep("crate://self/resources/hassaan-here-Ype8P9pAjXQ-unsplash.jpg")
         }
         <SlideshowMenu> {}
+
     }
 
     ImgPlaceholder = <View> {
@@ -69,19 +84,36 @@ live_design!{
         }
         <View> {
             width: Fill, height: Fit,
-            padding: { top: 5.0, right: 5.0, bottom: 0.0, left: 5.0 },
-            <Pbold> {
+            padding: { top: 5.0, right: 5.0, bottom: 5.0, left: 5.0 },
+            <Label> {
+                width: Fill,
+                draw_text: {
+                    wrap: Ellipsis,
+                    text_style: {
+                        font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf") }
+                        font_size: 10., 
+                    }
+                    fn get_color(self) -> vec4 {
+                        return #B;
+                    }
+                }
+
                 text: "filename.jpg",
+            }
+            <Label> {
                 draw_text: {
                     wrap: Ellipsis;
+                    text_style: {
+                        font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf") }
+                        font_size: 10., 
+                    }
+                    fn get_color(self) -> vec4 {
+                        return #8;
+                    }
                 }
-            }
-            <P> {
                 width: Fit,
+
                 text: "03-03-23",
-                draw_text: {
-                    color: #8,
-                }
             }
         }
     }
@@ -96,18 +128,36 @@ live_design!{
         margin: 0.0,
         spacing: 10.0
         align: { x: 0.0, y: 0.5} 
-        <ButtonFlatter> {
-            text: ""
-            padding: 0.,
+
+        <Button> {
             margin: { top: 0., right: 0., bottom: 0., left: 65. }
-            icon_walk: { width: 12., margin: { left: 3.0 }}
+
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    return sdf.result
+                }
+            }
+
             draw_icon: {
                 svg_file: dep("crate://self/resources/icon_folder.svg"),
             }
+            icon_walk: { width: 12., margin: { left: 3.0 }}
+
+            text: ""
         }
-        <Pbold> {
-            width: Fit, height: Fit,
+
+        <Label> {
+            width: Fit,
             margin: 0.,
+            draw_text: {
+                text_style: {
+                    font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf") }
+                    font_size: 10.
+                }
+                color: #B
+            }
+
             text: "../vacation/italy_2023",
         }
         <Filler> {}
@@ -117,25 +167,37 @@ live_design!{
                 svg_file: dep("crate://self/resources/Icon_Search.svg"),
             }
         }
+
         <TextInput> {
             height: Fit,
             empty_message: "Search"
+            draw_text: {
+                text_style: {
+                    font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf") }
+                    font_size: 10., 
+                }
+                fn get_color(self) -> vec4 {
+                    return #8
+                }
+            }
         }
-        <ButtonIcon> {
-            text: "Slideshow"
-            icon_walk: { width: 8.5, margin: { left: 3.0 }}
+
+        <Button> {
             draw_bg: {
                 bodytop: #06f,
                 bodybottom: #08F,
             }
 
-            draw_text: {
-                color: #fff,
-            }
+            icon_walk: { width: 8.5, margin: { left: 3.0 }}
             draw_icon: {
                 color: #fff,
                 svg_file: dep("crate://self/resources/icon_rarr.svg"),
             }
+
+            draw_text: {
+                color: #fff,
+            }
+            text: "Slideshow"
         }
     }
 
@@ -147,30 +209,59 @@ live_design!{
         align: { x: 0.0, y: 0.5 }
         flow: Right,
         <SliderAlt1> {
-            text: "Pics / line",
             width: 200.,
             step: 1.,
             min: 1.,
             max: 10.
             precision: 0,
+
+            text: "Pics / line",
         }
         <Vr> {}
-        <Pbold> {
+        <Label> {
             width: Fit,
-            margin: 0.
+            margin: 0.,
+            draw_text: {
+                text_style: {
+                    font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf") }
+                    font_size: 10.
+                }
+                color: #B
+            }
+
             text: "Preview",
         }
+
         <RadioButton> { text: "Square" }
         <RadioButton> { text: "Original" }
         <Vr> {}
-        <CheckBox> { text: "Show infos" }
-        <Filler> {}
-        <P> {
+        <CheckBox> {
             width: Fit,
-            margin: 0.
+            margin: 0.,
             draw_text: {
-                color: #8,
+                text_style: {
+                    font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf") }
+                    font_size: 10., 
+                }
+                fn get_color(self) -> vec4 {
+                    return #B;
+                }
             }
+
+            text: "Show infos",
+        }
+        <Filler> {}
+        <Label> {
+            width: Fit,
+            margin: 0.,
+            draw_text: {
+                text_style: {
+                    font: { path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf") }
+                    font_size: 10., 
+                }
+                color: #8
+            }
+
             text: "43 Images"
         }
     }
@@ -189,7 +280,7 @@ live_design!{
         width: Fill, height: Fill,
         flow: Down,
         margin: 0.0,
-        padding: 5.0,
+        padding: 10.0,
         spacing: 1.0,
         scroll_bars: <ScrollBars> {}
         <ImgPlaceholderRow> {}
