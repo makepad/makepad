@@ -3,7 +3,11 @@ use {
         font::Font,
         shaper::{Glyph, ShaperWithCache},
     },
-    std::{cell::RefCell, hash::{Hash, Hasher}, rc::Rc},
+    std::{
+        cell::RefCell,
+        hash::{Hash, Hasher},
+        rc::Rc,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -19,7 +23,11 @@ pub struct FontFamily {
 }
 
 impl FontFamily {
-    pub fn new(id: FontFamilyId, shaper: Rc<RefCell<ShaperWithCache>>, fonts: Vec<Rc<Font>>) -> Self {
+    pub fn new(
+        id: FontFamilyId,
+        shaper: Rc<RefCell<ShaperWithCache>>,
+        fonts: Vec<Rc<Font>>,
+    ) -> Self {
         Self { id, shaper, fonts }
     }
 

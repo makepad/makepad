@@ -1,16 +1,20 @@
 use {
     super::{
+        atlas::Atlas,
         faces::Faces,
         geom::{Point, Rect, Size},
         outline,
         outline::Outline,
-        raster_image::GlyphRasterImage,
-        atlas::Atlas,
         pixels::{Bgra, R},
+        raster_image::GlyphRasterImage,
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
-    std::{cell::RefCell, hash::{Hash, Hasher}, rc::Rc},
+    std::{
+        cell::RefCell,
+        hash::{Hash, Hasher},
+        rc::Rc,
+    },
 };
 
 pub type FontId = String;
