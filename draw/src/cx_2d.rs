@@ -24,10 +24,7 @@ use {
         font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
         glyph_rasterizer::GlyphRasterizer,
-        text::{
-            fonts::{Definitions, FontsWithTextures},
-            geometry::Size,
-        },
+        text::fonts::{Definitions, FontsWithTextures, Options},
         text_shaper::TextShaper,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     },
@@ -237,7 +234,7 @@ impl<'a> Cx2d<'a> {
         if !cx.has_global::<Rc<RefCell<FontsWithTextures>>>() {
             let fonts = FontsWithTextures::new(
                 cx,
-                Size::new(4096, 4096),
+                Options::default(),
                 Definitions::default(),
             );
             cx.set_global(Rc::new(RefCell::new(fonts)));

@@ -1,6 +1,6 @@
 use {
     super::{
-        geometry::{Point, Rect, Size},
+        geom::{Point, Rect, Size},
         image::SubimageMut,
         pixels::Bgra,
     },

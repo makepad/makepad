@@ -1,5 +1,5 @@
 use {
-    super::numeric::{One, Zero},
+    super::num::{One, Zero},
     std::ops::{Add, Mul, Sub},
 };
 
@@ -14,7 +14,7 @@ impl<T> Point<T> {
         Self { x, y }
     }
 
-    pub fn apply_transform(self, t: Transform<T>) -> Self
+    pub fn transform(self, t: Transformation<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
     {
@@ -71,7 +71,7 @@ impl<T> Size<T> {
         Self { width, height }
     }
 
-    pub fn apply_transform(self, t: Transform<T>) -> Self
+    pub fn transform(self, t: Transformation<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
     {
@@ -157,11 +157,11 @@ impl<T> Rect<T> {
         true
     }
 
-    pub fn apply_transform(self, t: Transform<T>) -> Self
+    pub fn transform(self, t: Transformation<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
     {
-        Self::new(self.origin.apply_transform(t), self.size.apply_transform(t))
+        Self::new(self.origin.transform(t), self.size.transform(t))
     }
 
     pub fn union(self, other: Self) -> Self
@@ -197,7 +197,7 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Transform<T> {
+pub struct Transformation<T> {
     pub xx: T,
     pub xy: T,
     pub yx: T,
@@ -206,7 +206,7 @@ pub struct Transform<T> {
     pub ty: T,
 }
 
-impl<T> Transform<T> {
+impl<T> Transformation<T> {
     pub fn identity() -> Self
     where
         T: One + Zero,
@@ -221,7 +221,7 @@ impl<T> Transform<T> {
         }
     }
 
-    pub fn scale(sx: T, sy: T) -> Self
+    pub fn scaling(sx: T, sy: T) -> Self
     where
         T: Zero,
     {
@@ -235,14 +235,14 @@ impl<T> Transform<T> {
         }
     }
 
-    pub fn scale_uniform(s: T) -> Self
+    pub fn scaling_uniform(s: T) -> Self
     where
         T: Copy + Zero,
     {
-        Self::scale(s, s)
+        Self::scaling(s, s)
     }
 
-    pub fn translate(tx: T, ty: T) -> Self
+    pub fn translation(tx: T, ty: T) -> Self
     where
         T: One + Zero,
     {
@@ -256,9 +256,41 @@ impl<T> Transform<T> {
         }
     }
 
+    pub fn translate(self, tx: T, ty: T) -> Self
+    where
+        T: Add<Output = T> + Copy,
+    {
+        Self {
+            tx: self.tx + tx,
+            ty: self.ty + ty,
+            ..self
+        }
+    }
+
+    pub fn scale(self, sx: T, sy: T) -> Self
+    where
+        T: Add<Output = T> + Copy + Mul<Output = T> + Zero,
+    {
+        Self {
+            xx: self.xx * sx,
+            xy: self.xy * sy,
+            yx: self.yx * sx,
+            yy: self.yy * sy,
+            tx: self.tx * sx,
+            ty: self.ty * sy,
+        }
+    }
+
+    pub fn scale_uniform(self, s: T) -> Self
+    where
+        T: Add<Output = T> + Copy + Mul<Output = T> + Zero,
+    {
+        self.scale(s, s)
+    }
+
     pub fn concat(self, other: Self) -> Self
     where
-        T: Add<Output = T> + Copy + Mul<Output = T> + std::fmt::Debug,
+        T: Add<Output = T> + Copy + Mul<Output = T>,
     {
         Self {
             xx: self.xx * other.xx + self.xy * other.yx,
@@ -271,7 +303,7 @@ impl<T> Transform<T> {
     }
 }
 
-impl<T> Default for Transform<T>
+impl<T> Default for Transformation<T>
 where
     T: One + Zero,
 {
