@@ -24,7 +24,7 @@ live_design!{
                         
         draw_bg: {
             fn pixel(self) -> vec4 {
-                return #6
+                return #0
             }
         }
     }
@@ -93,7 +93,7 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw(cx, Point::new(100.0, 100.0), "FAK", &FontFamilyId::Sans, 64.0);
+        self.draw_text.draw(cx, Point::new(100.0, 100.0), "Hello, world!繁", &FontFamilyId::Sans, 32.0);
         self.draw_bg.end(cx);
         DrawStep::done()
     }
