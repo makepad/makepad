@@ -117,6 +117,13 @@ impl<T> Rect<T> {
         Self { origin, size }
     }
 
+    pub fn is_empty(self) -> bool
+    where 
+        T: Eq + PartialEq + Zero
+    {
+        self.size == Size::ZERO
+    }
+
     pub fn min(self) -> Point<T>
     where
         T: Copy,

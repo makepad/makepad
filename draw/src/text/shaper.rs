@@ -2,7 +2,12 @@ use {
     super::font::{AllocatedGlyph, Font, GlyphId},
     makepad_rustybuzz as rustybuzz,
     rustybuzz::UnicodeBuffer,
-    std::{borrow::Borrow, collections::{HashMap, VecDeque}, hash::{Hash, Hasher}, rc::Rc},
+    std::{
+        borrow::Borrow,
+        collections::{HashMap, VecDeque},
+        hash::{Hash, Hasher},
+        rc::Rc,
+    },
 };
 
 #[derive(Debug)]
@@ -23,11 +28,7 @@ impl ShaperWithCache {
         }
     }
 
-    pub fn shape(
-        &mut self,
-        text: &str,
-        fonts: &[Rc<Font>],
-    ) -> Rc<Vec<Glyph>> {
+    pub fn shape(&mut self, text: &str, fonts: &[Rc<Font>]) -> Rc<Vec<Glyph>> {
         let key = BorrowedCacheKey(text, fonts);
         if !self.cache.contains_key(&key as &dyn CacheKey) {
             if self.cache_keys.len() == self.cache_size {
@@ -150,7 +151,6 @@ impl Shaper {
         self.reusable_unicode_buffer = Some(glyph_buffer.clear());
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Glyph {

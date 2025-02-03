@@ -1,4 +1,4 @@
-use crate::makepad_widgets::*;
+use crate::makepad_widgets::{text::{font_family::FontFamilyId, geom::Point}, *};
 
 live_design!{
     use link::theme::*;
@@ -93,7 +93,7 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw(cx, dvec2(100.0, 100.0), "Hello world");
+        self.draw_text.draw(cx, Point::new(100.0, 100.0), "FAK", &FontFamilyId::Sans, 64.0);
         self.draw_bg.end(cx);
         DrawStep::done()
     }
