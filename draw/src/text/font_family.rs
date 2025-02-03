@@ -1,9 +1,9 @@
 use {
     super::{
         font::Font,
-        shaper::{Glyph, Shaper},
+        shaper::{Glyph, ShaperWithCache},
     },
-    std::{cell::RefCell, rc::Rc},
+    std::{cell::RefCell, hash::{Hash, Hasher}, rc::Rc},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -14,12 +14,12 @@ pub enum FontFamilyId {
 #[derive(Debug)]
 pub struct FontFamily {
     id: FontFamilyId,
-    shaper: Rc<RefCell<Shaper>>,
+    shaper: Rc<RefCell<ShaperWithCache>>,
     fonts: Vec<Rc<Font>>,
 }
 
 impl FontFamily {
-    pub fn new(id: FontFamilyId, shaper: Rc<RefCell<Shaper>>, fonts: Vec<Rc<Font>>) -> Self {
+    pub fn new(id: FontFamilyId, shaper: Rc<RefCell<ShaperWithCache>>, fonts: Vec<Rc<Font>>) -> Self {
         Self { id, shaper, fonts }
     }
 
@@ -27,12 +27,21 @@ impl FontFamily {
         &self.id
     }
 
-    pub fn shape(&self, text: &str) -> Vec<Glyph> {
-        let mut shapr = self.shaper.borrow_mut();
-        shapr.shape(text, self.fonts())
+    pub fn shape(&self, text: &str) -> Rc<Vec<Glyph>> {
+        self.shaper.borrow_mut().shape(text, &self.fonts)
     }
+}
 
-    pub fn fonts(&self) -> &[Rc<Font>] {
-        &self.fonts
+impl Eq for FontFamily {}
+
+impl Hash for FontFamily {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialEq for FontFamily {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
     }
 }

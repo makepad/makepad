@@ -1,5 +1,5 @@
 use {
-    super::geometry::{Point, Rect, Size},
+    super::geom::{Point, Rect, Size},
     std::ops::{Index, IndexMut},
 };
 
