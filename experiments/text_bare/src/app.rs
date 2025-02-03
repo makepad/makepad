@@ -1,18 +1,12 @@
-use { 
-    crate::{
-        makepad_widgets::*,
-    },
-};
-
-// We dont have a UI yet 
+use crate::makepad_widgets::*;
 
 live_design!{
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
     
-    pub Drawer = {{Drawer}} {
-        width: Fit, height: Fit,
+    pub MyWidget = {{MyWidget}} {
+        width: Fill, height: Fill,
         spacing: 7.5,
         align: {x: 0.5, y: 0.5},
         padding: <THEME_MSPACE_2> {}
@@ -36,20 +30,22 @@ live_design!{
     }
     
     App = {{App}} {
-        ui: <Window>{
+        ui: <Window> {
             show_bg: true
             width: Fill,
             height: Fill,
-            window: {inner_size: vec2(400, 300)},
+            window: {
+                inner_size: vec2(400, 300)
+            },
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     return #4;
                 }
             }
-            body = <View>{
-                padding:20
-                flow:Down
-                drawer = <Drawer>{}
+            body = <View> {
+                padding: 20
+                flow: Down
+                widget = <MyWidget> {}
             }
         }
     }
@@ -68,8 +64,7 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
-}
+impl MatchEvent for App {}
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -79,28 +74,26 @@ impl AppMain for App {
 }
 
 #[derive(Live, LiveHook, Widget)]
-pub struct Drawer {
+pub struct MyWidget {
     #[redraw]
     #[live]
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawText2,
-    #[live]
-    label_walk: Walk,
     #[walk]
     walk: Walk,
     #[layout]
-    layout: Layout
+    layout: Layout,
+    #[live]
+    label_walk: Walk,
 }
 
-impl Widget for Drawer {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
-    }
+impl Widget for MyWidget {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text
-        .draw_walk(cx, self.label_walk, Align::default(), "Hello world");
+        self.draw_text.draw(cx, dvec2(100.0, 100.0), "Hello world");
         self.draw_bg.end(cx);
         DrawStep::done()
     }
