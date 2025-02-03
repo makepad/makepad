@@ -1,13 +1,13 @@
 use {
     super::{
         font::{Font, FontId},
-        font_faces::FontFaces,
+        faces::Faces,
         font_family::{FontFamily, FontFamilyId},
-        geometry::{Point, Size},
+        geom::{Point, Size},
         image::Subimage,
-        image_atlas::ImageAtlas,
+        atlas::Atlas,
         pixels::{Bgra, R},
-        shaper::Shaper,
+        shaper::ShaperWithCache,
     },
     makepad_platform::*,
     std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
@@ -26,14 +26,14 @@ pub struct FontsWithTextures {
 }
 
 impl FontsWithTextures {
-    pub fn new(cx: &mut Cx, atlas_size: Size<usize>, definitions: Definitions) -> Self {
+    pub fn new(cx: &mut Cx, options: Options, definitions: Definitions) -> Self {
         Self {
-            fonts: Fonts::new(atlas_size, definitions),
+            fonts: Fonts::new(options, definitions),
             grayscale_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecRu8 {
-                    width: atlas_size.width,
-                    height: atlas_size.height,
+                    width: options.grayscale_atlas_size.width,
+                    height: options.grayscale_atlas_size.height,
                     data: Some(vec![]),
                     unpack_row_length: None,
                     updated: TextureUpdated::Empty,
@@ -42,8 +42,8 @@ impl FontsWithTextures {
             color_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecBGRAu8_32 {
-                    width: atlas_size.width,
-                    height: atlas_size.height,
+                    width: options.color_atlas_size.width,
+                    height: options.color_atlas_size.height,
                     data: Some(vec![]),
                     updated: TextureUpdated::Empty,
                 },
@@ -74,17 +74,17 @@ impl FontsWithTextures {
 
     fn update_grayscale_texture(&mut self, cx: &mut Cx) {
         let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
-        let texture_size = self.fonts.atlas_size();
+        let atlas_size = self.fonts.grayscale_atlas_size();
         let dirty_rect = self
             .fonts
-            .take_dirty_grayscale_atlas_image_with(|dirty_image| {
+            .take_dirty_grayscale_image_with(|dirty_image| {
                 let dirty_rect = dirty_image.bounds();
                 for src_y in 0..dirty_rect.size.height {
                     for src_x in 0..dirty_rect.size.width {
                         let dst_x = dirty_rect.origin.x + src_x;
                         let dst_y = dirty_rect.origin.y + src_y;
                         let pixel = dirty_image[Point::new(src_x, src_y)];
-                        texture_data[dst_y * texture_size.width + dst_x] = pixel.r;
+                        texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
                     }
                 }
                 dirty_rect
@@ -109,15 +109,15 @@ impl FontsWithTextures {
         }
 
         let mut texture_data = self.color_texture.take_vec_u32(cx);
-        let texture_size = self.fonts.atlas_size();
-        let dirty_rect = self.fonts.take_dirty_color_atlas_image_with(|dirty_image| {
+        let atlas_size = self.fonts.color_atlas_size();
+        let dirty_rect = self.fonts.take_dirty_color_image_with(|dirty_image| {
             let dirty_rect = dirty_image.bounds();
             for src_y in 0..dirty_rect.size.height {
                 for src_x in 0..dirty_rect.size.width {
                     let dst_x = dirty_rect.origin.x + src_x;
                     let dst_y = dirty_rect.origin.y + src_y;
                     let pixel = dirty_image[Point::new(src_x, src_y)];
-                    texture_data[dst_y * texture_size.width + dst_x] = bgra_to_u32(pixel);
+                    texture_data[dst_y * atlas_size.width + dst_x] = bgra_to_u32(pixel);
                 }
             }
             dirty_rect
@@ -135,45 +135,49 @@ impl FontsWithTextures {
 
 #[derive(Clone, Debug)]
 pub struct Fonts {
-    shaper: Rc<RefCell<Shaper>>,
-    grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
-    color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
     definitions: Definitions,
+    shaper: Rc<RefCell<ShaperWithCache>>,
+    grayscale_atlas: Rc<RefCell<Atlas<R<u8>>>>,
+    color_atlas: Rc<RefCell<Atlas<Bgra<u8>>>>,
     font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: HashMap<FontId, Rc<Font>>,
 }
 
 impl Fonts {
-    pub fn new(atlas_size: Size<usize>, definitions: Definitions) -> Self {
+    pub fn new(options: Options, definitions: Definitions) -> Self {
         Self {
-            shaper: Rc::new(RefCell::new(Shaper::new())),
-            grayscale_atlas: Rc::new(RefCell::new(ImageAtlas::new(atlas_size))),
-            color_atlas: Rc::new(RefCell::new(ImageAtlas::new(atlas_size))),
+            shaper: Rc::new(RefCell::new(ShaperWithCache::new(options.shaper_cache_size))),
+            grayscale_atlas: Rc::new(RefCell::new(Atlas::new(options.grayscale_atlas_size))),
+            color_atlas: Rc::new(RefCell::new(Atlas::new(options.color_atlas_size))),
             definitions,
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
         }
     }
 
-    pub fn atlas_size(&self) -> Size<usize> {
+    pub fn grayscale_atlas_size(&self) -> Size<usize> {
         self.grayscale_atlas.borrow().size()
     }
 
-    pub fn take_dirty_grayscale_atlas_image_with<T>(
+    pub fn color_atlas_size(&self) -> Size<usize> {
+        self.color_atlas.borrow().size()
+    }
+
+    pub fn take_dirty_grayscale_image_with<T>(
         &mut self,
         f: impl FnOnce(Subimage<'_, R<u8>>) -> T,
     ) -> T {
         f(self.grayscale_atlas.borrow_mut().take_dirty_image())
     }
 
-    pub fn take_dirty_color_atlas_image_with<T>(
+    pub fn take_dirty_color_image_with<T>(
         &mut self,
         f: impl FnOnce(Subimage<'_, Bgra<u8>>) -> T,
     ) -> T {
         f(self.color_atlas.borrow_mut().take_dirty_image())
     }
 
-    pub fn get_or_create_font_family(&mut self, font_family_id: &FontFamilyId) -> Rc<FontFamily> {
+    pub fn font_family(&mut self, font_family_id: &FontFamilyId) -> Rc<FontFamily> {
         if !self.font_family_cache.contains_key(font_family_id) {
             let definition = self
                 .definitions
@@ -186,7 +190,7 @@ impl Fonts {
                 definition
                     .font_ids
                     .into_iter()
-                    .map(|font_id| self.get_or_create_font(&font_id))
+                    .map(|font_id| self.font(&font_id))
                     .collect(),
             ));
             self.font_family_cache
@@ -195,7 +199,7 @@ impl Fonts {
         self.font_family_cache.get(font_family_id).unwrap().clone()
     }
 
-    pub fn get_or_create_font(&mut self, font_id: &FontId) -> Rc<Font> {
+    pub fn font(&mut self, font_id: &FontId) -> Rc<Font> {
         if !self.font_cache.contains_key(font_id) {
             let definition = self
                 .definitions
@@ -206,7 +210,7 @@ impl Fonts {
                 font_id.clone(),
                 self.grayscale_atlas.clone(),
                 self.color_atlas.clone(),
-                FontFaces::from_data_and_index(definition.data, definition.index).unwrap(),
+                Faces::from_data_and_index(definition.data, definition.index).unwrap(),
             ));
             self.font_cache.insert(font_id.clone(), font);
         }
@@ -276,6 +280,23 @@ pub struct FontDefinition {
     pub index: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub shaper_cache_size: usize,
+    pub grayscale_atlas_size: Size<usize>,
+    pub color_atlas_size: Size<usize>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            shaper_cache_size: 512,
+            grayscale_atlas_size: Size::new(512, 512),
+            color_atlas_size: Size::new(512, 512),
+        }
+    }
+}
+
 mod tests {
     use {
         super::*,
@@ -284,11 +305,10 @@ mod tests {
 
     #[test]
     fn test() {
-        let atlas_size = Size::new(512, 512);
-        let mut fonts = Fonts::new(atlas_size, Definitions::default());
-        let font_family = fonts.get_or_create_font_family(&FontFamilyId::Sans);
+        let mut fonts = Fonts::new(Options::default(), Definitions::default());
+        let font_family = fonts.font_family(&FontFamilyId::Sans);
         let glyphs = font_family.shape("HalloRik!繁😊😔");
-        for glyph in glyphs {
+        for glyph in &*glyphs {
             glyph.font.allocate_glyph(glyph.id, 64.0);
         }
 
@@ -296,7 +316,7 @@ mod tests {
         let writer = BufWriter::new(file);
         let atlas = fonts.grayscale_atlas.borrow();
         let mut encoder =
-            png::Encoder::new(writer, atlas_size.width as u32, atlas_size.height as u32);
+            png::Encoder::new(writer, fonts.grayscale_atlas_size().width as u32, fonts.grayscale_atlas_size().height as u32);
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
@@ -309,7 +329,7 @@ mod tests {
         let writer = BufWriter::new(file);
         let atlas = fonts.color_atlas.borrow();
         let mut encoder =
-            png::Encoder::new(writer, atlas_size.width as u32, atlas_size.height as u32);
+            png::Encoder::new(writer, fonts.color_atlas_size().width as u32, fonts.color_atlas_size().height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();

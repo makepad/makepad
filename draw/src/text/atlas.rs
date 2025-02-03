@@ -1,18 +1,18 @@
 use super::{
-    geometry::{Point, Rect, Size},
+    geom::{Point, Rect, Size},
     image::{Image, Subimage, SubimageMut},
-    numeric::Zero,
+    num::Zero,
 };
 
 #[derive(Clone, Debug)]
-pub struct ImageAtlas<T> {
+pub struct Atlas<T> {
     image: Image<T>,
     dirty_rect: Rect<usize>,
     next_origin: Point<usize>,
     current_row_height: usize,
 }
 
-impl<T> ImageAtlas<T> {
+impl<T> Atlas<T> {
     pub fn new(size: Size<usize>) -> Self
     where
         T: Clone + Default,
