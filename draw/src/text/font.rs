@@ -2,7 +2,7 @@ use {
     super::{
         atlas::Atlas,
         faces::Faces,
-        geom::{Point, Rect, Size},
+        geometry::{Point, Rect, Size},
         outline,
         outline::Outline,
         pixels::{Bgra, R},

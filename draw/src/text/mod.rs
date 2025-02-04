@@ -1,11 +1,13 @@
 pub mod atlas;
 pub mod faces;
 pub mod font;
-pub mod font_family;
 pub mod fonts;
-pub mod geom;
+pub mod loader;
+pub mod font_family;
+pub mod layouter;
+pub mod geometry;
 pub mod image;
-pub mod num;
+pub mod numeric;
 pub mod outline;
 pub mod pixels;
 pub mod raster_image;

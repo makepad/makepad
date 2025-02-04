@@ -1,7 +1,7 @@
 use {
     super::{
-        geom::{Point, Rect, Size},
-        num::Zero,
+        geometry::{Point, Rect, Size},
+        numeric::Zero,
     },
     std::ops::{Index, IndexMut},
 };

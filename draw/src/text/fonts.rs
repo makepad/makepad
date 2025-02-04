@@ -1,211 +1,26 @@
-use {
-    super::{
-        atlas::Atlas,
-        faces::Faces,
-        font::{Font, FontId},
-        font_family::{FontFamily, FontFamilyId},
-        geom::{Point, Size},
-        image::Subimage,
-        pixels::{Bgra, R},
-        shaper::ShaperWithCache,
-    },
-    makepad_platform::*,
-    std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
-};
-
-const IBM_PLEX_SANS_TEXT: &[u8] = include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
-const LXG_WEN_KAI_REGULAR: &[u8] =
-    include_bytes!("../../../widgets/resources/LXGWWenKaiRegular.ttf");
-const NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../widgets/resources/NotoColorEmoji.ttf");
-
-#[derive(Clone, Debug)]
-pub struct Fonts {
-    definitions: Definitions,
-    shaper: Rc<RefCell<ShaperWithCache>>,
-    grayscale_atlas: Rc<RefCell<Atlas<R<u8>>>>,
-    color_atlas: Rc<RefCell<Atlas<Bgra<u8>>>>,
-    font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
-    font_cache: HashMap<FontId, Rc<Font>>,
-}
-
-impl Fonts {
-    pub fn new(options: Options, definitions: Definitions) -> Self {
-        Self {
-            shaper: Rc::new(RefCell::new(ShaperWithCache::new(
-                options.shaper_cache_size,
-            ))),
-            grayscale_atlas: Rc::new(RefCell::new(Atlas::new(options.grayscale_atlas_size))),
-            color_atlas: Rc::new(RefCell::new(Atlas::new(options.color_atlas_size))),
-            definitions,
-            font_family_cache: HashMap::new(),
-            font_cache: HashMap::new(),
-        }
-    }
-
-    pub fn grayscale_atlas_size(&self) -> Size<usize> {
-        self.grayscale_atlas.borrow().size()
-    }
-
-    pub fn color_atlas_size(&self) -> Size<usize> {
-        self.color_atlas.borrow().size()
-    }
-
-    pub fn take_dirty_grayscale_image_with<T>(
-        &mut self,
-        f: impl FnOnce(Subimage<'_, R<u8>>) -> T,
-    ) -> T {
-        f(self.grayscale_atlas.borrow_mut().take_dirty_image())
-    }
-
-    pub fn take_dirty_color_image_with<T>(
-        &mut self,
-        f: impl FnOnce(Subimage<'_, Bgra<u8>>) -> T,
-    ) -> T {
-        f(self.color_atlas.borrow_mut().take_dirty_image())
-    }
-
-    pub fn font_family(&mut self, font_family_id: &FontFamilyId) -> Rc<FontFamily> {
-        if !self.font_family_cache.contains_key(font_family_id) {
-            let definition = self
-                .definitions
-                .font_families
-                .remove(font_family_id)
-                .unwrap_or_else(|| panic!("font family {:?} is not defined", font_family_id));
-            let font_family = Rc::new(FontFamily::new(
-                font_family_id.clone(),
-                self.shaper.clone(),
-                definition
-                    .font_ids
-                    .into_iter()
-                    .map(|font_id| self.font(&font_id))
-                    .collect(),
-            ));
-            self.font_family_cache
-                .insert(font_family_id.clone(), font_family);
-        }
-        self.font_family_cache.get(font_family_id).unwrap().clone()
-    }
-
-    pub fn font(&mut self, font_id: &FontId) -> Rc<Font> {
-        if !self.font_cache.contains_key(font_id) {
-            let definition = self
-                .definitions
-                .fonts
-                .remove(font_id)
-                .unwrap_or_else(|| panic!("font {:?} is not defined", font_id));
-            let font = Rc::new(Font::new(
-                font_id.clone(),
-                self.grayscale_atlas.clone(),
-                self.color_atlas.clone(),
-                Faces::from_data_and_index(definition.data, definition.index).unwrap(),
-            ));
-            self.font_cache.insert(font_id.clone(), font);
-        }
-        self.font_cache.get(font_id).unwrap().clone()
-    }
-}
-
-
-
-#[derive(Clone, Copy, Debug)]
-pub struct Options {
-    pub shaper_cache_size: usize,
-    pub grayscale_atlas_size: Size<usize>,
-    pub color_atlas_size: Size<usize>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            shaper_cache_size: 512,
-            grayscale_atlas_size: Size::new(512, 512),
-            color_atlas_size: Size::new(512, 512),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Definitions {
-    pub font_families: HashMap<FontFamilyId, FontFamilyDefinition>,
-    pub fonts: HashMap<FontId, FontDefinition>,
-}
-
-impl Default for Definitions {
-    fn default() -> Self {
-        Self {
-            font_families: [(
-                FontFamilyId::Sans,
-                FontFamilyDefinition {
-                    font_ids: [
-                        "IBM Plex Sans Text".into(),
-                        "LXG WWen Kai Regular".into(),
-                        "Noto Color Emoji".into(),
-                    ]
-                    .into(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-            fonts: [
-                (
-                    "IBM Plex Sans Text".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(IBM_PLEX_SANS_TEXT).into(),
-                        index: 0,
-                    },
-                ),
-                (
-                    "LXG WWen Kai Regular".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(LXG_WEN_KAI_REGULAR).into(),
-                        index: 0,
-                    },
-                ),
-                (
-                    "Noto Color Emoji".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(NOTO_COLOR_EMOJI).into(),
-                        index: 0,
-                    },
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct FontFamilyDefinition {
-    pub font_ids: Vec<FontId>,
-}
-
-#[derive(Clone, Debug)]
-pub struct FontDefinition {
-    pub data: Rc<Cow<'static, [u8]>>,
-    pub index: u32,
-}
+use {super::{layouter::Layouter, geometry::Point, pixels::Bgra}, makepad_platform::*};
 
 #[derive(Debug)]
-pub struct FontsWithTextures {
-    fonts: Fonts,
+pub struct Fonts {
+    layouter: Layouter,
     grayscale_texture: Texture,
     color_texture: Texture,
 }
 
-impl FontsWithTextures {
-    pub fn new(cx: &mut Cx, options: Options, definitions: Definitions) -> Self {
+impl Fonts {
+    pub fn new(cx: &mut Cx, layouter: Layouter) -> Self {
+        let grayscale_atlas_size = layouter.loader().grayscale_atlas().borrow().size();
+        let color_atlas_size = layouter.loader().color_atlas().borrow().size();
         Self {
-            fonts: Fonts::new(options, definitions),
+            layouter,
             grayscale_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecRu8 {
-                    width: options.grayscale_atlas_size.width,
-                    height: options.grayscale_atlas_size.height,
+                    width: grayscale_atlas_size.width,
+                    height: grayscale_atlas_size.height,
                     data: Some(vec![
                         0;
-                        options.grayscale_atlas_size.width
-                            * options.grayscale_atlas_size.height
+                        grayscale_atlas_size.width * grayscale_atlas_size.height
                     ]),
                     unpack_row_length: None,
                     updated: TextureUpdated::Empty,
@@ -214,18 +29,20 @@ impl FontsWithTextures {
             color_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecBGRAu8_32 {
-                    width: options.color_atlas_size.width,
-                    height: options.color_atlas_size.height,
+                    width: color_atlas_size.width,
+                    height: color_atlas_size.height,
                     data: Some(vec![
                         0;
-                        options.grayscale_atlas_size.width
-                            * options.grayscale_atlas_size.height
-                            * 4
+                        grayscale_atlas_size.width * grayscale_atlas_size.height * 4
                     ]),
                     updated: TextureUpdated::Empty,
                 },
             ),
         }
+    }
+
+    pub fn layouter(&self) -> &Layouter {
+        &self.layouter
     }
 
     pub fn grayscale_texture(&self) -> &Texture {
@@ -236,12 +53,8 @@ impl FontsWithTextures {
         &self.color_texture
     }
 
-    pub fn fonts(&self) -> &Fonts {
-        &self.fonts
-    }
-
-    pub fn fonts_mut(&mut self) -> &mut Fonts {
-        &mut self.fonts
+    pub fn layouter_mut(&mut self) -> &mut Layouter {
+        &mut self.layouter
     }
 
     pub fn update_textures(&mut self, cx: &mut Cx) {
@@ -251,19 +64,18 @@ impl FontsWithTextures {
 
     fn update_grayscale_texture(&mut self, cx: &mut Cx) {
         let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
-        let atlas_size = self.fonts.grayscale_atlas_size();
-        let dirty_rect = self.fonts.take_dirty_grayscale_image_with(|dirty_image| {
-            let dirty_rect = dirty_image.bounds();
-            for src_y in 0..dirty_rect.size.height {
-                for src_x in 0..dirty_rect.size.width {
-                    let dst_x = dirty_rect.origin.x + src_x;
-                    let dst_y = dirty_rect.origin.y + src_y;
-                    let pixel = dirty_image[Point::new(src_x, src_y)];
-                    texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
-                }
+        let mut atlas = self.layouter.loader().grayscale_atlas().borrow_mut();
+        let atlas_size = atlas.size();
+        let dirty_image = atlas.take_dirty_image();
+        let dirty_rect = dirty_image.bounds();
+        for src_y in 0..dirty_rect.size.height {
+            for src_x in 0..dirty_rect.size.width {
+                let dst_x = dirty_rect.origin.x + src_x;
+                let dst_y = dirty_rect.origin.y + src_y;
+                let pixel = dirty_image[Point::new(src_x, src_y)];
+                texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
             }
-            dirty_rect
-        });
+        }
         self.grayscale_texture.put_back_vec_u8(
             cx,
             texture_data,
@@ -284,19 +96,18 @@ impl FontsWithTextures {
         }
 
         let mut texture_data = self.color_texture.take_vec_u32(cx);
-        let atlas_size = self.fonts.color_atlas_size();
-        let dirty_rect = self.fonts.take_dirty_color_image_with(|dirty_image| {
-            let dirty_rect = dirty_image.bounds();
-            for src_y in 0..dirty_rect.size.height {
-                for src_x in 0..dirty_rect.size.width {
-                    let dst_x = dirty_rect.origin.x + src_x;
-                    let dst_y = dirty_rect.origin.y + src_y;
-                    let pixel = dirty_image[Point::new(src_x, src_y)];
-                    texture_data[dst_y * atlas_size.width + dst_x] = bgra_to_u32(pixel);
-                }
+        let mut atlas = self.layouter.loader().color_atlas().borrow_mut();
+        let atlas_size = atlas.size();
+        let dirty_image = atlas.take_dirty_image();
+        let dirty_rect = dirty_image.bounds();
+        for src_y in 0..dirty_rect.size.height {
+            for src_x in 0..dirty_rect.size.width {
+                let dst_x = dirty_rect.origin.x + src_x;
+                let dst_y = dirty_rect.origin.y + src_y;
+                let pixel = dirty_image[Point::new(src_x, src_y)];
+                texture_data[dst_y * atlas_size.width + dst_x] = bgra_to_u32(pixel);
             }
-            dirty_rect
-        });
+        }
         self.color_texture.put_back_vec_u32(
             cx,
             texture_data,
@@ -305,55 +116,5 @@ impl FontsWithTextures {
                 SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
             )),
         );
-    }
-}
-
-
-mod tests {
-    use {
-        super::*,
-        std::{fs::File, io::BufWriter},
-    };
-
-    #[test]
-    fn test() {
-        let mut fonts = Fonts::new(Options::default(), Definitions::default());
-        let font_family = fonts.font_family(&FontFamilyId::Sans);
-        let glyphs = font_family.shape("HalloRik!繁😊😔");
-        for glyph in &*glyphs {
-            glyph.font.allocate_glyph(glyph.id, 64.0);
-        }
-
-        let file = File::create("/Users/ejpbruel/Desktop/grayscale.png").unwrap();
-        let writer = BufWriter::new(file);
-        let atlas = fonts.grayscale_atlas.borrow();
-        let mut encoder = png::Encoder::new(
-            writer,
-            fonts.grayscale_atlas_size().width as u32,
-            fonts.grayscale_atlas_size().height as u32,
-        );
-        encoder.set_color(png::ColorType::Grayscale);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().unwrap();
-        let pixels = atlas.image().pixels();
-        let data =
-            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
-        writer.write_image_data(&data).unwrap();
-
-        let file = File::create("/Users/ejpbruel/Desktop/color.png").unwrap();
-        let writer = BufWriter::new(file);
-        let atlas = fonts.color_atlas.borrow();
-        let mut encoder = png::Encoder::new(
-            writer,
-            fonts.color_atlas_size().width as u32,
-            fonts.color_atlas_size().height as u32,
-        );
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().unwrap();
-        let pixels = atlas.image().pixels();
-        let data =
-            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
-        writer.write_image_data(&data).unwrap();
     }
 }
