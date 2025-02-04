@@ -1,5 +1,8 @@
 use {
-    super::{geom::{Point, Rect, Size}, num::Zero},
+    super::{
+        geom::{Point, Rect, Size},
+        num::Zero,
+    },
     std::ops::{Index, IndexMut},
 };
 
