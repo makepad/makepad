@@ -1,6 +1,6 @@
 use {
     super::{
-        geometry::{Point, Rect, Size},
+        geom::{Point, Rect, Size},
         image::SubimageMut,
         pixels::Bgra,
     },
@@ -11,7 +11,7 @@ use {
 #[derive(Clone, Debug)]
 pub struct GlyphRasterImage<'a> {
     origin_in_pxs: Point<f32>,
-    pxs_per_em: f32,
+    dpxs_per_em: f32,
     format: Format,
     data: &'a [u8],
 }
@@ -20,27 +20,27 @@ impl<'a> GlyphRasterImage<'a> {
     pub fn from_raster_glyph_image(image: ttf_parser::RasterGlyphImage<'a>) -> Option<Self> {
         Some(Self {
             origin_in_pxs: Point::new(image.x as f32, image.y as f32),
-            pxs_per_em: image.pixels_per_em as f32,
+            dpxs_per_em: image.pixels_per_em as f32,
             format: Format::from_raster_image_format(image.format)?,
             data: image.data,
         })
     }
 
-    pub fn origin_in_pxs(&self) -> Point<f32> {
+    pub fn origin_in_dpxs(&self) -> Point<f32> {
         self.origin_in_pxs
     }
 
-    pub fn size_in_pxs(&self) -> Size<f32> {
+    pub fn size_in_dpxs(&self) -> Size<f32> {
         let size = self.size();
         Size::new(size.width as f32, size.height as f32)
     }
 
     pub fn bounds_in_pxs(&self) -> Rect<f32> {
-        Rect::new(self.origin_in_pxs(), self.size_in_pxs())
+        Rect::new(self.origin_in_dpxs(), self.size_in_dpxs())
     }
 
-    pub fn pxs_per_em(&self) -> f32 {
-        self.pxs_per_em
+    pub fn dpxs_per_em(&self) -> f32 {
+        self.dpxs_per_em
     }
 
     pub fn size(&self) -> Size<usize> {

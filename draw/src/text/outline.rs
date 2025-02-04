@@ -1,8 +1,8 @@
 use {
     super::{
-        geometry::{Point, Rect, Size, Transformation},
+        geom::{Point, Rect, Size, Transformation},
         image::SubimageMut,
-        numeric::Zero,
+        num::Zero,
         pixels::R,
     },
     makepad_rustybuzz as rustybuzz,
@@ -12,41 +12,41 @@ use {
 #[derive(Clone, Debug)]
 pub struct Outline {
     bounds: Rect<f32>,
-    pxs_per_em: f32,
+    dpxs_per_em: f32,
     units_per_em: f32,
     commands: Vec<Command>,
 }
 
 impl Outline {
-    pub fn origin_in_pxs(&self) -> Point<f32> {
+    pub fn origin_in_dpxs(&self) -> Point<f32> {
         self.bounds
             .origin
-            .transform(Transformation::scaling_uniform(self.pxs_per_unit()))
+            .transform(Transformation::scaling_uniform(self.dpxs_per_unit()))
     }
 
-    pub fn size_in_pxs(&self) -> Size<f32> {
+    pub fn size_in_dpxs(&self) -> Size<f32> {
         self.bounds
             .size
-            .transform(Transformation::scaling_uniform(self.pxs_per_unit()))
+            .transform(Transformation::scaling_uniform(self.dpxs_per_unit()))
     }
 
     pub fn bounds_in_pxs(&self) -> Rect<f32> {
-        Rect::new(self.origin_in_pxs(), self.size_in_pxs())
+        Rect::new(self.origin_in_dpxs(), self.size_in_dpxs())
     }
 
-    pub fn pxs_per_em(&self) -> f32 {
-        self.pxs_per_em
+    pub fn dpxs_per_em(&self) -> f32 {
+        self.dpxs_per_em
     }
 
-    fn pxs_per_unit(&self) -> f32 {
-        self.pxs_per_em / self.units_per_em
+    fn dpxs_per_unit(&self) -> f32 {
+        self.dpxs_per_em / self.units_per_em
     }
 
     pub fn image_size(&self) -> Size<usize> {
-        let size_in_pxs = self.size_in_pxs();
+        let size_in_dpxs = self.size_in_dpxs();
         Size::new(
-            size_in_pxs.width.ceil() as usize,
-            size_in_pxs.height.ceil() as usize,
+            size_in_dpxs.width.ceil() as usize,
+            size_in_dpxs.height.ceil() as usize,
         )
     }
 
@@ -61,7 +61,7 @@ impl Outline {
         let mut rasterizer = Rasterizer::new(output_size.width, output_size.height);
         let origin = self.bounds.origin;
         let transform =
-            Transformation::translation(-origin.x, -origin.y).scale_uniform(self.pxs_per_unit());
+            Transformation::translation(-origin.x, -origin.y).scale_uniform(self.dpxs_per_unit());
         let mut last = Point::ZERO;
         let mut last_move = None;
         for command in self.commands.iter().copied() {
@@ -137,7 +137,7 @@ impl Builder {
     pub fn finish(self, bounds: Rect<f32>, pxs_per_em: f32, units_per_em: f32) -> Outline {
         Outline {
             bounds,
-            pxs_per_em,
+            dpxs_per_em: pxs_per_em,
             units_per_em,
             commands: self.commands,
         }

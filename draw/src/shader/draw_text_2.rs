@@ -6,7 +6,7 @@ use crate::{
     text::{
         font::{AllocatedGlyph, AtlasKind},
         font_family::FontFamilyId,
-        geometry::{Point, Rect, Size, Transformation},
+        geom::{Point, Rect, Size, Transformation},
         shaper::Glyph,
     },
 };
@@ -115,7 +115,7 @@ impl DrawText2 {
         let mut fonts = cx.fonts.borrow_mut();
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        let font_family = fonts.layouter_mut().loader_mut().font_family(font_family_id).clone();
+        let font_family = fonts.get_or_load_font_family(font_family_id).clone();
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
 
@@ -128,7 +128,7 @@ impl DrawText2 {
         );
 
         let mut p = p;
-        for glyph in &*font_family.shape(text) {
+        for glyph in &*font_family.get_or_shape(text.into()).glyphs {
             self.draw_glyph(
                 cx,
                 &mut p,
@@ -189,11 +189,11 @@ impl DrawText2 {
             vec2(point.width, point.height)
         }
 
-        let transform = Transformation::scaling_uniform(font_size_in_lpxs / glyph.pxs_per_em)
+        let transform = Transformation::scaling_uniform(font_size_in_lpxs / glyph.dpxs_per_em)
             .translate(p.x, p.y);
         let bounds_in_lpxs = Rect::new(
-            Point::new(glyph.bounds_in_pxs.min().x, -glyph.bounds_in_pxs.max().y),
-            glyph.bounds_in_pxs.size,
+            Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
+            glyph.bounds_in_dpxs.size,
         )
         .transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
