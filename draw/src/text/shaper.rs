@@ -11,40 +11,6 @@ use {
 };
 
 #[derive(Debug)]
-pub struct ShaperWithCache {
-    shaper: Shaper,
-    cache_size: usize,
-    cache_keys: VecDeque<OwnedCacheKey>,
-    cache: HashMap<OwnedCacheKey, Rc<Vec<Glyph>>>,
-}
-
-impl ShaperWithCache {
-    pub fn new(cache_size: usize) -> Self {
-        Self {
-            shaper: Shaper::new(),
-            cache_size,
-            cache_keys: VecDeque::with_capacity(cache_size),
-            cache: HashMap::with_capacity(cache_size),
-        }
-    }
-
-    pub fn shape(&mut self, text: &str, fonts: &[Rc<Font>]) -> Rc<Vec<Glyph>> {
-        let key = BorrowedCacheKey(text, fonts);
-        if !self.cache.contains_key(&key as &dyn CacheKey) {
-            if self.cache_keys.len() == self.cache_size {
-                let key = self.cache_keys.pop_front().unwrap();
-                self.cache.remove(&key);
-            }
-            let key = key.to_owned();
-            let glyphs = Rc::new(self.shaper.shape(text, fonts));
-            self.cache_keys.push_back(key.clone());
-            self.cache.insert(key, glyphs);
-        }
-        self.cache.get(&key as &dyn CacheKey).unwrap().clone()
-    }
-}
-
-#[derive(Debug)]
 pub struct Shaper {
     reusable_glyphs_stack: Vec<Vec<Glyph>>,
     reusable_unicode_buffer: Option<UnicodeBuffer>,
@@ -164,6 +130,40 @@ pub struct Glyph {
 impl Glyph {
     pub fn allocate(&self, font_size_in_pxs: f32) -> Option<AllocatedGlyph> {
         self.font.allocate_glyph(self.id, font_size_in_pxs)
+    }
+}
+
+#[derive(Debug)]
+pub struct ShaperWithCache {
+    shaper: Shaper,
+    cache_size: usize,
+    cache_keys: VecDeque<OwnedCacheKey>,
+    cache: HashMap<OwnedCacheKey, Rc<Vec<Glyph>>>,
+}
+
+impl ShaperWithCache {
+    pub fn new(cache_size: usize) -> Self {
+        Self {
+            shaper: Shaper::new(),
+            cache_size,
+            cache_keys: VecDeque::with_capacity(cache_size),
+            cache: HashMap::with_capacity(cache_size),
+        }
+    }
+
+    pub fn shape(&mut self, text: &str, fonts: &[Rc<Font>]) -> Rc<Vec<Glyph>> {
+        let key = BorrowedCacheKey(text, fonts);
+        if !self.cache.contains_key(&key as &dyn CacheKey) {
+            if self.cache_keys.len() == self.cache_size {
+                let key = self.cache_keys.pop_front().unwrap();
+                self.cache.remove(&key);
+            }
+            let key = key.to_owned();
+            let glyphs = Rc::new(self.shaper.shape(text, fonts));
+            self.cache_keys.push_back(key.clone());
+            self.cache.insert(key, glyphs);
+        }
+        self.cache.get(&key as &dyn CacheKey).unwrap().clone()
     }
 }
 

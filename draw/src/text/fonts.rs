@@ -18,119 +18,6 @@ const LXG_WEN_KAI_REGULAR: &[u8] =
     include_bytes!("../../../widgets/resources/LXGWWenKaiRegular.ttf");
 const NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../widgets/resources/NotoColorEmoji.ttf");
 
-#[derive(Debug)]
-pub struct FontsWithTextures {
-    fonts: Fonts,
-    grayscale_texture: Texture,
-    color_texture: Texture,
-}
-
-impl FontsWithTextures {
-    pub fn new(cx: &mut Cx, options: Options, definitions: Definitions) -> Self {
-        Self {
-            fonts: Fonts::new(options, definitions),
-            grayscale_texture: Texture::new_with_format(
-                cx,
-                TextureFormat::VecRu8 {
-                    width: options.grayscale_atlas_size.width,
-                    height: options.grayscale_atlas_size.height,
-                    data: Some(vec![0; options.grayscale_atlas_size.width * options.grayscale_atlas_size.height]),
-                    unpack_row_length: None,
-                    updated: TextureUpdated::Empty,
-                },
-            ),
-            color_texture: Texture::new_with_format(
-                cx,
-                TextureFormat::VecBGRAu8_32 {
-                    width: options.color_atlas_size.width,
-                    height: options.color_atlas_size.height,
-                    data: Some(vec![0; options.grayscale_atlas_size.width * options.grayscale_atlas_size.height * 4]),
-                    updated: TextureUpdated::Empty,
-                },
-            ),
-        }
-    }
-
-    pub fn grayscale_texture(&self) -> &Texture {
-        &self.grayscale_texture
-    }
-
-    pub fn color_texture(&self) -> &Texture {
-        &self.color_texture
-    }
-
-    pub fn fonts(&self) -> &Fonts {
-        &self.fonts
-    }
-
-    pub fn fonts_mut(&mut self) -> &mut Fonts {
-        &mut self.fonts
-    }
-
-    pub fn update_textures(&mut self, cx: &mut Cx) {
-        self.update_grayscale_texture(cx);
-        self.update_color_texture(cx);
-    }
-
-    fn update_grayscale_texture(&mut self, cx: &mut Cx) {
-        let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
-        let atlas_size = self.fonts.grayscale_atlas_size();
-        let dirty_rect = self.fonts.take_dirty_grayscale_image_with(|dirty_image| {
-            let dirty_rect = dirty_image.bounds();
-            for src_y in 0..dirty_rect.size.height {
-                for src_x in 0..dirty_rect.size.width {
-                    let dst_x = dirty_rect.origin.x + src_x;
-                    let dst_y = dirty_rect.origin.y + src_y;
-                    let pixel = dirty_image[Point::new(src_x, src_y)];
-                    texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
-                }
-            }
-            dirty_rect
-        });
-        self.grayscale_texture.put_back_vec_u8(
-            cx,
-            texture_data,
-            Some(RectUsize::new(
-                PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
-                SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
-            )),
-        );
-    }
-
-    fn update_color_texture(&mut self, cx: &mut Cx) {
-        fn bgra_to_u32(pixel: Bgra<u8>) -> u32 {
-            let b = u32::from(pixel.b);
-            let g = u32::from(pixel.g);
-            let r = u32::from(pixel.r);
-            let a = u32::from(pixel.a);
-            (b << 24) | (g << 16) | (r << 8) | a
-        }
-
-        let mut texture_data = self.color_texture.take_vec_u32(cx);
-        let atlas_size = self.fonts.color_atlas_size();
-        let dirty_rect = self.fonts.take_dirty_color_image_with(|dirty_image| {
-            let dirty_rect = dirty_image.bounds();
-            for src_y in 0..dirty_rect.size.height {
-                for src_x in 0..dirty_rect.size.width {
-                    let dst_x = dirty_rect.origin.x + src_x;
-                    let dst_y = dirty_rect.origin.y + src_y;
-                    let pixel = dirty_image[Point::new(src_x, src_y)];
-                    texture_data[dst_y * atlas_size.width + dst_x] = bgra_to_u32(pixel);
-                }
-            }
-            dirty_rect
-        });
-        self.color_texture.put_back_vec_u32(
-            cx,
-            texture_data,
-            Some(RectUsize::new(
-                PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
-                SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
-            )),
-        );
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Fonts {
     definitions: Definitions,
@@ -218,6 +105,25 @@ impl Fonts {
     }
 }
 
+
+
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub shaper_cache_size: usize,
+    pub grayscale_atlas_size: Size<usize>,
+    pub color_atlas_size: Size<usize>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            shaper_cache_size: 512,
+            grayscale_atlas_size: Size::new(512, 512),
+            color_atlas_size: Size::new(512, 512),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Definitions {
     pub font_families: HashMap<FontFamilyId, FontFamilyDefinition>,
@@ -280,22 +186,128 @@ pub struct FontDefinition {
     pub index: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Options {
-    pub shaper_cache_size: usize,
-    pub grayscale_atlas_size: Size<usize>,
-    pub color_atlas_size: Size<usize>,
+#[derive(Debug)]
+pub struct FontsWithTextures {
+    fonts: Fonts,
+    grayscale_texture: Texture,
+    color_texture: Texture,
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl FontsWithTextures {
+    pub fn new(cx: &mut Cx, options: Options, definitions: Definitions) -> Self {
         Self {
-            shaper_cache_size: 512,
-            grayscale_atlas_size: Size::new(512, 512),
-            color_atlas_size: Size::new(512, 512),
+            fonts: Fonts::new(options, definitions),
+            grayscale_texture: Texture::new_with_format(
+                cx,
+                TextureFormat::VecRu8 {
+                    width: options.grayscale_atlas_size.width,
+                    height: options.grayscale_atlas_size.height,
+                    data: Some(vec![
+                        0;
+                        options.grayscale_atlas_size.width
+                            * options.grayscale_atlas_size.height
+                    ]),
+                    unpack_row_length: None,
+                    updated: TextureUpdated::Empty,
+                },
+            ),
+            color_texture: Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: options.color_atlas_size.width,
+                    height: options.color_atlas_size.height,
+                    data: Some(vec![
+                        0;
+                        options.grayscale_atlas_size.width
+                            * options.grayscale_atlas_size.height
+                            * 4
+                    ]),
+                    updated: TextureUpdated::Empty,
+                },
+            ),
         }
     }
+
+    pub fn grayscale_texture(&self) -> &Texture {
+        &self.grayscale_texture
+    }
+
+    pub fn color_texture(&self) -> &Texture {
+        &self.color_texture
+    }
+
+    pub fn fonts(&self) -> &Fonts {
+        &self.fonts
+    }
+
+    pub fn fonts_mut(&mut self) -> &mut Fonts {
+        &mut self.fonts
+    }
+
+    pub fn update_textures(&mut self, cx: &mut Cx) {
+        self.update_grayscale_texture(cx);
+        self.update_color_texture(cx);
+    }
+
+    fn update_grayscale_texture(&mut self, cx: &mut Cx) {
+        let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
+        let atlas_size = self.fonts.grayscale_atlas_size();
+        let dirty_rect = self.fonts.take_dirty_grayscale_image_with(|dirty_image| {
+            let dirty_rect = dirty_image.bounds();
+            for src_y in 0..dirty_rect.size.height {
+                for src_x in 0..dirty_rect.size.width {
+                    let dst_x = dirty_rect.origin.x + src_x;
+                    let dst_y = dirty_rect.origin.y + src_y;
+                    let pixel = dirty_image[Point::new(src_x, src_y)];
+                    texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
+                }
+            }
+            dirty_rect
+        });
+        self.grayscale_texture.put_back_vec_u8(
+            cx,
+            texture_data,
+            Some(RectUsize::new(
+                PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
+                SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
+            )),
+        );
+    }
+
+    fn update_color_texture(&mut self, cx: &mut Cx) {
+        fn bgra_to_u32(pixel: Bgra<u8>) -> u32 {
+            let b = u32::from(pixel.b);
+            let g = u32::from(pixel.g);
+            let r = u32::from(pixel.r);
+            let a = u32::from(pixel.a);
+            (a << 24) | (r << 16) | (g << 8) | b
+        }
+
+        let mut texture_data = self.color_texture.take_vec_u32(cx);
+        let atlas_size = self.fonts.color_atlas_size();
+        let dirty_rect = self.fonts.take_dirty_color_image_with(|dirty_image| {
+            let dirty_rect = dirty_image.bounds();
+            for src_y in 0..dirty_rect.size.height {
+                for src_x in 0..dirty_rect.size.width {
+                    let dst_x = dirty_rect.origin.x + src_x;
+                    let dst_y = dirty_rect.origin.y + src_y;
+                    let pixel = dirty_image[Point::new(src_x, src_y)];
+                    texture_data[dst_y * atlas_size.width + dst_x] = bgra_to_u32(pixel);
+                }
+            }
+            dirty_rect
+        });
+        self.color_texture.put_back_vec_u32(
+            cx,
+            texture_data,
+            Some(RectUsize::new(
+                PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
+                SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
+            )),
+        );
+    }
 }
+
 
 mod tests {
     use {

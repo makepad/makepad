@@ -118,8 +118,8 @@ impl<T> Rect<T> {
     }
 
     pub fn is_empty(self) -> bool
-    where 
-        T: Eq + PartialEq + Zero
+    where
+        T: Eq + PartialEq + Zero,
     {
         self.size == Size::ZERO
     }

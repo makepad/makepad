@@ -81,10 +81,9 @@ impl<'a> GlyphRasterImage<'a> {
                     for x in 0..width as usize {
                         let index = buffer[y * width + x] as usize;
                         let base = 3 * index;
-                        // CAUTION: I reversed the palette here for testing!
-                        let b = palette[base + 0];
+                        let r = palette[base + 0];
                         let g = palette[base + 1];
-                        let r = palette[base + 2];
+                        let b = palette[base + 2];
                         let a = trns.map_or(255, |trns| trns.get(index).copied().unwrap_or(255));
                         image[Point::new(x, y)] = Bgra::new(b, g, r, a);
                     }
