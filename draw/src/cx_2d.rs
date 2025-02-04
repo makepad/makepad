@@ -24,7 +24,7 @@ use {
         font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
         glyph_rasterizer::GlyphRasterizer,
-        text::fonts::{Definitions, FontsWithTextures, Options},
+        text::{fonts::Fonts, layouter::Layouter, loader::{Options, Loader, Definitions}},
         text_shaper::TextShaper,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     },
@@ -50,7 +50,7 @@ pub struct Cx2d<'a> {
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
     pub (crate) align_list: Vec<AlignEntry>,
-    pub fonts: Rc<RefCell<FontsWithTextures>>,
+    pub fonts: Rc<RefCell<Fonts>>,
     pub font_loader: Rc<RefCell<FontLoader>>,
     pub text_shaper: Rc<RefCell<TextShaper>>,
     pub glyph_rasterizer: Rc<RefCell<GlyphRasterizer>>,
@@ -96,7 +96,7 @@ impl<'a> Cx2d<'a> {
         Self::lazy_construct_nav_tree(cx);
         Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
-        let fonts = cx.get_global::<Rc<RefCell<FontsWithTextures>>>().clone();
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
         let text_shaper=  cx.get_global::<Rc<RefCell<TextShaper>>>().clone();
         let glyph_rasterizer = cx.get_global::<Rc<RefCell<GlyphRasterizer>>>().clone();
@@ -231,11 +231,10 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn lazy_construct_fonts(cx: &mut Cx) {
-        if !cx.has_global::<Rc<RefCell<FontsWithTextures>>>() {
-            let fonts = FontsWithTextures::new(
+        if !cx.has_global::<Rc<RefCell<Fonts>>>() {
+            let fonts = Fonts::new(
                 cx,
-                Options::default(),
-                Definitions::default(),
+                Layouter::new(Loader::new(Options::default(), Definitions::default()))
             );
             cx.set_global(Rc::new(RefCell::new(fonts)));
         }

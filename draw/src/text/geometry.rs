@@ -1,5 +1,5 @@
 use {
-    super::num::{One, Zero},
+    super::numeric::{One, Zero},
     std::ops::{Add, Mul, Sub},
 };
 

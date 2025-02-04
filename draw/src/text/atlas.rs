@@ -1,7 +1,7 @@
 use super::{
-    geom::{Point, Rect, Size},
+    geometry::{Point, Rect, Size},
     image::{Image, Subimage, SubimageMut},
-    num::Zero,
+    numeric::Zero,
 };
 
 #[derive(Clone, Debug)]
