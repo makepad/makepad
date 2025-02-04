@@ -6,7 +6,7 @@ use crate::{
     text::{
         font::{AllocatedGlyph, AtlasKind},
         font_family::FontFamilyId,
-        geom::{Point, Rect, Size, Transformation},
+        geometry::{Point, Rect, Size, Transformation},
         shaper::Glyph,
     },
 };
@@ -115,7 +115,7 @@ impl DrawText2 {
         let mut fonts = cx.fonts.borrow_mut();
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        let font_family = fonts.fonts_mut().font_family(font_family_id);
+        let font_family = fonts.layouter_mut().loader_mut().font_family(font_family_id).clone();
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
 
