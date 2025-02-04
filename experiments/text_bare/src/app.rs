@@ -1,4 +1,4 @@
-use crate::makepad_widgets::{text::{font_family::FontFamilyId, geom::Point}, *};
+use crate::makepad_widgets::{text::{font_family::FontFamilyId, geometry::Point}, *};
 
 live_design!{
     use link::theme::*;
