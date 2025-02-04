@@ -1,7 +1,8 @@
 use {
     super::{
         font::Font,
-        shaper::{Glyph, ShaperWithCache},
+        shaper::{ShapeInput, ShapeOutput, Shaper},
+        substr::Substr,
     },
     std::{
         cell::RefCell,
@@ -10,24 +11,17 @@ use {
     },
 };
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum FontFamilyId {
-    Sans,
-}
+pub type FontFamilyId = Rc<str>;
 
 #[derive(Debug)]
 pub struct FontFamily {
     id: FontFamilyId,
-    shaper: Rc<RefCell<ShaperWithCache>>,
-    fonts: Vec<Rc<Font>>,
+    shaper: Rc<RefCell<Shaper>>,
+    fonts: Rc<[Rc<Font>]>,
 }
 
 impl FontFamily {
-    pub fn new(
-        id: FontFamilyId,
-        shaper: Rc<RefCell<ShaperWithCache>>,
-        fonts: Vec<Rc<Font>>,
-    ) -> Self {
+    pub fn new(id: FontFamilyId, shaper: Rc<RefCell<Shaper>>, fonts: Rc<[Rc<Font>]>) -> Self {
         Self { id, shaper, fonts }
     }
 
@@ -35,8 +29,11 @@ impl FontFamily {
         &self.id
     }
 
-    pub fn shape(&self, text: &str) -> Rc<Vec<Glyph>> {
-        self.shaper.borrow_mut().shape(text, &self.fonts)
+    pub fn get_or_shape(&self, text: Substr) -> Rc<ShapeOutput> {
+        self.shaper.borrow_mut().get_or_shape(&ShapeInput {
+            text: text.into(),
+            fonts: self.fonts.clone(),
+        })
     }
 }
 

@@ -1,4 +1,14 @@
-use {super::{layouter::Layouter, geometry::Point, pixels::Bgra}, makepad_platform::*};
+use {
+    super::{
+        font_family::{FontFamily, FontFamilyId},
+        geom::Point,
+        layouter::Layouter,
+        loader::Definitions,
+        pixels::Bgra,
+    },
+    makepad_platform::*,
+    std::rc::Rc,
+};
 
 #[derive(Debug)]
 pub struct Fonts {
@@ -8,9 +18,10 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(cx: &mut Cx, layouter: Layouter) -> Self {
-        let grayscale_atlas_size = layouter.loader().grayscale_atlas().borrow().size();
-        let color_atlas_size = layouter.loader().color_atlas().borrow().size();
+    pub fn new(cx: &mut Cx, definitions: Definitions) -> Self {
+        let layouter = Layouter::new(definitions);
+        let grayscale_atlas_size = layouter.grayscale_atlas().borrow().size();
+        let color_atlas_size = layouter.color_atlas().borrow().size();
         Self {
             layouter,
             grayscale_texture: Texture::new_with_format(
@@ -33,16 +44,14 @@ impl Fonts {
                     height: color_atlas_size.height,
                     data: Some(vec![
                         0;
-                        grayscale_atlas_size.width * grayscale_atlas_size.height * 4
+                        grayscale_atlas_size.width
+                            * grayscale_atlas_size.height
+                            * 4
                     ]),
                     updated: TextureUpdated::Empty,
                 },
             ),
         }
-    }
-
-    pub fn layouter(&self) -> &Layouter {
-        &self.layouter
     }
 
     pub fn grayscale_texture(&self) -> &Texture {
@@ -53,8 +62,9 @@ impl Fonts {
         &self.color_texture
     }
 
-    pub fn layouter_mut(&mut self) -> &mut Layouter {
-        &mut self.layouter
+    // TODO: Remove
+    pub fn get_or_load_font_family(&mut self, font_family_id: &FontFamilyId) -> &Rc<FontFamily> {
+        self.layouter.get_or_load_font_family(font_family_id)
     }
 
     pub fn update_textures(&mut self, cx: &mut Cx) {
@@ -64,7 +74,7 @@ impl Fonts {
 
     fn update_grayscale_texture(&mut self, cx: &mut Cx) {
         let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
-        let mut atlas = self.layouter.loader().grayscale_atlas().borrow_mut();
+        let mut atlas = self.layouter.grayscale_atlas().borrow_mut();
         let atlas_size = atlas.size();
         let dirty_image = atlas.take_dirty_image();
         let dirty_rect = dirty_image.bounds();
@@ -96,7 +106,7 @@ impl Fonts {
         }
 
         let mut texture_data = self.color_texture.take_vec_u32(cx);
-        let mut atlas = self.layouter.loader().color_atlas().borrow_mut();
+        let mut atlas = self.layouter.color_atlas().borrow_mut();
         let atlas_size = atlas.size();
         let dirty_image = atlas.take_dirty_image();
         let dirty_rect = dirty_image.bounds();

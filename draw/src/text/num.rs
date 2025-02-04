@@ -1,3 +1,5 @@
+use std::hash::Hash;
+
 pub trait Zero {
     const ZERO: Self;
 }

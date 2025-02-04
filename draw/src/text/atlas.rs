@@ -1,7 +1,8 @@
 use super::{
-    geometry::{Point, Rect, Size},
+    geom::{Point, Rect, Size},
     image::{Image, Subimage, SubimageMut},
-    numeric::Zero,
+    num::Zero,
+    pixels::{Bgra, R},
 };
 
 #[derive(Clone, Debug)]
@@ -59,3 +60,6 @@ impl<T> Atlas<T> {
         Some(self.image.subimage_mut(rect))
     }
 }
+
+pub type GrayscaleAtlas = Atlas<R<u8>>;
+pub type ColorAtlas = Atlas<Bgra<u8>>;
