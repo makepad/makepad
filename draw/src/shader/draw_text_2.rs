@@ -4,7 +4,7 @@ use crate::{
     geometry::GeometryQuad2D,
     makepad_platform::*,
     text::{
-        font::AllocatedGlyph,
+        font::{AllocatedGlyph, AtlasKind},
         font_family::FontFamilyId,
         geom::{Point, Rect, Size, Transformation},
         shaper::Glyph,
@@ -18,6 +18,7 @@ live_design! {
         color: #fff
 
         texture grayscale_texture: texture2d
+        texture color_texture: texture2d
 
         varying tex_coord1: vec2
         varying clipped: vec2
@@ -50,7 +51,12 @@ live_design! {
         }
 
         fn pixel(self) -> vec4 {
-            return vec4(sample2d(self.grayscale_texture, self.tex_coord1.xy).x, 1.0, 0.0, 1.0);
+            if self.tex_index == 0 {
+                return vec4(sample2d(self.grayscale_texture, self.tex_coord1.xy).xxx, 1.0);
+            } else {
+                let c = sample2d(self.color_texture, self.tex_coord1.xy);
+                return vec4(c.rgb * c.a, c.a);
+            }
         }
     }
 }
@@ -69,6 +75,8 @@ pub struct DrawText2 {
     // these values are all generated
     #[live]
     pub color: Vec4,
+    #[calc]
+    pub tex_index: f32,
     #[calc]
     pub font_t1: Vec2,
     #[calc]
@@ -106,20 +114,28 @@ impl DrawText2 {
     ) {
         let mut fonts = cx.fonts.borrow_mut();
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
-        let font_family = fonts
-            .fonts_mut()
-            .font_family(font_family_id);
+        self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
+        let font_family = fonts.fonts_mut().font_family(font_family_id);
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
 
-        cx.cx.debug.rect(makepad_platform::Rect {
-            pos: dvec2(p.x as f64, p.y as f64),
-            size: dvec2(1000.0, 1.0),
-        }, vec4(1.0, 0.0, 0.0, 1.0));
+        cx.cx.debug.rect(
+            makepad_platform::Rect {
+                pos: dvec2(p.x as f64, p.y as f64),
+                size: dvec2(1000.0, 1.0),
+            },
+            vec4(1.0, 0.0, 0.0, 1.0),
+        );
 
         let mut p = p;
         for glyph in &*font_family.shape(text) {
-            self.draw_glyph(cx, &mut p, glyph, font_size_in_lpxs, &mut many_instances.instances);
+            self.draw_glyph(
+                cx,
+                &mut p,
+                glyph,
+                font_size_in_lpxs,
+                &mut many_instances.instances,
+            );
         }
 
         let new_area = cx.end_many_instances(many_instances);
@@ -178,19 +194,22 @@ impl DrawText2 {
         let bounds_in_lpxs = Rect::new(
             Point::new(glyph.bounds_in_pxs.min().x, -glyph.bounds_in_pxs.max().y),
             glyph.bounds_in_pxs.size,
-        ).transform(transform);
+        )
+        .transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
+        self.tex_index = match glyph.atlas_kind {
+            AtlasKind::Grayscale => 0.0,
+            AtlasKind::Color => 1.0,
+        };
         self.font_t1 = point_to_vec2(tex_coord(glyph.image_bounds.min(), glyph.atlas_size));
         self.font_t2 = point_to_vec2(tex_coord(glyph.image_bounds.max(), glyph.atlas_size));
         self.char_depth = 1.0; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
-        /*
         println!("RECT POS {:?}", self.rect_pos);
         println!("RECT SIZE {:?}", self.rect_size);
         println!("FONT T1 {:?}", self.font_t1);
         println!("FONT T2 {:?}", self.font_t2);
-        */
     }
 }
