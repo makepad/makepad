@@ -26,8 +26,13 @@ live_design!{
         
         draw_check: {
             uniform size: 7.5;
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 match self.check_type {
                     CheckType::Check => {
                         let left = 1;
@@ -37,7 +42,13 @@ live_design!{
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5 + offset_y);
-                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
+                        sdf.fill_keep(
+                            mix(
+                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_TOP * 1.5, self.focus),
+                                THEME_COLOR_INSET_PIT_BOTTOM,
+                                pow(self.pos.y, 1.)
+                            )
+                        )
                         sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
                         
                         let szs = sz * 0.5;
@@ -45,10 +56,12 @@ live_design!{
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix(
-                            THEME_COLOR_U_HIDDEN,
-                            THEME_COLOR_TEXT_ACTIVE,
-                            self.selected), 1.25
+                        sdf.stroke(
+                            mix(
+                                THEME_COLOR_U_HIDDEN,
+                                mix(self.color_on, self.color_hover, self.hover),
+                                self.on
+                            ), 1.25
                         );
                     }
                     CheckType::Radio => {
@@ -56,19 +69,25 @@ live_design!{
                         let left = 0.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
+                        sdf.fill_keep(
+                            mix(
+                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_TOP * 1.5, self.focus),
+                                THEME_COLOR_INSET_PIT_BOTTOM,
+                                pow(self.pos.y, 1.)
+                            )
+                        )
                         sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
                                 mix(
-                                    THEME_COLOR_U_HIDDEN,
-                                    THEME_COLOR_CTRL_HOVER,
+                                    mix(THEME_COLOR_U_HIDDEN, #f00, self.focus),
+                                    self.color_hover,
                                     self.hover
                                 ),
-                                THEME_COLOR_TEXT_ACTIVE,
-                                self.selected
+                                self.color_on,
+                                self.on
                             )
                         );
                     }
@@ -89,18 +108,44 @@ live_design!{
                             
                         sdf.fill(
                             mix(
-                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
+                                mix(
+                                    mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_TOP * 1.5, self.focus),
+                                    THEME_COLOR_INSET_PIT_BOTTOM * 0.1,
+                                    pow(self.pos.y, 1.0)
+                                ),
                                 mix(THEME_COLOR_INSET_PIT_TOP_HOVER * 1.75, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
                                 self.hover
                             )
                         )
                         let isz = sz * 0.65;
-                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                        sdf.circle(left + sz + self.on * sz, c.y - 0.5, isz);
+                        sdf.circle(left + sz + self.on * sz, c.y - 0.5, 0.425 * isz);
                         sdf.subtract();
-                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                        sdf.blend(self.selected)
-                        sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+                        sdf.circle(left + sz + self.on * sz, c.y - 0.5, isz);
+                        sdf.blend(self.on)
+                        sdf.fill(
+                            mix(
+                                mix(
+                                    mix(
+                                        self.color,
+                                        self.color_focus,
+                                        self.focus
+                                    ),
+                                    self.color_hover,
+                                    self.hover
+                                ),
+                                mix(
+                                    mix(
+                                        self.color_on,
+                                        self.color_focus,
+                                        self.focus
+                                    ),
+                                    self.color_hover,
+                                    self.hover
+                                ),
+                                self.on
+                            )
+                        );
                     }
                     CheckType::None => {
                         sdf.fill(THEME_COLOR_D_HIDDEN);
@@ -112,43 +157,47 @@ live_design!{
             
         draw_text: {
             instance focus: 0.0
-            instance selected: 0.0
+            instance on: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
+            instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_on: (THEME_COLOR_TEXT_DEFAULT)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_DEFAULT,
+                        mix(self.color, self.color_focus, self.focus),
+                        self.color_hover,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_DEFAULT,
-                    self.selected
+                    self.color_on,
+                    self.on
                 )
+            }
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
             }
         }
             
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
-            instance selected: 0.0
-            uniform color: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            instance on: 0.0
+            uniform color: (THEME_COLOR_D_3)
+            uniform color_hover: (THEME_COLOR_D_4)
+            instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         self.color,
-                        self.color * 1.4,
+                        self.color_hover,
                         self.hover
                     ),
-                    mix(
-                        self.color_active,
-                        self.color_active * 1.4,
-                        self.hover
-                    ),
-                    self.selected
+                    self.color_on,
+                    self.on
                 )
             }
         }
@@ -194,22 +243,22 @@ live_design!{
                     }
                 }
             }
-            selected = {
+            on = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {selected: 0.0},
-                        draw_text: {selected: 0.0},
-                        draw_icon: {selected: 0.0},
+                        draw_check: {on: 0.0},
+                        draw_text: {on: 0.0},
+                        draw_icon: {on: 0.0},
                     }
                 }
                 on = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_check: {selected: 1.0}
-                        draw_text: {selected: 1.0}
-                        draw_icon: {selected: 1.0},
+                        draw_check: {on: 1.0}
+                        draw_text: {on: 1.0}
+                        draw_icon: {on: 1.0},
                     }
                 }
             }
@@ -262,24 +311,24 @@ live_design!{
                     }
                 }
             }
-            selected = {
+            on = {
                 default: off
                 off = {
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {selected: 0.0},
-                        draw_text: {selected: 0.0},
-                        draw_icon: {selected: 0.0},
+                        draw_check: {on: 0.0},
+                        draw_text: {on: 0.0},
+                        draw_icon: {on: 0.0},
                     }
                 }
                 on = {
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {selected: 1.0}
-                        draw_text: {selected: 1.0}
-                        draw_icon: {selected: 1.0},
+                        draw_check: {on: 1.0}
+                        draw_text: {on: 1.0}
+                        draw_icon: {on: 1.0},
                     }
                 }
             }
@@ -300,7 +349,7 @@ pub struct DrawCheckBox {
     #[live] check_type: CheckType,
     #[live] hover: f32,
     #[live] focus: f32,
-    #[live] selected: f32
+    #[live] on: f32
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -372,7 +421,7 @@ impl Widget for CheckBox {
     fn data_to_widget(&mut self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(value) = nodes.read_field_value(path) {
             if let Some(value) = value.as_bool() {
-                self.animator_toggle(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+                self.animator_toggle(cx, value, Animate::Yes, id!(on.on), id!(on.off));
             }
         }
     }
@@ -390,12 +439,12 @@ impl Widget for CheckBox {
                 self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, id!(selected.on)) {
-                    self.animator_play(cx, id!(selected.off));
+                if self.animator_in_state(cx, id!(on.on)) {
+                    self.animator_play(cx, id!(on.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
                 }
                 else {
-                    self.animator_play(cx, id!(selected.on));
+                    self.animator_play(cx, id!(on.on));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
                 }
             },
@@ -439,18 +488,18 @@ impl CheckBoxRef {
         }
     }
     
-    pub fn selected(&self, cx: &Cx) -> bool {
+    pub fn on(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator_in_state(cx, id!(selected.on))
+            inner.animator_in_state(cx, id!(on.on))
         }
         else {
             false
         }
     }
     
-    pub fn set_selected(&self, cx: &mut Cx, value: bool) {
+    pub fn set_on(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_toggle(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+            inner.animator_toggle(cx, value, Animate::Yes, id!(on.on), id!(on.off));
         }
     }
 }

@@ -40,14 +40,14 @@ live_design!{
             instance selected: 0.0
             instance hover: 0.0
             instance color: (THEME_COLOR_FLOATING_BG)
-            instance color_selected: (THEME_COLOR_CTRL_HOVER)
+            instance color_on: (THEME_COLOR_CTRL_HOVER)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 
                 sdf.clear(mix(
                     self.color,
-                    self.color_selected,
+                    self.color_on,
                     self.hover
                 ))
                 

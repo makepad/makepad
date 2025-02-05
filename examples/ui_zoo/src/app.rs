@@ -30,7 +30,7 @@ live_design!{
         width: Fill, height: Fit,
         flow: Down,
         spacing: (THEME_SPACE_1),
-         margin: <THEME_MSPACE_H_3> {}
+        margin: <THEME_MSPACE_H_3> {}
         divider = <Hr> { }
         title = <H3> { text: "Header" }
     }
@@ -341,12 +341,12 @@ live_design!{
                         styledbutton = <Button> {
                             draw_bg: {
                                 fn pixel(self) -> vec4 {
-                                    return (THEME_COLOR_MAKEPAD) + self.pressed * vec4(1., 1., 1., 1.)
+                                    return (THEME_COLOR_MAKEPAD) + self.down * vec4(1., 1., 1., 1.)
                                 }
                             }
                             draw_text: {
                                 fn get_color(self) -> vec4 {
-                                    return (THEME_COLOR_U_5) - vec4(0., 0.1, 0.4, 0.) * self.hover - self.pressed * vec4(1., 1., 1., 0.);
+                                    return (THEME_COLOR_U_5) - vec4(0., 0.1, 0.4, 0.) * self.hover - self.down * vec4(1., 1., 1., 0.);
                                 }
                             }
                             text: "I can be styled!"
@@ -964,7 +964,7 @@ live_design!{
                                 text:"Check me out!"
                                 draw_check: { check_type: None }
                                 draw_icon: {
-                                    color_active: #f00,
+                                    color_on: #f00,
                                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                 }
                             }
@@ -1025,7 +1025,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
-                                        color_active: #0f0,
+                                        color_on: #0f0,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -1035,7 +1035,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
-                                        color_active: #0ff,
+                                        color_on: #0ff,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -1045,7 +1045,7 @@ live_design!{
                                         width: 12.5, height: Fit,
                                     }
                                     draw_icon: {
-                                        color_active: #f00,
+                                        color_on: #f00,
                                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                     }
                                 }
@@ -1382,8 +1382,8 @@ live_design!{
                                 <Button> {
                                     text: "I can be clicked", // Text label.
                                     draw_bg: {
-                                        bodytop: #3, // Set the hover-state color.
-                                        bodybottom: #f00, // Set the pressed-state color.
+                                        color: #3, // Set the hover-state color.
+                                        color_hover: #f00, // Set the pressed-state color.
                                     },
                                     height: Fit, // Element assumes height of its children.
                                     width: Fit, // Element expands to use all available horizontal space.
@@ -1407,7 +1407,7 @@ live_design!{
                                                     self.hover
                                                 ),
                                                 #00f,
-                                                self.pressed
+                                                self.down
                                             )
                                         }
                                     },
@@ -1424,7 +1424,7 @@ live_design!{
                                                     self.hover
                                                 ),
                                                 #000,
-                                                self.pressed
+                                                self.down
                                             )
                                         }
                                     }
@@ -1443,8 +1443,8 @@ live_design!{
                                     //         return mix( // State transition animations.
                                     //             mix(
                                     //                 self.color,
-                                    //                 self.bodytop,
-                                    //                 self.bodybottom
+                                    //                 self.color,
+                                    //                 self.color_down
                                     //             ),
                                     //             self.color_pressed,
                                     //             self.pressed
@@ -1474,12 +1474,12 @@ live_design!{
                                             off = { // Behavior when the animation is started to the off-state
                                                 from: { // Behavior depending on the prior states
                                                     all: Forward {duration: 0.1}, // Default animation direction and speed in secs.
-                                                    pressed: Forward {duration: 0.25} // Direction and speed for 'pressed' in secs.
+                                                    down: Forward {duration: 0.25} // Direction and speed for 'pressed' in secs.
                                                 }
                                                 apply: { // Shader methods to animate
-                                                    draw_bg: { pressed: 0.0, hover: 0.0 } // Timeline target positions for the given states.
-                                                    draw_icon: { pressed: 0.0, hover: 0.0 }
-                                                    draw_text: { pressed: 0.0, hover: 0.0 }
+                                                    draw_bg: { down: 0.0, hover: 0.0 } // Timeline target positions for the given states.
+                                                    draw_icon: { down: 0.0, hover: 0.0 }
+                                                    draw_text: { down: 0.0, hover: 0.0 }
                                                 }
                                             }
 
@@ -1489,21 +1489,21 @@ live_design!{
                                                     pressed: Forward {duration: 0.5}
                                                 }
                                                 apply: {
-                                                    draw_bg: { pressed: 0.0, hover: [{time: 0.0, value: 1.0}] },
+                                                    draw_bg: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
                                                     // pressed: 'pressed' timeline target position
                                                     // hover, time: Normalized timeline from 0.0 - 1.0. 'duration' then determines the actual playback duration of this animation in seconds.
                                                     // hover, value: target timeline position
-                                                    draw_icon: { pressed: 0.0, hover: [{time: 0.0, value: 1.0}] },
-                                                    draw_text: { pressed: 0.0, hover: [{time: 0.0, value: 1.0}] }
+                                                    draw_icon: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
+                                                    draw_text: { down: 0.0, hover: [{time: 0.0, value: 1.0}] }
                                                 }
                                             }
                                 
                                             pressed = { // Behavior when the animation is started to the pressed-state
                                                 from: {all: Forward {duration: 0.2}}
                                                 apply: {
-                                                    draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0}, 
-                                                    draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0},
-                                                    draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0}
+                                                    draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0}, 
+                                                    draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0},
+                                                    draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0}
                                                 }
                                             }
                                         }
