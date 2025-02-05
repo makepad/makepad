@@ -107,10 +107,10 @@ live_design!{
                 instance inset: vec4(0.0, 0.0, 0.0, 0.0)
                 instance focus: 0.0,
                 color: (THEME_COLOR_D_HIDDEN)
-                instance color_selected: (THEME_COLOR_D_HIDDEN)
+                instance color_focus: (THEME_COLOR_D_HIDDEN)
                     
                 fn get_color(self) -> vec4 {
-                    return mix(self.color, self.color_selected, self.focus)
+                    return mix(self.color, self.color_focus, self.focus)
                 }
                     
                 fn get_border_color(self) -> vec4 {
@@ -364,10 +364,10 @@ live_design!{
                 instance inset: vec4(0.0, 0.0, 0.0, 0.0)
                 instance focus: 0.0,
                 color: (THEME_COLOR_D_HIDDEN)
-                instance color_selected: (THEME_COLOR_D_HIDDEN)
+                instance color_focus: (THEME_COLOR_D_HIDDEN)
                     
                 fn get_color(self) -> vec4 {
-                    return mix(self.color, self.color_selected, self.focus)
+                    return mix(self.color, self.color_focus, self.focus)
                 }
                     
                 fn get_border_color(self) -> vec4 {
