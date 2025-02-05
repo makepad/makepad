@@ -1,12 +1,12 @@
 use {
     super::{
-        atlas::Atlas,
         faces::Faces,
-        geom::{Point, Rect, Size},
+        geometry::{Point, Rect, Size},
         outline,
         outline::Outline,
+        raster_image::RasterImage,
+        image_atlas::ImageAtlas,
         pixels::{Bgra, R},
-        raster_image::GlyphRasterImage,
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -22,16 +22,16 @@ pub type FontId = Rc<str>;
 #[derive(Debug)]
 pub struct Font {
     id: FontId,
-    grayscale_atlas: Rc<RefCell<Atlas<R<u8>>>>,
-    color_atlas: Rc<RefCell<Atlas<Bgra<u8>>>>,
+    grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
+    color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
     faces: Faces,
 }
 
 impl Font {
     pub fn new(
         id: FontId,
-        grayscale_atlas: Rc<RefCell<Atlas<R<u8>>>>,
-        color_atlas: Rc<RefCell<Atlas<Bgra<u8>>>>,
+        grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
+        color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
         faces: Faces,
     ) -> Self {
         Self {
@@ -42,7 +42,7 @@ impl Font {
         }
     }
 
-    pub fn font_id(&self) -> &FontId {
+    pub fn id(&self) -> &FontId {
         &self.id
     }
 
@@ -71,16 +71,16 @@ impl Font {
     pub fn glyph_raster_image(
         &self,
         glyph_id: GlyphId,
-        pxs_per_em: f32,
-    ) -> Option<GlyphRasterImage<'_>> {
+        dpxs_per_em: f32,
+    ) -> Option<RasterImage<'_>> {
         let face = self.ttf_parser_face();
         let glyph_id = ttf_parser::GlyphId(glyph_id);
-        let image = face.glyph_raster_image(glyph_id, pxs_per_em as u16)?;
-        GlyphRasterImage::from_raster_glyph_image(image)
+        let image = face.glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
+        RasterImage::from_raster_glyph_image(image)
     }
 
-    pub fn allocate_glyph(&self, glyph_id: GlyphId, pxs_per_em: f32) -> Option<AllocatedGlyph> {
-        if let Some(outline) = self.glyph_outline(glyph_id, pxs_per_em) {
+    pub fn allocate_glyph(&self, glyph_id: GlyphId, dpx_per_em: f32) -> Option<AllocatedGlyph> {
+        if let Some(outline) = self.glyph_outline(glyph_id, dpx_per_em) {
             let mut atlas = self.grayscale_atlas.borrow_mut();
             let mut image = atlas.allocate_image(outline.image_size())?;
             outline.rasterize(&mut image);
@@ -93,7 +93,7 @@ impl Font {
                 image_bounds,
             });
         }
-        if let Some(raster_image) = self.glyph_raster_image(glyph_id, pxs_per_em) {
+        if let Some(raster_image) = self.glyph_raster_image(glyph_id, dpx_per_em) {
             let mut atlas = self.color_atlas.borrow_mut();
             let mut image = atlas.allocate_image(raster_image.size())?;
             raster_image.decode(&mut image);

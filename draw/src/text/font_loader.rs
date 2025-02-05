@@ -1,11 +1,11 @@
 use {
     super::{
-        atlas::{Atlas, ColorAtlas, GrayscaleAtlas},
         faces::Faces,
         font::{Font, FontId},
         font_data,
         font_family::{FontFamily, FontFamilyId},
-        geom::Size,
+        geometry::Size,
+        image_atlas::{ColorAtlas, GrayscaleAtlas, ImageAtlas},
         pixels::{Bgra, R},
         shaper::Shaper,
     },
@@ -13,8 +13,8 @@ use {
 };
 
 #[derive(Clone, Debug)]
-pub struct Loader {
-    definitions: Definitions,
+pub struct FontLoader {
+    definitions: FontDefinitions,
     shaper: Rc<RefCell<Shaper>>,
     grayscale_atlas: Rc<RefCell<GrayscaleAtlas>>,
     color_atlas: Rc<RefCell<ColorAtlas>>,
@@ -22,26 +22,26 @@ pub struct Loader {
     font_cache: HashMap<FontId, Rc<Font>>,
 }
 
-const GRAYSCALE_ATLAS_SIZE: Size<usize> = Size::new(256, 256);
-const COLOR_ATLAS_SIZE: Size<usize> = Size::new(256, 256);
+const GRAYSCALE_ATLAS_SIZE: Size<usize> = Size::new(512, 512);
+const COLOR_ATLAS_SIZE: Size<usize> = Size::new(512, 512);
 
-impl Loader {
-    pub fn new(definitions: Definitions) -> Self {
+impl FontLoader {
+    pub fn new(definitions: FontDefinitions) -> Self {
         Self {
             shaper: Rc::new(RefCell::new(Shaper::new())),
-            grayscale_atlas: Rc::new(RefCell::new(Atlas::new(GRAYSCALE_ATLAS_SIZE))),
-            color_atlas: Rc::new(RefCell::new(Atlas::new(COLOR_ATLAS_SIZE))),
+            grayscale_atlas: Rc::new(RefCell::new(ImageAtlas::new(GRAYSCALE_ATLAS_SIZE))),
+            color_atlas: Rc::new(RefCell::new(ImageAtlas::new(COLOR_ATLAS_SIZE))),
             definitions,
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
         }
     }
 
-    pub fn grayscale_atlas(&self) -> &Rc<RefCell<Atlas<R<u8>>>> {
+    pub fn grayscale_atlas(&self) -> &Rc<RefCell<ImageAtlas<R<u8>>>> {
         &self.grayscale_atlas
     }
 
-    pub fn color_atlas(&self) -> &Rc<RefCell<Atlas<Bgra<u8>>>> {
+    pub fn color_atlas(&self) -> &Rc<RefCell<ImageAtlas<Bgra<u8>>>> {
         &self.color_atlas
     }
 
@@ -55,7 +55,7 @@ impl Loader {
     }
 
     fn load_font_family(&mut self, font_family_id: FontFamilyId) -> FontFamily {
-        let definition = self
+        let font_ids = self
             .definitions
             .font_families
             .remove(&font_family_id)
@@ -63,8 +63,7 @@ impl Loader {
         FontFamily::new(
             font_family_id,
             self.shaper.clone(),
-            definition
-                .font_ids
+            font_ids
                 .into_iter()
                 .map(|font_id| self.get_or_load_font(&font_id).clone())
                 .collect(),
@@ -96,24 +95,22 @@ impl Loader {
 }
 
 #[derive(Clone, Debug)]
-pub struct Definitions {
-    pub font_families: HashMap<FontFamilyId, FontFamilyDefinition>,
+pub struct FontDefinitions {
+    pub font_families: HashMap<FontFamilyId, Vec<FontId>>,
     pub fonts: HashMap<FontId, FontDefinition>,
 }
 
-impl Default for Definitions {
+impl Default for FontDefinitions {
     fn default() -> Self {
         Self {
             font_families: [(
                 "Sans".into(),
-                FontFamilyDefinition {
-                    font_ids: [
-                        "IBM Plex Sans Text".into(),
-                        "LXG WWen Kai Regular".into(),
-                        "Noto Color Emoji".into(),
-                    ]
-                    .into(),
-                },
+                [
+                    "IBM Plex Sans Text".into(),
+                    "LXG WWen Kai Regular".into(),
+                    "Noto Color Emoji".into(),
+                ]
+                .into(),
             )]
             .into_iter()
             .collect(),
@@ -144,11 +141,6 @@ impl Default for Definitions {
             .collect(),
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct FontFamilyDefinition {
-    pub font_ids: Vec<FontId>,
 }
 
 #[derive(Clone, Debug)]

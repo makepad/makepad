@@ -1,19 +1,19 @@
 use super::{
-    geom::{Point, Rect, Size},
+    geometry::{Point, Rect, Size},
     image::{Image, Subimage, SubimageMut},
-    num::Zero,
+    numeric::Zero,
     pixels::{Bgra, R},
 };
 
 #[derive(Clone, Debug)]
-pub struct Atlas<T> {
+pub struct ImageAtlas<T> {
     image: Image<T>,
     dirty_rect: Rect<usize>,
-    next_origin: Point<usize>,
+    current_point: Point<usize>,
     current_row_height: usize,
 }
 
-impl<T> Atlas<T> {
+impl<T> ImageAtlas<T> {
     pub fn new(size: Size<usize>) -> Self
     where
         T: Clone + Default,
@@ -21,7 +21,7 @@ impl<T> Atlas<T> {
         Self {
             image: Image::new(size),
             dirty_rect: Rect::ZERO,
-            next_origin: Point::ZERO,
+            current_point: Point::ZERO,
             current_row_height: 0,
         }
     }
@@ -44,16 +44,16 @@ impl<T> Atlas<T> {
         const PADDING: Size<usize> = Size::new(2, 2);
 
         let padded_size = size + PADDING;
-        if self.next_origin.x + padded_size.width > self.size().width {
-            self.next_origin.x = 0;
-            self.next_origin.y += self.current_row_height;
+        if self.current_point.x + padded_size.width > self.size().width {
+            self.current_point.x = 0;
+            self.current_point.y += self.current_row_height;
             self.current_row_height = 0;
         }
-        if self.next_origin.y + padded_size.height > self.size().height {
+        if self.current_point.y + padded_size.height > self.size().height {
             return None;
         }
-        let origin = self.next_origin;
-        self.next_origin.x += padded_size.width;
+        let origin = self.current_point;
+        self.current_point.x += padded_size.width;
         self.current_row_height = self.current_row_height.max(padded_size.height);
         let rect = Rect::new(origin, size);
         self.dirty_rect = self.dirty_rect.union(rect);
@@ -61,5 +61,5 @@ impl<T> Atlas<T> {
     }
 }
 
-pub type GrayscaleAtlas = Atlas<R<u8>>;
-pub type ColorAtlas = Atlas<Bgra<u8>>;
+pub type GrayscaleAtlas = ImageAtlas<R<u8>>;
+pub type ColorAtlas = ImageAtlas<Bgra<u8>>;
