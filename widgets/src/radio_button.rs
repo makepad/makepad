@@ -30,12 +30,13 @@ live_design!{
         label_align: { y: 0.0 }
         
         draw_radio: {
+            // instance active: 0.0;
             uniform size: 7.0;
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color: (THEME_COLOR_CTRL_DEFAULT)
             uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -56,8 +57,8 @@ live_design!{
                                     self.color_hover,
                                     self.hover
                                 ),
-                                mix(self.color_on, self.color_on * 1.5, self.hover),
-                                self.on
+                                mix(self.color_active, self.color_active * 1.5, self.hover),
+                                self.active
                             )
                         );
                         
@@ -67,13 +68,13 @@ live_design!{
                         let grad_bot = 1.0;
                         let body = mix(
                             mix(self.color, self.color_hover, self.hover),
-                            mix(self.color_on, self.color_on * 1.5, self.hover),
-                            self.on
+                            mix(self.color_active, self.color_active * 1.5, self.hover),
+                            self.active
                         );
                         let body_transp = vec4(body.xyz, 0.0);
-                        let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.on), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                        let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.active), max(0.0, grad_top - sdf.pos.y) / grad_top);
                         let bot_gradient = mix(
-                            mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.on),
+                            mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.active),
                             top_gradient,
                             clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                         );
@@ -85,7 +86,7 @@ live_design!{
                         sdf.stroke(
                             mix(THEME_COLOR_BEVEL_SHADOW,
                                 THEME_COLOR_U_HIDDEN,
-                                self.on
+                                self.active
                             ), THEME_BEVELING * 2.
                         );
                             
@@ -107,11 +108,11 @@ live_design!{
             
         draw_text: {
             instance hover: 0.0
-            instance on: 0.0
+            instance active: 0.0
                 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_on: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -123,18 +124,18 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_on,
-                    self.on
+                    self.color_active,
+                    self.active
                 )
             }
         }
             
         draw_icon: {
             instance hover: 0.0
-            instance on: 0.0
+            instance active: 0.0
             uniform color: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_hover: (THEME_COLOR_WHITE)
-            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -144,11 +145,11 @@ live_design!{
                         self.hover
                     ),
                     mix(
-                        self.color_on,
+                        self.color_active,
                         self.color_hover,
                         self.hover
                     ),
-                    self.on
+                    self.active
                 )
             }
         }
@@ -178,20 +179,20 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_radio: {on: 0.0}
-                        draw_icon: {on: 0.0}
-                        draw_text: {on: 0.0}
-                        draw_icon: {on: 0.0}
+                        draw_radio: {active: 0.0}
+                        draw_icon: {active: 0.0}
+                        draw_text: {active: 0.0}
+                        draw_icon: {active: 0.0}
                     }
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_radio: {on: 1.0}
-                        draw_icon: {on: 1.0}
-                        draw_text: {on: 1.0}
-                        draw_icon: {on: 1.0}
+                        draw_radio: {active: 1.0}
+                        draw_icon: {active: 1.0}
+                        draw_text: {active: 1.0}
+                        draw_icon: {active: 1.0}
                     }
                 }
             }
@@ -227,11 +228,11 @@ live_design!{
         }
         draw_text: {
             instance hover: 0.0
-            instance on: 0.0
+            instance active: 0.0
                 
             uniform color: (THEME_COLOR_U_3)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_on: (THEME_COLOR_TEXT_SELECTED)
+            uniform color_active: (THEME_COLOR_TEXT_SELECTED)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -243,8 +244,8 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_on,
-                    self.on
+                    self.color_active,
+                    self.active
                 )
             }
         }
@@ -259,11 +260,11 @@ live_design!{
             
         draw_text: {
             instance hover: 0.0
-            instance on: 0.0
+            instance active: 0.0
                 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
                 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -272,8 +273,8 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_on,
-                    self.on
+                    self.color_active,
+                    self.active
                 )
             }
         }
@@ -304,7 +305,7 @@ pub struct DrawRadioButton {
     #[live] radio_type: RadioType,
     #[live] hover: f32,
     #[live] focus: f32,
-    #[live] on: f32
+    #[live] active: f32
 }
 
 
@@ -415,8 +416,8 @@ impl Widget for RadioButton {
                 self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, id!(on.off)) {
-                    self.animator_play(cx, id!(on.on));
+                if self.animator_in_state(cx, id!(active.off)) {
+                    self.animator_play(cx, id!(active.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
                 }
             },
@@ -448,14 +449,14 @@ impl Widget for RadioButton {
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.animator_play(cx, id!(on.off));
+            inner.animator_play(cx, id!(active.off));
         }
     }
 
     pub fn select(&self, cx: &mut Cx, scope: &mut Scope){
         if let Some(mut inner) = self.borrow_mut(){
-            if inner.animator_in_state(cx, id!(on.off)) {
-                inner.animator_play(cx, id!(on.on));
+            if inner.animator_in_state(cx, id!(active.off)) {
+                inner.animator_play(cx, id!(active.on));
                 cx.widget_action(inner.widget_uid(), &scope.path, RadioButtonAction::Clicked);
             }
         }
