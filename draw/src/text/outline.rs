@@ -1,8 +1,8 @@
 use {
     super::{
-        geom::{Point, Rect, Size, Transformation},
+        geometry::{Point, Rect, Size, Transformation},
         image::SubimageMut,
-        num::Zero,
+        numeric::Zero,
         pixels::R,
     },
     makepad_rustybuzz as rustybuzz,

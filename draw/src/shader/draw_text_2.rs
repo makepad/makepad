@@ -6,7 +6,7 @@ use crate::{
     text::{
         font::{AllocatedGlyph, AtlasKind},
         font_family::FontFamilyId,
-        geom::{Point, Rect, Size, Transformation},
+        geometry::{Point, Rect, Size, Transformation},
         shaper::Glyph,
     },
 };
@@ -128,7 +128,7 @@ impl DrawText2 {
         );
 
         let mut p = p;
-        for glyph in &*font_family.get_or_shape(text.into()).glyphs {
+        for glyph in &*font_family.get_or_shape_text(text.into()).glyphs {
             self.draw_glyph(
                 cx,
                 &mut p,

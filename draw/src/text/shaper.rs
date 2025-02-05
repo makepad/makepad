@@ -7,20 +7,21 @@ use {
     rustybuzz::UnicodeBuffer,
     std::{
         collections::{HashMap, VecDeque},
+        fmt,
         hash::Hash,
         rc::Rc,
     },
 };
 
-const CACHE_SIZE: usize = 256;
+const CACHE_SIZE: usize = 1024;
 
 #[derive(Debug)]
 pub struct Shaper {
     reusable_glyphs: Vec<Vec<Glyph>>,
     reusable_unicode_buffer: UnicodeBuffer,
     cache_size: usize,
-    cached_inputs: VecDeque<ShapeInput>,
-    cached_outputs: HashMap<ShapeInput, Rc<ShapeOutput>>,
+    cached_params: VecDeque<ShapeParams>,
+    cached_results: HashMap<ShapeParams, Rc<ShapeResult>>,
 }
 
 impl Shaper {
@@ -29,28 +30,29 @@ impl Shaper {
             reusable_glyphs: Vec::new(),
             reusable_unicode_buffer: UnicodeBuffer::new(),
             cache_size: CACHE_SIZE,
-            cached_inputs: VecDeque::with_capacity(CACHE_SIZE),
-            cached_outputs: HashMap::with_capacity(CACHE_SIZE),
+            cached_params: VecDeque::with_capacity(CACHE_SIZE),
+            cached_results: HashMap::with_capacity(CACHE_SIZE),
         }
     }
 
-    pub fn get_or_shape(&mut self, input: &ShapeInput) -> Rc<ShapeOutput> {
-        if !self.cached_outputs.contains_key(input) {
-            if self.cached_inputs.len() == self.cache_size {
-                let inputs = self.cached_inputs.pop_front().unwrap();
-                self.cached_outputs.remove(&inputs);
+    pub fn get_or_shape(&mut self, params: &ShapeParams) -> Rc<ShapeResult> {
+        if !self.cached_results.contains_key(params) {
+            if self.cached_params.len() == self.cache_size {
+                let inputs = self.cached_params.pop_front().unwrap();
+                self.cached_results.remove(&inputs);
             }
-            let result = self.shape(input);
-            self.cached_inputs.push_back(input.clone());
-            self.cached_outputs.insert(input.clone(), Rc::new(result));
+            let result = self.shape(params);
+            self.cached_params.push_back(params.clone());
+            self.cached_results
+                .insert(params.clone(), Rc::new(result));
         }
-        self.cached_outputs.get(input).unwrap().clone()
+        self.cached_results.get(params).unwrap().clone()
     }
 
-    fn shape(&mut self, input: &ShapeInput) -> ShapeOutput {
+    fn shape(&mut self, input: &ShapeParams) -> ShapeResult {
         let mut glyphs = Vec::new();
         self.shape_recursive(&input.text, &input.fonts, 0, input.text.len(), &mut glyphs);
-        ShapeOutput { glyphs }
+        ShapeResult { glyphs }
     }
 
     fn shape_recursive(
@@ -84,10 +86,10 @@ impl Shaper {
         self.shape_step(text, font, start, end, &mut glyphs);
         let mut glyph_groups = group_glyphs_by_cluster(&glyphs).peekable();
         while let Some(glyph_group) = glyph_groups.next() {
-            if glyph_group.iter().any(|glyph| glyph.glyph_id == 0) && !fonts.is_empty() {
+            if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
                 while glyph_groups.peek().map_or(false, |glyph_group| {
-                    glyph_group.iter().any(|glyph| glyph.glyph_id == 0)
+                    glyph_group.iter().any(|glyph| glyph.id == 0)
                 }) {
                     glyph_groups.next();
                 }
@@ -131,7 +133,7 @@ impl Shaper {
                 .zip(glyph_buffer.glyph_positions())
                 .map(|(glyph_info, glyph_position)| Glyph {
                     font: font.clone(),
-                    glyph_id: glyph_info.glyph_id as u16,
+                    id: glyph_info.glyph_id as u16,
                     cluster: glyph_info.cluster as usize,
                     advance_in_ems: glyph_position.x_advance as f32 / font.units_per_em(),
                     offset_in_ems: glyph_position.x_offset as f32 / font.units_per_em(),
@@ -142,27 +144,45 @@ impl Shaper {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ShapeInput {
+pub struct ShapeParams {
     pub text: Substr,
     pub fonts: Rc<[Rc<Font>]>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ShapeOutput {
+pub struct ShapeResult {
     pub glyphs: Vec<Glyph>,
 }
 
-#[derive(Clone, Debug)]
+impl ShapeResult {
+    pub fn width_in_ems(&self) -> f32 {
+        self.glyphs.iter().map(|glyph| glyph.advance_in_ems).sum()
+    }
+}
+
+#[derive(Clone)]
 pub struct Glyph {
     pub font: Rc<Font>,
-    pub glyph_id: GlyphId,
+    pub id: GlyphId,
     pub cluster: usize,
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
 }
 
 impl Glyph {
-    pub fn allocate(&self, font_size_in_pxs: f32) -> Option<AllocatedGlyph> {
-        self.font.allocate_glyph(self.glyph_id, font_size_in_pxs)
+    pub fn allocate(&self, dpx_per_em: f32) -> Option<AllocatedGlyph> {
+        self.font.allocate_glyph(self.id, dpx_per_em)
+    }
+}
+
+impl fmt::Debug for Glyph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShapedGlyph")
+            .field("font", &self.font.id())
+            .field("id", &self.id)
+            .field("cluster", &self.cluster)
+            .field("advance_in_ems", &self.advance_in_ems)
+            .field("offset_in_ems", &self.offset_in_ems)
+            .finish()
     }
 }
