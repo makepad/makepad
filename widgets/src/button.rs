@@ -18,6 +18,7 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance down: 0.0,
+
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_PRESSED)
@@ -37,6 +38,7 @@ live_design! {
         draw_icon: {
             instance hover: 0.0
             instance down: 0.0
+
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_PRESSED)
@@ -49,12 +51,20 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
+
             uniform border_radius: (THEME_CORNER_RADIUS)
+
             uniform color: (THEME_COLOR_CTRL_DEFAULT)
             uniform color_hover: (THEME_COLOR_CTRL_HOVER)
             uniform color_down: (THEME_COLOR_CTRL_PRESSED)
+
             uniform outline_color_top: (THEME_COLOR_BEVEL_LIGHT)
+            uniform outline_color_top_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform outline_color_top_down: (THEME_COLOR_BEVEL_SHADOW)
+
             uniform outline_color_bottom: (THEME_COLOR_BEVEL_SHADOW)
+            uniform outline_color_bottom_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform outline_color_bottom_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -65,11 +75,11 @@ live_design! {
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
                     body_transp,
-                    mix(self.outline_color_top, THEME_COLOR_BEVEL_SHADOW, self.down),
+                    mix(mix(self.outline_color_top, self.outline_color_top_hover, self.hover), self.outline_color_top_down, self.down),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
                 let bot_gradient = mix(
-                    mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.down),
+                    mix(mix(self.outline_color_bottom, self.outline_color_bottom_hover, self.hover), self.outline_color_bottom_down, self.down),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -159,20 +169,11 @@ live_design! {
         margin: 0.
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        // draw_bg: {
-        //     fn pixel(self) -> vec4 {
-        //         let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-        //         sdf.fill(#f00)
-        //         return sdf.result
-        //     }
-        // }
         
         draw_text: {
-            instance hover: 0.0,
-            instance down: 0.0,
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+            color: (THEME_COLOR_TEXT_DEFAULT)
+            color_hover: (THEME_COLOR_TEXT_HOVER)
+            color_down: (THEME_COLOR_TEXT_PRESSED)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -185,10 +186,21 @@ live_design! {
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            instance color: (THEME_COLOR_U_HIDDEN)
-            instance color_hover: (THEME_COLOR_CTRL_HOVER)
-            instance color_down: (THEME_COLOR_CTRL_PRESSED)
+
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_CTRL_HOVER)
+            color_down: (THEME_COLOR_CTRL_PRESSED)
+
+            outline_color_top: (THEME_COLOR_U_HIDDEN)
+            outline_color_top_hover: (THEME_COLOR_BEVEL_LIGHT)
+            outline_color_top_down: (THEME_COLOR_BEVEL_SHADOW)
+
+            outline_color_bottom: (THEME_COLOR_U_HIDDEN)
+            outline_color_bottom_hover: (THEME_COLOR_BEVEL_SHADOW)
+            outline_color_bottom_down: (THEME_COLOR_BEVEL_LIGHT)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
@@ -198,11 +210,11 @@ live_design! {
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
                     body_transp,
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_SHADOW, self.down),
+                    mix(mix(self.outline_color_top, self.outline_color_top_hover, self.hover), self.outline_color_top_down, self.down),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
                 let bot_gradient = mix(
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_LIGHT, self.down),
+                    mix(mix(self.outline_color_bottom, self.outline_color_bottom_hover, self.hover), self.outline_color_bottom_down, self.down),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -233,6 +245,7 @@ live_design! {
         margin: <THEME_MSPACE_2> {},
         align: { x: 0.5, y: 0.5 },
         icon_walk: { width: 12. },
+
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -242,35 +255,30 @@ live_design! {
         }
         
         draw_text: {
-            instance hover: 0.0,
-            instance down: 0.0,
+            color: (THEME_COLOR_TEXT_DEFAULT)
+            color_hover: (THEME_COLOR_TEXT_HOVER)
+            color_down: (THEME_COLOR_TEXT_PRESSED)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.down
-                )
+                return mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down)
             }
         }
         
         draw_bg: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            instance color: (THEME_COLOR_U_HIDDEN)
-            instance color_hover: (THEME_COLOR_U_HIDDEN)
+            border_radius: (THEME_CORNER_RADIUS)
+            
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_U_HIDDEN)
+            color_down: (THEME_COLOR_U_HIDDEN)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.color, self.color_hover, self.hover), THEME_COLOR_D_HIDDEN, self.down);
+                let body = mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down);
                 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
