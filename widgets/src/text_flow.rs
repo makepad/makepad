@@ -29,8 +29,8 @@ live_design!{
     
     pub TextFlowLink = <TextFlowLinkBase> {
         color: #xa,
-        hover_color: #xf,
-        pressed_color: #x3,
+        color_hover: #xf,
+        color_down: #x3,
                 
         margin:{right:5}
                 
@@ -772,9 +772,9 @@ struct TextFlowLink {
     /// The default font color for the link when not hovered on or pressed.
     #[live] color: Option<Vec4>,
     /// The font color used when the link is hovered on.
-    #[live] hover_color: Option<Vec4>,
+    #[live] color_hover: Option<Vec4>,
     /// The font color used when the link is pressed.
-    #[live] pressed_color: Option<Vec4>,
+    #[live] color_down: Option<Vec4>,
     
     #[live] pub text: ArcStringMut,
         
@@ -875,12 +875,12 @@ impl Widget for TextFlowLink {
         tf.areas_tracker.push_tracker();
         let mut pushed_color = false;
         if self.hovered > 0.0 {
-            if let Some(color) = self.hover_color {
+            if let Some(color) = self.color_hover {
                 tf.font_colors.push(color);
                 pushed_color = true;
             }
         } else if self.pressed > 0.0 {
-            if let Some(color) = self.pressed_color {
+            if let Some(color) = self.color_down {
                 tf.font_colors.push(color);
                 pushed_color = true;
             }
