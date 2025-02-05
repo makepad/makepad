@@ -79,11 +79,11 @@ pub const fn shader_enum(i: u32) -> u32 {
     i
 }
 
-pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
+pub const DRAW_CALL_USER_UNIFORMS: usize = 48;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 #[repr(C)]
 pub struct DrawVars {
     pub area: Area,
@@ -95,6 +95,22 @@ pub struct DrawVars {
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
+}
+
+impl Default for DrawVars{
+    fn default()->Self{
+        Self{
+            area: Default::default(),
+            var_instance_start: Default::default(),
+            var_instance_slots: Default::default(),
+            options: Default::default(),
+            draw_shader: Default::default(),
+            geometry_id: Default::default(),
+            user_uniforms: [0f32; DRAW_CALL_USER_UNIFORMS],
+            texture_slots: Default::default(),
+            var_instances: [0f32; DRAW_CALL_VAR_INSTANCES]
+        }
+    }
 }
 
 impl LiveHookDeref for DrawVars{}
