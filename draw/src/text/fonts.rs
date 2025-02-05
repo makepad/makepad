@@ -1,10 +1,10 @@
 use {
     super::{
         font_family::{FontFamily, FontFamilyId},
-        geom::Point,
-        layouter::Layouter,
-        loader::Definitions,
+        font_loader::FontDefinitions,
+        geometry::Point,
         pixels::Bgra,
+        layouter::TextLayouter,
     },
     makepad_platform::*,
     std::rc::Rc,
@@ -12,14 +12,14 @@ use {
 
 #[derive(Debug)]
 pub struct Fonts {
-    layouter: Layouter,
+    layouter: TextLayouter,
     grayscale_texture: Texture,
     color_texture: Texture,
 }
 
 impl Fonts {
-    pub fn new(cx: &mut Cx, definitions: Definitions) -> Self {
-        let layouter = Layouter::new(definitions);
+    pub fn new(cx: &mut Cx, definitions: FontDefinitions) -> Self {
+        let layouter = TextLayouter::new(definitions);
         let grayscale_atlas_size = layouter.grayscale_atlas().borrow().size();
         let color_atlas_size = layouter.color_atlas().borrow().size();
         Self {
