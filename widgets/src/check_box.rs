@@ -29,7 +29,7 @@ live_design!{
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
-            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -59,8 +59,8 @@ live_design!{
                         sdf.stroke(
                             mix(
                                 THEME_COLOR_U_HIDDEN,
-                                mix(self.color_on, self.color_hover, self.hover),
-                                self.on
+                                mix(self.color_active, self.color_hover, self.hover),
+                                self.active
                             ), 1.25
                         );
                     }
@@ -86,8 +86,8 @@ live_design!{
                                     self.color_hover,
                                     self.hover
                                 ),
-                                self.color_on,
-                                self.on
+                                self.color_active,
+                                self.active
                             )
                         );
                     }
@@ -118,11 +118,11 @@ live_design!{
                             )
                         )
                         let isz = sz * 0.65;
-                        sdf.circle(left + sz + self.on * sz, c.y - 0.5, isz);
-                        sdf.circle(left + sz + self.on * sz, c.y - 0.5, 0.425 * isz);
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
                         sdf.subtract();
-                        sdf.circle(left + sz + self.on * sz, c.y - 0.5, isz);
-                        sdf.blend(self.on)
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                        sdf.blend(self.active)
                         sdf.fill(
                             mix(
                                 mix(
@@ -136,14 +136,14 @@ live_design!{
                                 ),
                                 mix(
                                     mix(
-                                        self.color_on,
+                                        self.color_active,
                                         self.color_focus,
                                         self.focus
                                     ),
                                     self.color_hover,
                                     self.hover
                                 ),
-                                self.on
+                                self.active
                             )
                         );
                     }
@@ -157,12 +157,12 @@ live_design!{
             
         draw_text: {
             instance focus: 0.0
-            instance on: 0.0
+            instance active: 0.0
             instance hover: 0.0
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
             instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
-            uniform color_on: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -171,8 +171,8 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_on,
-                    self.on
+                    self.color_active,
+                    self.active
                 )
             }
             text_style: <THEME_FONT_REGULAR> {
@@ -183,11 +183,11 @@ live_design!{
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
-            instance on: 0.0
+            instance active: 0.0
             uniform color: (THEME_COLOR_D_3)
             uniform color_hover: (THEME_COLOR_D_4)
             instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
-            uniform color_on: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -196,8 +196,8 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_on,
-                    self.on
+                    self.color_active,
+                    self.active
                 )
             }
         }
@@ -243,22 +243,22 @@ live_design!{
                     }
                 }
             }
-            on = {
+            active = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {on: 0.0},
-                        draw_text: {on: 0.0},
-                        draw_icon: {on: 0.0},
+                        draw_check: {active: 0.0},
+                        draw_text: {active: 0.0},
+                        draw_icon: {active: 0.0},
                     }
                 }
                 on = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_check: {on: 1.0}
-                        draw_text: {on: 1.0}
-                        draw_icon: {on: 1.0},
+                        draw_check: {active: 1.0}
+                        draw_text: {active: 1.0}
+                        draw_icon: {active: 1.0},
                     }
                 }
             }
@@ -311,24 +311,24 @@ live_design!{
                     }
                 }
             }
-            on = {
+            active = {
                 default: off
                 off = {
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {on: 0.0},
-                        draw_text: {on: 0.0},
-                        draw_icon: {on: 0.0},
+                        draw_check: {active: 0.0},
+                        draw_text: {active: 0.0},
+                        draw_icon: {active: 0.0},
                     }
                 }
                 on = {
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {on: 1.0}
-                        draw_text: {on: 1.0}
-                        draw_icon: {on: 1.0},
+                        draw_check: {active: 1.0}
+                        draw_text: {active: 1.0}
+                        draw_icon: {active: 1.0},
                     }
                 }
             }
@@ -349,7 +349,7 @@ pub struct DrawCheckBox {
     #[live] check_type: CheckType,
     #[live] hover: f32,
     #[live] focus: f32,
-    #[live] on: f32
+    #[live] active: f32
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -421,7 +421,7 @@ impl Widget for CheckBox {
     fn data_to_widget(&mut self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(value) = nodes.read_field_value(path) {
             if let Some(value) = value.as_bool() {
-                self.animator_toggle(cx, value, Animate::Yes, id!(on.on), id!(on.off));
+                self.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
             }
         }
     }
@@ -439,12 +439,12 @@ impl Widget for CheckBox {
                 self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, id!(on.on)) {
-                    self.animator_play(cx, id!(on.off));
+                if self.animator_in_state(cx, id!(active.on)) {
+                    self.animator_play(cx, id!(active.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
                 }
                 else {
-                    self.animator_play(cx, id!(on.on));
+                    self.animator_play(cx, id!(active.on));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
                 }
             },
@@ -490,7 +490,7 @@ impl CheckBoxRef {
     
     pub fn on(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator_in_state(cx, id!(on.on))
+            inner.animator_in_state(cx, id!(active.on))
         }
         else {
             false
@@ -499,7 +499,7 @@ impl CheckBoxRef {
     
     pub fn set_on(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_toggle(cx, value, Animate::Yes, id!(on.on), id!(on.off));
+            inner.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
         }
     }
 }
