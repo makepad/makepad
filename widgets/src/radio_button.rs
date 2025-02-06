@@ -30,7 +30,6 @@ live_design!{
         label_align: { y: 0.0 }
         
         draw_radio: {
-            // instance active: 0.0;
             uniform size: 7.0;
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -133,6 +132,7 @@ live_design!{
         draw_icon: {
             instance hover: 0.0
             instance active: 0.0
+
             uniform color: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_hover: (THEME_COLOR_WHITE)
             uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
@@ -305,7 +305,7 @@ pub struct DrawRadioButton {
     #[live] radio_type: RadioType,
     #[live] hover: f32,
     #[live] focus: f32,
-    #[live] active: f32
+    #[live] on: f32
 }
 
 
