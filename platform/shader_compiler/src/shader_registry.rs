@@ -502,8 +502,10 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_lut!(dpi_dilate), id_lut!(pass), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(time), id_lut!(pass), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(view_transform), id_lut!(view), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(view_clip), id_lut!(view), Ty::Vec4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(view_shift), id_lut!(view), Ty::Vec2, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(draw_zbias), id_lut!(draw), Ty::Float, TokenSpan::default());
-        
+                
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 
         match &class_node.value {
