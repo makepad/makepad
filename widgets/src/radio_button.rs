@@ -30,6 +30,7 @@ live_design!{
         label_align: { y: 0.0 }
         
         draw_radio: {
+
             uniform size: 7.0;
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -174,7 +175,7 @@ live_design!{
                     }
                 }
             }
-            on = {
+            active = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.2}}
@@ -305,7 +306,7 @@ pub struct DrawRadioButton {
     #[live] radio_type: RadioType,
     #[live] hover: f32,
     #[live] focus: f32,
-    #[live] on: f32
+    #[live] active: f32
 }
 
 
