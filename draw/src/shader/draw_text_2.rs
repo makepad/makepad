@@ -7,8 +7,8 @@ use crate::{
         font::{AllocatedGlyph, AtlasKind},
         font_family::FontFamilyId,
         geometry::{Point, Rect, Size, Transformation},
+        layouter::{LaidoutGlyph, LaidoutRow, LayoutParams, Span, Style},
         non_nan::NonNanF32,
-        layouter::{LayoutParams, LayoutSpan, LaidoutGlyph, LaidoutRow, LayoutSettings, LayoutStyle},
     },
 };
 
@@ -116,22 +116,34 @@ impl DrawText2 {
         let mut fonts = cx.fonts.borrow_mut();
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        let rows = fonts.get_or_layout(&LayoutParams {
-            settings: LayoutSettings {
-                max_width_in_lpxs: NonNanF32::new(f32::INFINITY).unwrap(),
-            },
-            spans: vec![
-                LayoutSpan {
-                    style: LayoutStyle {
-                        font_family_id,
-                        font_size_in_lpxs,
-                    },
-                    text: text.into(),
-                }
-            ]
+        let text = fonts.get_or_layout(&LayoutParams {
+            max_width_in_lpxs: NonNanF32::new(128.0).unwrap(),
+            spans: vec![Span {
+                style: Style {
+                    font_family_id,
+                    font_size_in_lpxs,
+                },
+                text: text.into(),
+            }],
         });
         drop(fonts);
 
+        let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
+        let mut p = p;
+        for row in &text.rows {
+            self.draw_row(cx, &mut p, row, &mut many_instances.instances);
+        }
+        let new_area = cx.end_many_instances(many_instances);
+        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+    }
+
+    fn draw_row(
+        &mut self,
+        cx: &mut Cx2d<'_>,
+        p: &mut Point<f32>,
+        row: &LaidoutRow,
+        output: &mut Vec<f32>,
+    ) {
         cx.cx.debug.rect(
             makepad_platform::Rect {
                 pos: dvec2(p.x as f64, p.y as f64),
@@ -140,22 +152,12 @@ impl DrawText2 {
             vec4(1.0, 0.0, 0.0, 1.0),
         );
 
-        let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        let mut p = p;
-        for row in &*rows {
-            self.draw_row(cx, &mut p, row, &mut many_instances.instances);
-        }
-        let new_area = cx.end_many_instances(many_instances);
-        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-    }
-
-    fn draw_row(&mut self, cx: &mut Cx2d<'_>, p: &mut Point<f32>, row: &LaidoutRow, output: &mut Vec<f32>) {
         let x = p.x;
         for glyph in &row.glyphs {
             self.draw_glyph(cx, p, glyph, output);
         }
         p.x = x;
-        p.y += row.height_in_lpxs();
+        p.y += row.height_in_lpxs;
     }
 
     fn draw_glyph(
@@ -218,9 +220,11 @@ impl DrawText2 {
         self.char_depth = 1.0; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
+        /*
         println!("RECT POS {:?}", self.rect_pos);
         println!("RECT SIZE {:?}", self.rect_size);
         println!("FONT T1 {:?}", self.font_t1);
         println!("FONT T2 {:?}", self.font_t2);
+        */
     }
 }
