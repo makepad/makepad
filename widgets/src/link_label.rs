@@ -13,8 +13,6 @@ live_design!{
     
     pub LinkLabelBase = {{LinkLabel}} {}
     pub LinkLabel = <LinkLabelBase> {
-        // TODO: add a focus states
-        
         width: Fit, height: Fit,
         margin: <THEME_MSPACE_2> {}
         padding: 0.,
@@ -24,9 +22,11 @@ live_design!{
         draw_bg: {
             instance down: 0.0
             instance hover: 0.0
+
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let offset_y = 1.0
@@ -45,11 +45,12 @@ live_design!{
         }
         
         draw_text: {
-            instance color: (THEME_COLOR_TEXT_DEFAULT),
-            instance color_hover: (THEME_COLOR_TEXT_HOVER),
-            instance color_down: (THEME_COLOR_TEXT_PRESSED),
             instance down: 0.0
             instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT),
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
+            uniform color_down: (THEME_COLOR_TEXT_PRESSED),
 
             wrap: Word
             text_style: <THEME_FONT_REGULAR>{
@@ -114,9 +115,10 @@ live_design!{
             instance focus: 0.0
             instance hover: 0.0
             instance down: 0.0
-            instance color: (THEME_COLOR_TEXT_DEFAULT),
-            instance color_hover: (THEME_COLOR_TEXT_HOVER),
-            instance color_down: (THEME_COLOR_TEXT_PRESSED),
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT),
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
+            uniform color_down: (THEME_COLOR_TEXT_PRESSED),
 
             fn get_color(self) -> vec4 {
                 return mix(
