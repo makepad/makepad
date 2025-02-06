@@ -344,7 +344,10 @@ live_design!{
         
     pub CheckBoxToggle = <CheckBox> {
         align: { x: 0., y: 0. }
-        draw_check: { check_type: Toggle }
+        draw_check: {
+            uniform mark_color: (THEME_COLOR_TEXT_DEFAULT)
+            check_type: Toggle
+        }
         label_walk: {
             margin: <THEME_MSPACE_H_1> { left: 22.5 }
         }
