@@ -93,7 +93,7 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw(cx, Point::new(50.0, 50.0), "繁😊😔 The quick brown fox jumps over the lazy dog", "Sans".into(), NonNanF32::new(32.0).unwrap());
+        self.draw_text.draw(cx, Point::new(50.0, 50.0), "繁😊😔 The quick brown fox jumps over the lazy dog", "Sans".into(), NonNanF32::new(16.0).unwrap());
         self.draw_bg.end(cx);
         DrawStep::done()
     }

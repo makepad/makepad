@@ -1,7 +1,7 @@
 use {
     super::{
         font::Font,
-        shaper::{ShapeParams, ShapedGlyph, Shaper},
+        shaper::{ShapeParams, ShapedText, Shaper},
         substr::Substr,
     },
     std::{
@@ -29,7 +29,7 @@ impl FontFamily {
         &self.id
     }
 
-    pub fn get_or_shape(&self, text: Substr) -> Rc<Vec<ShapedGlyph>> {
+    pub fn get_or_shape(&self, text: Substr) -> Rc<ShapedText> {
         self.shaper.borrow_mut().get_or_shape(&ShapeParams {
             text: text.into(),
             fonts: self.fonts.clone(),

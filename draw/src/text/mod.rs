@@ -21,7 +21,7 @@ mod tests {
     use {
         super::*,
         font_loader::FontDefinitions,
-        layouter::{LayoutParams, LayoutSettings, LayoutSpan, LayoutStyle, Layouter},
+        layouter::{LayoutParams, Layouter, Span, Style},
         non_nan::NonNanF32,
         std::{fs::File, io::BufWriter},
     };
@@ -29,28 +29,20 @@ mod tests {
     #[test]
     fn test() {
         let mut layouter = Layouter::new(FontDefinitions::default());
-        let rows = layouter.get_or_layout(&LayoutParams {
-            settings: LayoutSettings {
-                max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
-            },
-            spans: vec![LayoutSpan {
-                style: LayoutStyle {
+        let text = layouter.get_or_layout(&LayoutParams {
+            max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
+            spans: vec![Span {
+                style: Style {
                     font_family_id: "Sans".into(),
                     font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
                 },
                 text: "繁😊😔 The quick brown fox jumps over the lazy dog".into(),
             }],
         });
-
-        let font_family = layouter.get_or_load_font_family(&"Sans".into());
-        for row in &*rows {
+        for row in &text.rows {
             for glyph in &row.glyphs {
                 glyph.font.allocate_glyph(glyph.id, 64.0);
             }
-        }
-        let glyphs = font_family.get_or_shape("HalloRik!繁😊😔".into());
-        for glyph in &*glyphs {
-            glyph.font.allocate_glyph(glyph.id, 64.0);
         }
 
         let file = File::create("/Users/ejpbruel/Desktop/grayscale.png").unwrap();
