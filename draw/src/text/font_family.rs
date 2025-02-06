@@ -1,8 +1,8 @@
 use {
     super::{
         font::Font,
+        shaper::{ShapeParams, ShapedGlyph, Shaper},
         substr::Substr,
-        shaper::{ShapeParams, ShapeResult, Shaper},
     },
     std::{
         cell::RefCell,
@@ -29,17 +29,11 @@ impl FontFamily {
         &self.id
     }
 
-    pub fn get_or_shape_text(&self, text: Substr) -> Rc<ShapeResult> {
-        self.shaper
-            .borrow_mut()
-            .get_or_shape(&ShapeParams {
-                text: text.into(),
-                fonts: self.fonts.clone(),
-            })
-    }
-
-    pub fn compute_text_width_in_ems(&self, text: Substr) -> f32 {
-        self.get_or_shape_text(text).width_in_ems()
+    pub fn get_or_shape(&self, text: Substr) -> Rc<Vec<ShapedGlyph>> {
+        self.shaper.borrow_mut().get_or_shape(&ShapeParams {
+            text: text.into(),
+            fonts: self.fonts.clone(),
+        })
     }
 }
 
