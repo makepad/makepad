@@ -1,8 +1,8 @@
 use {
     super::{
-        faces::Faces,
         font::{Font, FontId},
         font_data,
+        font_face::FontFaceDefinition,
         font_family::{FontFamily, FontFamilyId},
         geometry::Size,
         image_atlas::{ColorAtlas, GrayscaleAtlas, ImageAtlas},
@@ -57,7 +57,7 @@ impl FontLoader {
     fn load_font_family(&mut self, font_family_id: FontFamilyId) -> FontFamily {
         let font_ids = self
             .definitions
-            .font_families
+            .families
             .remove(&font_family_id)
             .unwrap_or_else(|| panic!("font family {} is not defined", font_family_id));
         FontFamily::new(
@@ -81,29 +81,29 @@ impl FontLoader {
     fn load_font(&mut self, font_id: FontId) -> Font {
         let definition = self
             .definitions
-            .fonts
+            .faces
             .remove(&font_id)
             .unwrap_or_else(|| panic!("font {} is not defined", font_id));
         Font::new(
             font_id.clone(),
             self.grayscale_atlas.clone(),
             self.color_atlas.clone(),
-            Faces::from_data_and_index(definition.data, definition.index)
-                .unwrap_or_else(|| panic!("failed to load font {} from definition", font_id)),
+            definition,
         )
+        .unwrap_or_else(|| panic!("failed to create font {} from definition", font_id))
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct FontDefinitions {
-    pub font_families: HashMap<FontFamilyId, Vec<FontId>>,
-    pub fonts: HashMap<FontId, FontDefinition>,
+    pub families: HashMap<FontFamilyId, Vec<FontId>>,
+    pub faces: HashMap<FontId, FontFaceDefinition>,
 }
 
 impl Default for FontDefinitions {
     fn default() -> Self {
         Self {
-            font_families: [(
+            families: [(
                 "Sans".into(),
                 [
                     "IBM Plex Sans Text".into(),
@@ -114,24 +114,24 @@ impl Default for FontDefinitions {
             )]
             .into_iter()
             .collect(),
-            fonts: [
+            faces: [
                 (
                     "IBM Plex Sans Text".into(),
-                    FontDefinition {
+                    FontFaceDefinition {
                         data: Cow::Borrowed(font_data::IBM_PLEX_SANS_TEXT).into(),
                         index: 0,
                     },
                 ),
                 (
                     "LXG WWen Kai Regular".into(),
-                    FontDefinition {
+                    FontFaceDefinition {
                         data: Cow::Borrowed(font_data::LXG_WEN_KAI_REGULAR).into(),
                         index: 0,
                     },
                 ),
                 (
                     "Noto Color Emoji".into(),
-                    FontDefinition {
+                    FontFaceDefinition {
                         data: Cow::Borrowed(font_data::NOTO_COLOR_EMOJI).into(),
                         index: 0,
                     },
@@ -141,10 +141,4 @@ impl Default for FontDefinitions {
             .collect(),
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct FontDefinition {
-    pub data: Rc<Cow<'static, [u8]>>,
-    pub index: u32,
 }

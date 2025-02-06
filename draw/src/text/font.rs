@@ -1,12 +1,12 @@
 use {
     super::{
-        faces::Faces,
+        font_face::{FontFace, FontFaceDefinition},
         geometry::{Point, Rect, Size},
+        image_atlas::ImageAtlas,
         outline,
         outline::Outline,
-        raster_image::RasterImage,
-        image_atlas::ImageAtlas,
         pixels::{Bgra, R},
+        raster_image::RasterImage,
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -24,7 +24,7 @@ pub struct Font {
     id: FontId,
     grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
     color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
-    faces: Faces,
+    face: FontFace,
 }
 
 impl Font {
@@ -32,14 +32,14 @@ impl Font {
         id: FontId,
         grayscale_atlas: Rc<RefCell<ImageAtlas<R<u8>>>>,
         color_atlas: Rc<RefCell<ImageAtlas<Bgra<u8>>>>,
-        faces: Faces,
-    ) -> Self {
-        Self {
+        face_definition: FontFaceDefinition,
+    ) -> Option<Self> {
+        Some(Self {
             id,
             grayscale_atlas,
             color_atlas,
-            faces,
-        }
+            face: FontFace::from_definition(face_definition)?,
+        })
     }
 
     pub fn id(&self) -> &FontId {
@@ -47,15 +47,31 @@ impl Font {
     }
 
     pub(super) fn ttf_parser_face(&self) -> &ttf_parser::Face<'_> {
-        self.faces.ttf_parser_face()
+        self.face.as_ttf_parser_face()
     }
 
     pub(super) fn rustybuzz_face(&self) -> &rustybuzz::Face<'_> {
-        self.faces.rustybuzz_face()
+        self.face.as_rustybuzz_face()
     }
 
     pub fn units_per_em(&self) -> f32 {
         self.ttf_parser_face().units_per_em() as f32
+    }
+
+    pub fn ascender_in_ems(&self) -> f32 {
+        self.ttf_parser_face().ascender() as f32 / self.units_per_em()
+    }
+
+    pub fn descender_in_ems(&self) -> f32 {
+        self.ttf_parser_face().descender() as f32 / self.units_per_em()
+    }
+
+    pub fn line_gap_in_ems(&self) -> f32 {
+        self.ttf_parser_face().line_gap() as f32 / self.units_per_em()
+    }
+
+    pub fn line_height_in_ems(&self) -> f32 {
+        self.ascender_in_ems() - self.descender_in_ems() + self.line_gap_in_ems()
     }
 
     pub fn glyph_outline(&self, glyph_id: GlyphId, pxs_per_em: f32) -> Option<Outline> {

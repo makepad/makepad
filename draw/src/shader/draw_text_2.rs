@@ -7,7 +7,8 @@ use crate::{
         font::{AllocatedGlyph, AtlasKind},
         font_family::FontFamilyId,
         geometry::{Point, Rect, Size, Transformation},
-        shaper::Glyph,
+        non_nan::NonNanF32,
+        layouter::{LayoutParams, LayoutSpan, LaidoutGlyph, LaidoutRow, LayoutSettings, LayoutStyle},
     },
 };
 
@@ -109,15 +110,27 @@ impl DrawText2 {
         cx: &mut Cx2d,
         p: Point<f32>,
         text: &str,
-        font_family_id: &FontFamilyId,
-        font_size_in_lpxs: f32,
+        font_family_id: FontFamilyId,
+        font_size_in_lpxs: NonNanF32,
     ) {
         let mut fonts = cx.fonts.borrow_mut();
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        let font_family = fonts.get_or_load_font_family(font_family_id).clone();
+        let rows = fonts.get_or_layout(&LayoutParams {
+            settings: LayoutSettings {
+                max_width_in_lpxs: NonNanF32::new(f32::INFINITY).unwrap(),
+            },
+            spans: vec![
+                LayoutSpan {
+                    style: LayoutStyle {
+                        font_family_id,
+                        font_size_in_lpxs,
+                    },
+                    text: text.into(),
+                }
+            ]
+        });
         drop(fonts);
-        let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
 
         cx.cx.debug.rect(
             makepad_platform::Rect {
@@ -127,48 +140,46 @@ impl DrawText2 {
             vec4(1.0, 0.0, 0.0, 1.0),
         );
 
+        let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         let mut p = p;
-        for glyph in &*font_family.get_or_shape_text(text.into()).glyphs {
-            self.draw_glyph(
-                cx,
-                &mut p,
-                glyph,
-                font_size_in_lpxs,
-                &mut many_instances.instances,
-            );
+        for row in &*rows {
+            self.draw_row(cx, &mut p, row, &mut many_instances.instances);
         }
-
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+    }
+
+    fn draw_row(&mut self, cx: &mut Cx2d<'_>, p: &mut Point<f32>, row: &LaidoutRow, output: &mut Vec<f32>) {
+        let x = p.x;
+        for glyph in &row.glyphs {
+            self.draw_glyph(cx, p, glyph, output);
+        }
+        p.x = x;
+        p.y += row.height_in_lpxs();
     }
 
     fn draw_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
         p: &mut Point<f32>,
-        glyph: &Glyph,
-        font_size_in_lpxs: f32,
+        glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
         let lpxs_per_dpx = cx.current_dpi_factor() as f32;
-        let font_size_in_dpxs = font_size_in_lpxs * lpxs_per_dpx;
+        let font_size_in_dpxs = glyph.font_size_in_lpxs * lpxs_per_dpx;
         if let Some(allocated_glyph) = glyph.allocate(font_size_in_dpxs) {
-            let offset_in_lpxs = glyph.offset_in_ems * font_size_in_lpxs;
             self.draw_allocated_glyph(
-                cx,
-                Point::new(p.x + offset_in_lpxs, p.y),
+                Point::new(p.x + glyph.offset_in_lpxs, p.y),
                 allocated_glyph,
-                font_size_in_lpxs,
+                glyph.font_size_in_lpxs,
                 output,
             );
         }
-        let advance_in_lpxs = glyph.advance_in_ems * font_size_in_lpxs;
-        p.x += advance_in_lpxs;
+        p.x += glyph.advance_in_lpxs;
     }
 
     fn draw_allocated_glyph(
         &mut self,
-        cx: &mut Cx2d<'_>,
         p: Point<f32>,
         glyph: AllocatedGlyph,
         font_size_in_lpxs: f32,
