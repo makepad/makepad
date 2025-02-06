@@ -15,10 +15,15 @@ live_design!{
         
         fn clip_and_transform_vertex(self, rect_pos:vec2, rect_size:vec2) -> vec4 {
             let clipped: vec2 = clamp(
-                self.geom_pos * rect_size + rect_pos,
-                self.draw_clip.xy,
-                self.draw_clip.zw
-            )
+                clamp(
+                    self.geom_pos * rect_size + rect_pos,
+                    self.draw_clip.xy,
+                    self.draw_clip.zw
+                )
+                + self.view_shift,
+                self.view_clip.xy,
+                self.view_clip.zw
+            );
             //clipped = self.geom_pos * rect_size + rect_pos;
             self.pos = (clipped - rect_pos) / rect_size
             // only pass the clipped position forward
