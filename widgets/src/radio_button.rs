@@ -30,13 +30,30 @@ live_design!{
         label_align: { y: 0.0 }
         
         draw_radio: {
-
             uniform size: 7.0;
+            uniform bevel: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_top: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_top_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_top_active: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_bottom_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_bottom_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform outline_color_top: (THEME_COLOR_BEVEL_SHADOW)
+            uniform outline_color_top_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform outline_color_top_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform outline_color_bottom: (THEME_COLOR_BEVEL_LIGHT)
+            uniform outline_color_bottom_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform outline_color_bottom_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -46,18 +63,38 @@ live_design!{
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), (THEME_BEVELING))
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_top, self.color_bottom, self.pos.y),
+                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                self.hover
+                            )
+                        )
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
+                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                self.hover
+                            ), self.bevel
+                        )
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
                                 mix(
                                     THEME_COLOR_U_HIDDEN,
-                                    self.color_hover,
+                                    self.mark_color_hover,
                                     self.hover
                                 ),
-                                mix(self.color_active, self.color_active * 1.5, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active * 1.5, self.hover),
                                 self.active
                             )
                         );
@@ -67,8 +104,8 @@ live_design!{
                         let grad_top = 5.0;
                         let grad_bot = 1.0;
                         let body = mix(
-                            mix(self.color, self.color_hover, self.hover),
-                            mix(self.color_active, self.color_active * 1.5, self.hover),
+                            mix(self.mark_color, self.mark_color_hover, self.hover),
+                            mix(self.mark_color_active, self.mark_color_active * 1.5, self.hover),
                             self.active
                         );
                         let body_transp = vec4(body.xyz, 0.0);
@@ -134,20 +171,24 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
 
-            uniform color: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_hover: (THEME_COLOR_WHITE)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_top: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_top_hover: (THEME_COLOR_WHITE)
+            uniform color_top_active: (THEME_COLOR_TEXT_ACTIVE)
+
+            uniform color_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_bottom_hover: (THEME_COLOR_WHITE)
+            uniform color_bottom_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        self.color,
-                        mix(self.color, #0, 0.75),
+                        mix(self.color_top, self.color_bottom, self.pos.y),
+                        mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
                         self.hover
                     ),
                     mix(
-                        self.color_active,
-                        self.color_hover,
+                        mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                        mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
                         self.hover
                     ),
                     self.active

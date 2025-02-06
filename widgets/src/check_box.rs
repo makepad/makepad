@@ -26,10 +26,29 @@ live_design!{
         
         draw_check: {
             uniform size: 7.5;
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+
+            uniform bevel: (THEME_BEVELING)
+
+            uniform color_top: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_top_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_top_active: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_bottom_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_bottom_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform outline_color_top: (THEME_COLOR_BEVEL_SHADOW)
+            uniform outline_color_top_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform outline_color_top_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform outline_color_bottom: (THEME_COLOR_BEVEL_LIGHT)
+            uniform outline_color_bottom_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform outline_color_bottom_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform mark_color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -44,12 +63,27 @@ live_design!{
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5 + offset_y);
                         sdf.fill_keep(
                             mix(
-                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_TOP * 1.5, self.focus),
-                                THEME_COLOR_INSET_PIT_BOTTOM,
-                                pow(self.pos.y, 1.)
+                                mix(
+                                    mix(self.color_top, self.color_bottom, self.pos.y),
+                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                self.hover
                             )
                         )
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
+
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
+                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                self.hover
+                            ), self.bevel
+                        )
                         
                         let szs = sz * 0.5;
                         let dx = 1.0;
@@ -58,8 +92,20 @@ live_design!{
                         sdf.line_to(c.x + szs, c.y - szs);
                         sdf.stroke(
                             mix(
-                                THEME_COLOR_U_HIDDEN,
-                                mix(self.color_active, self.color_hover, self.hover),
+                                mix(
+                                    self.mark_color,
+                                    self.mark_color_focus,
+                                    self.focus
+                                ),
+                                mix(
+                                    mix(
+                                        self.mark_color_active,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
                                 self.active
                             ), 1.25
                         );
@@ -71,22 +117,48 @@ live_design!{
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(
                             mix(
-                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_TOP * 1.5, self.focus),
-                                THEME_COLOR_INSET_PIT_BOTTOM,
-                                pow(self.pos.y, 1.)
+                                mix(
+                                    mix(self.color_top, self.color_bottom, self.pos.y),
+                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                self.hover
                             )
                         )
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
+                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                self.hover
+                            ), self.bevel
+                        )
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
                                 mix(
-                                    mix(THEME_COLOR_U_HIDDEN, #f00, self.focus),
-                                    self.color_hover,
+                                    mix(
+                                        self.mark_color,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
                                     self.hover
                                 ),
-                                self.color_active,
+                                mix(
+                                    mix(
+                                        self.mark_color_active,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
                                 self.active
                             )
                         );
@@ -96,27 +168,30 @@ live_design!{
                         let left = 0.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                        
-                        sdf.stroke_keep(
-                            mix(
-                                THEME_COLOR_BEVEL_SHADOW,
-                                THEME_COLOR_BEVEL_LIGHT,
-                                clamp(self.pos.y - 0.2, 0, 1)
-                            ),
-                            THEME_BEVELING
-                        )
-                            
-                        sdf.fill(
+                        sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_TOP * 1.5, self.focus),
-                                    THEME_COLOR_INSET_PIT_BOTTOM * 0.1,
-                                    pow(self.pos.y, 1.0)
+                                    mix(self.color_top, self.color_bottom, self.pos.y),
+                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    self.active
                                 ),
-                                mix(THEME_COLOR_INSET_PIT_TOP_HOVER * 1.75, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
+                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
                                 self.hover
                             )
                         )
+                        
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
+                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    self.active
+                                ),
+                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                self.hover
+                            ), self.bevel
+                        )
+                            
                         let isz = sz * 0.65;
                         sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
                         sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
@@ -127,20 +202,20 @@ live_design!{
                             mix(
                                 mix(
                                     mix(
-                                        self.color,
-                                        self.color_focus,
+                                        self.mark_color,
+                                        self.mark_color_focus,
                                         self.focus
                                     ),
-                                    self.color_hover,
+                                    self.mark_color_hover,
                                     self.hover
                                 ),
                                 mix(
                                     mix(
-                                        self.color_active,
-                                        self.color_focus,
+                                        self.mark_color_active,
+                                        self.mark_color_focus,
                                         self.focus
                                     ),
-                                    self.color_hover,
+                                    self.mark_color_hover,
                                     self.hover
                                 ),
                                 self.active
@@ -157,11 +232,12 @@ live_design!{
             
         draw_text: {
             instance focus: 0.0
-            instance active: 0.0
             instance hover: 0.0
+            instance active: 0.0
+
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUSED)
             uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
 
             fn get_color(self) -> vec4 {
@@ -184,9 +260,10 @@ live_design!{
             instance focus: 0.0
             instance hover: 0.0
             instance active: 0.0
+
             uniform color: (THEME_COLOR_D_3)
             uniform color_hover: (THEME_COLOR_D_4)
-            instance color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUSED)
             uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn get_color(self) -> vec4 {
