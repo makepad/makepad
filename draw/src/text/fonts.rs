@@ -1,9 +1,8 @@
 use {
     super::{
-        font_family::{FontFamily, FontFamilyId},
         font_loader::FontDefinitions,
         geometry::Point,
-        layouter::{LayoutParams, LaidoutRow, Layouter},
+        layouter::{LaidoutText, LayoutParams, Layouter},
         pixels::Bgra,
     },
     makepad_platform::*,
@@ -62,12 +61,7 @@ impl Fonts {
         &self.color_texture
     }
 
-    // TODO: Remove
-    pub fn get_or_load_font_family(&mut self, font_family_id: &FontFamilyId) -> &Rc<FontFamily> {
-        self.layouter.get_or_load_font_family(font_family_id)
-    }
-
-    pub fn get_or_layout(&mut self, params: &LayoutParams) -> Rc<Vec<LaidoutRow>> {
+    pub fn get_or_layout(&mut self, params: &LayoutParams) -> Rc<LaidoutText> {
         self.layouter.get_or_layout(params)
     }
 

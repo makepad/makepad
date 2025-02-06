@@ -1,6 +1,6 @@
 use {
     super::{
-        font::{AllocatedGlyph, Font, GlyphId},
+        font::{Font, GlyphId},
         substr::Substr,
     },
     makepad_rustybuzz as rustybuzz,
@@ -21,7 +21,7 @@ pub struct Shaper {
     reusable_unicode_buffer: UnicodeBuffer,
     cache_size: usize,
     cached_shape_params: VecDeque<ShapeParams>,
-    cached_shaped_glyphs: HashMap<ShapeParams, Rc<Vec<ShapedGlyph>>>,
+    cached_shaped_texts: HashMap<ShapeParams, Rc<ShapedText>>,
 }
 
 impl Shaper {
@@ -31,34 +31,28 @@ impl Shaper {
             reusable_unicode_buffer: UnicodeBuffer::new(),
             cache_size: CACHE_SIZE,
             cached_shape_params: VecDeque::with_capacity(CACHE_SIZE),
-            cached_shaped_glyphs: HashMap::with_capacity(CACHE_SIZE),
+            cached_shaped_texts: HashMap::with_capacity(CACHE_SIZE),
         }
     }
 
-    pub fn get_or_shape(&mut self, params: &ShapeParams) -> Rc<Vec<ShapedGlyph>> {
-        if !self.cached_shaped_glyphs.contains_key(params) {
+    pub fn get_or_shape(&mut self, params: &ShapeParams) -> Rc<ShapedText> {
+        if !self.cached_shaped_texts.contains_key(params) {
             if self.cached_shape_params.len() == self.cache_size {
                 let params = self.cached_shape_params.pop_front().unwrap();
-                self.cached_shaped_glyphs.remove(&params);
+                self.cached_shaped_texts.remove(&params);
             }
-            let glyphs = self.shape(params);
+            let text: ShapedText = self.shape(params);
             self.cached_shape_params.push_back(params.clone());
-            self.cached_shaped_glyphs
-                .insert(params.clone(), Rc::new(glyphs));
+            self.cached_shaped_texts
+                .insert(params.clone(), Rc::new(text));
         }
-        self.cached_shaped_glyphs.get(params).unwrap().clone()
+        self.cached_shaped_texts.get(params).unwrap().clone()
     }
 
-    fn shape(&mut self, params: &ShapeParams) -> Vec<ShapedGlyph> {
-        let mut glyphs = Vec::new();
-        self.shape_recursive(
-            &params.text,
-            &params.fonts,
-            0,
-            params.text.len(),
-            &mut glyphs,
-        );
-        glyphs
+    fn shape(&mut self, params: &ShapeParams) -> ShapedText {
+        let mut text = ShapedText::default();
+        self.shape_recursive(&params.text, &params.fonts, 0, params.text.len(), &mut text);
+        text
     }
 
     fn shape_recursive(
@@ -67,7 +61,7 @@ impl Shaper {
         fonts: &[Rc<Font>],
         start: usize,
         end: usize,
-        output: &mut Vec<ShapedGlyph>,
+        output: &mut ShapedText,
     ) {
         fn group_glyphs_by_cluster(
             glyphs: &[ShapedGlyph],
@@ -108,7 +102,9 @@ impl Shaper {
                 };
                 self.shape_recursive(text, fonts, missing_start, missing_end, output);
             } else {
-                output.extend(glyph_group.iter().cloned());
+                for glyph in glyph_group.iter().cloned() {
+                    output.push_glyph(glyph);
+                }
             }
         }
         drop(glyph_groups);
@@ -155,6 +151,29 @@ impl Shaper {
 pub struct ShapeParams {
     pub text: Substr,
     pub fonts: Rc<[Rc<Font>]>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ShapedText {
+    pub glyphs: Vec<ShapedGlyph>,
+}
+
+impl ShapedText {
+    pub fn width_in_ems(&self) -> f32 {
+        self.glyphs.iter().map(|glyph| glyph.advance_in_ems).sum()
+    }
+
+    pub fn height_in_ems(&self) -> f32 {
+        self.glyphs
+            .iter()
+            .map(|glyph| glyph.height_in_ems())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(0.0)
+    }
+
+    pub fn push_glyph(&mut self, glyph: ShapedGlyph) {
+        self.glyphs.push(glyph);
+    }
 }
 
 #[derive(Clone)]
