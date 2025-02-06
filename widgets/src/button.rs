@@ -27,7 +27,15 @@ live_design! {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down)
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_down,
+                    self.down
+                )
             }
         }
         
@@ -44,7 +52,15 @@ live_design! {
             uniform color_down: (THEME_COLOR_TEXT_PRESSED)
 
             fn get_color(self) -> vec4 {
-                return mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down)
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_down,
+                    self.down
+                )
             }
         }
         
@@ -52,6 +68,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
 
+            uniform bevel: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color: (THEME_COLOR_CTRL_DEFAULT)
@@ -70,16 +87,41 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down);
+                let body = mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_down,
+                    self.down
+                );
                 
                 let body_transp = vec4(body.xyz, 0.0);
+
                 let top_gradient = mix(
                     body_transp,
-                    mix(mix(self.outline_color_top, self.outline_color_top_hover, self.hover), self.outline_color_top_down, self.down),
+                    mix(
+                        mix(
+                            self.outline_color_top,
+                            self.outline_color_top_hover,
+                            self.hover
+                        ),
+                        self.outline_color_top_down,
+                        self.down
+                    ),
                     max(0.0, grad_top - sdf.pos.y) / grad_top
                 );
+
                 let bot_gradient = mix(
-                    mix(mix(self.outline_color_bottom, self.outline_color_bottom_hover, self.hover), self.outline_color_bottom_down, self.down),
+                    mix(
+                        mix(
+                            self.outline_color_bottom,
+                            self.outline_color_bottom_hover,
+                            self.hover),
+                            self.outline_color_bottom_down,
+                            self.down
+                        ),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
@@ -91,11 +133,12 @@ live_design! {
                     self.rect_size.y - 2.0,
                     self.border_radius
                 )
+
                 sdf.fill_keep(body)
                 
                 sdf.stroke(
                     bot_gradient,
-                    THEME_BEVELING
+                    self.bevel 
                 )
                 
                 return sdf.result
@@ -163,7 +206,7 @@ live_design! {
         }
     }
     
-    pub ButtonFlat = <ButtonIcon> {
+    pub ButtonFlat = <Button> {
         height: Fit, width: Fit,
         padding: <THEME_MSPACE_2> {}
         margin: 0.
@@ -187,6 +230,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
 
+            uniform bevel: (THEME_BEVELING)
             border_radius: (THEME_CORNER_RADIUS)
 
             color: (THEME_COLOR_U_HIDDEN)
@@ -201,45 +245,11 @@ live_design! {
             outline_color_bottom_hover: (THEME_COLOR_BEVEL_SHADOW)
             outline_color_bottom_down: (THEME_COLOR_BEVEL_LIGHT)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
-                let body = mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down);
-                
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(
-                    body_transp,
-                    mix(mix(self.outline_color_top, self.outline_color_top_hover, self.hover), self.outline_color_top_down, self.down),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-                let bot_gradient = mix(
-                    mix(mix(self.outline_color_bottom, self.outline_color_bottom_hover, self.hover), self.outline_color_bottom_down, self.down),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
-                )
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    THEME_BEVELING
-                )
-                
-                return sdf.result
-            }
         }
         
     }
     
-    pub ButtonFlatter = <ButtonIcon> {
+    pub ButtonFlatter = <Button> {
         height: Fit, width: Fit,
         padding: <THEME_MSPACE_2> {},
         margin: <THEME_MSPACE_2> {},
@@ -263,51 +273,30 @@ live_design! {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down)
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_down,
+                    self.down
+                )
             }
         }
         
         draw_bg: {
-            border_radius: (THEME_CORNER_RADIUS)
-            
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_U_HIDDEN)
             color_down: (THEME_COLOR_U_HIDDEN)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
-                let body = mix(mix(self.color, self.color_hover, self.hover), self.color_down, self.down);
-                
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(
-                    body_transp,
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.down),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-                let bot_gradient = mix(
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.down),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
-                )
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    THEME_BEVELING
-                )
-                
-                return sdf.result
-            }
+            outline_color_top: (THEME_COLOR_U_HIDDEN)
+            outline_color_top_hover: (THEME_COLOR_U_HIDDEN)
+            outline_color_top_down: (THEME_COLOR_U_HIDDEN)
+
+            outline_color_bottom: (THEME_COLOR_U_HIDDEN)
+            outline_color_bottom_hover: (THEME_COLOR_U_HIDDEN)
+            outline_color_bottom_down: (THEME_COLOR_U_HIDDEN)
         }
         
     }
