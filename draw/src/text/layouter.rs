@@ -1,18 +1,19 @@
 use {
     super::{
-        font::GlyphId,
+        font::{AllocatedGlyph, Font, GlyphId},
         font_family::{FontFamily, FontFamilyId},
         font_loader::{FontDefinitions, FontLoader},
         geometry::Point,
         image_atlas::{ColorAtlas, GrayscaleAtlas},
         non_nan::NonNanF32,
         numeric::Zero,
+        shaper::ShapedGlyph,
         substr::Substr,
-        shaper::ShapeResult,
     },
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
+        fmt,
         rc::Rc,
     },
 };
@@ -20,20 +21,20 @@ use {
 const CACHE_SIZE: usize = 1024;
 
 #[derive(Debug)]
-pub struct TextLayouter {
+pub struct Layouter {
     loader: FontLoader,
     cache_size: usize,
-    cached_params: VecDeque<LayoutParams>,
-    cached_laidout_texts: HashMap<LayoutParams, Rc<LayoutResult>>,
+    cached_layout_params: VecDeque<LayoutParams>,
+    cached_laidout_rows: HashMap<LayoutParams, Rc<Vec<LaidoutRow>>>,
 }
 
-impl TextLayouter {
+impl Layouter {
     pub fn new(definitions: FontDefinitions) -> Self {
         Self {
             loader: FontLoader::new(definitions),
             cache_size: CACHE_SIZE,
-            cached_params: VecDeque::with_capacity(CACHE_SIZE),
-            cached_laidout_texts: HashMap::with_capacity(CACHE_SIZE),
+            cached_layout_params: VecDeque::with_capacity(CACHE_SIZE),
+            cached_laidout_rows: HashMap::with_capacity(CACHE_SIZE),
         }
     }
 
@@ -50,58 +51,87 @@ impl TextLayouter {
         self.loader.get_or_load_font_family(font_family_id)
     }
 
-    pub fn get_or_layout(&mut self, params: &LayoutParams) -> Rc<LayoutResult> {
-        if !self.cached_laidout_texts.contains_key(params) {
-            if self.cached_params.len() == self.cache_size {
-                let params = self.cached_params.pop_front().unwrap();
-                self.cached_laidout_texts.remove(&params);
+    pub fn get_or_layout(&mut self, params: &LayoutParams) -> Rc<Vec<LaidoutRow>> {
+        if !self.cached_laidout_rows.contains_key(params) {
+            if self.cached_layout_params.len() == self.cache_size {
+                let params = self.cached_layout_params.pop_front().unwrap();
+                self.cached_laidout_rows.remove(&params);
             }
             let result = self.layout(params);
-            self.cached_params.push_back(params.clone());
-            self.cached_laidout_texts
+            self.cached_layout_params.push_back(params.clone());
+            self.cached_laidout_rows
                 .insert(params.clone(), Rc::new(result));
         }
-        self.cached_laidout_texts.get(params).unwrap().clone()
+        self.cached_laidout_rows.get(params).unwrap().clone()
     }
 
-    fn layout(&mut self, input: &LayoutParams) -> LayoutResult {
+    fn layout(&mut self, params: &LayoutParams) -> Vec<LaidoutRow> {
         let mut rows = Vec::new();
-        LayoutTextContext {
-            layouter: self,
-            settings: &input.settings,
+        LayoutContext {
+            loader: &mut self.loader,
+            settings: &params.settings,
             current_point_in_lpxs: Point::ZERO,
-            current_row: Row::default(),
+            current_row: LaidoutRow::default(),
             output: &mut rows,
         }
-        .layout_paragraph(&input.paragraph);
-        LayoutResult { rows }
+        .layout(&params.spans);
+        rows
     }
 }
 
 #[derive(Debug)]
-struct LayoutTextContext<'a> {
-    layouter: &'a mut TextLayouter,
-    settings: &'a LayoutTextSettings,
+struct LayoutContext<'a> {
+    loader: &'a mut FontLoader,
+    settings: &'a LayoutSettings,
     current_point_in_lpxs: Point<f32>,
-    current_row: Row,
-    output: &'a mut Vec<Row>,
+    current_row: LaidoutRow,
+    output: &'a mut Vec<LaidoutRow>,
 }
 
-impl<'a> LayoutTextContext<'a> {
-    fn remaining_width_in_lpxs(&self) -> f32 {
-        self.settings.max_width_in_lpxs.into_inner() - self.current_point_in_lpxs.x
-    }
-
-    fn layout_paragraph(&mut self, paragraph: &Paragraph) {
-        for line in &paragraph.lines {
-            self.layout_line(line);
-        }
-    }
-
-    fn layout_line(&mut self, line: &Line) {
-        for span in &line.spans {
+impl<'a> LayoutContext<'a> {
+    fn layout(&mut self, spans: &[LayoutSpan]) {
+        for span in spans {
             self.layout_span(span);
         }
+    }
+
+    fn layout_span(&mut self, span: &LayoutSpan) {
+        let font_family = self
+            .loader
+            .get_or_load_font_family(&span.style.font_family_id)
+            .clone();
+        for glyph in &*font_family.get_or_shape(span.text.clone()) {
+            self.push_glyph_to_current_row(span.style.font_size_in_lpxs.into_inner(), &glyph);
+        }
+        self.finish_current_row();
+    }
+
+    fn push_glyph_to_current_row(&mut self, font_size_in_lpxs: f32, glyph: &ShapedGlyph) {
+        let advance_in_lpxs = glyph.advance_in_ems * font_size_in_lpxs;
+        let offset_in_lpxs = glyph.offset_in_ems * font_size_in_lpxs;
+        self.current_row.push_glyph(LaidoutGlyph {
+            font: glyph.font.clone(),
+            font_size_in_lpxs,
+            id: glyph.id,
+            advance_in_lpxs,
+            offset_in_lpxs,
+        });
+        self.current_point_in_lpxs.x += advance_in_lpxs;
+    }
+
+    fn finish_current_row(&mut self) {
+        use std::mem;
+
+        let height_in_lpxs = self.current_row.height_in_lpxs();
+        self.output.push(mem::take(&mut self.current_row));
+        self.current_point_in_lpxs.x = 0.0;
+        self.current_point_in_lpxs.y += height_in_lpxs;
+    }
+}
+
+/*
+    fn remaining_width_in_lpxs(&self) -> f32 {
+        self.settings.max_width_in_lpxs.into_inner() - self.current_point_in_lpxs.x
     }
 
     fn layout_span(&mut self, span: &Span) {
@@ -135,12 +165,12 @@ impl<'a> LayoutTextContext<'a> {
                 Ok(shaped_text) => {
                     already_failed_before = false;
                     self.extend_current_row(shaped_text);
-                },
+                }
                 Err(FitError) => {
                     assert!(!already_failed_before);
                     already_failed_before = true;
                     self.finish_current_row()
-                },
+                }
             }
         }
     }
@@ -270,7 +300,7 @@ impl Fitter {
                     if estimated_width_in_lpxs > max_width_in_lpxs {
                         return None;
                     }
-                    let shaped_text = self.font_family.get_or_shape_text(
+                    let shaped_text = self.font_family.get_or_shape(
                         self.text_after_current_word()
                             .substr(..summed_word_len_after_current_word),
                     );
@@ -278,7 +308,7 @@ impl Fitter {
                         shaped_text.width_in_ems() * self.font_size_in_lpxs;
                     // println!("Actual width: {:?}", actual_width_in_lpxs);
                     if actual_width_in_lpxs > max_width_in_lpxs {
-                        return None;
+                        return None;f
                     }
                     println!("Found a fit!");
                     println!("First word index: {:?}", self.first_word_index);
@@ -294,71 +324,84 @@ impl Fitter {
 
 #[derive(Clone, Debug)]
 pub struct FitError;
+*/
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutParams {
-    pub settings: LayoutTextSettings,
-    pub paragraph: Paragraph,
+    pub settings: LayoutSettings,
+    pub spans: Vec<LayoutSpan>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct LayoutTextSettings {
+pub struct LayoutSettings {
     pub max_width_in_lpxs: NonNanF32,
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Paragraph {
-    lines: Vec<Line>,
-}
-
-impl Paragraph {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push_line(&mut self, line: Line) {
-        self.lines.push(line);
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Line {
-    spans: Vec<Span>,
-}
-
-impl Line {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push_span(&mut self, span: Span) {
-        self.spans.push(span);
-    }
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Span {
-    pub style: Style,
+pub struct LayoutSpan {
+    pub style: LayoutStyle,
     pub text: Substr,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Style {
+pub struct LayoutStyle {
     pub font_family_id: FontFamilyId,
     pub font_size_in_lpxs: NonNanF32,
 }
 
 #[derive(Clone, Debug)]
-pub struct LayoutResult {
-    pub rows: Vec<Row>,
+pub struct LaidoutRow {
+    pub glyphs: Vec<LaidoutGlyph>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Row {
-    pub glyphs: Vec<Glyph>,
+impl LaidoutRow {
+    pub fn height_in_lpxs(&self) -> f32 {
+        self.glyphs
+            .iter()
+            .map(|glyph| glyph.height_in_lpxs())
+            .fold(0.0, |height_in_lpxs, glyph_height_in_lpxs| {
+                height_in_lpxs.max(glyph_height_in_lpxs)
+            })
+    }
+
+    pub fn push_glyph(&mut self, glyph: LaidoutGlyph) {
+        self.glyphs.push(glyph);
+    }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Glyph {
+impl Default for LaidoutRow {
+    fn default() -> Self {
+        Self { glyphs: Vec::new() }
+    }
+}
+
+#[derive(Clone)]
+pub struct LaidoutGlyph {
+    pub font: Rc<Font>,
+    pub font_size_in_lpxs: f32,
     pub id: GlyphId,
+    pub advance_in_lpxs: f32,
+    pub offset_in_lpxs: f32,
+}
+
+impl LaidoutGlyph {
+    pub fn height_in_lpxs(&self) -> f32 {
+        self.font.line_height_in_ems() * self.font_size_in_lpxs
+    }
+
+    pub fn allocate(&self, dpx_per_em: f32) -> Option<AllocatedGlyph> {
+        self.font.allocate_glyph(self.id, dpx_per_em)
+    }
+}
+
+impl fmt::Debug for LaidoutGlyph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LaidoutGlyph")
+            .field("font", &self.font.id())
+            .field("font_size_in_lpxs", &self.font_size_in_lpxs)
+            .field("id", &self.id)
+            .field("advance_in_lpxs", &self.advance_in_lpxs)
+            .field("offset_in_lpxs", &self.offset_in_lpxs)
+            .finish()
+    }
 }
