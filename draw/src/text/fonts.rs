@@ -3,8 +3,8 @@ use {
         font_family::{FontFamily, FontFamilyId},
         font_loader::FontDefinitions,
         geometry::Point,
+        layouter::{LayoutParams, LaidoutRow, Layouter},
         pixels::Bgra,
-        layouter::TextLayouter,
     },
     makepad_platform::*,
     std::rc::Rc,
@@ -12,14 +12,14 @@ use {
 
 #[derive(Debug)]
 pub struct Fonts {
-    layouter: TextLayouter,
+    layouter: Layouter,
     grayscale_texture: Texture,
     color_texture: Texture,
 }
 
 impl Fonts {
     pub fn new(cx: &mut Cx, definitions: FontDefinitions) -> Self {
-        let layouter = TextLayouter::new(definitions);
+        let layouter = Layouter::new(definitions);
         let grayscale_atlas_size = layouter.grayscale_atlas().borrow().size();
         let color_atlas_size = layouter.color_atlas().borrow().size();
         Self {
@@ -65,6 +65,10 @@ impl Fonts {
     // TODO: Remove
     pub fn get_or_load_font_family(&mut self, font_family_id: &FontFamilyId) -> &Rc<FontFamily> {
         self.layouter.get_or_load_font_family(font_family_id)
+    }
+
+    pub fn get_or_layout(&mut self, params: &LayoutParams) -> Rc<Vec<LaidoutRow>> {
+        self.layouter.get_or_layout(params)
     }
 
     pub fn update_textures(&mut self, cx: &mut Cx) {
