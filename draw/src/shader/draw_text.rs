@@ -33,11 +33,16 @@ live_design!{
             let max_pos = vec2(self.rect_pos.x + self.rect_size.x, self.rect_pos.y - self.rect_size.y)
 
             self.clipped = clamp(
-                mix(min_pos, max_pos, self.geom_pos),
-                self.draw_clip.xy,
-                self.draw_clip.zw
-            )
-
+                clamp(
+                    mix(min_pos, max_pos, self.geom_pos),
+                    self.draw_clip.xy,
+                    self.draw_clip.zw
+                )
+                + self.view_shift,
+                self.view_clip.xy,
+                self.view_clip.zw
+            );
+            
             let normalized: vec2 = (self.clipped - min_pos) / vec2(self.rect_size.x, -self.rect_size.y)
 
             self.tex_coord1 = mix(

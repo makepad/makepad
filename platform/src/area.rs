@@ -169,7 +169,10 @@ impl Area {
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let pos = dvec2(buf[inst.instance_offset + rect_pos + 0] as f64, buf[inst.instance_offset + rect_pos + 1] as f64);
+                    let pos = dvec2(
+                        buf[inst.instance_offset + rect_pos + 0] as f64, 
+                        buf[inst.instance_offset + rect_pos + 1] as f64
+                    );
                     if let Some(rect_size) = sh.mapping.rect_size {
                         let size = dvec2(buf[inst.instance_offset + rect_size + 0] as f64, buf[inst.instance_offset + rect_size + 1] as f64);
                         if let Some(draw_clip) = sh.mapping.draw_clip {
@@ -181,7 +184,24 @@ impl Area {
                                 buf[inst.instance_offset + draw_clip + 2] as f64,
                                 buf[inst.instance_offset + draw_clip + 3] as f64
                             );
-                            return Rect{pos,size}.clip((p1,p2));
+                            if draw_list.draw_list_has_clip{
+                                let p3 = dvec2(
+                                    draw_list.draw_list_uniforms.view_clip.x as f64,
+                                    draw_list.draw_list_uniforms.view_clip.y as f64,
+                                );
+                                let p4 = dvec2(
+                                    draw_list.draw_list_uniforms.view_clip.z as f64,
+                                    draw_list.draw_list_uniforms.view_clip.w as f64,
+                                );
+                                let shift = dvec2(
+                                    draw_list.draw_list_uniforms.view_shift.x as f64,
+                                    draw_list.draw_list_uniforms.view_shift.y as f64
+                                );
+                                return Rect{pos,size}.clip((p1,p2)).translate(shift).clip((p3,p4));
+                            }
+                            else{
+                                return Rect{pos,size}.clip((p1,p2));
+                            }
                         }
                     }
                 }
@@ -191,7 +211,24 @@ impl Area {
                 // we need to clip this drawlist too
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
                 let rect_area = &draw_list.rect_areas[ra.rect_id];
-                return rect_area.rect.clip(rect_area.draw_clip);                
+                if draw_list.draw_list_has_clip{
+                    let p3 = dvec2(
+                        draw_list.draw_list_uniforms.view_clip.x as f64,
+                        draw_list.draw_list_uniforms.view_clip.y as f64,
+                    );
+                    let p4 = dvec2(
+                        draw_list.draw_list_uniforms.view_clip.z as f64,
+                        draw_list.draw_list_uniforms.view_clip.w as f64,
+                    );
+                    let shift = dvec2(
+                        draw_list.draw_list_uniforms.view_shift.x as f64,
+                        draw_list.draw_list_uniforms.view_shift.y as f64
+                    );
+                    return rect_area.rect.clip(rect_area.draw_clip).translate(shift).clip((p3,p4));
+                }
+                else{
+                    return rect_area.rect.clip(rect_area.draw_clip);
+                }                
             },
             _ => Rect::default(),
         }
