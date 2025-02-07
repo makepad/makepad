@@ -70,10 +70,6 @@ impl Font {
         self.ttf_parser_face().line_gap() as f32 / self.units_per_em()
     }
 
-    pub fn line_height_in_ems(&self) -> f32 {
-        self.ascender_in_ems() - self.descender_in_ems() + self.line_gap_in_ems()
-    }
-
     pub fn glyph_outline(&self, glyph_id: GlyphId, pxs_per_em: f32) -> Option<Outline> {
         let face = self.ttf_parser_face();
         let glyph_id = ttf_parser::GlyphId(glyph_id);

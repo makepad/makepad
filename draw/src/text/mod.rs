@@ -21,23 +21,27 @@ mod tests {
     use {
         super::*,
         font_loader::FontDefinitions,
-        layouter::{LayoutParams, Layouter, Span, Style},
+        layouter::{LayoutOptions, LayoutParams, Layouter, Span, Style, Text},
         non_nan::NonNanF32,
-        std::{fs::File, io::BufWriter},
+        std::{fs::File, io::BufWriter, rc::Rc},
     };
 
     #[test]
     fn test() {
         let mut layouter = Layouter::new(FontDefinitions::default());
-        let text = layouter.get_or_layout(&LayoutParams {
-            max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
-            spans: vec![Span {
-                style: Style {
-                    font_family_id: "Sans".into(),
-                    font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                },
-                text: "繁😊😔 The quick brown fox jumps over the lazy dog".into(),
-            }],
+        let text = layouter.get_or_layout(LayoutParams {
+            options: LayoutOptions {
+                max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
+            },
+            text: Rc::new(Text {
+                spans: vec![Span {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                    },
+                    text: "繁😊😔 The quick brown fox jumps over the lazy dog".into(),
+                }],
+            }),
         });
         for row in &text.rows {
             for glyph in &row.glyphs {

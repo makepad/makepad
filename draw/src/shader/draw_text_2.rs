@@ -1,15 +1,17 @@
-use crate::{
-    cx_2d::Cx2d,
-    draw_list_2d::ManyInstances,
-    geometry::GeometryQuad2D,
-    makepad_platform::*,
-    text::{
-        font::{AllocatedGlyph, AtlasKind},
-        font_family::FontFamilyId,
-        geometry::{Point, Rect, Size, Transformation},
-        layouter::{LaidoutGlyph, LaidoutRow, LayoutParams, Span, Style},
-        non_nan::NonNanF32,
+use {
+    crate::{
+        cx_2d::Cx2d,
+        draw_list_2d::ManyInstances,
+        geometry::GeometryQuad2D,
+        makepad_platform::*,
+        text::{
+            font::{AllocatedGlyph, AtlasKind},
+            geometry::{Point, Rect, Size, Transformation},
+            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Text},
+            non_nan::NonNanF32,
+        },
     },
+    std::rc::Rc,
 };
 
 live_design! {
@@ -105,39 +107,39 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
-    pub fn draw(
-        &mut self,
-        cx: &mut Cx2d,
-        p: Point<f32>,
-        text: &str,
-        font_family_id: FontFamilyId,
-        font_size_in_lpxs: NonNanF32,
-    ) {
-        let mut fonts = cx.fonts.borrow_mut();
+    pub fn draw(&mut self, cx: &mut Cx2d, p: Point<f32>, text: Rc<Text>) {
+        let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
+            options: LayoutOptions {
+                max_width_in_lpxs: NonNanF32::new(128.0).unwrap(),
+            },
+            text,
+        });
+        self.draw_laidout_text(cx, p, laidout_text);
+    }
+
+    fn draw_laidout_text(&mut self, cx: &mut Cx2d<'_>, p: Point<f32>, text: Rc<LaidoutText>) {
+        let fonts = cx.fonts.borrow_mut();
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        let text = fonts.get_or_layout(&LayoutParams {
-            max_width_in_lpxs: NonNanF32::new(128.0).unwrap(),
-            spans: vec![Span {
-                style: Style {
-                    font_family_id,
-                    font_size_in_lpxs,
-                },
-                text: text.into(),
-            }],
-        });
         drop(fonts);
-
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         let mut p = p;
+        let mut is_first_row = true;
         for row in &text.rows {
-            self.draw_row(cx, &mut p, row, &mut many_instances.instances);
+            if !is_first_row {
+                p.y += row.ascender_in_lpxs;
+            }
+            let x = p.x;
+            self.draw_laidout_row(cx, &mut p, row, &mut many_instances.instances);
+            p.x = x;
+            p.y += -row.descender_in_lpxs + row.line_gap_in_lpxs;
+            is_first_row = false;
         }
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
     }
 
-    fn draw_row(
+    fn draw_laidout_row(
         &mut self,
         cx: &mut Cx2d<'_>,
         p: &mut Point<f32>,
@@ -152,32 +154,29 @@ impl DrawText2 {
             vec4(1.0, 0.0, 0.0, 1.0),
         );
 
-        let x = p.x;
         for glyph in &row.glyphs {
             self.draw_glyph(cx, p, glyph, output);
+            p.x += glyph.advance_in_lpxs;
         }
-        p.x = x;
-        p.y += row.height_in_lpxs;
     }
 
     fn draw_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
         p: &mut Point<f32>,
-        glyph: &LaidoutGlyph,
+        laidout_glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
         let lpxs_per_dpx = cx.current_dpi_factor() as f32;
-        let font_size_in_dpxs = glyph.font_size_in_lpxs * lpxs_per_dpx;
-        if let Some(allocated_glyph) = glyph.allocate(font_size_in_dpxs) {
+        let font_size_in_dpxs = laidout_glyph.font_size_in_lpxs * lpxs_per_dpx;
+        if let Some(allocated_glyph) = laidout_glyph.allocate(font_size_in_dpxs) {
             self.draw_allocated_glyph(
-                Point::new(p.x + glyph.offset_in_lpxs, p.y),
+                Point::new(p.x + laidout_glyph.offset_in_lpxs, p.y),
                 allocated_glyph,
-                glyph.font_size_in_lpxs,
+                laidout_glyph.font_size_in_lpxs,
                 output,
             );
         }
-        p.x += glyph.advance_in_lpxs;
     }
 
     fn draw_allocated_glyph(

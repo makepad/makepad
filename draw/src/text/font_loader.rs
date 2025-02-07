@@ -103,15 +103,18 @@ pub struct FontDefinitions {
 impl Default for FontDefinitions {
     fn default() -> Self {
         Self {
-            families: [(
-                "Sans".into(),
-                [
-                    "IBM Plex Sans Text".into(),
-                    "LXG WWen Kai Regular".into(),
-                    "Noto Color Emoji".into(),
-                ]
-                .into(),
-            )]
+            families: [
+                (
+                    "Sans".into(),
+                    [
+                        "IBM Plex Sans Text".into(),
+                        "LXG WWen Kai Regular".into(),
+                        "Noto Color Emoji".into(),
+                    ]
+                    .into(),
+                ),
+                ("Monospace".into(), ["Liberation Mono Regular".into()].into()),
+            ]
             .into_iter()
             .collect(),
             faces: [
@@ -133,6 +136,13 @@ impl Default for FontDefinitions {
                     "Noto Color Emoji".into(),
                     FontFaceDefinition {
                         data: Cow::Borrowed(font_data::NOTO_COLOR_EMOJI).into(),
+                        index: 0,
+                    },
+                ),
+                (
+                    "Liberation Mono Regular".into(),
+                    FontFaceDefinition {
+                        data: Cow::Borrowed(font_data::LIBERATION_MONO_REGULAR).into(),
                         index: 0,
                     },
                 ),

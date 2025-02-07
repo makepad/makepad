@@ -61,7 +61,7 @@ impl Fonts {
         &self.color_texture
     }
 
-    pub fn get_or_layout(&mut self, params: &LayoutParams) -> Rc<LaidoutText> {
+    pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
         self.layouter.get_or_layout(params)
     }
 
