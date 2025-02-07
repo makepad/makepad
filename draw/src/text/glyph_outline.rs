@@ -1,8 +1,8 @@
 use {
     super::{
-        geometry::{Point, Rect, Size, Transformation},
+        geom::{Point, Rect, Size, Transformation},
         image::SubimageMut,
-        numeric::Zero,
+        num::Zero,
         pixels::R,
     },
     makepad_rustybuzz as rustybuzz,
@@ -10,14 +10,14 @@ use {
 };
 
 #[derive(Clone, Debug)]
-pub struct Outline {
+pub struct GlyphOutline {
     bounds: Rect<f32>,
     dpxs_per_em: f32,
     units_per_em: f32,
     commands: Vec<Command>,
 }
 
-impl Outline {
+impl GlyphOutline {
     pub fn origin_in_dpxs(&self) -> Point<f32> {
         self.bounds
             .origin
@@ -134,8 +134,8 @@ impl Builder {
         }
     }
 
-    pub fn finish(self, bounds: Rect<f32>, pxs_per_em: f32, units_per_em: f32) -> Outline {
-        Outline {
+    pub fn finish(self, bounds: Rect<f32>, pxs_per_em: f32, units_per_em: f32) -> GlyphOutline {
+        GlyphOutline {
             bounds,
             dpxs_per_em: pxs_per_em,
             units_per_em,
