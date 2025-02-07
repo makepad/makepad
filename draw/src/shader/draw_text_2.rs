@@ -5,8 +5,8 @@ use {
         geometry::GeometryQuad2D,
         makepad_platform::*,
         text::{
-            font::{AllocatedGlyph, AtlasKind},
-            geometry::{Point, Rect, Size, Transformation},
+            font::{GlyphImage, GlyphImageKind},
+            geom::{Point, Rect, Size, Transformation},
             layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Text},
             non_nan::NonNanF32,
         },
@@ -155,12 +155,12 @@ impl DrawText2 {
         );
 
         for glyph in &row.glyphs {
-            self.draw_glyph(cx, p, glyph, output);
+            self.draw_laidout_glyph(cx, p, glyph, output);
             p.x += glyph.advance_in_lpxs;
         }
     }
 
-    fn draw_glyph(
+    fn draw_laidout_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
         p: &mut Point<f32>,
@@ -170,7 +170,7 @@ impl DrawText2 {
         let lpxs_per_dpx = cx.current_dpi_factor() as f32;
         let font_size_in_dpxs = laidout_glyph.font_size_in_lpxs * lpxs_per_dpx;
         if let Some(allocated_glyph) = laidout_glyph.allocate(font_size_in_dpxs) {
-            self.draw_allocated_glyph(
+            self.draw_glyph_image(
                 Point::new(p.x + laidout_glyph.offset_in_lpxs, p.y),
                 allocated_glyph,
                 laidout_glyph.font_size_in_lpxs,
@@ -179,10 +179,10 @@ impl DrawText2 {
         }
     }
 
-    fn draw_allocated_glyph(
+    fn draw_glyph_image(
         &mut self,
         p: Point<f32>,
-        glyph: AllocatedGlyph,
+        image: GlyphImage,
         font_size_in_lpxs: f32,
         output: &mut Vec<f32>,
     ) {
@@ -201,21 +201,21 @@ impl DrawText2 {
             vec2(point.width, point.height)
         }
 
-        let transform = Transformation::scaling_uniform(font_size_in_lpxs / glyph.dpxs_per_em)
+        let transform = Transformation::scaling_uniform(font_size_in_lpxs / image.dpxs_per_em)
             .translate(p.x, p.y);
         let bounds_in_lpxs = Rect::new(
-            Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
-            glyph.bounds_in_dpxs.size,
+            Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y),
+            image.bounds_in_dpxs.size,
         )
         .transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
-        self.tex_index = match glyph.atlas_kind {
-            AtlasKind::Grayscale => 0.0,
-            AtlasKind::Color => 1.0,
+        self.tex_index = match image.kind {
+            GlyphImageKind::Grayscale => 0.0,
+            GlyphImageKind::Color => 1.0,
         };
-        self.font_t1 = point_to_vec2(tex_coord(glyph.image_bounds.min(), glyph.atlas_size));
-        self.font_t2 = point_to_vec2(tex_coord(glyph.image_bounds.max(), glyph.atlas_size));
+        self.font_t1 = point_to_vec2(tex_coord(image.bounds.min(), image.atlas_size));
+        self.font_t2 = point_to_vec2(tex_coord(image.bounds.max(), image.atlas_size));
         self.char_depth = 1.0; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
