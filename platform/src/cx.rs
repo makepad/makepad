@@ -1,51 +1,17 @@
 use {
-    makepad_futures::{executor, executor::{Executor, Spawner}},
-    std::{
-        collections::{
+    crate::{
+        action::{ActionSendSync, ActionsBuf, ACTION_SENDER_GLOBAL}, area::Area, cx_api::CxOsOp, debug::Debug, display_context::DisplayContext, draw_list::CxDrawListPool, draw_matrix::CxDrawMatrixPool, draw_shader::CxDrawShaders, event::{
+            CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger
+        }, geometry::{
+            CxGeometryPool, Geometry, GeometryFingerprint
+        }, gpu_info::GpuInfo, makepad_live_compiler::{
+            LiveFileChange, LiveRegistry
+        }, makepad_shader_compiler::ShaderRegistry, os::CxOs, pass::CxPassPool, performance_stats::PerformanceStats, texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated}, translator::Translator, web_socket::WebSocket, window::CxWindowPool
+    }, makepad_futures::executor::{self, Executor, Spawner}, std::{
+        any::{Any, TypeId}, cell::RefCell, collections::{
             HashMap,
             HashSet,
-        },
-        any::{Any, TypeId},
-        rc::Rc,
-        rc::Weak,
-        cell::RefCell,
-    },
-    crate::{
-        action::{ActionSendSync,ACTION_SENDER_GLOBAL},
-        makepad_live_compiler::{
-            LiveRegistry,
-            LiveFileChange
-        },
-        makepad_shader_compiler::ShaderRegistry,
-        draw_shader::CxDrawShaders,
-        draw_matrix::CxDrawMatrixPool,
-        os::CxOs,
-        debug::Debug,
-        display_context::DisplayContext,
-        performance_stats::PerformanceStats,
-        event::{
-            DrawEvent,
-            CxFingers,
-            CxDragDrop,
-            Event,
-            Trigger,
-            CxKeyboard,
-            NextFrame,
-        },
-        action::ActionsBuf,
-        cx_api::CxOsOp,
-        area::Area,
-        gpu_info::GpuInfo,
-        window::CxWindowPool,
-        draw_list::CxDrawListPool,
-        web_socket::WebSocket,
-        pass::CxPassPool,
-        texture::{CxTexturePool,TextureFormat,Texture,TextureUpdated},
-        geometry::{
-            Geometry,
-            CxGeometryPool,
-            GeometryFingerprint
-        },
+        }, rc::{Rc, Weak}
     }
 };
 
@@ -124,6 +90,8 @@ pub struct Cx {
     pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
+
+    pub translator: Translator,
 
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
@@ -311,6 +279,8 @@ impl Cx {
             performance_stats: Default::default(),
 
             display_context: Default::default(),
+
+            translator: Translator::new("en"),
 
             widget_query_invalidation_event: None,
         }

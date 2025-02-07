@@ -57,6 +57,8 @@ pub mod ui_runner;
 
 pub mod display_context;
 
+pub mod translator;
+
 #[macro_use]
 mod app_main;
 

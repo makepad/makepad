@@ -639,6 +639,16 @@ impl Cx {
     pub fn event_id(&self) -> u64 {
         self.event_id
     }
+
+    /// Translate a string
+    pub fn tr(&self, key: LiveId) -> String {
+        self.translator.tr(self, key)
+    }
+
+    /// Translate a string with arguments
+    pub fn tr_with_args(&self, key: LiveId, args: &[&str]) -> String {
+        self.translator.tr_with_args(self, key, args)
+    }
 }
 
 #[macro_export]
