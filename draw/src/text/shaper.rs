@@ -35,21 +35,21 @@ impl Shaper {
         }
     }
 
-    pub fn get_or_shape(&mut self, params: &ShapeParams) -> Rc<ShapedText> {
-        if !self.cached_shaped_texts.contains_key(params) {
+    pub fn get_or_shape(&mut self, params: ShapeParams) -> Rc<ShapedText> {
+        if !self.cached_shaped_texts.contains_key(&params) {
             if self.cached_shape_params.len() == self.cache_size {
                 let params = self.cached_shape_params.pop_front().unwrap();
                 self.cached_shaped_texts.remove(&params);
             }
-            let text: ShapedText = self.shape(params);
+            let text: ShapedText = self.shape(params.clone());
             self.cached_shape_params.push_back(params.clone());
             self.cached_shaped_texts
                 .insert(params.clone(), Rc::new(text));
         }
-        self.cached_shaped_texts.get(params).unwrap().clone()
+        self.cached_shaped_texts.get(&params).unwrap().clone()
     }
 
-    fn shape(&mut self, params: &ShapeParams) -> ShapedText {
+    fn shape(&mut self, params: ShapeParams) -> ShapedText {
         let mut text = ShapedText::default();
         self.shape_recursive(&params.text, &params.fonts, 0, params.text.len(), &mut text);
         text
@@ -163,14 +163,6 @@ impl ShapedText {
         self.glyphs.iter().map(|glyph| glyph.advance_in_ems).sum()
     }
 
-    pub fn height_in_ems(&self) -> f32 {
-        self.glyphs
-            .iter()
-            .map(|glyph| glyph.height_in_ems())
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(0.0)
-    }
-
     pub fn push_glyph(&mut self, glyph: ShapedGlyph) {
         self.glyphs.push(glyph);
     }
@@ -183,12 +175,6 @@ pub struct ShapedGlyph {
     pub cluster: usize,
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
-}
-
-impl ShapedGlyph {
-    pub fn height_in_ems(&self) -> f32 {
-        self.font.ascender_in_ems() - self.font.descender_in_ems()
-    }
 }
 
 impl fmt::Debug for ShapedGlyph {
