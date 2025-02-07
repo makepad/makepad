@@ -30,7 +30,7 @@ impl FontFamily {
     }
 
     pub fn get_or_shape(&self, text: Substr) -> Rc<ShapedText> {
-        self.shaper.borrow_mut().get_or_shape(&ShapeParams {
+        self.shaper.borrow_mut().get_or_shape(ShapeParams {
             text: text.into(),
             fonts: self.fonts.clone(),
         })

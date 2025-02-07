@@ -1,4 +1,7 @@
-use crate::makepad_widgets::{text::{non_nan::NonNanF32, geometry::Point}, *};
+use {
+    crate::makepad_widgets::{text::{non_nan::NonNanF32, geometry::Point, layouter::{Text, Span, Style}}, *},
+    std::rc::Rc,
+};
 
 live_design!{
     use link::theme::*;
@@ -93,7 +96,31 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw(cx, Point::new(50.0, 50.0), "繁😊😔 The quick brown fox jumps over the lazy dog", "Sans".into(), NonNanF32::new(16.0).unwrap());
+        self.draw_text.draw(cx, Point::new(50.0, 50.0), Rc::new(Text {
+            spans: vec![
+                Span {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
+                    },
+                    text: "繁😊😔 The quick brown fox ".into()
+                },
+                Span {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(20.0).unwrap()
+                    },
+                    text: "jumps ".into()
+                },
+                Span {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
+                    },
+                    text: "over the lazy dog".into()
+                },
+            ],
+        }));
         self.draw_bg.end(cx);
         DrawStep::done()
     }
