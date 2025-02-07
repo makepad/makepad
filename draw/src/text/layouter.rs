@@ -1,9 +1,9 @@
 use {
     super::{
-        font::{AllocatedGlyph, Font, GlyphId},
+        font::{GlyphImage, Font, GlyphId},
         font_family::{FontFamily, FontFamilyId},
         font_loader::{FontDefinitions, FontLoader},
-        image_atlas::{ColorAtlas, GrayscaleAtlas},
+        font_atlas::{ColorAtlas, GrayscaleAtlas},
         non_nan::NonNanF32,
         shaper::{ShapedGlyph, ShapedText},
         substr::Substr,
@@ -11,7 +11,6 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
-        fmt,
         rc::Rc,
     },
 };
@@ -320,7 +319,7 @@ impl Default for LaidoutRow {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LaidoutGlyph {
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
@@ -342,19 +341,7 @@ impl LaidoutGlyph {
         self.font.line_gap_in_ems() * self.font_size_in_lpxs
     }
 
-    pub fn allocate(&self, dpx_per_em: f32) -> Option<AllocatedGlyph> {
-        self.font.allocate_glyph(self.id, dpx_per_em)
-    }
-}
-
-impl fmt::Debug for LaidoutGlyph {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LaidoutGlyph")
-            .field("font", &self.font.id())
-            .field("font_size_in_lpxs", &self.font_size_in_lpxs)
-            .field("id", &self.id)
-            .field("advance_in_lpxs", &self.advance_in_lpxs)
-            .field("offset_in_lpxs", &self.offset_in_lpxs)
-            .finish()
+    pub fn allocate(&self, dpx_per_em: f32) -> Option<GlyphImage> {
+        self.font.glyph_image(self.id, dpx_per_em)
     }
 }

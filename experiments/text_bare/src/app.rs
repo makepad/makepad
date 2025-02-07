@@ -1,5 +1,5 @@
 use {
-    crate::makepad_widgets::{text::{non_nan::NonNanF32, geometry::Point, layouter::{Text, Span, Style}}, *},
+    crate::makepad_widgets::{text::{non_nan::NonNanF32, geom::Point, layouter::{Text, Span, Style}}, *},
     std::rc::Rc,
 };
 

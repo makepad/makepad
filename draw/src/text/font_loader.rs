@@ -4,8 +4,8 @@ use {
         font_data,
         font_face::FontFaceDefinition,
         font_family::{FontFamily, FontFamilyId},
-        geometry::Size,
-        image_atlas::{ColorAtlas, GrayscaleAtlas, ImageAtlas},
+        geom::Size,
+        font_atlas::{ColorAtlas, GrayscaleAtlas, FontAtlas},
         pixels::{Bgra, R},
         shaper::Shaper,
     },
@@ -29,19 +29,19 @@ impl FontLoader {
     pub fn new(definitions: FontDefinitions) -> Self {
         Self {
             shaper: Rc::new(RefCell::new(Shaper::new())),
-            grayscale_atlas: Rc::new(RefCell::new(ImageAtlas::new(GRAYSCALE_ATLAS_SIZE))),
-            color_atlas: Rc::new(RefCell::new(ImageAtlas::new(COLOR_ATLAS_SIZE))),
+            grayscale_atlas: Rc::new(RefCell::new(FontAtlas::new(GRAYSCALE_ATLAS_SIZE))),
+            color_atlas: Rc::new(RefCell::new(FontAtlas::new(COLOR_ATLAS_SIZE))),
             definitions,
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
         }
     }
 
-    pub fn grayscale_atlas(&self) -> &Rc<RefCell<ImageAtlas<R<u8>>>> {
+    pub fn grayscale_atlas(&self) -> &Rc<RefCell<FontAtlas<R<u8>>>> {
         &self.grayscale_atlas
     }
 
-    pub fn color_atlas(&self) -> &Rc<RefCell<ImageAtlas<Bgra<u8>>>> {
+    pub fn color_atlas(&self) -> &Rc<RefCell<FontAtlas<Bgra<u8>>>> {
         &self.color_atlas
     }
 

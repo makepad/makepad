@@ -1,19 +1,24 @@
-use super::{
-    geometry::{Point, Rect, Size},
-    image::{Image, Subimage, SubimageMut},
-    numeric::Zero,
-    pixels::{Bgra, R},
+use {
+    std::collections::HashMap,
+    super::{
+        font::{FontId, GlyphId},
+        geom::{Point, Rect, Size},
+        image::{Image, Subimage, SubimageMut},
+        num::Zero,
+        pixels::{Bgra, R},
+    },
 };
 
 #[derive(Clone, Debug)]
-pub struct ImageAtlas<T> {
+pub struct FontAtlas<T> {
     image: Image<T>,
     dirty_rect: Rect<usize>,
     current_point: Point<usize>,
     current_row_height: usize,
+    cached_glyph_image_rects: HashMap<GlyphImageKey, Rect<usize>>,
 }
 
-impl<T> ImageAtlas<T> {
+impl<T> FontAtlas<T> {
     pub fn new(size: Size<usize>) -> Self
     where
         T: Clone + Default,
@@ -23,6 +28,7 @@ impl<T> ImageAtlas<T> {
             dirty_rect: Rect::ZERO,
             current_point: Point::ZERO,
             current_row_height: 0,
+            cached_glyph_image_rects: HashMap::new(),
         }
     }
 
@@ -40,7 +46,15 @@ impl<T> ImageAtlas<T> {
         self.image.subimage(dirty_rect)
     }
 
-    pub fn allocate_image(&mut self, size: Size<usize>) -> Option<SubimageMut<'_, T>> {
+    pub fn get_or_allocate_glyph_image(&mut self, key: GlyphImageKey) -> Option<SubimageMut<'_, T>> {
+        if !self.cached_glyph_image_rects.contains_key(&key) {
+            let rect = self.allocate_glyph_image(key.size)?;
+            self.cached_glyph_image_rects.insert(key.clone(), rect);
+        }
+        self.cached_glyph_image_rects.get(&key).copied().map(|rect| self.image.subimage_mut(rect))
+    }
+
+    pub fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
         const PADDING: Size<usize> = Size::new(2, 2);
 
         let padded_size = size + PADDING;
@@ -57,9 +71,16 @@ impl<T> ImageAtlas<T> {
         self.current_row_height = self.current_row_height.max(padded_size.height);
         let rect = Rect::new(origin, size);
         self.dirty_rect = self.dirty_rect.union(rect);
-        Some(self.image.subimage_mut(rect))
+        Some(rect)
     }
 }
 
-pub type GrayscaleAtlas = ImageAtlas<R<u8>>;
-pub type ColorAtlas = ImageAtlas<Bgra<u8>>;
+pub type GrayscaleAtlas = FontAtlas<R<u8>>;
+pub type ColorAtlas = FontAtlas<Bgra<u8>>;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct GlyphImageKey {
+    pub font_id: FontId,
+    pub glyph_id: GlyphId,
+    pub size: Size<usize>,
+}

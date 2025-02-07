@@ -1,7 +1,7 @@
 use {
     super::{
         font_loader::FontDefinitions,
-        geometry::Point,
+        geom::Point,
         layouter::{LaidoutText, LayoutParams, Layouter},
         pixels::Bgra,
     },
