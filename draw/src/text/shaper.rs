@@ -7,7 +7,6 @@ use {
     rustybuzz::UnicodeBuffer,
     std::{
         collections::{HashMap, VecDeque},
-        fmt,
         hash::Hash,
         rc::Rc,
     },
@@ -168,23 +167,11 @@ impl ShapedText {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShapedGlyph {
     pub font: Rc<Font>,
     pub id: GlyphId,
     pub cluster: usize,
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
-}
-
-impl fmt::Debug for ShapedGlyph {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ShapedGlyph")
-            .field("font", &self.font.id())
-            .field("id", &self.id)
-            .field("cluster", &self.cluster)
-            .field("advance_in_ems", &self.advance_in_ems)
-            .field("offset_in_ems", &self.offset_in_ems)
-            .finish()
-    }
 }

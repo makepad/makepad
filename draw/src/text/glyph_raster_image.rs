@@ -1,6 +1,6 @@
 use {
     super::{
-        geometry::{Point, Rect, Size},
+        geom::{Point, Rect, Size},
         image::SubimageMut,
         pixels::Bgra,
     },
@@ -9,14 +9,14 @@ use {
 };
 
 #[derive(Clone, Debug)]
-pub struct RasterImage<'a> {
+pub struct GlyphRasterImage<'a> {
     origin_in_pxs: Point<f32>,
     dpxs_per_em: f32,
     format: Format,
     data: &'a [u8],
 }
 
-impl<'a> RasterImage<'a> {
+impl<'a> GlyphRasterImage<'a> {
     pub fn from_raster_glyph_image(image: ttf_parser::RasterGlyphImage<'a>) -> Option<Self> {
         Some(Self {
             origin_in_pxs: Point::new(image.x as f32, image.y as f32),

@@ -4,15 +4,15 @@ pub mod font_face;
 pub mod font_family;
 pub mod font_loader;
 pub mod fonts;
-pub mod geometry;
+pub mod geom;
 pub mod image;
-pub mod image_atlas;
+pub mod font_atlas;
 pub mod layouter;
 pub mod non_nan;
-pub mod numeric;
-pub mod outline;
+pub mod num;
+pub mod glyph_outline;
 pub mod pixels;
-pub mod raster_image;
+pub mod glyph_raster_image;
 pub mod shaper;
 pub mod substr;
 
@@ -45,7 +45,7 @@ mod tests {
         });
         for row in &text.rows {
             for glyph in &row.glyphs {
-                glyph.font.allocate_glyph(glyph.id, 64.0);
+                glyph.font.glyph_image(glyph.id, 64.0);
             }
         }
 
