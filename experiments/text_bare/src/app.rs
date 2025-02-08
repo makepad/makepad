@@ -98,6 +98,7 @@ impl Widget for MyWidget {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_text.draw(cx, Point::new(50.0, 50.0), Rc::new(Text {
             spans: vec![
+                /*
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
@@ -112,12 +113,13 @@ impl Widget for MyWidget {
                     },
                     text: "jumps ".into()
                 },
+                */
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
                     },
-                    text: "over the lazy dog".into()
+                    text: "Lorem ipsum odor amet, consectetuer adipiscing elit. Laoreet ad elit odio taciti, dignissim ullamcor".into()
                 },
             ],
         }));

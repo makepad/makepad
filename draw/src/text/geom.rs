@@ -47,6 +47,17 @@ where
     }
 }
 
+impl<T> Sub<Size<T>> for Point<T>
+where
+    T: Sub<Output = T>,
+{
+    type Output = Self;
+
+    fn sub(self, size: Size<T>) -> Self::Output {
+        Self::new(self.x - size.width, self.y - size.height)
+    }
+}
+
 impl<T> From<Size<T>> for Point<T> {
     fn from(size: Size<T>) -> Self {
         Self::new(size.width, size.height)
@@ -96,6 +107,17 @@ where
 impl<T> From<Point<T>> for Size<T> {
     fn from(point: Point<T>) -> Self {
         Self::new(point.x, point.y)
+    }
+}
+
+impl<T> Sub for Size<T>
+where
+    T: Sub<Output = T>,
+{
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        Self::new(self.width - other.width, self.height - other.height)
     }
 }
 

@@ -1,18 +1,19 @@
 pub mod font;
+pub mod font_atlas;
 pub mod font_data;
 pub mod font_face;
 pub mod font_family;
 pub mod font_loader;
 pub mod fonts;
 pub mod geom;
+pub mod glyph_outline;
+pub mod glyph_raster_image;
 pub mod image;
-pub mod font_atlas;
 pub mod layouter;
 pub mod non_nan;
 pub mod num;
-pub mod glyph_outline;
 pub mod pixels;
-pub mod glyph_raster_image;
+pub mod sdf;
 pub mod shaper;
 pub mod substr;
 
@@ -39,7 +40,7 @@ mod tests {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
                     },
-                    text: "繁😊😔 The quick brown fox jumps over the lazy dog".into(),
+                    text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
                 }],
             }),
         });
@@ -60,7 +61,7 @@ mod tests {
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        let pixels = atlas.image().pixels();
+        let pixels = atlas.image().as_pixels();
         let data =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
         writer.write_image_data(&data).unwrap();
@@ -76,7 +77,7 @@ mod tests {
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        let pixels = atlas.image().pixels();
+        let pixels = atlas.image().as_pixels();
         let data =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         writer.write_image_data(&data).unwrap();

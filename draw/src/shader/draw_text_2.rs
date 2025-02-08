@@ -5,7 +5,7 @@ use {
         geometry::GeometryQuad2D,
         makepad_platform::*,
         text::{
-            font::{GlyphImage, GlyphImageKind},
+            font::{AtlasKind, GlyphImage},
             geom::{Point, Rect, Size, Transformation},
             layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Text},
             non_nan::NonNanF32,
@@ -53,9 +53,22 @@ live_design! {
             )))
         }
 
+        fn sdf(self, p: vec2) -> float {
+            let dxt = length(dFdx(p));
+            let dyt = length(dFdy(p));
+            let scale = (dxt + dyt) * 512.0 * 0.5;
+            
+            let radius = 3.0;
+            let cutoff = 0.25;
+            let s = sample2d(self.grayscale_texture, p).x;
+            s = clamp((s - (1.0 - cutoff)) * radius / scale + 0.5, 0.0, 1.0);
+            return s;
+        }
+
         fn pixel(self) -> vec4 {
             if self.tex_index == 0 {
-                return vec4(sample2d(self.grayscale_texture, self.tex_coord1.xy).xxx, 1.0);
+                let c = vec4(1.0, 1.0, 1.0, 1.0);
+                return self.sdf(self.tex_coord1.xy) * vec4(c.rgb * c.a, c.a);
             } else {
                 let c = sample2d(self.color_texture, self.tex_coord1.xy);
                 return vec4(c.rgb * c.a, c.a);
@@ -146,6 +159,11 @@ impl DrawText2 {
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
+        for glyph in &row.glyphs {
+            self.draw_laidout_glyph(cx, p, glyph, output);
+            p.x += glyph.advance_in_lpxs;
+        }
+
         cx.cx.debug.rect(
             makepad_platform::Rect {
                 pos: dvec2(p.x as f64, p.y as f64),
@@ -153,11 +171,6 @@ impl DrawText2 {
             },
             vec4(1.0, 0.0, 0.0, 1.0),
         );
-
-        for glyph in &row.glyphs {
-            self.draw_laidout_glyph(cx, p, glyph, output);
-            p.x += glyph.advance_in_lpxs;
-        }
     }
 
     fn draw_laidout_glyph(
@@ -171,6 +184,7 @@ impl DrawText2 {
         let font_size_in_dpxs = laidout_glyph.font_size_in_lpxs * lpxs_per_dpx;
         if let Some(allocated_glyph) = laidout_glyph.allocate(font_size_in_dpxs) {
             self.draw_glyph_image(
+                cx,
                 Point::new(p.x + laidout_glyph.offset_in_lpxs, p.y),
                 allocated_glyph,
                 laidout_glyph.font_size_in_lpxs,
@@ -181,11 +195,14 @@ impl DrawText2 {
 
     fn draw_glyph_image(
         &mut self,
+        cx: &mut Cx2d<'_>,
         p: Point<f32>,
         image: GlyphImage,
         font_size_in_lpxs: f32,
         output: &mut Vec<f32>,
     ) {
+        use crate::text::sdf;
+
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
                 (2 * point.x + 1) as f32 / (2 * size.width) as f32,
@@ -208,15 +225,15 @@ impl DrawText2 {
             image.bounds_in_dpxs.size,
         )
         .transform(transform);
-        self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
-        self.rect_size = size_to_vec2(bounds_in_lpxs.size);
-        self.tex_index = match image.kind {
-            GlyphImageKind::Grayscale => 0.0,
-            GlyphImageKind::Color => 1.0,
+        self.rect_pos = point_to_vec2(bounds_in_lpxs.origin - Size::new(sdf::PADDING as f32 / cx.current_dpi_factor() as f32, sdf::PADDING as f32 / cx.current_dpi_factor() as f32));
+        self.rect_size = size_to_vec2(bounds_in_lpxs.size + Size::new(2.0 * sdf::PADDING as f32 / cx.current_dpi_factor() as f32, 2.0 * sdf::PADDING as f32 / cx.current_dpi_factor() as f32)); 
+        self.tex_index = match image.atlas_kind {
+            AtlasKind::Grayscale => 0.0,
+            AtlasKind::Color => 1.0,
         };
-        self.font_t1 = point_to_vec2(tex_coord(image.bounds.min(), image.atlas_size));
-        self.font_t2 = point_to_vec2(tex_coord(image.bounds.max(), image.atlas_size));
-        self.char_depth = 1.0; // TODO
+        self.font_t1 = point_to_vec2(tex_coord(image.atlas_bounds.min(), image.atlas_size));
+        self.font_t2 = point_to_vec2(tex_coord(image.atlas_bounds.max(), image.atlas_size));
+        self.char_depth += 1.0; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
         /*
