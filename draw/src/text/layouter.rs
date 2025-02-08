@@ -1,9 +1,9 @@
 use {
     super::{
-        font::{GlyphImage, Font, GlyphId},
+        font::{Font, GlyphId, GlyphImage},
+        font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
         font_loader::{FontDefinitions, FontLoader},
-        font_atlas::{ColorAtlas, GrayscaleAtlas},
         non_nan::NonNanF32,
         shaper::{ShapedGlyph, ShapedText},
         substr::Substr,

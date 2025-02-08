@@ -23,6 +23,15 @@ impl<T> Image<T> {
         }
     }
 
+    pub fn from_size_and_pixels(size: Size<usize>, pixels: Vec<T>) -> Self {
+        assert_eq!(size.width * size.height, pixels.len());
+        Self { size, pixels }
+    }
+
+    pub fn into_pixels(self) -> Vec<T> {
+        self.pixels
+    }
+
     pub fn is_empty(&self) -> bool {
         self.size() == Size::ZERO
     }
@@ -31,8 +40,12 @@ impl<T> Image<T> {
         self.size
     }
 
-    pub fn pixels(&self) -> &[T] {
+    pub fn as_pixels(&self) -> &[T] {
         &self.pixels
+    }
+
+    pub fn as_mut_pixels(&mut self) -> &mut [T] {
+        &mut self.pixels
     }
 
     pub fn subimage(&self, rect: Rect<usize>) -> Subimage<'_, T> {
@@ -87,8 +100,25 @@ impl<'a, T> Subimage<'a, T> {
         self.bounds().is_empty()
     }
 
+    pub fn size(&self) -> Size<usize> {
+        self.bounds().size
+    }
+
     pub fn bounds(&self) -> Rect<usize> {
         self.bounds
+    }
+
+    pub fn to_image(&self) -> Image<T>
+    where
+        T: Copy,
+    {
+        let mut pixels = Vec::with_capacity(self.size().width * self.size().height);
+        for y in 0..self.size().height {
+            for x in 0..self.size().width {
+                pixels.push(self[Point::new(x, y)]);
+            }
+        }
+        Image::from_size_and_pixels(self.size(), pixels)
     }
 }
 
@@ -113,6 +143,10 @@ pub struct SubimageMut<'a, T> {
 impl<'a, T> SubimageMut<'a, T> {
     pub fn is_empty(&self) -> bool {
         self.bounds().is_empty()
+    }
+
+    pub fn size(&self) -> Size<usize> {
+        self.bounds().size
     }
 
     pub fn bounds(&self) -> Rect<usize> {
