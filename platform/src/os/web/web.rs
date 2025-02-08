@@ -183,8 +183,14 @@ impl Cx {
                 }
                 
                 live_id!(ToWasmSignal) =>{
-                    self.handle_media_signals();
-                    self.call_event_handler(&Event::Signal);
+                    let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
+                    if tw.flags & 1 != 0{
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
+                    }
+                    if tw.flags & 2 != 0{
+                        self.handle_action_receiver();
+                    }
                 }
                 
                 live_id!(ToWasmTimerFired) => {
@@ -360,8 +366,8 @@ impl Cx {
         
         self.handle_platform_ops();
         self.handle_media_signals();
-        
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
+
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || self.demo_time_repaint{
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
         
@@ -526,6 +532,7 @@ impl Cx {
                 CxOsOp::SelectFileDialog(_) => todo!(),
                 CxOsOp::SaveFolderDialog(_) => todo!(),
                 CxOsOp::SelectFolderDialog(_) => todo!(),    
+                CxOsOp::ShowInDock(_) => {}
             }
         }
     }
@@ -632,6 +639,7 @@ impl CxOsApi for Cx {
         });
     }
     fn default_window_size(&self)->DVec2{self.os.window_geom.inner_size}
+    
     /*
     fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
@@ -766,12 +774,14 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
 #[export_name = "wasm_check_signal"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_check_signal() -> u32 {
+    let mut x = 0;
     if SignalToUI::check_and_clear_ui_signal(){
-        1
+        x |= 1
     }
-    else{
-        0
+    if SignalToUI::check_and_clear_action_signal(){
+        x |= 2
     }
+    x
 }
 
 #[export_name = "wasm_init_panic_hook"]

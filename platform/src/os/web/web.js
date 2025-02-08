@@ -500,8 +500,9 @@ export class WasmWebBrowser extends WasmBridge {
     
     start_signal_poll() {
         this.poll_timer = window.setInterval(e => {
-            if (this.exports.wasm_check_signal() == 1) {
-                this.to_wasm.ToWasmSignal();
+            let flags = this.exports.wasm_check_signal();
+            if (flags != 0) {
+                this.to_wasm.ToWasmSignal({flags});
                 this.do_wasm_pump();
             }
         }, 0.016 * 1000.0);

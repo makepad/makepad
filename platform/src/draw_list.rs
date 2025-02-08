@@ -64,7 +64,7 @@ impl std::ops::Index<DrawListId> for CxDrawListPool {
     fn index(&self, index: DrawListId) -> &Self::Output {
         let d = &self.0.pool[index.0];
         if d.generation != index.1 {
-            error!("Drawlist id generation wrong {} {} {}", index.0, d.generation, index.1)
+            error!("Drawlist id generation wrong index: {} current gen:{} in pointer:{}", index.0, d.generation, index.1)
         }
         &d.item
     }
@@ -85,16 +85,12 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
 #[derive(Default, Clone)]
 #[repr(C)]
 pub struct DrawUniforms {
-    //pub draw_clip_x1: f32,
-    //pub draw_clip_y1: f32,
-    //pub draw_clip_x2: f32,
-    //pub draw_clip_y2: f32,
-    //pub draw_scroll: Vec4,
     pub draw_zbias: f32,
     pub pad1: f32,
     pub pad2: f32,
-    pub pad3: f32
+    pub pad3: f32,
 }
+
 
 impl DrawUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawUniforms>()] {
@@ -206,10 +202,26 @@ impl CxDrawCall {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 #[repr(C)]
 pub struct CxDrawListUniforms {
     pub view_transform: [f32; 16],
+    pub view_clip: Vec4,
+    pub view_shift: Vec2,
+    pub pad1: f32,
+    pub pad2: f32       
+}
+
+impl Default for CxDrawListUniforms{
+    fn default()->Self{
+        Self{
+            view_transform: [0.0;16],
+            view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
+            view_shift: vec2(0.0,0.0),
+            pad1: 0.0,
+            pad2: 0.0,
+        }
+    }
 }
 
 impl CxDrawListUniforms {
@@ -275,6 +287,8 @@ pub struct CxDrawList {
     pub draw_items: CxDrawItems,
     
     pub draw_list_uniforms: CxDrawListUniforms,
+    pub draw_list_has_clip: bool,
+    
     pub os: CxOsView,
     pub rect_areas: Vec<CxRectArea>,
     pub find_appendable_draw_shader_id: Vec<u64>
