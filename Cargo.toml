@@ -16,6 +16,7 @@ workspace.members = [
     # "experiments/bigfish",
     "experiments/teamtalk",
     "experiments/huedmx",
+    "experiments/text_bare",
     "experiments/sdxl_remote",
     # === examples ===
     # "examples/bare_text",

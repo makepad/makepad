@@ -9,11 +9,15 @@ pub mod draw_list_2d;
 pub mod shader;
 pub mod turtle;
 pub mod font_atlas;
-pub mod font_cache;
+pub mod glyph_rasterizer;
 pub mod font_loader;
+pub mod sdf_glyph_rasterizer;
+pub mod svg_glyph_rasterizer;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
+pub mod text_shaper;
+
 mod owned_font_face;
  
 pub use crate::{

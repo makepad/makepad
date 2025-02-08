@@ -139,6 +139,7 @@ pub struct ToWasmTimerFired {
 
 #[derive(ToWasm)]
 pub struct ToWasmSignal {
+    pub flags:u32
 }
 
 #[derive(ToWasm)]
