@@ -1,11 +1,11 @@
 use {
     super::{
         font::{Font, FontId},
+        font_atlas::{ColorAtlas, FontAtlas, GrayscaleAtlas},
         font_data,
         font_face::FontFaceDefinition,
         font_family::{FontFamily, FontFamilyId},
         geom::Size,
-        font_atlas::{ColorAtlas, GrayscaleAtlas, FontAtlas},
         pixels::{Bgra, R},
         shaper::Shaper,
     },
@@ -113,7 +113,10 @@ impl Default for FontDefinitions {
                     ]
                     .into(),
                 ),
-                ("Monospace".into(), ["Liberation Mono Regular".into()].into()),
+                (
+                    "Monospace".into(),
+                    ["Liberation Mono Regular".into()].into(),
+                ),
             ]
             .into_iter()
             .collect(),

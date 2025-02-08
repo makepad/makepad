@@ -1,12 +1,12 @@
 use {
     super::{
+        font_atlas::{FontAtlas, GlyphImageKey},
         font_face::{FontFace, FontFaceDefinition},
         geom::{Point, Rect, Size},
-        font_atlas::{FontAtlas, GlyphImageKey},
         glyph_outline,
         glyph_outline::GlyphOutline,
-        pixels::{Bgra, R},
         glyph_raster_image::GlyphRasterImage,
+        pixels::{Bgra, R},
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -92,21 +92,25 @@ impl Font {
     }
 
     pub fn glyph_image(&self, glyph_id: GlyphId, dpx_per_em: f32) -> Option<GlyphImage> {
+        use super::{image::Image, sdf};
+
         if let Some(outline) = self.glyph_outline(glyph_id, dpx_per_em) {
             let mut atlas = self.grayscale_atlas.borrow_mut();
+            let mut coverage = Image::new(outline.image_size());
+            outline.rasterize(&mut coverage.subimage_mut(coverage.size().into()));
             let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
                 font_id: self.id.clone(),
                 glyph_id,
-                size: outline.image_size()
+                size: outline.image_size() + Size::new(2 * sdf::PADDING, 2 * sdf::PADDING),
             })?;
-            outline.rasterize(&mut image);
-            let bounds = image.bounds();
+            sdf::coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut image);
+            let atlas_bounds = image.bounds();
             return Some(GlyphImage {
                 bounds_in_dpxs: outline.bounds_in_pxs(),
                 dpxs_per_em: outline.dpxs_per_em(),
-                kind: GlyphImageKind::Grayscale,
+                atlas_kind: AtlasKind::Grayscale,
+                atlas_bounds,
                 atlas_size: atlas.size(),
-                bounds,
             });
         }
         if let Some(raster_image) = self.glyph_raster_image(glyph_id, dpx_per_em) {
@@ -114,16 +118,16 @@ impl Font {
             let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
                 font_id: self.id.clone(),
                 glyph_id,
-                size: raster_image.size()
+                size: raster_image.size(),
             })?;
             raster_image.decode(&mut image);
-            let bounds = image.bounds();
+            let atlas_bounds = image.bounds();
             return Some(GlyphImage {
                 bounds_in_dpxs: raster_image.bounds_in_pxs(),
                 dpxs_per_em: raster_image.dpxs_per_em(),
-                kind: GlyphImageKind::Color,
+                atlas_kind: AtlasKind::Color,
+                atlas_bounds,
                 atlas_size: atlas.size(),
-                bounds,
             });
         }
         None
@@ -150,13 +154,13 @@ pub type GlyphId = u16;
 pub struct GlyphImage {
     pub bounds_in_dpxs: Rect<f32>,
     pub dpxs_per_em: f32,
-    pub kind: GlyphImageKind,
-    pub bounds: Rect<usize>,
+    pub atlas_kind: AtlasKind,
+    pub atlas_bounds: Rect<usize>,
     pub atlas_size: Size<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum GlyphImageKind {
+pub enum AtlasKind {
     Grayscale,
     Color,
 }

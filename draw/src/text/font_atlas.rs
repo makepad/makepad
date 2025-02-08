@@ -1,5 +1,4 @@
 use {
-    std::collections::HashMap,
     super::{
         font::{FontId, GlyphId},
         geom::{Point, Rect, Size},
@@ -7,6 +6,7 @@ use {
         num::Zero,
         pixels::{Bgra, R},
     },
+    std::collections::HashMap,
 };
 
 #[derive(Clone, Debug)]
@@ -46,12 +46,18 @@ impl<T> FontAtlas<T> {
         self.image.subimage(dirty_rect)
     }
 
-    pub fn get_or_allocate_glyph_image(&mut self, key: GlyphImageKey) -> Option<SubimageMut<'_, T>> {
+    pub fn get_or_allocate_glyph_image(
+        &mut self,
+        key: GlyphImageKey,
+    ) -> Option<SubimageMut<'_, T>> {
         if !self.cached_glyph_image_rects.contains_key(&key) {
             let rect = self.allocate_glyph_image(key.size)?;
             self.cached_glyph_image_rects.insert(key.clone(), rect);
         }
-        self.cached_glyph_image_rects.get(&key).copied().map(|rect| self.image.subimage_mut(rect))
+        self.cached_glyph_image_rects
+            .get(&key)
+            .copied()
+            .map(|rect| self.image.subimage_mut(rect))
     }
 
     pub fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
