@@ -266,7 +266,7 @@ impl Tab {
         
         let mut block_hover_out = false;
         match self.close_button.handle_event(cx, event) {
-            TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
+            TabCloseButtonAction::WasPressed if self.closeable => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
             TabCloseButtonAction::HoverOut => self.animator_play(cx, id!(hover.off)),
             _ => ()
@@ -295,7 +295,7 @@ impl Tab {
                 // A primary click/touch selects the tab, but a middle click closes it.
                 if fde.is_primary_hit() {
                     dispatch_action(cx, TabAction::WasPressed);
-                } else if fde.mouse_button().is_some_and(|b| b.is_middle()) {
+                } else if self.closeable && fde.mouse_button().is_some_and(|b| b.is_middle()) {
                     dispatch_action(cx, TabAction::CloseWasPressed);
                 }
             }

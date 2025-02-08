@@ -165,7 +165,6 @@ impl MacosApp {
             }
         }
     }
-    
     pub fn init_quit_menu(&mut self){
         self.update_macos_menu(
             &MacosMenu::Main{items:vec![MacosMenu::Sub{
@@ -181,7 +180,17 @@ impl MacosApp {
         );
     }
     
-    
+    // Determines whether to show your application in the dock when it runs. The default value is true. 
+    pub fn show_in_dock(&mut self, show: bool)  {
+        unsafe{
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            if show {
+                let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
+            } else {
+                let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory as i64]; 
+            }
+        }
+    }
     pub fn update_macos_menu(&mut self, menu: &MacosMenu) {
         unsafe fn make_menu(
             parent_menu: ObjcId,
@@ -309,7 +318,7 @@ impl MacosApp {
         }
     }*/
     pub fn startup_focus_hack(&mut self) {
-        
+        return
         unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;

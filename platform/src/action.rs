@@ -1,5 +1,6 @@
 use crate::generate_any_trait_api;
 use crate::cx::Cx;
+use crate::thread::SignalToUI;
 use std::any::{TypeId};
 use std::fmt::Debug;
 use std::fmt;
@@ -95,6 +96,7 @@ impl Cx{
     /// so you cannot use `as_widget_action()` when handling this action.
     pub fn post_action(action:impl ActionTrait + Send + Sync){
         ACTION_SENDER_GLOBAL.lock().unwrap().as_mut().unwrap().send(Box::new(action)).unwrap();
+        SignalToUI::set_action_signal();
     }
     
     pub fn action(&mut self, action: impl ActionTrait){

@@ -138,11 +138,36 @@ pub enum Event {
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
 
+    /// The raw event that occurs when the user presses a mouse button down.
+    ///
+    /// Do not match upon or handle this event directly; instead, use the family of
+    /// `hit`` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerDown`].
     MouseDown(MouseDownEvent),
+    /// The raw event that occurs when the user moves the mouse.
+    ///
+    /// Do not match upon or handle this event directly; instead, use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit`].
     MouseMove(MouseMoveEvent),
+    /// The raw event that occurs when the user releases a previously-pressed mouse button.
+    ///
+    /// Do not match upon or handle this event directly; instead, use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerUp`].
     MouseUp(MouseUpEvent),
+    /// The raw event that occurs when the user moves the mouse outside of the window.
+    ///
+    /// Do not match upon or handle this event directly; instead, use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerOverOut`].
     MouseLeave(MouseLeaveEvent),
+    /// The raw event that occurs when the user touches the screen.
+    ///
+    /// Do not match upon or handle this event directly; instead, use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit`].
     TouchUpdate(TouchUpdateEvent),
+    /// The raw event that occurs when the user scrolls, e.g.,
+    /// by using the mouse wheel or a touch flick.
+    ///
+    /// Do not match upon or handle this event directly; instead use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerScroll`].
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
 
     Timer(TimerEvent),
@@ -330,6 +355,7 @@ impl Event{
 }
 
 
+#[derive(Debug)]
 pub enum Hit{
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
@@ -368,7 +394,6 @@ impl Event{
         match self{
             Self::MouseDown(_)|
             Self::MouseMove(_)|
-            Self::MouseUp(_)|
             Self::TouchUpdate(_)|
             Self::Scroll(_)=>true,
             _=>false
@@ -412,7 +437,12 @@ impl DrawEvent{
                 if vw == draw_list_id {
                     return true
                 }
-                next = cx.draw_lists[vw].codeflow_parent_id;
+                if let Some(n) = cx.draw_lists.checked_index(vw){
+                    next = n.codeflow_parent_id;
+                }
+                else{ // a drawlist in our redraw lists was reused
+                    break;
+                }
             }
         }
         // figure out if areas are in some way a parent of view_id, then redraw
@@ -422,7 +452,12 @@ impl DrawEvent{
                 if vw == *check_draw_list_id {
                     return true
                 }
-                next = cx.draw_lists[vw].codeflow_parent_id;
+                if let Some(n) = cx.draw_lists.checked_index(vw){
+                    next = n.codeflow_parent_id;
+                }
+                else{ // a drawlist in our redraw lists was reused
+                    break;
+                }
             }
         }
         false
