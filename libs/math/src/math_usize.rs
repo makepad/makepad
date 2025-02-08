@@ -68,7 +68,7 @@ impl Sub for PointUsize {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SizeUsize {
     pub width: usize,
     pub height: usize,
