@@ -117,7 +117,7 @@ impl Widget for MyWidget {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
+                        font_size_in_lpxs: NonNanF32::new(10.0).unwrap()
                     },
                     text: "繁😊😔 Moge je vader je moeder wezen. Lorem ipsum odor amet, consectetuer adipiscing elit. Laoreet ad elit odio taciti, dignissim ullamcor".into()
                 },
