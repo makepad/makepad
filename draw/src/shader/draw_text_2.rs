@@ -58,7 +58,7 @@ live_design! {
             let dyt = length(dFdy(p));
             let scale = (dxt + dyt) * 512.0 * 0.5;
 
-            let radius = 3.0;
+            let radius = 8.0;
             let cutoff = 0.25;
             let s = sample2d(self.grayscale_texture, p).x;
             s = clamp((s - (1.0 - cutoff)) * radius / scale + 0.5, 0.0, 1.0);
@@ -235,7 +235,7 @@ impl DrawText2 {
         };
         self.font_t1 = point_to_vec2(tex_coord(image.atlas_bounds.min(), image.atlas_size));
         self.font_t2 = point_to_vec2(tex_coord(image.atlas_bounds.max(), image.atlas_size));
-        self.char_depth += 1.0; // TODO
+        self.char_depth += 0.001; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
         /*
