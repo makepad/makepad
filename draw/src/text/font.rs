@@ -97,61 +97,71 @@ impl Font {
     }
 
     pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
-        use super::image::Image;
-
-        if let Some(outline) = self.glyph_outline(glyph_id) {
-            let size_in_dpxs = outline.size_in_dpxs(dpxs_per_em);
-            let largest_side_in_dpxs = size_in_dpxs.width.max(size_in_dpxs.height);
-            let largest_size_in_dpxs_rounded_up = ((largest_side_in_dpxs).ceil() as usize).next_power_of_two() as f32;
-            let scale = 2.0 * largest_size_in_dpxs_rounded_up / largest_side_in_dpxs;
-            let dpxs_per_em = dpxs_per_em * scale;
-            let mut coverage = Image::new(outline.image_size(dpxs_per_em));
-            outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(coverage.size().into()));
-            let mut sdfer = self.sdfer.borrow_mut();
-            let padding = sdfer.settings().padding;
-            let mut atlas = self.grayscale_atlas.borrow_mut();
-            let atlas_size = atlas.size();
-            let mut sdf = atlas.get_or_allocate_glyph_image(GlyphImageKey {
-                font_id: self.id.clone(),
-                glyph_id,
-                size: coverage.size() + Size::new(2 * padding, 2 * padding),
-            })?;
-            let atlas_bounds = sdf.bounds();
-            sdfer.coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut sdf);
-            drop(sdf);
-            drop(atlas);
-            drop(sdfer);
-            let bounds_in_dpxs = outline.bounds_in_dpxs(dpxs_per_em);
-            let bounds_in_dpxs = Rect::new(
-                bounds_in_dpxs.origin - Size::new(padding as f32, padding as f32),
-                bounds_in_dpxs.size + Size::new(2.0 * padding as f32, 2.0 * padding as f32),
-            );
-            return Some(RasterizedGlyph {
-                bounds_in_dpxs,
-                dpxs_per_em,
-                atlas_kind: AtlasKind::Grayscale,
-                atlas_bounds,
-                atlas_size,
-            });
-        }
-        if let Some(raster_image) = self.glyph_raster_image(glyph_id, dpxs_per_em) {
-            let mut atlas = self.color_atlas.borrow_mut();
-            let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
-                font_id: self.id.clone(),
-                glyph_id,
-                size: raster_image.decode_size(),
-            })?;
-            raster_image.decode(&mut image);
-            let atlas_bounds = image.bounds();
-            return Some(RasterizedGlyph {
-                bounds_in_dpxs: raster_image.bounds_in_pxs(),
-                dpxs_per_em: raster_image.dpxs_per_em(),
-                atlas_kind: AtlasKind::Color,
-                atlas_bounds,
-                atlas_size: atlas.size(),
-            });
+        if let Some(rasterized_glyph) = self.rasterize_glyph_outline(glyph_id, dpxs_per_em) {
+            return Some(rasterized_glyph);
+        };
+        if let Some(rasterized_glyph) = self.rasterize_glyph_raster_image(glyph_id, dpxs_per_em) {
+            return Some(rasterized_glyph);
         }
         None
+    }
+
+    fn rasterize_glyph_outline(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+        use super::image::Image;
+
+        let outline = self.glyph_outline(glyph_id)?;
+        let size_in_dpxs = outline.size_in_dpxs(dpxs_per_em);
+        let largest_side_in_dpxs = size_in_dpxs.width.max(size_in_dpxs.height);
+        let largest_size_in_dpxs_rounded_up = ((largest_side_in_dpxs).ceil() as usize).next_power_of_two() as f32;
+        let scale = 2.0 * largest_size_in_dpxs_rounded_up / largest_side_in_dpxs;
+        let dpxs_per_em = dpxs_per_em * scale;
+        let mut coverage = Image::new(outline.image_size(dpxs_per_em));
+        outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(coverage.size().into()));
+        let mut sdfer = self.sdfer.borrow_mut();
+        let padding = sdfer.settings().padding;
+        let mut atlas = self.grayscale_atlas.borrow_mut();
+        let atlas_size = atlas.size();
+        let mut sdf = atlas.get_or_allocate_glyph_image(GlyphImageKey {
+            font_id: self.id.clone(),
+            glyph_id,
+            size: coverage.size() + Size::new(2 * padding, 2 * padding),
+        })?;
+        let atlas_bounds = sdf.bounds();
+        sdfer.coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut sdf);
+        drop(sdf);
+        drop(atlas);
+        drop(sdfer);
+        let bounds_in_dpxs = outline.bounds_in_dpxs(dpxs_per_em);
+        let bounds_in_dpxs = Rect::new(
+            bounds_in_dpxs.origin - Size::new(padding as f32, padding as f32),
+            bounds_in_dpxs.size + Size::new(2.0 * padding as f32, 2.0 * padding as f32),
+        );
+        return Some(RasterizedGlyph {
+            bounds_in_dpxs,
+            dpxs_per_em,
+            atlas_kind: AtlasKind::Grayscale,
+            atlas_bounds,
+            atlas_size,
+        });
+    }
+
+    fn rasterize_glyph_raster_image(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+        let raster_image = self.glyph_raster_image(glyph_id, dpxs_per_em)?;
+        let mut atlas = self.color_atlas.borrow_mut();
+        let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
+            font_id: self.id.clone(),
+            glyph_id,
+            size: raster_image.decode_size(),
+        })?;
+        raster_image.decode(&mut image);
+        let atlas_bounds = image.bounds();
+        return Some(RasterizedGlyph {
+            bounds_in_dpxs: raster_image.bounds_in_pxs(),
+            dpxs_per_em: raster_image.dpxs_per_em(),
+            atlas_kind: AtlasKind::Color,
+            atlas_bounds,
+            atlas_size: atlas.size(),
+        });
     }
 }
 
