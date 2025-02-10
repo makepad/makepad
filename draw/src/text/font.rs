@@ -5,7 +5,7 @@ use {
         geom::{Rect, Size},
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
-        pixels::{Rgba, R},
+        image::{Rgba, R},
         sdfer::Sdfer,
     },
     makepad_rustybuzz as rustybuzz,
@@ -23,8 +23,8 @@ pub type FontId = Rc<str>;
 pub struct Font {
     id: FontId,
     sdfer: Rc<RefCell<Sdfer>>,
-    grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
-    color_atlas: Rc<RefCell<FontAtlas<Rgba<u8>>>>,
+    grayscale_atlas: Rc<RefCell<FontAtlas<R>>>,
+    color_atlas: Rc<RefCell<FontAtlas<Rgba>>>,
     face: FontFace,
 }
 
@@ -32,8 +32,8 @@ impl Font {
     pub fn new(
         id: FontId,
         sdfer: Rc<RefCell<Sdfer>>,
-        grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
-        color_atlas: Rc<RefCell<FontAtlas<Rgba<u8>>>>,
+        grayscale_atlas: Rc<RefCell<FontAtlas<R>>>,
+        color_atlas: Rc<RefCell<FontAtlas<Rgba>>>,
         face_definition: FontFaceDefinition,
     ) -> Option<Self> {
         Some(Self {
@@ -115,8 +115,10 @@ impl Font {
         let largest_size_in_dpxs_rounded_up = ((largest_side_in_dpxs).ceil() as usize).next_power_of_two() as f32;
         let scale = 2.0 * largest_size_in_dpxs_rounded_up / largest_side_in_dpxs;
         let dpxs_per_em = dpxs_per_em * scale;
+
         let mut coverage = Image::new(outline.image_size(dpxs_per_em));
         outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(coverage.size().into()));
+
         let mut sdfer = self.sdfer.borrow_mut();
         let padding = sdfer.settings().padding;
         let mut atlas = self.grayscale_atlas.borrow_mut();
@@ -124,20 +126,16 @@ impl Font {
         let mut sdf = atlas.get_or_allocate_glyph_image(GlyphImageKey {
             font_id: self.id.clone(),
             glyph_id,
-            size: coverage.size() + Size::new(2 * padding, 2 * padding),
+            size: coverage.size() + Size::from(padding) * 2,
         })?;
         let atlas_bounds = sdf.bounds();
         sdfer.coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut sdf);
         drop(sdf);
         drop(atlas);
         drop(sdfer);
-        let bounds_in_dpxs = outline.bounds_in_dpxs(dpxs_per_em);
-        let bounds_in_dpxs = Rect::new(
-            bounds_in_dpxs.origin - Size::new(padding as f32, padding as f32),
-            bounds_in_dpxs.size + Size::new(2.0 * padding as f32, 2.0 * padding as f32),
-        );
+
         return Some(RasterizedGlyph {
-            bounds_in_dpxs,
+            bounds_in_dpxs: outline.bounds_in_dpxs(dpxs_per_em).pad(padding as f32),
             dpxs_per_em,
             atlas_kind: AtlasKind::Grayscale,
             atlas_bounds,

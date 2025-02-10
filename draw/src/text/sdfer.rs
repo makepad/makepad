@@ -1,8 +1,5 @@
 use {
-    super::{
-        image::{Subimage, SubimageMut},
-        pixels::R,
-    },
+    super::image::{R, Subimage, SubimageMut},
     std::fmt,
 };
 
@@ -25,8 +22,8 @@ impl Sdfer {
 
     pub fn coverage_to_sdf(
         &mut self,
-        coverage: &Subimage<'_, R<u8>>,
-        output: &mut SubimageMut<'_, R<u8>>,
+        coverage: &Subimage<'_, R>,
+        output: &mut SubimageMut<'_, R>,
     ) {
         use {
             super::geom::{Point, Size},
@@ -35,7 +32,7 @@ impl Sdfer {
 
         assert_eq!(
             output.size() - coverage.size(),
-            Size::new(2 * self.settings.padding, 2 * self.settings.padding),
+            Size::from(self.settings.padding) * 2,
         );
         let mut pixels = Vec::with_capacity(coverage.size().width * coverage.size().height);
         for y in 0..coverage.size().height {
