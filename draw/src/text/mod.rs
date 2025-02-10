@@ -15,13 +15,15 @@ pub mod num;
 pub mod sdfer;
 pub mod shaper;
 pub mod substr;
+pub mod text;
 
 #[cfg(test)]
 mod tests {
     use {
         super::*,
         font_loader::FontDefinitions,
-        layouter::{LayoutOptions, LayoutParams, Layouter, Settings, Span, Style, Text},
+        layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
+        text::{Span, Style, Text},
         non_nan::NonNanF32,
         std::{fs::File, io::BufWriter, rc::Rc},
     };

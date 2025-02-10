@@ -2,7 +2,7 @@ use {
     super::{
         font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
-        font_family::{FontFamily, FontFamilyId},
+        font_family::FontFamily,
         font_loader,
         font_loader::{FontDefinitions, FontLoader},
         geom::Size,
@@ -10,6 +10,7 @@ use {
         sdfer, shaper,
         shaper::{ShapedGlyph, ShapedText},
         substr::Substr,
+        text::{Text, Span},
     },
     std::{
         cell::RefCell,
@@ -284,29 +285,6 @@ impl Default for LayoutOptions {
             max_width_in_lpxs: NonNanF32::new(f32::INFINITY).unwrap(),
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Text {
-    pub spans: Vec<Span>,
-}
-
-impl Text {
-    pub fn push_span(&mut self, span: Span) {
-        self.spans.push(span);
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Span {
-    pub style: Style,
-    pub text: Substr,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Style {
-    pub font_family_id: FontFamilyId,
-    pub font_size_in_lpxs: NonNanF32,
 }
 
 #[derive(Clone, Debug, Default)]
