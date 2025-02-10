@@ -1,5 +1,6 @@
 use {
     self::super::open_ai_data::*,
+    self::super::google_ai_data::*,
     crate::{
         app::AppAction,
         file_system::file_system::{FileSystem,OpenDocument},
@@ -22,24 +23,34 @@ impl Default for AiChatManager{
                 AiModel{
                     name: "local".to_string(),
                     backend: AiBackend::OpenAI{
-                        url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
+                        url:"http://10.0.0.113:8080/v1/chat/completions".to_string(),
                         model:"".to_string(),
+                        reasoning_effort: None,
                         key:"".to_string()
                     }
                 },
                 AiModel{
-                    name:"gpt-4o".to_string(),
+                    name: "gemini 2.0 pro".to_string(),
+                    backend: AiBackend::Google{
+                        url:"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:streamGenerateContent?alt=sse&key=".to_string(),
+                        key:std::fs::read_to_string("GOOGLE_KEY").unwrap_or("".to_string())
+                    }
+                },
+                AiModel{
+                    name:"o3-mini".to_string(),
                     backend: AiBackend::OpenAI{
                         url: OPENAI_DEFAULT_URL.to_string(),
-                        model: "gpt-4o".to_string(),
+                        model: "o3-mini".to_string(),
+                        reasoning_effort: Some("high".to_string()),
                         key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
                     },
                 },
                 AiModel{
-                    name: "gpt-4o-mini".to_string(),
+                    name: "gpt-4o".to_string(),
                     backend: AiBackend::OpenAI{
                         url: OPENAI_DEFAULT_URL.to_string(),
-                        model: "gpt-4o-mini".to_string(),
+                        reasoning_effort: None,
+                        model: "gpt-4o".to_string(),
                         key: std::fs::read_to_string("OPENAI_KEY").unwrap_or("".to_string())
                     },
                 },
@@ -146,11 +157,16 @@ pub struct AiModel{
     pub backend: AiBackend
 }
 
-#[derive(Debug, SerRon, DeRon)]
+#[derive(Clone, Debug, SerRon, DeRon)]
 pub enum AiBackend{
+    Google{
+        url:String, 
+        key: String,
+    },
     OpenAI{
         url:String, 
         model:String,
+        reasoning_effort: Option<String>,
         key: String,
     }
 }
@@ -242,6 +258,7 @@ pub struct AiChatFile{
 #[derive(Debug)]
 pub struct AiInFlight{
     request_id: LiveId,
+    backend: AiBackend,
     history_slot: usize
 }
 
@@ -401,31 +418,63 @@ impl AiChatManager{
                         }
                         NetworkResponse::HttpStreamResponse(res)=>{
                             let data = res.get_string_body().unwrap();
+                                                        
                             let mut changed = false;
-                            for data in data.split("\n\n"){
-                                if let Some(data) = data.strip_prefix("data: "){
-                                    if data != "[DONE]"{
-                                        match ChatResponse::deserialize_json(data){
-                                            Ok(chat_response)=>{
-                                                if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
-                                                    if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
-                                                        if let Some(AiChatMessage::Assistant(s)) = msg.messages.last_mut(){
-                                                            s.push_str(&content);
-                                                        }
-                                                        else{
-                                                            msg.messages.push(AiChatMessage::Assistant(content.clone()))
+                            match in_flight.backend{
+                                AiBackend::OpenAI{..}=>{
+                                    for data in data.split("\n\n"){
+                                        if let Some(data) = data.strip_prefix("data: "){
+                                            if data != "[DONE]"{
+                                                match OpenAiChatResponse::deserialize_json(data){
+                                                    Ok(chat_response)=>{
+                                                        if let Some(content) = &chat_response.choices[0].delta.as_ref().unwrap().content{
+                                                            if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
+                                                                if let Some(AiChatMessage::Assistant(s)) = msg.messages.last_mut(){
+                                                                    s.push_str(&content);
+                                                                }
+                                                                else{
+                                                                    msg.messages.push(AiChatMessage::Assistant(content.clone()))
+                                                                }
+                                                            }
+                                                            changed = true;
                                                         }
                                                     }
-                                                    changed = true;
+                                                    Err(e)=>{
+                                                        println!("JSon parse error {:?} {}", e, data);
+                                                    }
                                                 }
-                                            }
-                                            Err(e)=>{
-                                                println!("JSon parse error {:?} {}", e, data);
                                             }
                                         }
                                     }
                                 }
+                                AiBackend::Google{..}=>{
+                                    for data in data.split("\n\n"){
+                                        if let Some(data) = data.strip_prefix("data: "){
+                                            match GoogleAiResponse::deserialize_json(&data){
+                                                Ok(response)=>{
+                                                    for candidate in &response.candidates{
+                                                        for part in &candidate.content.parts{
+                                                            if let Some(msg) = doc.file.history.get_mut(in_flight.history_slot){
+                                                                if let Some(AiChatMessage::Assistant(s)) = msg.messages.last_mut(){
+                                                                    s.push_str(&part.text);
+                                                                }
+                                                                else{
+                                                                    msg.messages.push(AiChatMessage::Assistant(part.text.clone()))
+                                                                }
+                                                            }
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                }
+                                                Err(e)=>{
+                                                    println!("JSon parse error {:?} {}", e, data);
+                                                }
+                                            }
+                                        }   
+                                    }
+                                }
                             }
+
                             if changed{
                                 cx.action(AppAction::RedrawAiChat{chat_id});
                                 cx.action(AppAction::SaveAiChat{chat_id});
@@ -533,9 +582,9 @@ impl AiChatManager{
     
     pub fn send_chat_to_backend(&mut self, cx: &mut Cx, chat_id:LiveId, history_slot:usize, fs:&mut FileSystem) {
         // build the request
-        let request = if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
+        let (request,backend) = if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
             // alright lets fetch which backend we want
-            let model = if let Some(AiChatMessage::User(msg)) = doc.file.history[history_slot].messages.last(){
+            let ai_model = if let Some(AiChatMessage::User(msg)) = doc.file.history[history_slot].messages.last(){
                 if let Some(backend) = self.models.iter().find(|v| v.name == msg.model){
                     backend
                 }
@@ -546,8 +595,8 @@ impl AiChatManager{
             else{
                 self.models.first().unwrap()
             };
-            match &model.backend{
-                AiBackend::OpenAI{url, model, key}=>{
+            match &ai_model.backend{
+                AiBackend::OpenAI{url, model, key, reasoning_effort}=>{
                     
                     let mut request = HttpRequest::new(url.clone(), HttpMethod::POST);
                     request.set_is_streaming();
@@ -575,7 +624,7 @@ impl AiChatManager{
                                     general_post = ctx.general_post;
                                     
                                     if let Some(text) = html.find_tag_text(ctx.system_pre){
-                                        messages.push(ChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                        messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
                                     }
                                         
                                     for file in &ctx.files{
@@ -587,47 +636,124 @@ impl AiChatManager{
                                                 content.push_str("```rust\n");
                                                 content.push_str(&text);
                                                 content.push_str("```\n");
-                                                 messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                                                 messages.push(OpenAiChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
                                             }
                                         }
                                     }
                                 }
-                               /* if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
+                                messages.push(OpenAiChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                
+                                if let Some(text) = html.find_tag_text(system_post){
+                                    messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                }
+                                if let Some(text) = html.find_tag_text(general_post){
+                                    messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                }
+                            }
+                            AiChatMessage::Assistant(v)=>{
+                                messages.push(OpenAiChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})
+                            }
+                        }
+                    }
+                    request.set_json_body(OpenAiChatPrompt {
+                        messages,
+                        model: model.to_string(),
+                        reasoning_effort:reasoning_effort.clone(),
+                        max_tokens: 10000,
+                        stream: true,
+                    });
+                    (request, ai_model.backend.clone())
+                }
+                AiBackend::Google{url, key}=>{
+                    let mut request = HttpRequest::new(format!("{}{}", url.clone(),key), HttpMethod::POST);
+                    request.set_is_streaming();
+                    request.set_header("Content-Type".to_string(), "application/json".to_string());
+                    request.set_metadata_id(chat_id); 
+                    let mut contents = Vec::new();
+                    for msg in &doc.file.history[history_slot].messages{
+                        match msg{
+                            AiChatMessage::User(v)=>{
+                                let doc = fs.file_path_as_string(AI_PROMPT_FILE).unwrap();
+                                // parse it as html
+                                let html = makepad_html::parse_html(&doc, &mut None, InternLiveId::No);
+                                let html = html.new_walker();
+                                
+                                // alright. we have to now collect our base context files
+                                // ok lets find these files
+                                let mut system_post = LiveId(0);
+                                let mut general_post = LiveId(0);
+                                                                                                
+                                if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
+                                    // alright lets fetch things
+                                    system_post = ctx.system_post;
+                                    general_post = ctx.general_post;
+                                                                        
+                                    if let Some(text) = html.find_tag_text(ctx.system_pre){
+                                        contents.push(GoogleAiContent {
+                                            parts: vec![GoogleAiPart{
+                                                text:text.to_string()
+                                            }],
+                                            role: Some("user".to_string()), 
+                                        });
+                                    }
+                                                                            
                                     for file in &ctx.files{
                                         if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
                                                 let mut content = String::new();
                                                 let text = doc.as_text().to_string();
-                                                content.push_str(&format!("\n Now follows a user project file with description ```{}```. The filename is ```{}```\n", file.kind, file.path));
+                                                content.push_str(&format!("\n Now follows a context file with description: ```{}``` given as context to help generating correct code. The filename is ```{}```\n",file.kind, file.path));
                                                 content.push_str("```rust\n");
                                                 content.push_str(&text);
                                                 content.push_str("```\n");
-                                                messages.push(ChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
+                                                contents.push(GoogleAiContent {
+                                                    parts: vec![GoogleAiPart{
+                                                        text:content.to_string()
+                                                    }],
+                                                    role: Some("user".to_string()), 
+                                                });
                                             }
                                         }
                                     }
-                                }*/
-                                messages.push(ChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
-                                
+                                }
+                                contents.push(GoogleAiContent {
+                                    parts: vec![GoogleAiPart{
+                                        text:v.message.clone()
+                                    }],
+                                    role: Some("user".to_string()), 
+                                });
+                                                                
                                 if let Some(text) = html.find_tag_text(system_post){
-                                    messages.push(ChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                    contents.push(GoogleAiContent {
+                                        parts: vec![GoogleAiPart{
+                                            text:text.to_string()
+                                        }],
+                                        role: Some("user".to_string()), 
+                                    });
                                 }
                                 if let Some(text) = html.find_tag_text(general_post){
-                                    messages.push(ChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                    contents.push(GoogleAiContent {
+                                        parts: vec![GoogleAiPart{
+                                            text:text.to_string()
+                                        }],
+                                        role: Some("user".to_string()), 
+                                    });
                                 }
                             }
                             AiChatMessage::Assistant(v)=>{
-                                messages.push(ChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})
+                                contents.push(GoogleAiContent {
+                                    parts: vec![GoogleAiPart{
+                                        text:v.to_string()
+                                    }],
+                                    role: Some("model".to_string()), 
+                                });
                             }
                         }
                     }
-                    request.set_json_body(ChatPrompt {
-                        messages,
-                        model: model.to_string(),
-                        max_tokens: 10000,
-                        stream: true,
+                    request.set_json_body(GoogleAiChatPrompt {
+                        contents,
                     });
-                    request
+                    (request, ai_model.backend.clone())
                 }
             }
         }
@@ -644,6 +770,7 @@ impl AiChatManager{
             doc.file.history[history_slot].messages.push(AiChatMessage::Assistant("".to_string()));
             doc.in_flight = Some(AiInFlight{
                 history_slot,
+                backend,
                 request_id
             });
             cx.http_request(request_id, request);
