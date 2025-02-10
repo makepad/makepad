@@ -57,7 +57,7 @@ live_design! {
             let dxt = length(dFdx(p));
             let dyt = length(dFdy(p));
             let scale = (dxt + dyt) * 512.0 * 0.5;
-            
+
             let radius = 3.0;
             let cutoff = 0.25;
             let s = sample2d(self.grayscale_texture, p).x;
@@ -201,7 +201,7 @@ impl DrawText2 {
         font_size_in_lpxs: f32,
         output: &mut Vec<f32>,
     ) {
-        use crate::text::sdf;
+        use crate::text::sdfer;
 
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
@@ -220,13 +220,15 @@ impl DrawText2 {
 
         let transform = Transformation::scaling_uniform(font_size_in_lpxs / image.dpxs_per_em)
             .translate(p.x, p.y);
-        let bounds_in_lpxs = Rect::new(
-            Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y),
-            image.bounds_in_dpxs.size,
-        )
-        .transform(transform);
-        self.rect_pos = point_to_vec2(bounds_in_lpxs.origin - Size::new(sdf::PADDING as f32 / cx.current_dpi_factor() as f32, sdf::PADDING as f32 / cx.current_dpi_factor() as f32));
-        self.rect_size = size_to_vec2(bounds_in_lpxs.size + Size::new(2.0 * sdf::PADDING as f32 / cx.current_dpi_factor() as f32, 2.0 * sdf::PADDING as f32 / cx.current_dpi_factor() as f32)); 
+        let bounds_in_dpxs = Rect::new(
+            Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y)
+                - Size::new(sdfer::PADDING as f32, sdfer::PADDING as f32),
+            image.bounds_in_dpxs.size
+                + Size::new(2.0 * sdfer::PADDING as f32, 2.0 * sdfer::PADDING as f32),
+        );
+        let bounds_in_lpxs = bounds_in_dpxs.transform(transform);
+        self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
+        self.rect_size = size_to_vec2(bounds_in_lpxs.size);
         self.tex_index = match image.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
