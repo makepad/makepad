@@ -19,8 +19,8 @@ impl Sdfer {
         }
     }
 
-    pub fn settings(&self) -> &Settings {
-        &self.settings
+    pub fn settings(&self) -> Settings {
+        self.settings
     }
 
     pub fn coverage_to_sdf(
@@ -49,6 +49,8 @@ impl Sdfer {
             &mut coverage,
             Params {
                 pad: self.settings.padding,
+                radius: self.settings.radius,
+                cutoff: self.settings.cutoff,
                 ..Params::default()
             },
             self.reusable_buffers.take(),
@@ -71,6 +73,6 @@ impl fmt::Debug for Sdfer {
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub padding: usize,
-    pub radius: f64,
-    pub cutoff: f64,
+    pub radius: f32,
+    pub cutoff: f32,
 }
