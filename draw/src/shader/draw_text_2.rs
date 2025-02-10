@@ -7,7 +7,8 @@ use {
         text::{
             font::{AtlasKind, RasterizedGlyph},
             geom::{Point, Rect, Size, Transform},
-            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Text},
+            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
+            text::Text,
             non_nan::NonNanF32,
         },
     },
