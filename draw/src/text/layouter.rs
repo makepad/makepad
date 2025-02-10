@@ -5,12 +5,12 @@ use {
         font_family::FontFamily,
         font_loader,
         font_loader::{FontDefinitions, FontLoader},
-        geom::Size,
+        geom::{Point, Size},
         non_nan::NonNanF32,
         sdfer, shaper,
         shaper::{ShapedGlyph, ShapedText},
         substr::Substr,
-        text::{Text, Span},
+        text::{Span, Text},
     },
     std::{
         cell::RefCell,
@@ -293,6 +293,18 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
+    pub fn walk_rows(&self, point_in_lpxs: Point<f32>, f: impl FnMut(Point<f32>, &LaidoutRow)) {
+        let mut point_in_lpxs = point_in_lpxs;
+        let mut f = f;
+        for (index, row) in self.rows.iter().enumerate() {
+            if index > 0 {
+                point_in_lpxs.y += row.ascender_in_lpxs;
+            }
+            f(point_in_lpxs, row);
+            point_in_lpxs.y += row.line_gap_in_lpxs - row.descender_in_lpxs;
+        }
+    }
+
     pub fn push_row(&mut self, row: LaidoutRow) {
         self.rows.push(row);
     }
@@ -307,6 +319,15 @@ pub struct LaidoutRow {
 }
 
 impl LaidoutRow {
+    pub fn walk_glyphs(&self, point_in_lpxs: Point<f32>, f: impl FnMut(Point<f32>, &LaidoutGlyph)) {
+        let mut point_in_lpxs = point_in_lpxs;
+        let mut f = f;
+        for glyph in &self.glyphs {
+            f(point_in_lpxs, glyph);
+            point_in_lpxs.x += glyph.advance_in_lpxs;
+        }
+    }
+
     pub fn push_glyph(&mut self, glyph: LaidoutGlyph) {
         self.ascender_in_lpxs = self.ascender_in_lpxs.max(glyph.ascender_in_lpxs());
         self.descender_in_lpxs = self.descender_in_lpxs.max(glyph.descender_in_lpxs());
@@ -348,7 +369,7 @@ impl LaidoutGlyph {
         self.font.line_gap_in_ems() * self.font_size_in_lpxs
     }
 
-    pub fn allocate(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
+    pub fn rasterize(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
         self.font.rasterize_glyph(self.id, dpx_per_em)
     }
 }

@@ -23,9 +23,9 @@ mod tests {
         super::*,
         font_loader::FontDefinitions,
         layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
-        text::{Span, Style, Text},
         non_nan::NonNanF32,
         std::{fs::File, io::BufWriter, rc::Rc},
+        text::{Span, Style, Text},
     };
 
     #[test]
