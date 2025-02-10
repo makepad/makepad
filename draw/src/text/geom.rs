@@ -14,7 +14,7 @@ impl<T> Point<T> {
         Self { x, y }
     }
 
-    pub fn transform(self, t: Transformation<T>) -> Self
+    pub fn apply_transform(self, t: Transform<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
     {
@@ -82,7 +82,7 @@ impl<T> Size<T> {
         Self { width, height }
     }
 
-    pub fn transform(self, t: Transformation<T>) -> Self
+    pub fn apply_transform(self, t: Transform<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
     {
@@ -104,9 +104,29 @@ where
     }
 }
 
+impl<T> From<T> for Size<T>
+where 
+    T: Copy
+{
+    fn from(scalar: T) -> Self {
+        Self::new(scalar, scalar)
+    }
+}
+
 impl<T> From<Point<T>> for Size<T> {
     fn from(point: Point<T>) -> Self {
         Self::new(point.x, point.y)
+    }
+}
+
+impl<T> Mul<T> for Size<T>
+where
+    T: Mul<Output = T> + Copy,
+{
+    type Output = Self;
+
+    fn mul(self, scalar: T) -> Self::Output {
+        Self::new(self.width * scalar, self.height * scalar)
     }
 }
 
@@ -146,20 +166,6 @@ impl<T> Rect<T> {
         self.size == Size::ZERO
     }
 
-    pub fn min(self) -> Point<T>
-    where
-        T: Copy,
-    {
-        self.origin
-    }
-
-    pub fn max(self) -> Point<T>
-    where
-        T: Add<Output = T> + Copy,
-    {
-        self.origin + self.size
-    }
-
     pub fn contains_point(self, point: Point<T>) -> bool
     where
         T: Add<Output = T> + Copy + Ord,
@@ -186,11 +192,35 @@ impl<T> Rect<T> {
         true
     }
 
-    pub fn transform(self, t: Transformation<T>) -> Self
+    pub fn min(self) -> Point<T>
+    where
+        T: Copy,
+    {
+        self.origin
+    }
+
+    pub fn max(self) -> Point<T>
+    where
+        T: Add<Output = T> + Copy,
+    {
+        self.origin + self.size
+    }
+
+    pub fn pad(self, padding: Size<T>) -> Self
+    where
+        T: Add<Output = T> + Copy + Sub<Output = T>,
+    {
+        Self::new(
+            self.origin - padding,
+            self.size + padding + padding,
+        )
+    }
+
+    pub fn apply_transform(self, t: Transform<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
     {
-        Self::new(self.origin.transform(t), self.size.transform(t))
+        Self::new(self.origin.apply_transform(t), self.size.apply_transform(t))
     }
 
     pub fn union(self, other: Self) -> Self
@@ -226,7 +256,7 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Transformation<T> {
+pub struct Transform<T> {
     pub xx: T,
     pub xy: T,
     pub yx: T,
@@ -235,7 +265,7 @@ pub struct Transformation<T> {
     pub ty: T,
 }
 
-impl<T> Transformation<T> {
+impl<T> Transform<T> {
     pub fn identity() -> Self
     where
         T: One + Zero,
@@ -250,7 +280,7 @@ impl<T> Transformation<T> {
         }
     }
 
-    pub fn scaling(sx: T, sy: T) -> Self
+    pub fn from_scale(sx: T, sy: T) -> Self
     where
         T: Zero,
     {
@@ -264,14 +294,14 @@ impl<T> Transformation<T> {
         }
     }
 
-    pub fn scaling_uniform(s: T) -> Self
+    pub fn from_scale_uniform(s: T) -> Self
     where
         T: Copy + Zero,
     {
-        Self::scaling(s, s)
+        Self::from_scale(s, s)
     }
 
-    pub fn translation(tx: T, ty: T) -> Self
+    pub fn from_translate(tx: T, ty: T) -> Self
     where
         T: One + Zero,
     {
@@ -332,7 +362,7 @@ impl<T> Transformation<T> {
     }
 }
 
-impl<T> Default for Transformation<T>
+impl<T> Default for Transform<T>
 where
     T: One + Zero,
 {

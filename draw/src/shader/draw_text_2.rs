@@ -6,7 +6,7 @@ use {
         makepad_platform::*,
         text::{
             font::{AtlasKind, RasterizedGlyph},
-            geom::{Point, Rect, Size, Transformation},
+            geom::{Point, Rect, Size, Transform},
             layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Text},
             non_nan::NonNanF32,
         },
@@ -218,13 +218,13 @@ impl DrawText2 {
             vec2(point.width, point.height)
         }
 
-        let transform = Transformation::scaling_uniform(font_size_in_lpxs / image.dpxs_per_em)
+        let transform = Transform::from_scale_uniform(font_size_in_lpxs / image.dpxs_per_em)
             .translate(p.x, p.y);
         let bounds_in_dpxs = Rect::new(
             Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y),
             image.bounds_in_dpxs.size,
         );
-        let bounds_in_lpxs = bounds_in_dpxs.transform(transform);
+        let bounds_in_lpxs = bounds_in_dpxs.apply_transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
         self.tex_index = match image.atlas_kind {
