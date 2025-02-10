@@ -20,6 +20,9 @@ live_design! {
     pub DrawText2 = {{DrawText2}} {
         color: #fff
 
+        uniform radius: float;
+        uniform cutoff: float;
+
         texture grayscale_texture: texture2d
         texture color_texture: texture2d
 
@@ -54,10 +57,8 @@ live_design! {
         }
 
         fn sdf(self, scale: float, p: vec2) -> float {
-            let radius = 3.0;
-            let cutoff = 0.25;
             let s = sample2d(self.grayscale_texture, p).x;
-            s = clamp((s - (1.0 - cutoff)) * radius / scale + 0.5, 0.0, 1.0);
+            s = clamp((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5, 0.0, 1.0);
             return s;
         }
 
@@ -134,6 +135,9 @@ impl DrawText2 {
 
     fn draw_laidout_text(&mut self, cx: &mut Cx2d<'_>, p: Point<f32>, text: Rc<LaidoutText>) {
         let fonts = cx.fonts.borrow_mut();
+        let settings = fonts.sdfer().borrow().settings();
+        self.draw_vars.user_uniforms[0] = settings.radius;
+        self.draw_vars.user_uniforms[1] = settings.cutoff;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);

@@ -5,9 +5,10 @@ use {
         layouter,
         layouter::{LaidoutText, LayoutParams, Layouter},
         pixels::Bgra,
+        sdfer::Sdfer,
     },
     makepad_platform::*,
-    std::rc::Rc,
+    std::{cell::RefCell, rc::Rc},
 };
 
 #[derive(Debug)]
@@ -52,6 +53,10 @@ impl Fonts {
                 },
             ),
         }
+    }
+
+    pub fn sdfer(&self) -> &Rc<RefCell<Sdfer>> {
+        self.layouter.sdfer()
     }
 
     pub fn grayscale_texture(&self) -> &Texture {
