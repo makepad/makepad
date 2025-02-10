@@ -12,36 +12,34 @@ use {
     },
 };
 
-const CACHE_SIZE: usize = 1024;
-
 #[derive(Debug)]
 pub struct Shaper {
     reusable_shaped_glyphs: Vec<Vec<ShapedGlyph>>,
     reusable_unicode_buffer: UnicodeBuffer,
     cache_size: usize,
-    cached_shape_params: VecDeque<ShapeParams>,
+    cached_params: VecDeque<ShapeParams>,
     cached_shaped_texts: HashMap<ShapeParams, Rc<ShapedText>>,
 }
 
 impl Shaper {
-    pub fn new() -> Self {
+    pub fn new(settings: Settings) -> Self {
         Self {
             reusable_shaped_glyphs: Vec::new(),
             reusable_unicode_buffer: UnicodeBuffer::new(),
-            cache_size: CACHE_SIZE,
-            cached_shape_params: VecDeque::with_capacity(CACHE_SIZE),
-            cached_shaped_texts: HashMap::with_capacity(CACHE_SIZE),
+            cache_size: settings.cache_size,
+            cached_params: VecDeque::with_capacity(settings.cache_size),
+            cached_shaped_texts: HashMap::with_capacity(settings.cache_size),
         }
     }
 
     pub fn get_or_shape(&mut self, params: ShapeParams) -> Rc<ShapedText> {
         if !self.cached_shaped_texts.contains_key(&params) {
-            if self.cached_shape_params.len() == self.cache_size {
-                let params = self.cached_shape_params.pop_front().unwrap();
+            if self.cached_params.len() == self.cache_size {
+                let params = self.cached_params.pop_front().unwrap();
                 self.cached_shaped_texts.remove(&params);
             }
             let text: ShapedText = self.shape(params.clone());
-            self.cached_shape_params.push_back(params.clone());
+            self.cached_params.push_back(params.clone());
             self.cached_shaped_texts
                 .insert(params.clone(), Rc::new(text));
         }
@@ -144,6 +142,11 @@ impl Shaper {
         );
         self.reusable_unicode_buffer = glyph_buffer.clear();
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub cache_size: usize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

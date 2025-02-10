@@ -7,7 +7,9 @@ use {
         font_family::{FontFamily, FontFamilyId},
         geom::Size,
         pixels::{Bgra, R},
+        sdfer,
         sdfer::Sdfer,
+        shaper,
         shaper::Shaper,
     },
     std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
@@ -24,16 +26,13 @@ pub struct FontLoader {
     font_cache: HashMap<FontId, Rc<Font>>,
 }
 
-const GRAYSCALE_ATLAS_SIZE: Size<usize> = Size::new(512, 512);
-const COLOR_ATLAS_SIZE: Size<usize> = Size::new(512, 512);
-
 impl FontLoader {
-    pub fn new(definitions: FontDefinitions) -> Self {
+    pub fn new(definitions: FontDefinitions, settings: Settings) -> Self {
         Self {
-            shaper: Rc::new(RefCell::new(Shaper::new())),
-            grayscale_atlas: Rc::new(RefCell::new(FontAtlas::new(GRAYSCALE_ATLAS_SIZE))),
-            color_atlas: Rc::new(RefCell::new(FontAtlas::new(COLOR_ATLAS_SIZE))),
-            sdfer: Rc::new(RefCell::new(Sdfer::new())),
+            shaper: Rc::new(RefCell::new(Shaper::new(settings.shaper))),
+            sdfer: Rc::new(RefCell::new(Sdfer::new(settings.sdfer))),
+            grayscale_atlas: Rc::new(RefCell::new(FontAtlas::new(settings.grayscale_atlas_size))),
+            color_atlas: Rc::new(RefCell::new(FontAtlas::new(settings.grayscale_atlas_size))),
             definitions,
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
@@ -82,20 +81,28 @@ impl FontLoader {
     }
 
     fn load_font(&mut self, font_id: FontId) -> Font {
-        let definition = self
+        let face_definition = self
             .definitions
             .faces
             .remove(&font_id)
             .unwrap_or_else(|| panic!("font {} is not defined", font_id));
         Font::new(
             font_id.clone(),
+            self.sdfer.clone(),
             self.grayscale_atlas.clone(),
             self.color_atlas.clone(),
-            self.sdfer.clone(),
-            definition,
+            face_definition,
         )
         .unwrap_or_else(|| panic!("failed to create font {} from definition", font_id))
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub shaper: shaper::Settings,
+    pub sdfer: sdfer::Settings,
+    pub grayscale_atlas_size: Size<usize>,
+    pub color_atlas_size: Size<usize>,
 }
 
 #[derive(Clone, Debug)]
