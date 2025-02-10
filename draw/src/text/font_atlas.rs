@@ -2,9 +2,8 @@ use {
     super::{
         font::{FontId, GlyphId},
         geom::{Point, Rect, Size},
-        image::{Image, Subimage, SubimageMut},
+        image::{Image, Subimage, SubimageMut, Rgba, R},
         num::Zero,
-        pixels::{Rgba, R},
     },
     std::collections::HashMap,
 };
@@ -81,8 +80,8 @@ impl<T> FontAtlas<T> {
     }
 }
 
-pub type GrayscaleAtlas = FontAtlas<R<u8>>;
-pub type ColorAtlas = FontAtlas<Rgba<u8>>;
+pub type GrayscaleAtlas = FontAtlas<R>;
+pub type ColorAtlas = FontAtlas<Rgba>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GlyphImageKey {
