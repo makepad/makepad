@@ -119,7 +119,7 @@ impl Widget for MyWidget {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
                     },
-                    text: "Lorem ipsum odor amet, consectetuer adipiscing elit. Laoreet ad elit odio taciti, dignissim ullamcor".into()
+                    text: "繁😊😔 Moge je vader je moeder wezen. Lorem ipsum odor amet, consectetuer adipiscing elit. Laoreet ad elit odio taciti, dignissim ullamcor".into()
                 },
             ],
         }));

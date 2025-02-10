@@ -23,18 +23,18 @@ pub type FontId = Rc<str>;
 #[derive(Debug)]
 pub struct Font {
     id: FontId,
+    sdfer: Rc<RefCell<Sdfer>>,
     grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
     color_atlas: Rc<RefCell<FontAtlas<Bgra<u8>>>>,
-    sdfer: Rc<RefCell<Sdfer>>,
     face: FontFace,
 }
 
 impl Font {
     pub fn new(
         id: FontId,
+        sdfer: Rc<RefCell<Sdfer>>,
         grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
         color_atlas: Rc<RefCell<FontAtlas<Bgra<u8>>>>,
-        sdfer: Rc<RefCell<Sdfer>>,
         face_definition: FontFaceDefinition,
     ) -> Option<Self> {
         Some(Self {
