@@ -5,7 +5,7 @@ use {
         geometry::GeometryQuad2D,
         makepad_platform::*,
         text::{
-            font::{AtlasKind, GlyphImage},
+            font::{AtlasKind, RasterizedGlyph},
             geom::{Point, Rect, Size, Transformation},
             layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Text},
             non_nan::NonNanF32,
@@ -199,12 +199,10 @@ impl DrawText2 {
         &mut self,
         cx: &mut Cx2d<'_>,
         p: Point<f32>,
-        image: GlyphImage,
+        image: RasterizedGlyph,
         font_size_in_lpxs: f32,
         output: &mut Vec<f32>,
     ) {
-        use crate::text::sdfer;
-
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
                 (2 * point.x + 1) as f32 / (2 * size.width) as f32,
@@ -223,10 +221,8 @@ impl DrawText2 {
         let transform = Transformation::scaling_uniform(font_size_in_lpxs / image.dpxs_per_em)
             .translate(p.x, p.y);
         let bounds_in_dpxs = Rect::new(
-            Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y)
-                - Size::new(sdfer::PADDING as f32, sdfer::PADDING as f32),
-            image.bounds_in_dpxs.size
-                + Size::new(2.0 * sdfer::PADDING as f32, 2.0 * sdfer::PADDING as f32),
+            Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y),
+            image.bounds_in_dpxs.size,
         );
         let bounds_in_lpxs = bounds_in_dpxs.transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);

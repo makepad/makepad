@@ -39,6 +39,10 @@ impl FontLoader {
         }
     }
 
+    pub fn sdfer(&self) -> &Rc<RefCell<Sdfer>> {
+        &self.sdfer
+    }
+
     pub fn grayscale_atlas(&self) -> &Rc<RefCell<FontAtlas<R<u8>>>> {
         &self.grayscale_atlas
     }
