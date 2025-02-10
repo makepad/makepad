@@ -1,6 +1,6 @@
 use {
     super::{
-        geom::{Point, Rect, Size, Transformation},
+        geom::{Point, Rect, Size, Transform},
         image::SubimageMut,
         num::Zero,
         pixels::R,
@@ -20,13 +20,13 @@ impl GlyphOutline {
     pub fn origin_in_dpxs(&self, dpxs_per_em: f32) -> Point<f32> {
         self.bounds
             .origin
-            .transform(Transformation::scaling_uniform(dpxs_per_em / self.units_per_em))
+            .apply_transform(Transform::from_scale_uniform(dpxs_per_em / self.units_per_em))
     }
 
     pub fn size_in_dpxs(&self, dpxs_per_em: f32) -> Size<f32> {
         self.bounds
             .size
-            .transform(Transformation::scaling_uniform(dpxs_per_em / self.units_per_em))
+            .apply_transform(Transform::from_scale_uniform(dpxs_per_em / self.units_per_em))
     }
 
     pub fn bounds_in_dpxs(&self, dpxs_per_em: f32) -> Rect<f32> {
@@ -52,7 +52,7 @@ impl GlyphOutline {
         let mut rasterizer = Rasterizer::new(output_size.width, output_size.height);
         let origin = self.bounds.origin;
         let transform =
-            Transformation::translation(-origin.x, -origin.y).scale_uniform(dpxs_per_em / self.units_per_em);
+            Transform::from_translate(-origin.x, -origin.y).scale_uniform(dpxs_per_em / self.units_per_em);
         let mut last = Point::ZERO;
         let mut last_move = None;
         for command in self.commands.iter().copied() {
@@ -63,33 +63,33 @@ impl GlyphOutline {
                 }
                 Command::LineTo(p) => {
                     rasterizer.draw_line(
-                        to_ab_glyph(last.transform(transform)),
-                        to_ab_glyph(p.transform(transform)),
+                        to_ab_glyph(last.apply_transform(transform)),
+                        to_ab_glyph(p.apply_transform(transform)),
                     );
                     last = p;
                 }
                 Command::QuadTo(p1, p) => {
                     rasterizer.draw_quad(
-                        to_ab_glyph(last.transform(transform)),
-                        to_ab_glyph(p1.transform(transform)),
-                        to_ab_glyph(p.transform(transform)),
+                        to_ab_glyph(last.apply_transform(transform)),
+                        to_ab_glyph(p1.apply_transform(transform)),
+                        to_ab_glyph(p.apply_transform(transform)),
                     );
                     last = p;
                 }
                 Command::CurveTo(p1, p2, p) => {
                     rasterizer.draw_cubic(
-                        to_ab_glyph(last.transform(transform)),
-                        to_ab_glyph(p1.transform(transform)),
-                        to_ab_glyph(p2.transform(transform)),
-                        to_ab_glyph(p.transform(transform)),
+                        to_ab_glyph(last.apply_transform(transform)),
+                        to_ab_glyph(p1.apply_transform(transform)),
+                        to_ab_glyph(p2.apply_transform(transform)),
+                        to_ab_glyph(p.apply_transform(transform)),
                     );
                     last = p;
                 }
                 Command::Close => {
                     if let Some(last_move) = last_move.take() {
                         rasterizer.draw_line(
-                            to_ab_glyph(last.transform(transform)),
-                            to_ab_glyph(last_move.transform(transform)),
+                            to_ab_glyph(last.apply_transform(transform)),
+                            to_ab_glyph(last_move.apply_transform(transform)),
                         );
                         last = last_move;
                     }
