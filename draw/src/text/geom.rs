@@ -206,9 +206,16 @@ impl<T> Rect<T> {
         self.origin + self.size
     }
 
-    pub fn pad(self, padding: Size<T>) -> Self
+    pub fn pad(self, padding: impl Into<Size<T>>) -> Self
     where
         T: Add<Output = T> + Copy + Sub<Output = T>,
+    {
+        self._pad(padding.into())
+    }
+
+    fn _pad(self, padding: Size<T>) -> Self
+    where
+    T: Add<Output = T> + Copy + Sub<Output = T>
     {
         Self::new(
             self.origin - padding,
@@ -223,9 +230,16 @@ impl<T> Rect<T> {
         Self::new(self.origin.apply_transform(t), self.size.apply_transform(t))
     }
 
-    pub fn union(self, other: Self) -> Self
+    pub fn union(self, other: impl Into<Self>) -> Self
     where
         T: Add<Output = T> + Copy + Ord + Sub<Output = T>,
+    {
+        self._union(other.into())
+    }
+
+    fn _union(self, other: Self) -> Self
+    where
+    T: Add<Output = T> + Copy + Ord + Sub<Output = T>
     {
         let min = Point::new(
             self.min().x.min(other.min().x),

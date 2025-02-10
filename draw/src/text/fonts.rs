@@ -2,9 +2,9 @@ use {
     super::{
         font_loader::FontDefinitions,
         geom::Point,
+        image::Rgba,
         layouter,
         layouter::{LaidoutText, LayoutParams, Layouter},
-        pixels::Rgba,
         sdfer::Sdfer,
     },
     makepad_platform::*,
@@ -101,7 +101,7 @@ impl Fonts {
     }
 
     fn update_color_texture(&mut self, cx: &mut Cx) {
-        fn rgba_to_u32(pixel: Rgba<u8>) -> u32 {
+        fn rgba_to_u32(pixel: Rgba) -> u32 {
             let r = u32::from(pixel.r);
             let g = u32::from(pixel.g);
             let b = u32::from(pixel.b);

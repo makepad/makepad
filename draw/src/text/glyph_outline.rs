@@ -1,9 +1,8 @@
 use {
     super::{
         geom::{Point, Rect, Size, Transform},
-        image::SubimageMut,
+        image::{R, SubimageMut},
         num::Zero,
-        pixels::R,
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -41,7 +40,7 @@ impl GlyphOutline {
         )
     }
 
-    pub fn rasterize(&self, dpxs_per_em: f32, output: &mut SubimageMut<R<u8>>) {
+    pub fn rasterize(&self, dpxs_per_em: f32, output: &mut SubimageMut<R>) {
         use ab_glyph_rasterizer::Rasterizer;
 
         fn to_ab_glyph(p: Point<f32>) -> ab_glyph_rasterizer::Point {

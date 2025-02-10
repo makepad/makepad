@@ -12,7 +12,6 @@ pub mod image;
 pub mod layouter;
 pub mod non_nan;
 pub mod num;
-pub mod pixels;
 pub mod sdfer;
 pub mod shaper;
 pub mod substr;
