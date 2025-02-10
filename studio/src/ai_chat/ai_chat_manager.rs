@@ -121,6 +121,146 @@ impl Default for AiChatManager{
                         AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
                         AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
                     ]
+                },
+                BaseContext{
+                    name: "Makepad Internal".to_string(),
+                    apply: AiApply::WholeFile,
+                    system_pre: live_id!(INTERNAL_PRE),
+                    system_post: live_id!(INTERNAL_POST),
+                    general_post: live_id!(INTERNAL_GENERAL),
+                    files: vec![
+                        /*
+                        AiContextFile::new("","platform/live_compiler/src/live_document.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_error.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_eval.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_expander.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_node.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_node_vec.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_parser.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_ptr.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_registry.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/live_token.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/span.rs"),
+                        AiContextFile::new("","platform/live_compiler/src/util.rs"),
+                        
+                        AiContextFile::new("","platform/live_tokenizer/src/char_ext.rs"),
+                        AiContextFile::new("","platform/live_tokenizer/src/colorhex.rs"),
+                        AiContextFile::new("","platform/live_tokenizer/src/full_token.rs"),
+                        AiContextFile::new("","platform/live_tokenizer/src/live_error_origin.rs"),
+                        AiContextFile::new("","platform/live_tokenizer/src/tokenizer.rs"),
+                        AiContextFile::new("","platform/live_tokenizer/src/vec4_ext.rs"),
+                        
+                        AiContextFile::new("","platform/shader_compiler/src/analyse.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/builtin.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/const_eval.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/const_gather.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/dep_analyse.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/generate.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/generate_glsl.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/generate_hlsl.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/generate_metal.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/lhs_check.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/shader_ast.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/shader_parser.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/shader_registry.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/swizzle.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/ty_check.rs"),
+                        AiContextFile::new("","platform/shader_compiler/src/util.rs"),
+                        
+                        AiContextFile::new("","platform/src/event/designer.rs"),
+                        AiContextFile::new("","platform/src/event/drag_drop.rs"),
+                        AiContextFile::new("","platform/src/event/event.rs"),
+                        AiContextFile::new("","platform/src/event/finger.rs"),
+                        AiContextFile::new("","platform/src/event/keyboard.rs"),
+                        AiContextFile::new("","platform/src/event/network.rs"),
+                        AiContextFile::new("","platform/src/event/video_playback.rs"),
+                        AiContextFile::new("","platform/src/event/window.rs"),
+                                                                        
+                        AiContextFile::new("","platform/src/action.rs"),
+                        AiContextFile::new("","platform/src/animator.rs"),
+                        AiContextFile::new("","platform/src/app_main.rs"),
+                        AiContextFile::new("","platform/src/area.rs"),
+                        AiContextFile::new("","platform/src/cx.rs"),
+                        AiContextFile::new("","platform/src/cx_api.rs"),
+                        AiContextFile::new("","platform/src/debug.rs"),
+                        */
+                        AiContextFile::new("","platform/src/draw_list.rs"),/*
+                        AiContextFile::new("","platform/src/draw_shader.rs"),
+                        AiContextFile::new("","platform/src/draw_vars.rs"),*/
+                        /*
+                        AiContextFile::new("","platform/src/file_dialogs.rs"),
+                        AiContextFile::new("","platform/src/geometry.rs"),
+                        AiContextFile::new("","platform/src/gpu_info.rs"),
+                        AiContextFile::new("","platform/src/id_pool.rs"),
+                        AiContextFile::new("","platform/src/live_atomic.rs"),
+                        AiContextFile::new("","platform/src/live_cx.rs"),
+                        AiContextFile::new("","platform/src/live_prims.rs"),
+                        AiContextFile::new("","platform/src/live_traits.rs"),
+                        AiContextFile::new("","platform/src/log.rs"),
+                        AiContextFile::new("","platform/src/pass.rs"),
+                        AiContextFile::new("","platform/src/scope.rs"),
+                        AiContextFile::new("","platform/src/studio.rs"),
+                        AiContextFile::new("","platform/src/texture.rs"),
+                        AiContextFile::new("","platform/src/thread.rs"),
+                        AiContextFile::new("","platform/src/ui_runner.rs"),
+                        AiContextFile::new("","platform/src/video.rs"),
+                        AiContextFile::new("","platform/src/web_socket.rs"),
+                        AiContextFile::new("","platform/src/window.rs"),
+                        */
+                        AiContextFile::new("","draw/src/cx_2d.rs"),
+                        AiContextFile::new("","draw/src/draw_list_2d.rs"),
+                        /*
+                        AiContextFile::new("","draw/src/match_event.rs"),
+                        AiContextFile::new("","draw/src/nav.rs"),
+                        AiContextFile::new("","draw/src/overlay.rs"),
+                        AiContextFile::new("","draw/src/shader/draw_color.rs"),
+                        AiContextFile::new("","draw/src/shader/draw_quad.rs"),
+                        AiContextFile::new("","draw/src/shader/draw_text.rs"),*/
+                       // AiContextFile::new("","draw/src/turtle.rs"),
+                                                                /*       
+                        AiContextFile::new("","widgets/src/button.rs"),
+                        AiContextFile::new("","widgets/src/check_box.rs"),
+                        AiContextFile::new("","widgets/src/dock.rs"),
+                        AiContextFile::new("","widgets/src/drop_down.rs"),
+                        AiContextFile::new("","widgets/src/expandable_panel.rs"),
+                        AiContextFile::new("","widgets/src/file_tree.rs"),
+                        AiContextFile::new("","widgets/src/flat_list.rs"),
+                        AiContextFile::new("","widgets/src/portal_list.rs"),
+                        AiContextFile::new("","widgets/src/html.rs"),
+                        AiContextFile::new("","widgets/src/image.rs"),
+                        AiContextFile::new("","widgets/src/image_cache.rs"),
+                        AiContextFile::new("","widgets/src/label.rs"),
+                        AiContextFile::new("","widgets/src/link_label.rs"),
+                        AiContextFile::new("","widgets/src/markdown.rs"),
+                        AiContextFile::new("","widgets/src/portal_list.rs"),
+                        */
+                        AiContextFile::new("","widgets/src/portal_list2.rs"),/*
+                        AiContextFile::new("","widgets/src/radio_button.rs"),
+                        AiContextFile::new("","widgets/src/scroll_bar.rs"),
+                        AiContextFile::new("","widgets/src/scroll_bars.rs"),
+                        AiContextFile::new("","widgets/src/slider.rs"),
+                        AiContextFile::new("","widgets/src/slides_view.rs"),
+                        AiContextFile::new("","widgets/src/tab.rs"),
+                        AiContextFile::new("","widgets/src/tab_bar.rs"),
+                        AiContextFile::new("","widgets/src/tab_close_button.rs"),
+                        AiContextFile::new("","widgets/src/text_flow.rs"),
+                        AiContextFile::new("","widgets/src/text_input.rs"),
+                        AiContextFile::new("","widgets/src/theme_desktop_dark.rs"),
+                        AiContextFile::new("","widgets/src/view.rs"),
+                        AiContextFile::new("","widgets/src/view_ui.rs"),
+                        AiContextFile::new("","widgets/src/widget.rs"),
+                        AiContextFile::new("","widgets/src/widget_match_event.rs"),
+                        AiContextFile::new("","widgets/src/window.rs"),*/
+                        /*
+                        AiContextFile::new("","widgets/src/designer.rs"),
+                        AiContextFile::new("","widgets/src/designer_data.rs"),
+                        AiContextFile::new("","widgets/src/designer_dummy.rs"),
+                        AiContextFile::new("","widgets/src/designer_outline.rs"),
+                        AiContextFile::new("","widgets/src/designer_outline_tree.rs"),
+                        AiContextFile::new("","widgets/src/designer_theme.rs"),
+                        AiContextFile::new("","widgets/src/designer_toolbox.rs"),
+                        AiContextFile::new("","widgets/src/designer_view.rs"),*/
+                    ]
                 }
             ],
             projects: vec![
@@ -448,6 +588,7 @@ impl AiChatManager{
                                     }
                                 }
                                 AiBackend::Google{..}=>{
+                                    println!("GOT {:?}", data);
                                     for data in data.split("\n\n"){
                                         if let Some(data) = data.strip_prefix("data: "){
                                             match GoogleAiResponse::deserialize_json(&data){
