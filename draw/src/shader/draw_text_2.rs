@@ -53,12 +53,8 @@ live_design! {
             )))
         }
 
-        fn sdf(self, p: vec2) -> float {
-            let dxt = length(dFdx(p));
-            let dyt = length(dFdy(p));
-            let scale = (dxt + dyt) * 512.0 * 0.5;
-
-            let radius = 8.0;
+        fn sdf(self, scale: float, p: vec2) -> float {
+            let radius = 3.0;
             let cutoff = 0.25;
             let s = sample2d(self.grayscale_texture, p).x;
             s = clamp((s - (1.0 - cutoff)) * radius / scale + 0.5, 0.0, 1.0);
@@ -67,9 +63,15 @@ live_design! {
 
         fn pixel(self) -> vec4 {
             if self.tex_index == 0 {
+                let texel_coords = self.tex_coord1.xy;
+                let dxt = length(dFdx(texel_coords));
+                let dyt = length(dFdy(texel_coords));
+                let scale = (dxt + dyt) * 512.0 * 0.5;
                 let c = vec4(1.0, 1.0, 1.0, 1.0);
-                return self.sdf(self.tex_coord1.xy) * vec4(c.rgb * c.a, c.a);
+                let s = self.sdf(scale, self.tex_coord1.xy);
+                return s * c;
             } else {
+                let texel_coords = self.tex_coord1.xy;
                 let c = sample2d(self.color_texture, self.tex_coord1.xy);
                 return vec4(c.rgb * c.a, c.a);
             }
