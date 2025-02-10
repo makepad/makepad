@@ -26,6 +26,21 @@ pub struct GoogleAiResponse{
 
 #[allow(non_snake_case)]
 #[derive(Debug, SerJson, DeJson)]
+pub struct GoogleAiCitation {
+    pub citationSources: Vec<GoogleAiCitationSource>,
+} 
+
+#[allow(non_snake_case)]
+#[derive(Debug, SerJson, DeJson)]
+pub struct GoogleAiCitationSource {
+    pub startIndex: usize,
+    pub endIndex: usize,
+    pub uri: String,
+    pub license: String,
+} 
+
+#[allow(non_snake_case)]
+#[derive(Debug, SerJson, DeJson)]
 pub struct GoogleAiMetadata {
     pub promptTokenCount: usize,
     pub candidatesTokenCount: usize,
@@ -37,5 +52,6 @@ pub struct GoogleAiMetadata {
 pub struct GoogleAiCandidate {
     pub content: GoogleAiContent,
     pub finishReason: Option<String>,
-    pub index: usize
+    pub index: usize,
+    pub citationMetadata: Option<GoogleAiCitation>,
 } 
