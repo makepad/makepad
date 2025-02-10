@@ -7,6 +7,7 @@ use {
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         pixels::{Bgra, R},
+        sdfer::Sdfer,
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -24,6 +25,7 @@ pub struct Font {
     id: FontId,
     grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
     color_atlas: Rc<RefCell<FontAtlas<Bgra<u8>>>>,
+    sdfer: Rc<RefCell<Sdfer>>,
     face: FontFace,
 }
 
@@ -32,12 +34,14 @@ impl Font {
         id: FontId,
         grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
         color_atlas: Rc<RefCell<FontAtlas<Bgra<u8>>>>,
+        sdfer: Rc<RefCell<Sdfer>>,
         face_definition: FontFaceDefinition,
     ) -> Option<Self> {
         Some(Self {
             id,
             grayscale_atlas,
             color_atlas,
+            sdfer,
             face: FontFace::from_definition(face_definition)?,
         })
     }
@@ -92,7 +96,7 @@ impl Font {
     }
 
     pub fn glyph_image(&self, glyph_id: GlyphId, dpx_per_em: f32) -> Option<GlyphImage> {
-        use super::{image::Image, sdf};
+        use super::{image::Image, sdfer};
 
         if let Some(outline) = self.glyph_outline(glyph_id, dpx_per_em) {
             let mut atlas = self.grayscale_atlas.borrow_mut();
@@ -101,9 +105,11 @@ impl Font {
             let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
                 font_id: self.id.clone(),
                 glyph_id,
-                size: outline.image_size() + Size::new(2 * sdf::PADDING, 2 * sdf::PADDING),
+                size: outline.image_size() + Size::new(2 * sdfer::PADDING, 2 * sdfer::PADDING),
             })?;
-            sdf::coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut image);
+            self.sdfer
+                .borrow_mut()
+                .coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut image);
             let atlas_bounds = image.bounds();
             return Some(GlyphImage {
                 bounds_in_dpxs: outline.bounds_in_pxs(),

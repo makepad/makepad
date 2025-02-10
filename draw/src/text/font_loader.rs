@@ -7,6 +7,7 @@ use {
         font_family::{FontFamily, FontFamilyId},
         geom::Size,
         pixels::{Bgra, R},
+        sdfer::Sdfer,
         shaper::Shaper,
     },
     std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
@@ -18,6 +19,7 @@ pub struct FontLoader {
     shaper: Rc<RefCell<Shaper>>,
     grayscale_atlas: Rc<RefCell<GrayscaleAtlas>>,
     color_atlas: Rc<RefCell<ColorAtlas>>,
+    sdfer: Rc<RefCell<Sdfer>>,
     font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: HashMap<FontId, Rc<Font>>,
 }
@@ -31,6 +33,7 @@ impl FontLoader {
             shaper: Rc::new(RefCell::new(Shaper::new())),
             grayscale_atlas: Rc::new(RefCell::new(FontAtlas::new(GRAYSCALE_ATLAS_SIZE))),
             color_atlas: Rc::new(RefCell::new(FontAtlas::new(COLOR_ATLAS_SIZE))),
+            sdfer: Rc::new(RefCell::new(Sdfer::new())),
             definitions,
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
@@ -88,6 +91,7 @@ impl FontLoader {
             font_id.clone(),
             self.grayscale_atlas.clone(),
             self.color_atlas.clone(),
+            self.sdfer.clone(),
             definition,
         )
         .unwrap_or_else(|| panic!("failed to create font {} from definition", font_id))
