@@ -98,6 +98,7 @@ impl Font {
     pub fn glyph_image(&self, glyph_id: GlyphId, dpx_per_em: f32) -> Option<GlyphImage> {
         use super::{image::Image, sdfer};
 
+        let dpx_per_em = 2.0 * dpx_per_em;
         if let Some(outline) = self.glyph_outline(glyph_id, dpx_per_em) {
             let mut atlas = self.grayscale_atlas.borrow_mut();
             let mut coverage = Image::new(outline.image_size());
