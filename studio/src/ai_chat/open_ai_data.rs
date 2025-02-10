@@ -1,15 +1,16 @@
 use crate::makepad_micro_serde::*;
 
 #[derive(Debug, SerJson, DeJson)]
-pub struct ChatPrompt {
-    pub messages: Vec<ChatMessage>,
+pub struct OpenAiChatPrompt {
+    pub messages: Vec<OpenAiChatMessage>,
     pub model: String,
+    pub reasoning_effort: Option<String>,
     pub max_tokens: i32,
     pub stream: bool
 }
 
 #[derive(Debug, SerJson, DeJson)]
-pub struct ChatMessage {
+pub struct OpenAiChatMessage {
     pub content: Option<String>,
     pub role: Option<String>,
     pub refusal: Option<JsonValue>
@@ -17,36 +18,37 @@ pub struct ChatMessage {
 
 #[allow(unused)]
 #[derive(Debug, DeJson)]
-pub struct ChatResponse {
+pub struct OpenAiChatResponse {
     pub id: String,
     pub object: String,
     pub created: i32,
     pub model: String,
+    pub service_tier: Option<String>,
     pub system_fingerprint: Option<JsonValue>,
-    pub usage: Option<ChatUsage>,
-    pub choices: Vec<ChatChoice>,
+    pub usage: Option<OpenAiChatUsage>,
+    pub choices: Vec<OpenAiChatChoice>,
 }
 
 #[allow(unused)]
 #[derive(Debug, DeJson)]
-pub struct CompletionDetails {
+pub struct OpenAiCompletionDetails {
     pub reasoning_tokens: i32,
 }
 
 #[allow(unused)]
 #[derive(Debug, DeJson)]
-pub struct ChatUsage {
+pub struct OpenAiChatUsage {
     pub prompt_tokens: i32,
     pub completion_tokens: i32,
     pub total_tokens: i32,
-    pub completion_tokens_details: CompletionDetails
+    pub completion_tokens_details: OpenAiCompletionDetails
 }
 
 #[allow(unused)]
 #[derive(Debug, DeJson)]
-pub struct ChatChoice {
-    pub message: Option<ChatMessage>,
-    pub delta: Option<ChatMessage>,
+pub struct OpenAiChatChoice {
+    pub message: Option<OpenAiChatMessage>,
+    pub delta: Option<OpenAiChatMessage>,
     pub finish_reason: Option<String>,
     pub logprobs: Option<JsonValue>,
     pub index: i32,
