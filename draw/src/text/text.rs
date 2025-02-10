@@ -1,4 +1,4 @@
-use super::{substr::Substr, font_family::FontFamilyId, non_nan::NonNanF32};
+use super::{font_family::FontFamilyId, non_nan::NonNanF32, substr::Substr};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Text {

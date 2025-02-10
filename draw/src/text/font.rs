@@ -106,18 +106,26 @@ impl Font {
         None
     }
 
-    fn rasterize_glyph_outline(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+    fn rasterize_glyph_outline(
+        &self,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
         use super::image::Image;
 
         let outline = self.glyph_outline(glyph_id)?;
         let size_in_dpxs = outline.size_in_dpxs(dpxs_per_em);
         let largest_side_in_dpxs = size_in_dpxs.width.max(size_in_dpxs.height);
-        let largest_size_in_dpxs_rounded_up = ((largest_side_in_dpxs).ceil() as usize).next_power_of_two() as f32;
+        let largest_size_in_dpxs_rounded_up =
+            ((largest_side_in_dpxs).ceil() as usize).next_power_of_two() as f32;
         let scale = 2.0 * largest_size_in_dpxs_rounded_up / largest_side_in_dpxs;
         let dpxs_per_em = dpxs_per_em * scale;
 
         let mut coverage = Image::new(outline.image_size(dpxs_per_em));
-        outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(coverage.size().into()));
+        outline.rasterize(
+            dpxs_per_em,
+            &mut coverage.subimage_mut(coverage.size().into()),
+        );
 
         let mut sdfer = self.sdfer.borrow_mut();
         let padding = sdfer.settings().padding;
@@ -143,7 +151,11 @@ impl Font {
         });
     }
 
-    fn rasterize_glyph_raster_image(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+    fn rasterize_glyph_raster_image(
+        &self,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
         let raster_image = self.glyph_raster_image(glyph_id, dpxs_per_em)?;
         let mut atlas = self.color_atlas.borrow_mut();
         let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
