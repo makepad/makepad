@@ -9,14 +9,20 @@ use {
 pub const PADDING: usize = 4;
 
 pub struct Sdfer {
+    settings: Settings,
     reusable_buffers: Option<sdfer::esdt::ReusableBuffers>,
 }
 
 impl Sdfer {
-    pub fn new() -> Self {
+    pub fn new(settings: Settings) -> Self {
         Self {
+            settings,
             reusable_buffers: None,
         }
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
     }
 
     pub fn coverage_to_sdf(
@@ -62,4 +68,11 @@ impl fmt::Debug for Sdfer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sdfer").finish_non_exhaustive()
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub padding: usize,
+    pub radius: f64,
+    pub cutoff: f64,
 }

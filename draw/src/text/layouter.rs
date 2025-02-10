@@ -3,8 +3,11 @@ use {
         font::{Font, GlyphId, GlyphImage},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
+        font_loader,
         font_loader::{FontDefinitions, FontLoader},
+        geom::Size,
         non_nan::NonNanF32,
+        sdfer, shaper,
         shaper::{ShapedGlyph, ShapedText},
         substr::Substr,
     },
@@ -15,32 +18,30 @@ use {
     },
 };
 
-const CACHE_SIZE: usize = 1024;
-
 #[derive(Debug)]
 pub struct Layouter {
-    loader: FontLoader,
+    font_loader: FontLoader,
     cache_size: usize,
     cached_params: VecDeque<LayoutParams>,
     cached_laidout_texts: HashMap<LayoutParams, Rc<LaidoutText>>,
 }
 
 impl Layouter {
-    pub fn new(definitions: FontDefinitions) -> Self {
+    pub fn new(definitions: FontDefinitions, settings: Settings) -> Self {
         Self {
-            loader: FontLoader::new(definitions),
-            cache_size: CACHE_SIZE,
-            cached_params: VecDeque::with_capacity(CACHE_SIZE),
-            cached_laidout_texts: HashMap::with_capacity(CACHE_SIZE),
+            font_loader: FontLoader::new(definitions, settings.font_loader),
+            cache_size: settings.cache_size,
+            cached_params: VecDeque::with_capacity(settings.cache_size),
+            cached_laidout_texts: HashMap::with_capacity(settings.cache_size),
         }
     }
 
     pub fn grayscale_atlas(&self) -> &Rc<RefCell<GrayscaleAtlas>> {
-        self.loader.grayscale_atlas()
+        self.font_loader.grayscale_atlas()
     }
 
     pub fn color_atlas(&self) -> &Rc<RefCell<ColorAtlas>> {
-        self.loader.color_atlas()
+        self.font_loader.color_atlas()
     }
 
     pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
@@ -60,7 +61,7 @@ impl Layouter {
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
         let mut text = LaidoutText::default();
         LayoutContext {
-            loader: &mut self.loader,
+            loader: &mut self.font_loader,
             max_width_in_lpxs: params.options.max_width_in_lpxs.into_inner(),
             current_x_in_lpxs: 0.0,
             current_row: LaidoutRow::default(),
@@ -150,6 +151,30 @@ impl<'a> LayoutContext<'a> {
 
         self.output.push_row(mem::take(&mut self.current_row));
         self.current_x_in_lpxs = 0.0;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub font_loader: font_loader::Settings,
+    pub cache_size: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            font_loader: font_loader::Settings {
+                shaper: shaper::Settings { cache_size: 4096 },
+                sdfer: sdfer::Settings {
+                    padding: 4,
+                    radius: 8.0,
+                    cutoff: 0.25,
+                },
+                grayscale_atlas_size: Size::new(512, 512),
+                color_atlas_size: Size::new(512, 512),
+            },
+            cache_size: 4096,
+        }
     }
 }
 

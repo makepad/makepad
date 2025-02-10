@@ -22,14 +22,14 @@ mod tests {
     use {
         super::*,
         font_loader::FontDefinitions,
-        layouter::{LayoutOptions, LayoutParams, Layouter, Span, Style, Text},
+        layouter::{LayoutOptions, LayoutParams, Layouter, Settings, Span, Style, Text},
         non_nan::NonNanF32,
         std::{fs::File, io::BufWriter, rc::Rc},
     };
 
     #[test]
     fn test() {
-        let mut layouter = Layouter::new(FontDefinitions::default());
+        let mut layouter = Layouter::new(FontDefinitions::default(), Settings::default());
         let text = layouter.get_or_layout(LayoutParams {
             options: LayoutOptions {
                 max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
