@@ -8,8 +8,8 @@ use {
             font::{AtlasKind, RasterizedGlyph},
             geom::{Point, Rect, Size, Transform},
             layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
-            text::Text,
             non_nan::NonNanF32,
+            text::Text,
         },
     },
     std::rc::Rc,
@@ -143,18 +143,9 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        let mut p = p;
-        let mut is_first_row = true;
-        for row in &text.rows {
-            if !is_first_row {
-                p.y += row.ascender_in_lpxs;
-            }
-            let x = p.x;
-            self.draw_laidout_row(cx, &mut p, row, &mut many_instances.instances);
-            p.x = x;
-            p.y += -row.descender_in_lpxs + row.line_gap_in_lpxs;
-            is_first_row = false;
-        }
+        text.walk_rows(p, |p, row| {
+            self.draw_laidout_row(cx, p, row, &mut many_instances.instances);
+        });
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
     }
@@ -162,14 +153,13 @@ impl DrawText2 {
     fn draw_laidout_row(
         &mut self,
         cx: &mut Cx2d<'_>,
-        p: &mut Point<f32>,
+        p: Point<f32>,
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        for glyph in &row.glyphs {
+        row.walk_glyphs(p, |p, glyph| {
             self.draw_laidout_glyph(cx, p, glyph, output);
-            p.x += glyph.advance_in_lpxs;
-        }
+        });
 
         cx.cx.debug.rect(
             makepad_platform::Rect {
@@ -183,28 +173,28 @@ impl DrawText2 {
     fn draw_laidout_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
-        p: &mut Point<f32>,
-        laidout_glyph: &LaidoutGlyph,
+        p: Point<f32>,
+        glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
         let lpxs_per_dpx = cx.current_dpi_factor() as f32;
-        let font_size_in_dpxs = laidout_glyph.font_size_in_lpxs * lpxs_per_dpx;
-        if let Some(allocated_glyph) = laidout_glyph.allocate(font_size_in_dpxs) {
-            self.draw_glyph_image(
+        let font_size_in_dpxs = glyph.font_size_in_lpxs * lpxs_per_dpx;
+        if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
+            self.draw_rasterized_glyph(
                 cx,
-                Point::new(p.x + laidout_glyph.offset_in_lpxs, p.y),
-                allocated_glyph,
-                laidout_glyph.font_size_in_lpxs,
+                Point::new(p.x + glyph.offset_in_lpxs, p.y),
+                rasterized_glyph,
+                glyph.font_size_in_lpxs,
                 output,
             );
         }
     }
 
-    fn draw_glyph_image(
+    fn draw_rasterized_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
         p: Point<f32>,
-        image: RasterizedGlyph,
+        glyph: RasterizedGlyph,
         font_size_in_lpxs: f32,
         output: &mut Vec<f32>,
     ) {
@@ -223,21 +213,21 @@ impl DrawText2 {
             vec2(point.width, point.height)
         }
 
-        let transform = Transform::from_scale_uniform(font_size_in_lpxs / image.dpxs_per_em)
+        let transform = Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em)
             .translate(p.x, p.y);
         let bounds_in_dpxs = Rect::new(
-            Point::new(image.bounds_in_dpxs.min().x, -image.bounds_in_dpxs.max().y),
-            image.bounds_in_dpxs.size,
+            Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
+            glyph.bounds_in_dpxs.size,
         );
         let bounds_in_lpxs = bounds_in_dpxs.apply_transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
-        self.tex_index = match image.atlas_kind {
+        self.tex_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
         };
-        self.font_t1 = point_to_vec2(tex_coord(image.atlas_bounds.min(), image.atlas_size));
-        self.font_t2 = point_to_vec2(tex_coord(image.atlas_bounds.max(), image.atlas_size));
+        self.font_t1 = point_to_vec2(tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size));
+        self.font_t2 = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
         self.char_depth += 0.001; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
