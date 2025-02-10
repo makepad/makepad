@@ -105,8 +105,8 @@ where
 }
 
 impl<T> From<T> for Size<T>
-where 
-    T: Copy
+where
+    T: Copy,
 {
     fn from(scalar: T) -> Self {
         Self::new(scalar, scalar)
@@ -215,12 +215,9 @@ impl<T> Rect<T> {
 
     fn _pad(self, padding: Size<T>) -> Self
     where
-    T: Add<Output = T> + Copy + Sub<Output = T>
+        T: Add<Output = T> + Copy + Sub<Output = T>,
     {
-        Self::new(
-            self.origin - padding,
-            self.size + padding + padding,
-        )
+        Self::new(self.origin - padding, self.size + padding + padding)
     }
 
     pub fn apply_transform(self, t: Transform<T>) -> Self
@@ -239,7 +236,7 @@ impl<T> Rect<T> {
 
     fn _union(self, other: Self) -> Self
     where
-    T: Add<Output = T> + Copy + Ord + Sub<Output = T>
+        T: Add<Output = T> + Copy + Ord + Sub<Output = T>,
     {
         let min = Point::new(
             self.min().x.min(other.min().x),

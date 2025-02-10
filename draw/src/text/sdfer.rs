@@ -1,5 +1,5 @@
 use {
-    super::image::{R, Subimage, SubimageMut},
+    super::image::{Subimage, SubimageMut, R},
     std::fmt,
 };
 
@@ -20,11 +20,7 @@ impl Sdfer {
         self.settings
     }
 
-    pub fn coverage_to_sdf(
-        &mut self,
-        coverage: &Subimage<'_, R>,
-        output: &mut SubimageMut<'_, R>,
-    ) {
+    pub fn coverage_to_sdf(&mut self, coverage: &Subimage<'_, R>, output: &mut SubimageMut<'_, R>) {
         use {
             super::geom::{Point, Size},
             sdfer::{esdt, esdt::Params, Image2d, Unorm8},
