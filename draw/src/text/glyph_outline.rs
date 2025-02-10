@@ -12,45 +12,36 @@ use {
 #[derive(Clone, Debug)]
 pub struct GlyphOutline {
     bounds: Rect<f32>,
-    dpxs_per_em: f32,
     units_per_em: f32,
     commands: Vec<Command>,
 }
 
 impl GlyphOutline {
-    pub fn origin_in_dpxs(&self) -> Point<f32> {
+    pub fn origin_in_dpxs(&self, dpxs_per_em: f32) -> Point<f32> {
         self.bounds
             .origin
-            .transform(Transformation::scaling_uniform(self.dpxs_per_unit()))
+            .transform(Transformation::scaling_uniform(dpxs_per_em / self.units_per_em))
     }
 
-    pub fn size_in_dpxs(&self) -> Size<f32> {
+    pub fn size_in_dpxs(&self, dpxs_per_em: f32) -> Size<f32> {
         self.bounds
             .size
-            .transform(Transformation::scaling_uniform(self.dpxs_per_unit()))
+            .transform(Transformation::scaling_uniform(dpxs_per_em / self.units_per_em))
     }
 
-    pub fn bounds_in_pxs(&self) -> Rect<f32> {
-        Rect::new(self.origin_in_dpxs(), self.size_in_dpxs())
+    pub fn bounds_in_dpxs(&self, dpxs_per_em: f32) -> Rect<f32> {
+        Rect::new(self.origin_in_dpxs(dpxs_per_em), self.size_in_dpxs(dpxs_per_em))
     }
 
-    pub fn dpxs_per_em(&self) -> f32 {
-        self.dpxs_per_em
-    }
-
-    fn dpxs_per_unit(&self) -> f32 {
-        self.dpxs_per_em / self.units_per_em
-    }
-
-    pub fn image_size(&self) -> Size<usize> {
-        let size_in_dpxs = self.size_in_dpxs();
+    pub fn image_size(&self, dpxs_per_em: f32) -> Size<usize> {
+        let size = self.size_in_dpxs(dpxs_per_em);
         Size::new(
-            size_in_dpxs.width.ceil() as usize,
-            size_in_dpxs.height.ceil() as usize,
+            size.width.ceil() as usize,
+            size.height.ceil() as usize,
         )
     }
 
-    pub fn rasterize(&self, output: &mut SubimageMut<R<u8>>) {
+    pub fn rasterize(&self, dpxs_per_em: f32, output: &mut SubimageMut<R<u8>>) {
         use ab_glyph_rasterizer::Rasterizer;
 
         fn to_ab_glyph(p: Point<f32>) -> ab_glyph_rasterizer::Point {
@@ -61,7 +52,7 @@ impl GlyphOutline {
         let mut rasterizer = Rasterizer::new(output_size.width, output_size.height);
         let origin = self.bounds.origin;
         let transform =
-            Transformation::translation(-origin.x, -origin.y).scale_uniform(self.dpxs_per_unit());
+            Transformation::translation(-origin.x, -origin.y).scale_uniform(dpxs_per_em / self.units_per_em);
         let mut last = Point::ZERO;
         let mut last_move = None;
         for command in self.commands.iter().copied() {
@@ -134,10 +125,9 @@ impl Builder {
         }
     }
 
-    pub fn finish(self, bounds: Rect<f32>, pxs_per_em: f32, units_per_em: f32) -> GlyphOutline {
+    pub fn finish(self, bounds: Rect<f32>, units_per_em: f32) -> GlyphOutline {
         GlyphOutline {
             bounds,
-            dpxs_per_em: pxs_per_em,
             units_per_em,
             commands: self.commands,
         }

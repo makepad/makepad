@@ -2,8 +2,7 @@ use {
     super::{
         font_atlas::{FontAtlas, GlyphImageKey},
         font_face::{FontFace, FontFaceDefinition},
-        geom::{Point, Rect, Size},
-        glyph_outline,
+        geom::{Rect, Size},
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         pixels::{Bgra, R},
@@ -74,14 +73,16 @@ impl Font {
         self.ttf_parser_face().line_gap() as f32 / self.units_per_em()
     }
 
-    pub fn glyph_outline(&self, glyph_id: GlyphId, pxs_per_em: f32) -> Option<GlyphOutline> {
+    pub fn glyph_outline(&self, glyph_id: GlyphId) -> Option<GlyphOutline> {
+        use super::{geom::Point, glyph_outline};
+
         let face = self.ttf_parser_face();
         let glyph_id = ttf_parser::GlyphId(glyph_id);
         let mut builder = glyph_outline::Builder::new();
         let bounds = face.outline_glyph(glyph_id, &mut builder)?;
         let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
         let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
-        Some(builder.finish(Rect::new(min, max - min), pxs_per_em, self.units_per_em()))
+        Some(builder.finish(Rect::new(min, max - min), self.units_per_em()))
     }
 
     pub fn glyph_raster_image(
@@ -95,41 +96,54 @@ impl Font {
         GlyphRasterImage::from_raster_glyph_image(image)
     }
 
-    pub fn glyph_image(&self, glyph_id: GlyphId, dpx_per_em: f32) -> Option<GlyphImage> {
-        use super::{image::Image, sdfer};
+    pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+        use super::image::Image;
 
-        let dpx_per_em = 2.0 * dpx_per_em;
-        if let Some(outline) = self.glyph_outline(glyph_id, dpx_per_em) {
+        if let Some(outline) = self.glyph_outline(glyph_id) {
+            let size_in_dpxs = outline.size_in_dpxs(dpxs_per_em);
+            let largest_side_in_dpxs = size_in_dpxs.width.max(size_in_dpxs.height);
+            let largest_size_in_dpxs_rounded_up = ((largest_side_in_dpxs).ceil() as usize).next_power_of_two() as f32;
+            let scale = 2.0 * largest_size_in_dpxs_rounded_up / largest_side_in_dpxs;
+            let dpxs_per_em = dpxs_per_em * scale;
+            let mut coverage = Image::new(outline.image_size(dpxs_per_em));
+            outline.rasterize(dpxs_per_em, &mut coverage.subimage_mut(coverage.size().into()));
+            let mut sdfer = self.sdfer.borrow_mut();
+            let padding = sdfer.settings().padding;
             let mut atlas = self.grayscale_atlas.borrow_mut();
-            let mut coverage = Image::new(outline.image_size());
-            outline.rasterize(&mut coverage.subimage_mut(coverage.size().into()));
-            let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
+            let atlas_size = atlas.size();
+            let mut sdf = atlas.get_or_allocate_glyph_image(GlyphImageKey {
                 font_id: self.id.clone(),
                 glyph_id,
-                size: outline.image_size() + Size::new(2 * sdfer::PADDING, 2 * sdfer::PADDING),
+                size: coverage.size() + Size::new(2 * padding, 2 * padding),
             })?;
-            self.sdfer
-                .borrow_mut()
-                .coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut image);
-            let atlas_bounds = image.bounds();
-            return Some(GlyphImage {
-                bounds_in_dpxs: outline.bounds_in_pxs(),
-                dpxs_per_em: outline.dpxs_per_em(),
+            let atlas_bounds = sdf.bounds();
+            sdfer.coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut sdf);
+            drop(sdf);
+            drop(atlas);
+            drop(sdfer);
+            let bounds_in_dpxs = outline.bounds_in_dpxs(dpxs_per_em);
+            let bounds_in_dpxs = Rect::new(
+                bounds_in_dpxs.origin - Size::new(padding as f32, padding as f32),
+                bounds_in_dpxs.size + Size::new(2.0 * padding as f32, 2.0 * padding as f32),
+            );
+            return Some(RasterizedGlyph {
+                bounds_in_dpxs,
+                dpxs_per_em,
                 atlas_kind: AtlasKind::Grayscale,
                 atlas_bounds,
-                atlas_size: atlas.size(),
+                atlas_size,
             });
         }
-        if let Some(raster_image) = self.glyph_raster_image(glyph_id, dpx_per_em) {
+        if let Some(raster_image) = self.glyph_raster_image(glyph_id, dpxs_per_em) {
             let mut atlas = self.color_atlas.borrow_mut();
             let mut image = atlas.get_or_allocate_glyph_image(GlyphImageKey {
                 font_id: self.id.clone(),
                 glyph_id,
-                size: raster_image.size(),
+                size: raster_image.decode_size(),
             })?;
             raster_image.decode(&mut image);
             let atlas_bounds = image.bounds();
-            return Some(GlyphImage {
+            return Some(RasterizedGlyph {
                 bounds_in_dpxs: raster_image.bounds_in_pxs(),
                 dpxs_per_em: raster_image.dpxs_per_em(),
                 atlas_kind: AtlasKind::Color,
@@ -158,7 +172,7 @@ impl PartialEq for Font {
 pub type GlyphId = u16;
 
 #[derive(Clone, Copy, Debug)]
-pub struct GlyphImage {
+pub struct RasterizedGlyph {
     pub bounds_in_dpxs: Rect<f32>,
     pub dpxs_per_em: f32,
     pub atlas_kind: AtlasKind,

@@ -1,6 +1,6 @@
 use {
     super::{
-        font::{Font, GlyphId, GlyphImage},
+        font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
         font_loader,
@@ -34,6 +34,10 @@ impl Layouter {
             cached_params: VecDeque::with_capacity(settings.cache_size),
             cached_laidout_texts: HashMap::with_capacity(settings.cache_size),
         }
+    }
+
+    pub fn sdfer(&self) -> &Rc<RefCell<sdfer::Sdfer>> {
+        self.font_loader.sdfer()
     }
 
     pub fn grayscale_atlas(&self) -> &Rc<RefCell<GrayscaleAtlas>> {
@@ -366,7 +370,7 @@ impl LaidoutGlyph {
         self.font.line_gap_in_ems() * self.font_size_in_lpxs
     }
 
-    pub fn allocate(&self, dpx_per_em: f32) -> Option<GlyphImage> {
-        self.font.glyph_image(self.id, dpx_per_em)
+    pub fn allocate(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
+        self.font.rasterize_glyph(self.id, dpx_per_em)
     }
 }
