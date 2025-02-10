@@ -5,7 +5,7 @@ use {
         geom::{Rect, Size},
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
-        pixels::{Bgra, R},
+        pixels::{Rgba, R},
         sdfer::Sdfer,
     },
     makepad_rustybuzz as rustybuzz,
@@ -24,7 +24,7 @@ pub struct Font {
     id: FontId,
     sdfer: Rc<RefCell<Sdfer>>,
     grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
-    color_atlas: Rc<RefCell<FontAtlas<Bgra<u8>>>>,
+    color_atlas: Rc<RefCell<FontAtlas<Rgba<u8>>>>,
     face: FontFace,
 }
 
@@ -33,7 +33,7 @@ impl Font {
         id: FontId,
         sdfer: Rc<RefCell<Sdfer>>,
         grayscale_atlas: Rc<RefCell<FontAtlas<R<u8>>>>,
-        color_atlas: Rc<RefCell<FontAtlas<Bgra<u8>>>>,
+        color_atlas: Rc<RefCell<FontAtlas<Rgba<u8>>>>,
         face_definition: FontFaceDefinition,
     ) -> Option<Self> {
         Some(Self {

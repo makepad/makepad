@@ -4,7 +4,7 @@ use {
         geom::{Point, Rect, Size},
         image::{Image, Subimage, SubimageMut},
         num::Zero,
-        pixels::{Bgra, R},
+        pixels::{Rgba, R},
     },
     std::collections::HashMap,
 };
@@ -82,7 +82,7 @@ impl<T> FontAtlas<T> {
 }
 
 pub type GrayscaleAtlas = FontAtlas<R<u8>>;
-pub type ColorAtlas = FontAtlas<Bgra<u8>>;
+pub type ColorAtlas = FontAtlas<Rgba<u8>>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GlyphImageKey {
