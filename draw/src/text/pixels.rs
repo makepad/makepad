@@ -12,15 +12,15 @@ impl<T> R<T> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 #[repr(C)]
-pub struct Bgra<T> {
-    pub b: T,
-    pub g: T,
+pub struct Rgba<T> {
     pub r: T,
+    pub g: T,
+    pub b: T,
     pub a: T,
 }
 
-impl<T> Bgra<T> {
-    pub fn new(b: T, g: T, r: T, a: T) -> Self {
-        Self { b, g, r, a }
+impl<T> Rgba<T> {
+    pub fn new(r: T, g: T, b: T, a: T) -> Self {
+        Self { r, g, b, a }
     }
 }

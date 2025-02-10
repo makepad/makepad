@@ -4,7 +4,7 @@ use {
         geom::Point,
         layouter,
         layouter::{LaidoutText, LayoutParams, Layouter},
-        pixels::Bgra,
+        pixels::Rgba,
         sdfer::Sdfer,
     },
     makepad_platform::*,
@@ -101,10 +101,10 @@ impl Fonts {
     }
 
     fn update_color_texture(&mut self, cx: &mut Cx) {
-        fn bgra_to_u32(pixel: Bgra<u8>) -> u32 {
-            let b = u32::from(pixel.b);
-            let g = u32::from(pixel.g);
+        fn rgba_to_u32(pixel: Rgba<u8>) -> u32 {
             let r = u32::from(pixel.r);
+            let g = u32::from(pixel.g);
+            let b = u32::from(pixel.b);
             let a = u32::from(pixel.a);
             (a << 24) | (r << 16) | (g << 8) | b
         }
@@ -119,7 +119,7 @@ impl Fonts {
                 let dst_x = dirty_rect.origin.x + src_x;
                 let dst_y = dirty_rect.origin.y + src_y;
                 let pixel = dirty_image[Point::new(src_x, src_y)];
-                texture_data[dst_y * atlas_size.width + dst_x] = bgra_to_u32(pixel);
+                texture_data[dst_y * atlas_size.width + dst_x] = rgba_to_u32(pixel);
             }
         }
         self.color_texture.put_back_vec_u32(

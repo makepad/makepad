@@ -6,7 +6,7 @@ use {
         font_face::FontFaceDefinition,
         font_family::{FontFamily, FontFamilyId},
         geom::Size,
-        pixels::{Bgra, R},
+        pixels::{Rgba, R},
         sdfer,
         sdfer::Sdfer,
         shaper,
@@ -47,7 +47,7 @@ impl FontLoader {
         &self.grayscale_atlas
     }
 
-    pub fn color_atlas(&self) -> &Rc<RefCell<FontAtlas<Bgra<u8>>>> {
+    pub fn color_atlas(&self) -> &Rc<RefCell<FontAtlas<Rgba<u8>>>> {
         &self.color_atlas
     }
 
