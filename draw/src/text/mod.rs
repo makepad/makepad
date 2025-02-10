@@ -46,7 +46,7 @@ mod tests {
         });
         for row in &text.rows {
             for glyph in &row.glyphs {
-                glyph.font.glyph_image(glyph.id, 64.0);
+                glyph.font.rasterize_glyph(glyph.id, 64.0);
             }
         }
 

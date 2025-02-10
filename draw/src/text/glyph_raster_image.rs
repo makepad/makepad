@@ -31,7 +31,7 @@ impl<'a> GlyphRasterImage<'a> {
     }
 
     pub fn size_in_dpxs(&self) -> Size<f32> {
-        let size = self.size();
+        let size = self.decode_size();
         Size::new(size.width as f32, size.height as f32)
     }
 
@@ -43,13 +43,13 @@ impl<'a> GlyphRasterImage<'a> {
         self.dpxs_per_em
     }
 
-    pub fn size(&self) -> Size<usize> {
+    pub fn decode_size(&self) -> Size<usize> {
         match self.format {
-            Format::Png => self.size_png(),
+            Format::Png => self.decode_size_png(),
         }
     }
 
-    fn size_png(&self) -> Size<usize> {
+    fn decode_size_png(&self) -> Size<usize> {
         let decoder = png::Decoder::new(self.data);
         let reader = decoder.read_info().unwrap();
         let info = reader.info();

@@ -6,8 +6,6 @@ use {
     std::fmt,
 };
 
-pub const PADDING: usize = 4;
-
 pub struct Sdfer {
     settings: Settings,
     reusable_buffers: Option<sdfer::esdt::ReusableBuffers>,
@@ -37,7 +35,7 @@ impl Sdfer {
 
         assert_eq!(
             output.size() - coverage.size(),
-            Size::new(2 * PADDING, 2 * PADDING),
+            Size::new(2 * self.settings.padding, 2 * self.settings.padding),
         );
         let mut pixels = Vec::with_capacity(coverage.size().width * coverage.size().height);
         for y in 0..coverage.size().height {
@@ -50,7 +48,7 @@ impl Sdfer {
         let (sdf, reusable_buffers) = esdt::glyph_to_sdf(
             &mut coverage,
             Params {
-                pad: PADDING,
+                pad: self.settings.padding,
                 ..Params::default()
             },
             self.reusable_buffers.take(),
