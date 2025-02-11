@@ -207,7 +207,7 @@ live_design!{
                     icon_walk: { width: 10. }
                     draw_icon: {
                         color: (THEME_COLOR_D_4),
-                        color_active: (STUDIO_PALETTE_6),
+                        //color_active: (STUDIO_PALETTE_6),
                         svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
                     }
                 }

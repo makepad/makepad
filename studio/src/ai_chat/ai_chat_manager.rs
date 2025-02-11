@@ -129,7 +129,10 @@ impl Default for AiChatManager{
                     system_post: live_id!(INTERNAL_POST),
                     general_post: live_id!(INTERNAL_GENERAL),
                     files: vec![
-                        /*
+                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),                        
                         AiContextFile::new("","platform/live_compiler/src/live_document.rs"),
                         AiContextFile::new("","platform/live_compiler/src/live_error.rs"),
                         AiContextFile::new("","platform/live_compiler/src/live_eval.rs"),
@@ -183,11 +186,11 @@ impl Default for AiChatManager{
                         AiContextFile::new("","platform/src/cx.rs"),
                         AiContextFile::new("","platform/src/cx_api.rs"),
                         AiContextFile::new("","platform/src/debug.rs"),
-                        */
-                        AiContextFile::new("","platform/src/draw_list.rs"),/*
+                        
+                        AiContextFile::new("","platform/src/draw_list.rs"),
                         AiContextFile::new("","platform/src/draw_shader.rs"),
-                        AiContextFile::new("","platform/src/draw_vars.rs"),*/
-                        /*
+                        AiContextFile::new("","platform/src/draw_vars.rs"),
+                        
                         AiContextFile::new("","platform/src/file_dialogs.rs"),
                         AiContextFile::new("","platform/src/geometry.rs"),
                         AiContextFile::new("","platform/src/gpu_info.rs"),
@@ -206,18 +209,17 @@ impl Default for AiChatManager{
                         AiContextFile::new("","platform/src/video.rs"),
                         AiContextFile::new("","platform/src/web_socket.rs"),
                         AiContextFile::new("","platform/src/window.rs"),
-                        */
+                        
                         AiContextFile::new("","draw/src/cx_2d.rs"),
                         AiContextFile::new("","draw/src/draw_list_2d.rs"),
-                        /*
+                        
                         AiContextFile::new("","draw/src/match_event.rs"),
                         AiContextFile::new("","draw/src/nav.rs"),
                         AiContextFile::new("","draw/src/overlay.rs"),
                         AiContextFile::new("","draw/src/shader/draw_color.rs"),
                         AiContextFile::new("","draw/src/shader/draw_quad.rs"),
-                        AiContextFile::new("","draw/src/shader/draw_text.rs"),*/
-                       // AiContextFile::new("","draw/src/turtle.rs"),
-                                                                /*       
+                        AiContextFile::new("","draw/src/shader/draw_text.rs"),
+                        AiContextFile::new("","draw/src/turtle.rs"),
                         AiContextFile::new("","widgets/src/button.rs"),
                         AiContextFile::new("","widgets/src/check_box.rs"),
                         AiContextFile::new("","widgets/src/dock.rs"),
@@ -233,8 +235,6 @@ impl Default for AiChatManager{
                         AiContextFile::new("","widgets/src/link_label.rs"),
                         AiContextFile::new("","widgets/src/markdown.rs"),
                         AiContextFile::new("","widgets/src/portal_list.rs"),
-                        */
-                        AiContextFile::new("","widgets/src/portal_list2.rs"),/*
                         AiContextFile::new("","widgets/src/radio_button.rs"),
                         AiContextFile::new("","widgets/src/scroll_bar.rs"),
                         AiContextFile::new("","widgets/src/scroll_bars.rs"),
@@ -250,8 +250,7 @@ impl Default for AiChatManager{
                         AiContextFile::new("","widgets/src/view_ui.rs"),
                         AiContextFile::new("","widgets/src/widget.rs"),
                         AiContextFile::new("","widgets/src/widget_match_event.rs"),
-                        AiContextFile::new("","widgets/src/window.rs"),*/
-                        /*
+                        AiContextFile::new("","widgets/src/window.rs"),
                         AiContextFile::new("","widgets/src/designer.rs"),
                         AiContextFile::new("","widgets/src/designer_data.rs"),
                         AiContextFile::new("","widgets/src/designer_dummy.rs"),
@@ -259,9 +258,9 @@ impl Default for AiChatManager{
                         AiContextFile::new("","widgets/src/designer_outline_tree.rs"),
                         AiContextFile::new("","widgets/src/designer_theme.rs"),
                         AiContextFile::new("","widgets/src/designer_toolbox.rs"),
-                        AiContextFile::new("","widgets/src/designer_view.rs"),*/
-                    ]
-                }
+                        AiContextFile::new("","widgets/src/designer_view.rs"),
+                    ],
+                },
             ],
             projects: vec![
                 AiProject{
@@ -272,6 +271,12 @@ impl Default for AiChatManager{
                     name:"makepad-example-simple".to_string(),
                     files:vec![
                         AiContextFile::new("Main app to rewrite","examples/simple/src/app.rs")
+                    ]
+                },
+                AiProject{
+                    name:"makepad-portal-list".to_string(),
+                    files:vec![
+                        AiContextFile::new("","widgets/src/portal_list2.rs")
                     ]
                 }
             ]
@@ -837,25 +842,46 @@ impl AiChatManager{
                                             role: Some("user".to_string()), 
                                         });
                                     }
+                                    
+                                    let mut parts = Vec::new();
                                                                             
                                     for file in &ctx.files{
                                         if let Some(file_id) = fs.path_to_file_node_id(&file.path){
                                             if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
                                                 let mut content = String::new();
                                                 let text = doc.as_text().to_string();
-                                                content.push_str(&format!("\n Now follows a context file with description: ```{}``` given as context to help generating correct code. The filename is ```{}```\n",file.kind, file.path));
+                                                content.push_str(&format!("The following is given as context to help generating correct code. The filename is ```{}```\n", file.path));
                                                 content.push_str("```rust\n");
                                                 content.push_str(&text);
                                                 content.push_str("```\n");
-                                                contents.push(GoogleAiContent {
-                                                    parts: vec![GoogleAiPart{
-                                                        text:content.to_string()
-                                                    }],
-                                                    role: Some("user".to_string()), 
-                                                });
+                                                parts.push(GoogleAiPart{
+                                                    text:content.to_string()
+                                                })
+                                                
                                             }
                                         }
                                     }
+                                    if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
+                                        for file in &ctx.files{
+                                            if let Some(file_id) = fs.path_to_file_node_id(&file.path){
+                                                if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
+                                                    let mut content = String::new();
+                                                    let text = doc.as_text().to_string();
+                                                    content.push_str(&format!("The following is part the code to work on. The filename is ```{}```\n", file.path));
+                                                    content.push_str("```rust\n");
+                                                    content.push_str(&text);
+                                                    content.push_str("```\n");
+                                                    parts.push(GoogleAiPart{
+                                                        text:content.to_string()
+                                                    })
+                                                }
+                                            }
+                                        }
+                                    }
+                                    contents.push(GoogleAiContent {
+                                        parts,
+                                        role: Some("user".to_string()), 
+                                    });
                                 }
                                 contents.push(GoogleAiContent {
                                     parts: vec![GoogleAiPart{
