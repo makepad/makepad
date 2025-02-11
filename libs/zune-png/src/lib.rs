@@ -162,8 +162,8 @@ extern crate alloc;
 extern crate core;
 
 #[cfg(feature = "std")]
-pub use apng::ActlChunk;
 pub use apng::post_process_image;
+pub use apng::ActlChunk;
 pub use apng::{BlendOp, DisposeOp};
 pub use decoder::{ItxtChunk, PngDecoder, PngInfo, TextChunk, TimeInfo, ZtxtChunk};
 pub use encoder::PngEncoder;
