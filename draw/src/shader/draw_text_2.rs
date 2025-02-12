@@ -7,7 +7,9 @@ use {
         text::{
             font::{AtlasKind, RasterizedGlyph},
             geom::{Point, Rect, Size, Transform},
-            layouter::{Align, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
+            layouter::{
+                LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, WalkOptions, Align,
+            },
             non_nan::NonNanF32,
             text::Text,
         },
@@ -128,14 +130,21 @@ impl DrawText2 {
         let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             options: LayoutOptions {
                 max_width_in_lpxs: Some(NonNanF32::new(128.0).unwrap()),
-                align: Align::Left,
             },
             text,
         });
-        self.draw_laidout_text(cx, p, laidout_text);
+        self.draw_laidout_text(cx, p, laidout_text, WalkOptions {
+            align: Align::Right,
+        });
     }
 
-    fn draw_laidout_text(&mut self, cx: &mut Cx2d<'_>, p: Point<f32>, text: Rc<LaidoutText>) {
+    fn draw_laidout_text(
+        &mut self,
+        cx: &mut Cx2d<'_>,
+        p: Point<f32>,
+        text: Rc<LaidoutText>,
+        options: WalkOptions,
+    ) {
         let fonts = cx.fonts.borrow_mut();
         let settings = fonts.sdfer().borrow().settings();
         self.draw_vars.user_uniforms[0] = settings.radius;
@@ -145,7 +154,7 @@ impl DrawText2 {
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         text.walk_rows(p, |p, row| {
-            self.draw_laidout_row(cx, p, row, &mut many_instances.instances);
+            self.draw_laidout_row(cx, p, row, options, &mut many_instances.instances);
         });
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -156,9 +165,10 @@ impl DrawText2 {
         cx: &mut Cx2d<'_>,
         p: Point<f32>,
         row: &LaidoutRow,
+        options: WalkOptions,
         output: &mut Vec<f32>,
     ) {
-        row.walk_glyphs(p, |p, glyph| {
+        row.walk_glyphs(p, options, |p, glyph| {
             self.draw_laidout_glyph(cx, p, glyph, output);
         });
 
