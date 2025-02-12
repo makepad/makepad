@@ -14,36 +14,36 @@ use {
 
 #[derive(Debug)]
 pub struct Shaper {
-    reusable_shaped_glyphs: Vec<Vec<ShapedGlyph>>,
+    reusable_glyphs: Vec<Vec<ShapedGlyph>>,
     reusable_unicode_buffer: UnicodeBuffer,
     cache_size: usize,
     cached_params: VecDeque<ShapeParams>,
-    cached_shaped_texts: HashMap<ShapeParams, Rc<ShapedText>>,
+    cached_results: HashMap<ShapeParams, Rc<ShapedText>>,
 }
 
 impl Shaper {
     pub fn new(settings: Settings) -> Self {
         Self {
-            reusable_shaped_glyphs: Vec::new(),
+            reusable_glyphs: Vec::new(),
             reusable_unicode_buffer: UnicodeBuffer::new(),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
-            cached_shaped_texts: HashMap::with_capacity(settings.cache_size),
+            cached_results: HashMap::with_capacity(settings.cache_size),
         }
     }
 
     pub fn get_or_shape(&mut self, params: ShapeParams) -> Rc<ShapedText> {
-        if !self.cached_shaped_texts.contains_key(&params) {
+        if !self.cached_results.contains_key(&params) {
             if self.cached_params.len() == self.cache_size {
                 let params = self.cached_params.pop_front().unwrap();
-                self.cached_shaped_texts.remove(&params);
+                self.cached_results.remove(&params);
             }
-            let text: ShapedText = self.shape(params.clone());
+            let result: ShapedText = self.shape(params.clone());
             self.cached_params.push_back(params.clone());
-            self.cached_shaped_texts
-                .insert(params.clone(), Rc::new(text));
+            self.cached_results
+                .insert(params.clone(), Rc::new(result));
         }
-        self.cached_shaped_texts.get(&params).unwrap().clone()
+        self.cached_results.get(&params).unwrap().clone()
     }
 
     fn shape(&mut self, params: ShapeParams) -> ShapedText {
@@ -81,15 +81,18 @@ impl Shaper {
         }
 
         let (font, fonts) = fonts.split_first().unwrap();
-        let mut glyphs = self.reusable_shaped_glyphs.pop().unwrap_or(Vec::new());
+        let mut glyphs = self.reusable_glyphs.pop().unwrap_or(Vec::new());
         self.shape_step(text, font, start, end, &mut glyphs);
         let mut glyph_groups = group_glyphs_by_cluster(&glyphs).peekable();
         while let Some(glyph_group) = glyph_groups.next() {
             if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
-                while glyph_groups.peek().map_or(false, |glyph_group| {
-                    glyph_group.iter().any(|glyph| glyph.id == 0)
-                }) {
+                while glyph_groups
+                    .peek()
+                    .map_or(false, |glyph_group| {
+                        glyph_group.iter().any(|glyph| glyph.id == 0)
+                    })
+                {
                     glyph_groups.next();
                 }
                 let missing_end = if let Some(glyph_group) = glyph_groups.peek() {
@@ -106,7 +109,7 @@ impl Shaper {
         }
         drop(glyph_groups);
         glyphs.clear();
-        self.reusable_shaped_glyphs.push(glyphs);
+        self.reusable_glyphs.push(glyphs);
     }
 
     fn shape_step(
