@@ -392,6 +392,7 @@ impl LaidoutRow {
         let mut point_in_lpxs = Point::new(
             match options.align {
                 Align::Left => point_in_lpxs.x,
+                Align::Center => point_in_lpxs.x + (self.max_width_in_lpxs - self.width_in_lpxs) / 2.0,
                 Align::Right => point_in_lpxs.x + self.max_width_in_lpxs - self.width_in_lpxs,
             },
             point_in_lpxs.y
@@ -448,6 +449,7 @@ pub struct WalkOptions {
 #[derive(Clone, Copy, Debug)]
 pub enum Align {
     Left,
+    Center,
     Right,
 }
 

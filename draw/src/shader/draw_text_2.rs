@@ -134,7 +134,7 @@ impl DrawText2 {
             text,
         });
         self.draw_laidout_text(cx, p, laidout_text, WalkOptions {
-            align: Align::Right,
+            align: Align::Center,
         });
     }
 
