@@ -7,7 +7,7 @@ use {
         text::{
             font::{AtlasKind, RasterizedGlyph},
             geom::{Point, Rect, Size, Transform},
-            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
+            layouter::{Align, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
             non_nan::NonNanF32,
             text::Text,
         },
@@ -127,7 +127,8 @@ impl DrawText2 {
     pub fn draw(&mut self, cx: &mut Cx2d, p: Point<f32>, text: Rc<Text>) {
         let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             options: LayoutOptions {
-                max_width_in_lpxs: NonNanF32::new(128.0).unwrap(),
+                max_width_in_lpxs: Some(NonNanF32::new(128.0).unwrap()),
+                align: Align::Left,
             },
             text,
         });
