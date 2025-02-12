@@ -110,7 +110,7 @@ impl Widget for MyWidget {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(20.0).unwrap()
                     },
-                    text: "jumps ".into()
+                    text: "Averylongwordtoshowthatdesperatebreakswork jumps ".into()
                 },
                 Span {
                     style: Style {

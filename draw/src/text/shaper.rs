@@ -40,8 +40,7 @@ impl Shaper {
             }
             let result: ShapedText = self.shape(params.clone());
             self.cached_params.push_back(params.clone());
-            self.cached_results
-                .insert(params.clone(), Rc::new(result));
+            self.cached_results.insert(params.clone(), Rc::new(result));
         }
         self.cached_results.get(&params).unwrap().clone()
     }
@@ -87,12 +86,9 @@ impl Shaper {
         while let Some(glyph_group) = glyph_groups.next() {
             if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
-                while glyph_groups
-                    .peek()
-                    .map_or(false, |glyph_group| {
-                        glyph_group.iter().any(|glyph| glyph.id == 0)
-                    })
-                {
+                while glyph_groups.peek().map_or(false, |glyph_group| {
+                    glyph_group.iter().any(|glyph| glyph.id == 0)
+                }) {
                     glyph_groups.next();
                 }
                 let missing_end = if let Some(glyph_group) = glyph_groups.peek() {
