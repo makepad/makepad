@@ -22,7 +22,7 @@ mod tests {
     use {
         super::*,
         font_loader::FontDefinitions,
-        layouter::{Align, LayoutOptions, LayoutParams, Layouter, Settings},
+        layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
         non_nan::NonNanF32,
         std::{fs::File, io::BufWriter, rc::Rc},
         text::{Span, Style, Text},
@@ -34,7 +34,6 @@ mod tests {
         let text = layouter.get_or_layout(LayoutParams {
             options: LayoutOptions {
                 max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
-                align: Align::Left,
             },
             text: Rc::new(Text {
                 spans: vec![Span {
