@@ -102,7 +102,9 @@ pub struct PortalList {
     #[rust] _draw_list_cache: Vec<DrawList>,
     
     //#[rust(DragState::None)] drag_state: DragState,
-    #[rust(ScrollState::Stopped)] scroll_state: ScrollState
+    #[rust(ScrollState::Stopped)] scroll_state: ScrollState,
+    /// Whether the PortalList was actively scrolling during the most recent finger down hit.
+    #[rust] was_scrolling_upon_finger_down: bool,
 }
 
 
@@ -726,7 +728,7 @@ impl Widget for PortalList {
             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
             self.area.redraw(cx);
         }
-        
+
         for item in self.items.values_mut() {
             let item_uid = item.widget.widget_uid();
             cx.group_widget_actions(uid, item_uid, |cx|{
@@ -812,9 +814,7 @@ impl Widget for PortalList {
         if !self.scroll_bar.is_area_captured(cx) || is_scroll{ 
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
-                    if self.tail_range {
-                        self.tail_range = false;
-                    }
+                    self.tail_range = false;
                     self.detect_tail_in_draw = true;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true);
@@ -888,10 +888,12 @@ impl Widget for PortalList {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
                     }
-                    // ok so fingerdown eh.
-                    if self.tail_range {
-                        self.tail_range = false;
-                    }
+                    self.tail_range = false;
+                    self.was_scrolling_upon_finger_down = match &self.scroll_state {
+                        ScrollState::Drag { samples } => samples.len() > 1,
+                        ScrollState::Stopped => false,
+                        _ => true,
+                    };
                     if self.drag_scrolling && fe.is_primary_hit() {
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample{abs: fe.abs.index(vi), time: fe.time}]
@@ -1030,13 +1032,9 @@ impl PortalListRef {
         inner.visible_items()
     }
 
-    /// Returns whether this PortalList is currently scrolling.
-    ///
-    /// This returns true if the PortalList's scroll state is not `ScrollState::Stopped`.
-    pub fn is_scrolling(&self) -> bool {
-        self.borrow().is_some_and(|inner|
-            !matches!(inner.scroll_state, ScrollState::Stopped)
-        )
+    /// Returns whether this PortalList was scrolling when the previous finger down event occurred.
+    pub fn was_scrolling_on_latest_finger_down(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.was_scrolling_upon_finger_down)
     }
 
     /// Returns whether the given `actions` contain an action indicating that this PortalList was scrolled.
