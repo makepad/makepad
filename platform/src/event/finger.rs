@@ -622,17 +622,22 @@ impl FingerMoveEvent {
 #[derive(Clone, Copy, Debug)]
 pub struct FingerUpEvent {
     pub window_id: WindowId,
+    /// The absolute position of the original finger-down event.
     pub abs: DVec2,
+    /// The absolute position of this finger-up event.
+    pub abs_start: DVec2,
+    /// The time at which the original finger-down event occurred.
     pub capture_time: f64,
+    /// The time at which this finger-up event occurred.
+    pub time: f64,
     
     pub digit_id: DigitId,
     pub device: DigitDevice,
     
     pub tap_count: u32,
     pub modifiers: KeyModifiers,
-    pub time: f64,
-    pub abs_start: DVec2,
     pub rect: Rect,
+    /// Whether this finger-up event (`abs`) occurred within the hits area.
     pub is_over: bool,
     pub is_sweep: bool
 }
