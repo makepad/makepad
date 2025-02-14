@@ -4,7 +4,6 @@ pub use makepad_html;
 pub use makepad_derive_widget;
 pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
-pub use makepad_markdown;
 
 pub mod button;
 pub mod cached_widget;
