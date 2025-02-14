@@ -1030,6 +1030,15 @@ impl PortalListRef {
         inner.visible_items()
     }
 
+    /// Returns whether this PortalList is currently scrolling.
+    ///
+    /// This returns true if the PortalList's scroll state is not `ScrollState::Stopped`.
+    pub fn is_scrolling(&self) -> bool {
+        self.borrow().is_some_and(|inner|
+            !matches!(inner.scroll_state, ScrollState::Stopped)
+        )
+    }
+
     /// Returns whether the given `actions` contain an action indicating that this PortalList was scrolled.
     pub fn scrolled(&self, actions: &Actions) -> bool {
         if let PortalListAction::Scroll = actions.find_widget_action(self.widget_uid()).cast() {
