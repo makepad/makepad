@@ -335,7 +335,7 @@ impl Markdown {
         // Track state for nested formatting
         let mut list_stack = Vec::new();
 
-        let parser = Parser::new_ext(self.body.as_ref(), Options::all());        
+        let parser = Parser::new_ext(self.body.as_ref(), Options::ENABLE_TABLES);        
         
         for event in parser.into_iter() {
             match event {
