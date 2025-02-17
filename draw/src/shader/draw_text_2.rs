@@ -7,11 +7,8 @@ use {
         text::{
             font::{AtlasKind, RasterizedGlyph},
             geom::{Point, Rect, Size, Transform},
-            layouter::{
-                LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams,
-            },
-            non_nan::NonNanF32,
-            text::Text,
+            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
+            text::{Color, Text},
         },
     },
     std::rc::Rc,
@@ -21,8 +18,6 @@ live_design! {
     use link::shaders::*;
 
     pub DrawText2 = {{DrawText2}} {
-        color: #fff
-
         uniform radius: float;
         uniform cutoff: float;
 
@@ -71,7 +66,7 @@ live_design! {
                 let dxt = length(dFdx(texel_coords));
                 let dyt = length(dFdy(texel_coords));
                 let scale = (dxt + dyt) * 512.0 * 0.5;
-                let c = vec4(1.0, 1.0, 1.0, 1.0);
+                let c = self.color;
                 let s = self.sdf(scale, self.tex_coord1.xy);
                 return s * c;
             } else {
@@ -129,23 +124,21 @@ impl DrawText2 {
     pub fn draw(&mut self, cx: &mut Cx2d, p: Point<f32>, text: Rc<Text>) {
         let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             options: LayoutOptions {
-                max_width_in_lpxs: Some(NonNanF32::new(128.0).unwrap()),
+                max_width_in_lpxs: None, // Some(NonNanF32::new(128.0).unwrap()),
             },
             text,
         });
-        self.draw_laidout_text(
-            cx,
-            p,
-            laidout_text,
-        );
+        self.draw_laidout_text(cx, p, laidout_text);
     }
 
     fn draw_laidout_text(
         &mut self,
         cx: &mut Cx2d<'_>,
-        p: Point<f32>,
+        point_in_lpxs: Point<f32>,
         text: Rc<LaidoutText>,
     ) {
+        use std::ops::ControlFlow;
+
         let fonts = cx.fonts.borrow_mut();
         let settings = fonts.sdfer().borrow().settings();
         self.draw_vars.user_uniforms[0] = settings.radius;
@@ -154,13 +147,9 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        text.walk_rows(p, |p, row| {
-            self.draw_laidout_row(
-                cx,
-                p,
-                row,
-                &mut many_instances.instances,
-            );
+        text.walk_rows::<()>(point_in_lpxs, |point_in_lpxs, row| {
+            self.draw_laidout_row(cx, point_in_lpxs, row, &mut many_instances.instances);
+            ControlFlow::Continue(())
         });
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -169,17 +158,20 @@ impl DrawText2 {
     fn draw_laidout_row(
         &mut self,
         cx: &mut Cx2d<'_>,
-        p: Point<f32>,
+        point_in_lpxs: Point<f32>,
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        row.walk_glyphs(p, |p, glyph| {
-            self.draw_laidout_glyph(cx, p, glyph, output);
+        use std::ops::ControlFlow;
+
+        row.walk_glyphs::<()>(point_in_lpxs, |point_in_lpxs, glyph| {
+            self.draw_laidout_glyph(cx, point_in_lpxs, glyph, output);
+            ControlFlow::Continue(())
         });
 
         cx.cx.debug.rect(
             makepad_platform::Rect {
-                pos: dvec2(p.x as f64, p.y as f64),
+                pos: dvec2(point_in_lpxs.x as f64, point_in_lpxs.y as f64),
                 size: dvec2(1000.0, 1.0),
             },
             vec4(1.0, 0.0, 0.0, 1.0),
@@ -189,7 +181,7 @@ impl DrawText2 {
     fn draw_laidout_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
-        p: Point<f32>,
+        point_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
@@ -198,9 +190,13 @@ impl DrawText2 {
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
                 cx,
-                Point::new(p.x + glyph.offset_in_lpxs, p.y),
-                rasterized_glyph,
+                Point::new(
+                    point_in_lpxs.x + glyph.offset_in_lpxs,
+                    point_in_lpxs.y + glyph.baseline_y_in_lpxs(),
+                ),
                 glyph.font_size_in_lpxs,
+                glyph.color,
+                rasterized_glyph,
                 output,
             );
         }
@@ -209,9 +205,10 @@ impl DrawText2 {
     fn draw_rasterized_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
-        p: Point<f32>,
-        glyph: RasterizedGlyph,
+        point_in_lpxs: Point<f32>,
         font_size_in_lpxs: f32,
+        color: Color,
+        glyph: RasterizedGlyph,
         output: &mut Vec<f32>,
     ) {
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
@@ -229,8 +226,17 @@ impl DrawText2 {
             vec2(point.width, point.height)
         }
 
+        fn color_to_vec4(color: Color) -> Vec4 {
+            vec4(
+                color.r as f32 / 255.0,
+                color.g as f32 / 255.0,
+                color.b as f32 / 255.0,
+                color.a as f32 / 255.0,
+            )
+        }
+
         let transform = Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em)
-            .translate(p.x, p.y);
+            .translate(point_in_lpxs.x, point_in_lpxs.y);
         let bounds_in_dpxs = Rect::new(
             Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
             glyph.bounds_in_dpxs.size,
@@ -244,6 +250,7 @@ impl DrawText2 {
         };
         self.font_t1 = point_to_vec2(tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size));
         self.font_t2 = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
+        self.color = color_to_vec4(color);
         self.char_depth += 0.001; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
