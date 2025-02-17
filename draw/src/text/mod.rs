@@ -42,15 +42,25 @@ mod tests {
             },
             text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
         });
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                color: Color::RED,
+                baseline: Baseline::Alphabetic,
+            },
+            text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
+        });
         let text = layouter.get_or_layout(LayoutParams {
+            text: Rc::new(text),
             options: LayoutOptions {
                 max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
             },
-            text: Rc::new(text),
         });
         for row in text.rows() {
-            for glyph in row.glyphs() {
+            for glyph in &row.glyphs {
                 glyph.font.rasterize_glyph(glyph.id, 64.0);
+                println!("{:?}", glyph.cluster);
             }
         }
 
