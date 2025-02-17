@@ -46,8 +46,8 @@ mod tests {
             },
             text: Rc::new(text),
         });
-        for row in &*text {
-            for glyph in &row.glyphs {
+        for row in text.rows() {
+            for glyph in row.glyphs() {
                 glyph.font.rasterize_glyph(glyph.id, 64.0);
             }
         }
