@@ -1,5 +1,5 @@
 use {
-    crate::makepad_widgets::{text::{non_nan::NonNanF32, geom::Point, text::{Text, Span, Style}}, *},
+    crate::makepad_widgets::{text::{non_nan::NonNanF32, geom::Point, text::{Baseline, Color, Text, Span, Style}}, *},
     std::rc::Rc,
 };
 
@@ -97,6 +97,7 @@ impl Widget for MyWidget {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         let mut text = Text::default();
+        /*
         text.push_span(Span {
             style: Style {
                 font_family_id: "Sans".into(),
@@ -117,6 +118,34 @@ impl Widget for MyWidget {
                 font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
             },
             text: "繁😊😔 over the lazy dog.".into()
+        });
+        */
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                color: Color::BRIGHT_RED,
+                baseline: Baseline::Alphabetic,
+            },
+            text: "XBaseline alphabetic ".into()
+        });
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                color: Color::BRIGHT_GREEN,
+                baseline: Baseline::Top,
+            },
+            text: "XBaseline top ".into()
+        });
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                color: Color::BRIGHT_BLUE,
+                baseline: Baseline::Bottom,
+            },
+            text: "XBaseline bottom ".into()
         });
         self.draw_text.draw(cx, Point::new(50.0, 50.0), Rc::new(text));
         self.draw_bg.end(cx);
