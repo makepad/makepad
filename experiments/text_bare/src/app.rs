@@ -1,7 +1,4 @@
-use {
-    crate::makepad_widgets::{text::{non_nan::NonNanF32, geom::Point, text::{Baseline, Color, Text, Span, Style}}, *},
-    std::rc::Rc,
-};
+use crate::makepad_widgets::{text::{non_nan::NonNanF32, geom::Point, layout::{LayoutParams, LayoutSpan, LayoutOptions}, style::{Baseline, Color, Style}}, *};
 
 live_design!{
     use link::theme::*;
@@ -96,58 +93,43 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        let mut text = Text::default();
-        /*
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
+        let text = "The quick brown fox jumps over the lazy dog繁😊😔";
+        let text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
+            text: text.into(),
+            spans: [
+                LayoutSpan {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        color: Color::BRIGHT_RED,
+                        baseline: Baseline::Alphabetic,
+                    },
+                    range: 0..10,
+                },
+                LayoutSpan {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        color: Color::BRIGHT_GREEN,
+                        baseline: Baseline::Top,
+                    },
+                    range: 10..20,
+                },
+                LayoutSpan {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        color: Color::BRIGHT_BLUE,
+                        baseline: Baseline::Bottom,
+                    },
+                    range: 20..text.len(),
+                },
+            ].into(),
+            options: LayoutOptions {
+                max_width_in_lpxs: None // Some(NonNanF32::new(256.0).unwrap()),
             },
-            text: "繁😊😔 The quick brown fox ".into()
         });
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(20.0).unwrap()
-            },
-            text: "Averylongwordtoshowthatdesperatebreakswork jumps ".into()
-        });
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
-            },
-            text: "繁😊😔 over the lazy dog.".into()
-        });
-        */
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                color: Color::BRIGHT_RED,
-                baseline: Baseline::Alphabetic,
-            },
-            text: "XBaseline alphabetic ".into()
-        });
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                color: Color::BRIGHT_GREEN,
-                baseline: Baseline::Top,
-            },
-            text: "XBaseline top ".into()
-        });
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                color: Color::BRIGHT_BLUE,
-                baseline: Baseline::Bottom,
-            },
-            text: "XBaseline bottom ".into()
-        });
-        self.draw_text.draw(cx, Point::new(50.0, 50.0), Rc::new(text));
+        self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);
         self.draw_bg.end(cx);
         DrawStep::done()
     }
