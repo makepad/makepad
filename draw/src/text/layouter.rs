@@ -15,9 +15,7 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
-        ops::Deref,
         rc::Rc,
-        slice,
     },
 };
 
@@ -65,13 +63,11 @@ impl Layouter {
     }
 
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
-        use super::num::Zero;
-
         let mut text = LaidoutText::default();
         LayoutContext {
             loader: &mut self.font_loader,
             options: params.options,
-            current_point_in_lpxs: Point::ZERO,
+            current_x_in_lpxs: 0.0,
             current_row: LaidoutRow::default(),
             out_text: &mut text,
         }
@@ -108,7 +104,7 @@ impl Default for Settings {
 struct LayoutContext<'a> {
     loader: &'a mut FontLoader,
     options: LayoutOptions,
-    current_point_in_lpxs: Point<f32>,
+    current_x_in_lpxs: f32,
     current_row: LaidoutRow,
     out_text: &'a mut LaidoutText,
 }
@@ -122,11 +118,11 @@ impl<'a> LayoutContext<'a> {
 
     fn remaining_width_on_current_row_in_lpxs(&self) -> Option<f32> {
         self.max_width_in_lpxs()
-            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_point_in_lpxs.x)
+            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_x_in_lpxs)
     }
 
     fn layout(&mut self, text: &Text) {
-        for span in text {
+        for span in text.spans() {
             self.layout_span(span);
         }
         self.finish_current_row();
@@ -224,25 +220,21 @@ impl<'a> LayoutContext<'a> {
 
     fn push_glyph_onto_current_row(&mut self, font_size_in_lpxs: f32, glyph: ShapedGlyph) {
         let glyph = LaidoutGlyph {
-            origin_in_lpxs: Point::new(self.current_point_in_lpxs.x, 0.0),
             font: glyph.font.clone(),
             font_size_in_lpxs,
             id: glyph.id,
             advance_in_lpxs: glyph.advance_in_ems * font_size_in_lpxs,
             offset_in_lpxs: glyph.offset_in_ems * font_size_in_lpxs,
         };
-        self.current_point_in_lpxs.x += glyph.advance_in_lpxs;
+        self.current_x_in_lpxs += glyph.advance_in_lpxs;
         self.current_row.push_glyph(glyph);
     }
 
     fn finish_current_row(&mut self) {
         use std::mem;
 
-        let mut row = mem::replace(&mut self.current_row, LaidoutRow::default());
-        self.current_point_in_lpxs.x = 0.0;
-        self.current_point_in_lpxs.y += row.ascender_in_lpxs;
-        row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
-        self.current_point_in_lpxs.y += row.line_gap_in_lpxs - row.descender_in_lpxs;
+        let row = mem::replace(&mut self.current_row, LaidoutRow::default());
+        self.current_x_in_lpxs = 0.0;
         self.out_text.push_row(row);
     }
 }
@@ -358,39 +350,66 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
+    pub fn rows(&self) -> &[LaidoutRow] {
+        &self.rows
+    }
+
+    pub fn walk_rows(&self, p: Point<f32>, f: impl FnMut(Point<f32>, &LaidoutRow)) {
+        let mut p = p;
+        let mut f = f;
+        for (row_index, row) in self.rows.iter().enumerate() {
+            if row_index != 0 {
+                p.y += row.ascender_in_lpxs();
+            }
+            f(p, row);
+            p.y += -row.descender_in_lpxs() + row.line_gap_in_lpxs();
+        }
+    }
+
     pub fn push_row(&mut self, row: LaidoutRow) {
         self.rows.push(row);
     }
 }
 
-impl Deref for LaidoutText {
-    type Target = [LaidoutRow];
-
-    fn deref(&self) -> &Self::Target {
-        &self.rows
-    }
-}
-
-impl<'a> IntoIterator for &'a LaidoutText {
-    type Item = &'a LaidoutRow;
-    type IntoIter = slice::Iter<'a, LaidoutRow>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.rows.iter()
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct LaidoutRow {
-    pub origin_in_lpxs: Point<f32>,
-    pub width_in_lpxs: f32,
-    pub ascender_in_lpxs: f32,
-    pub descender_in_lpxs: f32,
-    pub line_gap_in_lpxs: f32,
-    pub glyphs: Vec<LaidoutGlyph>,
+    width_in_lpxs: f32,
+    ascender_in_lpxs: f32,
+    descender_in_lpxs: f32,
+    line_gap_in_lpxs: f32,
+    glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
+    pub fn width_in_lpxs(&self) -> f32 {
+        self.width_in_lpxs
+    }
+
+    pub fn ascender_in_lpxs(&self) -> f32 {
+        self.ascender_in_lpxs
+    }
+
+    pub fn descender_in_lpxs(&self) -> f32 {
+        self.descender_in_lpxs
+    }
+
+    pub fn line_gap_in_lpxs(&self) -> f32 {
+        self.line_gap_in_lpxs
+    }
+
+    pub fn glyphs(&self) -> &[LaidoutGlyph] {
+        &self.glyphs
+    }
+
+    pub fn walk_glyphs(&self, p: Point<f32>, f: impl FnMut(Point<f32>, &LaidoutGlyph)) {
+        let mut p = p;
+        let mut f = f;
+        for glyph in &self.glyphs {
+            f(p, glyph);
+            p.x += glyph.advance_in_lpxs;
+        }
+    }
+
     pub fn push_glyph(&mut self, glyph: LaidoutGlyph) {
         self.width_in_lpxs += glyph.advance_in_lpxs;
         self.ascender_in_lpxs = self.ascender_in_lpxs.max(glyph.ascender_in_lpxs());
@@ -400,18 +419,8 @@ impl LaidoutRow {
     }
 }
 
-impl<'a> IntoIterator for &'a LaidoutRow {
-    type Item = &'a LaidoutGlyph;
-    type IntoIter = slice::Iter<'a, LaidoutGlyph>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.glyphs.iter()
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct LaidoutGlyph {
-    pub origin_in_lpxs: Point<f32>,
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
     pub id: GlyphId,

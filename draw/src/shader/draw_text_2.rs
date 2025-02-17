@@ -154,17 +154,14 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        for row in &*text {
+        text.walk_rows(p, |p, row| {
             self.draw_laidout_row(
                 cx,
-                p.apply_transform(Transform::from_translate(
-                    row.origin_in_lpxs.x,
-                    row.origin_in_lpxs.y,
-                )),
+                p,
                 row,
                 &mut many_instances.instances,
             );
-        }
+        });
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
     }
@@ -176,12 +173,9 @@ impl DrawText2 {
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        for glyph in row {
-            self.draw_laidout_glyph(cx, p.apply_transform(Transform::from_translate(
-                glyph.origin_in_lpxs.x,
-                glyph.origin_in_lpxs.y,
-            )), glyph, output);
-        };
+        row.walk_glyphs(p, |p, glyph| {
+            self.draw_laidout_glyph(cx, p, glyph, output);
+        });
 
         cx.cx.debug.rect(
             makepad_platform::Rect {
