@@ -1,7 +1,7 @@
 use {
     super::{
         font::Font,
-        shaper::{ShapeParams, ShapedText, Shaper},
+        shape::{ShapeParams, ShapedText, Shaper},
         substr::Substr,
     },
     std::{

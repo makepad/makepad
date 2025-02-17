@@ -3,8 +3,8 @@ use {
         font_loader::FontDefinitions,
         geom::Point,
         image::Rgba,
-        layouter,
-        layouter::{LaidoutText, LayoutParams, Layouter},
+        layout,
+        layout::{LaidoutText, LayoutParams, Layouter},
         sdfer::Sdfer,
     },
     makepad_platform::*,
@@ -19,7 +19,7 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(cx: &mut Cx, definitions: FontDefinitions, settings: layouter::Settings) -> Self {
+    pub fn new(cx: &mut Cx, definitions: FontDefinitions, settings: layout::Settings) -> Self {
         let layouter = Layouter::new(definitions, settings);
         let grayscale_atlas_size = layouter.grayscale_atlas().borrow().size();
         let color_atlas_size = layouter.color_atlas().borrow().size();

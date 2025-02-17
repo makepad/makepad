@@ -9,13 +9,13 @@ pub mod geom;
 pub mod glyph_outline;
 pub mod glyph_raster_image;
 pub mod image;
-pub mod layouter;
+pub mod layout;
 pub mod non_nan;
 pub mod num;
 pub mod sdfer;
-pub mod shaper;
+pub mod shape;
 pub mod substr;
-pub mod text;
+pub mod style;
 
 #[cfg(test)]
 mod tests {
@@ -24,40 +24,51 @@ mod tests {
         use {
             super::{
                 font_loader::FontDefinitions,
-                layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
+                layout::{LayoutOptions, LayoutParams, LayoutSpan, Layouter, Settings},
                 non_nan::NonNanF32,
-                text::{Baseline, Color, Span, Style, Text},
+                style::{Baseline, Color, Style},
             },
-            std::{fs::File, io::BufWriter, rc::Rc},
+            std::{fs::File, io::BufWriter},
         };
 
         let mut layouter = Layouter::new(FontDefinitions::default(), Settings::default());
-        let mut text = Text::default();
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                color: Color::WHITE,
-                baseline: Baseline::Alphabetic,
-            },
-            text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
-        });
-        text.push_span(Span {
-            style: Style {
-                font_family_id: "Sans".into(),
-                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                color: Color::RED,
-                baseline: Baseline::Alphabetic,
-            },
-            text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
-        });
+        let text = "The quick brown fox jumps over the lazy dog繁😊😔";
         let text = layouter.get_or_layout(LayoutParams {
-            text: Rc::new(text),
+            text: text.into(),
+            spans: [
+                LayoutSpan {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        color: Color::RED,
+                        baseline: Baseline::Alphabetic,
+                    },
+                    range: 0..10,
+                },
+                LayoutSpan {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        color: Color::GREEN,
+                        baseline: Baseline::Top,
+                    },
+                    range: 10..20,
+                },
+                LayoutSpan {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        color: Color::BLUE,
+                        baseline: Baseline::Bottom,
+                    },
+                    range: 20..text.len(),
+                },
+            ].into(),
             options: LayoutOptions {
                 max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
             },
         });
-        for row in text.rows() {
+        for row in &text.rows {
             for glyph in &row.glyphs {
                 glyph.font.rasterize_glyph(glyph.id, 64.0);
                 println!("{:?}", glyph.cluster);
