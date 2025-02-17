@@ -57,7 +57,7 @@ impl Shaper {
         fonts: &[Rc<Font>],
         start: usize,
         end: usize,
-        output: &mut ShapedText,
+        out_text: &mut ShapedText,
     ) {
         fn group_glyphs_by_cluster(
             glyphs: &[ShapedGlyph],
@@ -96,10 +96,10 @@ impl Shaper {
                 } else {
                     end
                 };
-                self.shape_recursive(text, fonts, missing_start, missing_end, output);
+                self.shape_recursive(text, fonts, missing_start, missing_end, out_text);
             } else {
                 for glyph in glyph_group.iter().cloned() {
-                    output.push_glyph(glyph);
+                    out_text.push_glyph(glyph);
                 }
             }
         }

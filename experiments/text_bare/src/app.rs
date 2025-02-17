@@ -96,31 +96,29 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text.draw(cx, Point::new(50.0, 50.0), Rc::new(Text {
-            spans: vec![
-                Span {
-                    style: Style {
-                        font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
-                    },
-                    text: "繁😊😔 The quick brown fox ".into()
-                },
-                Span {
-                    style: Style {
-                        font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(20.0).unwrap()
-                    },
-                    text: "Averylongwordtoshowthatdesperatebreakswork jumps ".into()
-                },
-                Span {
-                    style: Style {
-                        font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
-                    },
-                    text: "繁😊😔 over the lazy dog.".into()
-                },
-            ],
-        }));
+        let mut text = Text::default();
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
+            },
+            text: "繁😊😔 The quick brown fox ".into()
+        });
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(20.0).unwrap()
+            },
+            text: "Averylongwordtoshowthatdesperatebreakswork jumps ".into()
+        });
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap()
+            },
+            text: "繁😊😔 over the lazy dog.".into()
+        });
+        self.draw_text.draw(cx, Point::new(50.0, 50.0), Rc::new(text));
         self.draw_bg.end(cx);
         DrawStep::done()
     }
