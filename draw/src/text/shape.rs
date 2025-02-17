@@ -82,10 +82,10 @@ impl Shaper {
                 let end = glyphs[start..]
                     .windows(2)
                     .position(|window| window[0].cluster != window[1].cluster)
-                    .map_or(glyphs.len(), |index| start + index + 1);
-                let group = &glyphs[start..end];
+                    .map_or(glyphs.len(), |byte_index| start + byte_index + 1);
+                let glyph_group = &glyphs[start..end];
                 start = end;
-                Some(group)
+                Some(glyph_group)
             })
         }
 
@@ -167,12 +167,6 @@ pub struct ShapedText {
     pub text: Substr,
     pub width_in_ems: f32,
     pub glyphs: Vec<ShapedGlyph>,
-}
-
-impl ShapedText {
-    pub fn len(&self) -> usize {
-        self.text.len()
-    }
 }
 
 #[derive(Clone, Debug)]
