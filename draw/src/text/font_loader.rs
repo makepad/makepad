@@ -9,8 +9,8 @@ use {
         image::{Rgba, R},
         sdfer,
         sdfer::Sdfer,
-        shaper,
-        shaper::Shaper,
+        shape,
+        shape::Shaper,
     },
     std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
 };
@@ -103,7 +103,7 @@ impl FontLoader {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
-    pub shaper: shaper::Settings,
+    pub shaper: shape::Settings,
     pub sdfer: sdfer::Settings,
     pub grayscale_atlas_size: Size<usize>,
     pub color_atlas_size: Size<usize>,

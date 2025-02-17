@@ -1,17 +1,14 @@
-use {
-    crate::{
-        cx_2d::Cx2d,
-        draw_list_2d::ManyInstances,
-        geometry::GeometryQuad2D,
-        makepad_platform::*,
-        text::{
-            font::{AtlasKind, RasterizedGlyph},
-            geom::{Point, Rect, Size, Transform},
-            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams},
-            text::{Color, Text},
-        },
+use crate::{
+    cx_2d::Cx2d,
+    draw_list_2d::ManyInstances,
+    geometry::GeometryQuad2D,
+    makepad_platform::*,
+    text::{
+        font::{AtlasKind, RasterizedGlyph},
+        geom::{Point, Rect, Size, Transform},
+        layout::{LaidoutGlyph, LaidoutRow, LaidoutText},
+        style::Color,
     },
-    std::rc::Rc,
 };
 
 live_design! {
@@ -121,21 +118,11 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
-    pub fn draw(&mut self, cx: &mut Cx2d, p: Point<f32>, text: Rc<Text>) {
-        let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
-            options: LayoutOptions {
-                max_width_in_lpxs: None, // Some(NonNanF32::new(128.0).unwrap()),
-            },
-            text,
-        });
-        self.draw_laidout_text(cx, p, laidout_text);
-    }
-
-    fn draw_laidout_text(
+    pub fn draw_laidout_text(
         &mut self,
         cx: &mut Cx2d<'_>,
         point_in_lpxs: Point<f32>,
-        text: Rc<LaidoutText>,
+        text: &LaidoutText,
     ) {
         let fonts = cx.fonts.borrow_mut();
         let settings = fonts.sdfer().borrow().settings();
