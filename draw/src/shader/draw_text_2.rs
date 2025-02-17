@@ -137,8 +137,6 @@ impl DrawText2 {
         point_in_lpxs: Point<f32>,
         text: Rc<LaidoutText>,
     ) {
-        use std::ops::ControlFlow;
-
         let fonts = cx.fonts.borrow_mut();
         let settings = fonts.sdfer().borrow().settings();
         self.draw_vars.user_uniforms[0] = settings.radius;
@@ -149,7 +147,6 @@ impl DrawText2 {
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         text.walk_rows::<()>(point_in_lpxs, |point_in_lpxs, row| {
             self.draw_laidout_row(cx, point_in_lpxs, row, &mut many_instances.instances);
-            ControlFlow::Continue(())
         });
         let new_area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -162,11 +159,8 @@ impl DrawText2 {
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        use std::ops::ControlFlow;
-
         row.walk_glyphs::<()>(point_in_lpxs, |point_in_lpxs, glyph| {
             self.draw_laidout_glyph(cx, point_in_lpxs, glyph, output);
-            ControlFlow::Continue(())
         });
 
         cx.cx.debug.rect(
