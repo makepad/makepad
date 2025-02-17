@@ -19,33 +19,34 @@ pub mod text;
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*,
-        font_loader::FontDefinitions,
-        layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
-        non_nan::NonNanF32,
-        std::{fs::File, io::BufWriter, rc::Rc},
-        text::{Span, Style, Text},
-    };
-
     #[test]
     fn test() {
+        use {
+            super::{
+                font_loader::FontDefinitions,
+                layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
+                non_nan::NonNanF32,
+                text::{Span, Style, Text},
+            },
+            std::{fs::File, io::BufWriter, rc::Rc},
+        };
+
         let mut layouter = Layouter::new(FontDefinitions::default(), Settings::default());
+        let mut text = Text::default();
+        text.push_span(Span {
+            style: Style {
+                font_family_id: "Sans".into(),
+                font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+            },
+            text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
+        });
         let text = layouter.get_or_layout(LayoutParams {
             options: LayoutOptions {
                 max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
             },
-            text: Rc::new(Text {
-                spans: vec![Span {
-                    style: Style {
-                        font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                    },
-                    text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
-                }],
-            }),
+            text: Rc::new(text),
         });
-        for row in &text.rows {
+        for row in &*text {
             for glyph in &row.glyphs {
                 glyph.font.rasterize_glyph(glyph.id, 64.0);
             }
