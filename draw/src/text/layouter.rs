@@ -7,14 +7,13 @@ use {
         geom::{Point, Size},
         non_nan::NonNanF32,
         sdfer,
-        shaper::{self, ShapedGlyph, ShapedText},
+        shaper::{self, ShapedText},
         substr::Substr,
         text::{Baseline, Color, Span, Text},
     },
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
-        ops::ControlFlow,
         rc::Rc,
     },
 };
@@ -63,16 +62,19 @@ impl Layouter {
     }
 
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
-        let mut text = LaidoutText::default();
+        let mut rows = Vec::new();
         LayoutContext {
             loader: &mut self.font_loader,
             options: params.options,
+            current_index: 0,
             current_x_in_lpxs: 0.0,
-            current_row: LaidoutRow::default(),
-            out_text: &mut text,
+            glyphs: Vec::new(),
+            out_rows: &mut rows,
         }
         .layout(&params.text);
-        text
+        LaidoutText {
+            rows
+        }
     }
 }
 
@@ -104,9 +106,10 @@ impl Default for Settings {
 struct LayoutContext<'a> {
     loader: &'a mut FontLoader,
     options: LayoutOptions,
+    current_index: usize,
     current_x_in_lpxs: f32,
-    current_row: LaidoutRow,
-    out_text: &'a mut LaidoutText,
+    glyphs: Vec<LaidoutGlyph>,
+    out_rows: &'a mut Vec<LaidoutRow>,
 }
 
 impl<'a> LayoutContext<'a> {
@@ -125,7 +128,7 @@ impl<'a> LayoutContext<'a> {
         for span in text.spans() {
             self.layout_span(span);
         }
-        self.finish_current_row();
+        self.finish_row();
     }
 
     fn layout_span(&mut self, span: &Span) {
@@ -142,7 +145,7 @@ impl<'a> LayoutContext<'a> {
                 &span.text,
             );
         } else {
-            self.append_text_to_current_row(
+            self.append_text(
                 span.style.font_size_in_lpxs.into_inner(),
                 span.style.color,
                 span.style.baseline,
@@ -170,10 +173,10 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
-                    self.append_text_to_current_row(font_size_in_lpxs, color, baseline, &text);
+                    self.append_text(font_size_in_lpxs, color, baseline, &text);
                 }
                 None => {
-                    if self.current_row.glyphs.is_empty() {
+                    if self.glyphs.is_empty() {
                         self.wrap_by_grapheme(
                             font_family,
                             font_size_in_lpxs,
@@ -182,7 +185,7 @@ impl<'a> LayoutContext<'a> {
                             &fitter.pop_front(),
                         );
                     } else {
-                        self.finish_current_row()
+                        self.finish_row()
                     }
                 }
             }
@@ -210,25 +213,25 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
-                    self.append_text_to_current_row(font_size_in_lpxs, color, baseline, &text);
+                    self.append_text(font_size_in_lpxs, color, baseline, &text);
                 }
                 None => {
-                    if self.current_row.glyphs.is_empty() {
-                        self.append_text_to_current_row(
+                    if self.glyphs.is_empty() {
+                        self.append_text(
                             font_size_in_lpxs,
                             color,
                             baseline,
                             &font_family.get_or_shape(fitter.pop_front()),
                         );
                     } else {
-                        self.finish_current_row();
+                        self.finish_row();
                     }
                 }
             }
         }
     }
 
-    fn append_text_to_current_row(
+    fn append_text(
         &mut self,
         font_size_in_lpxs: f32,
         color: Color,
@@ -236,37 +239,48 @@ impl<'a> LayoutContext<'a> {
         text: &ShapedText,
     ) {
         for glyph in &text.glyphs {
-            self.push_glyph_onto_current_row(font_size_in_lpxs, color, baseline, glyph);
+            let glyph = LaidoutGlyph {
+                font: glyph.font.clone(),
+                font_size_in_lpxs,
+                color,
+                baseline,
+                id: glyph.id,
+                cluster: self.current_index + glyph.cluster,
+                advance_in_lpxs: glyph.advance_in_ems * font_size_in_lpxs,
+                offset_in_lpxs: glyph.offset_in_ems * font_size_in_lpxs,
+            };
+            self.current_x_in_lpxs += glyph.advance_in_lpxs;
+            self.glyphs.push(glyph);
         }
+        self.current_index += text.len();
     }
 
-    fn push_glyph_onto_current_row(
-        &mut self,
-        font_size_in_lpxs: f32,
-        color: Color,
-        baseline: Baseline,
-        glyph: &ShapedGlyph,
-    ) {
-        let glyph = LaidoutGlyph {
-            font: glyph.font.clone(),
-            font_size_in_lpxs,
-            color,
-            baseline,
-            id: glyph.id,
-            cluster: glyph.cluster,
-            advance_in_lpxs: glyph.advance_in_ems * font_size_in_lpxs,
-            offset_in_lpxs: glyph.offset_in_ems * font_size_in_lpxs,
-        };
-        self.current_x_in_lpxs += glyph.advance_in_lpxs;
-        self.current_row.push_glyph(glyph);
-    }
-
-    fn finish_current_row(&mut self) {
+    fn finish_row(&mut self) {
         use std::mem;
 
-        let row = mem::replace(&mut self.current_row, LaidoutRow::default());
+        let glyphs = mem::take(&mut self.glyphs);
+        let row = LaidoutRow {
+            len: self.current_index,
+            width_in_lpxs: self.current_x_in_lpxs,
+            ascender_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.ascender_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            descender_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.descender_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            line_gap_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.line_gap_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            glyphs,
+        };
         self.current_x_in_lpxs = 0.0;
-        self.out_text.push_row(row);
+        self.out_rows.push(row);
     }
 }
 
@@ -293,7 +307,7 @@ impl<'a> Fitter<'a> {
             .scan(0, |segment_start, segment_len| {
                 let segment_end = *segment_start + segment_len;
                 let segment = text.substr(*segment_start..segment_end);
-                let segment_width_in_ems = font_family.get_or_shape(segment).width_in_ems();
+                let segment_width_in_ems = font_family.get_or_shape(segment).width_in_ems;
                 let segment_width_in_lpxs = segment_width_in_ems * font_size_in_lpxs;
                 *segment_start = segment_end;
                 Some(segment_width_in_lpxs)
@@ -347,7 +361,7 @@ impl<'a> Fitter<'a> {
             return None;
         }
         let shaped_text = self.font_family.get_or_shape(text);
-        let shaped_text_width_in_lpxs = shaped_text.width_in_ems() * self.font_size_in_lpxs;
+        let shaped_text_width_in_lpxs = shaped_text.width_in_ems * self.font_size_in_lpxs;
         if shaped_text_width_in_lpxs > max_width_in_lpxs {
             return None;
         }
@@ -366,8 +380,8 @@ impl<'a> Fitter<'a> {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutParams {
-    pub options: LayoutOptions,
     pub text: Rc<Text>,
+    pub options: LayoutOptions,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -388,18 +402,17 @@ impl LaidoutText {
     pub fn walk_rows<B>(
         &self,
         initial_point_in_lpxs: Point<f32>,
-        f: impl FnMut(Point<f32>, &LaidoutRow) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
+        f: impl FnMut(Point<f32>, &LaidoutRow),
+    ) {
         let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
         for (row_index, row) in self.rows.iter().enumerate() {
             if row_index != 0 {
-                current_point_in_lpxs.y += row.ascender_in_lpxs();
+                current_point_in_lpxs.y += row.ascender_in_lpxs;
             }
-            f(current_point_in_lpxs, row)?;
-            current_point_in_lpxs.y += -row.descender_in_lpxs() + row.line_gap_in_lpxs();
+            f(current_point_in_lpxs, row);
+            current_point_in_lpxs.y += -row.descender_in_lpxs + row.line_gap_in_lpxs;
         }
-        ControlFlow::Continue(())
     }
 
     pub fn push_row(&mut self, row: LaidoutRow) {
@@ -409,46 +422,55 @@ impl LaidoutText {
 
 #[derive(Clone, Debug, Default)]
 pub struct LaidoutRow {
-    width_in_lpxs: f32,
-    ascender_in_lpxs: f32,
-    descender_in_lpxs: f32,
-    line_gap_in_lpxs: f32,
-    glyphs: Vec<LaidoutGlyph>,
+    pub len: usize,
+    pub width_in_lpxs: f32,
+    pub ascender_in_lpxs: f32,
+    pub descender_in_lpxs: f32,
+    pub line_gap_in_lpxs: f32,
+    pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
-    pub fn width_in_lpxs(&self) -> f32 {
-        self.width_in_lpxs
-    }
-
-    pub fn ascender_in_lpxs(&self) -> f32 {
-        self.ascender_in_lpxs
-    }
-
-    pub fn descender_in_lpxs(&self) -> f32 {
-        self.descender_in_lpxs
-    }
-
-    pub fn line_gap_in_lpxs(&self) -> f32 {
-        self.line_gap_in_lpxs
-    }
-
-    pub fn glyphs(&self) -> &[LaidoutGlyph] {
-        &self.glyphs
-    }
-
     pub fn walk_glyphs<B>(
         &self,
         initial_point_in_lpxs: Point<f32>,
-        f: impl FnMut(Point<f32>, &LaidoutGlyph) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
+        f: impl FnMut(Point<f32>, &LaidoutGlyph),
+    ) {
         let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
         for glyph in &self.glyphs {
-            f(current_point_in_lpxs, glyph)?;
+            f(current_point_in_lpxs, glyph);
             current_point_in_lpxs.x += glyph.advance_in_lpxs;
         }
-        ControlFlow::Continue(())
+    }
+
+    pub fn point_in_lpxs_to_index(&self, point_in_lpxs: Point<f32>) {
+        fn group_glyphs_by_cluster(
+            glyphs: &[LaidoutGlyph],
+        ) -> impl Iterator<Item = &[LaidoutGlyph]> + '_ {
+            use std::iter;
+
+            let mut start = 0;
+            iter::from_fn(move || {
+                if start == glyphs.len() {
+                    return None;
+                }
+                let end = glyphs[start..]
+                    .windows(2)
+                    .position(|window| window[0].cluster != window[1].cluster)
+                    .map_or(glyphs.len(), |index| start + index + 1);
+                let group = &glyphs[start..end];
+                start = end;
+                Some(group)
+            })
+        }
+
+        let mut glyph_groups = group_glyphs_by_cluster(&self.glyphs).peekable();
+        while let Some(glyph_group) = glyph_groups.next() {
+            let start_cluster = glyph_group[0].cluster;
+            let end_cluster = glyph_groups.peek().map_or(self.len, |glyph_group| glyph_group[0].cluster);
+            // TODO
+        }
     }
 
     pub fn push_glyph(&mut self, glyph: LaidoutGlyph) {
