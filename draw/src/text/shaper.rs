@@ -46,9 +46,19 @@ impl Shaper {
     }
 
     fn shape(&mut self, params: ShapeParams) -> ShapedText {
-        let mut text = ShapedText::default();
-        self.shape_recursive(&params.text, &params.fonts, 0, params.text.len(), &mut text);
-        text
+        let mut glyphs = Vec::new();
+        self.shape_recursive(
+            &params.text,
+            &params.fonts,
+            0,
+            params.text.len(),
+            &mut glyphs,
+        );
+        ShapedText {
+            text: params.text,
+            width_in_ems: glyphs.iter().map(|glyph| glyph.advance_in_ems).sum(),
+            glyphs,
+        }
     }
 
     fn shape_recursive(
@@ -57,7 +67,7 @@ impl Shaper {
         fonts: &[Rc<Font>],
         start: usize,
         end: usize,
-        out_text: &mut ShapedText,
+        out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
         fn group_glyphs_by_cluster(
             glyphs: &[ShapedGlyph],
@@ -96,11 +106,9 @@ impl Shaper {
                 } else {
                     end
                 };
-                self.shape_recursive(text, fonts, missing_start, missing_end, out_text);
+                self.shape_recursive(text, fonts, missing_start, missing_end, out_glyphs);
             } else {
-                for glyph in glyph_group.iter().cloned() {
-                    out_text.push_glyph(glyph);
-                }
+                out_glyphs.extend(glyph_group.iter().cloned());
             }
         }
         drop(glyph_groups);
@@ -114,7 +122,7 @@ impl Shaper {
         font: &Rc<Font>,
         start: usize,
         end: usize,
-        output: &mut Vec<ShapedGlyph>,
+        out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
         use {std::mem, unicode_segmentation::UnicodeSegmentation};
 
@@ -126,7 +134,7 @@ impl Shaper {
             }
         }
         let glyph_buffer = rustybuzz::shape(font.rustybuzz_face(), &[], unicode_buffer);
-        output.extend(
+        out_glyphs.extend(
             glyph_buffer
                 .glyph_infos()
                 .iter()
@@ -154,18 +162,16 @@ pub struct ShapeParams {
     pub fonts: Rc<[Rc<Font>]>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ShapedText {
+    pub text: Substr,
+    pub width_in_ems: f32,
     pub glyphs: Vec<ShapedGlyph>,
 }
 
 impl ShapedText {
-    pub fn width_in_ems(&self) -> f32 {
-        self.glyphs.iter().map(|glyph| glyph.advance_in_ems).sum()
-    }
-
-    pub fn push_glyph(&mut self, glyph: ShapedGlyph) {
-        self.glyphs.push(glyph);
+    pub fn len(&self) -> usize {
+        self.text.len()
     }
 }
 
