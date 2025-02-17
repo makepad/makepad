@@ -26,7 +26,7 @@ mod tests {
                 font_loader::FontDefinitions,
                 layouter::{LayoutOptions, LayoutParams, Layouter, Settings},
                 non_nan::NonNanF32,
-                text::{Span, Style, Text},
+                text::{Baseline, Color, Span, Style, Text},
             },
             std::{fs::File, io::BufWriter, rc::Rc},
         };
@@ -37,6 +37,8 @@ mod tests {
             style: Style {
                 font_family_id: "Sans".into(),
                 font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                color: Color::WHITE,
+                baseline: Baseline::Alphabetic,
             },
             text: "繁😊😔 The Xuick brown fox jumps over the lazy dog".into(),
         });

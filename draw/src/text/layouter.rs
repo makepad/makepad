@@ -3,18 +3,18 @@ use {
         font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::FontFamily,
-        font_loader,
-        font_loader::{FontDefinitions, FontLoader},
+        font_loader::{self, FontDefinitions, FontLoader},
         geom::{Point, Size},
         non_nan::NonNanF32,
-        sdfer, shaper,
-        shaper::{ShapedGlyph, ShapedText},
+        sdfer,
+        shaper::{self, ShapedGlyph, ShapedText},
         substr::Substr,
-        text::{Span, Text},
+        text::{Baseline, Color, Span, Text},
     },
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
+        ops::ControlFlow,
         rc::Rc,
     },
 };
@@ -137,11 +137,15 @@ impl<'a> LayoutContext<'a> {
             self.wrap_by_word(
                 &font_family,
                 span.style.font_size_in_lpxs.into_inner(),
+                span.style.color,
+                span.style.baseline,
                 &span.text,
             );
         } else {
             self.append_text_to_current_row(
                 span.style.font_size_in_lpxs.into_inner(),
+                span.style.color,
+                span.style.baseline,
                 &font_family.get_or_shape(span.text.clone()),
             );
         }
@@ -151,6 +155,8 @@ impl<'a> LayoutContext<'a> {
         &mut self,
         font_family: &Rc<FontFamily>,
         font_size_in_lpxs: f32,
+        color: Color,
+        baseline: Baseline,
         text: &Substr,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
@@ -164,11 +170,17 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
-                    self.append_text_to_current_row(font_size_in_lpxs, &text);
+                    self.append_text_to_current_row(font_size_in_lpxs, color, baseline, &text);
                 }
                 None => {
                     if self.current_row.glyphs.is_empty() {
-                        self.wrap_by_grapheme(font_family, font_size_in_lpxs, &fitter.pop_front());
+                        self.wrap_by_grapheme(
+                            font_family,
+                            font_size_in_lpxs,
+                            color,
+                            baseline,
+                            &fitter.pop_front(),
+                        );
                     } else {
                         self.finish_current_row()
                     }
@@ -181,6 +193,8 @@ impl<'a> LayoutContext<'a> {
         &mut self,
         font_family: &Rc<FontFamily>,
         font_size_in_lpxs: f32,
+        color: Color,
+        baseline: Baseline,
         text: &Substr,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
@@ -196,12 +210,14 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
-                    self.append_text_to_current_row(font_size_in_lpxs, &text);
+                    self.append_text_to_current_row(font_size_in_lpxs, color, baseline, &text);
                 }
                 None => {
                     if self.current_row.glyphs.is_empty() {
                         self.append_text_to_current_row(
                             font_size_in_lpxs,
+                            color,
+                            baseline,
                             &font_family.get_or_shape(fitter.pop_front()),
                         );
                     } else {
@@ -212,17 +228,32 @@ impl<'a> LayoutContext<'a> {
         }
     }
 
-    fn append_text_to_current_row(&mut self, font_size_in_lpxs: f32, text: &ShapedText) {
+    fn append_text_to_current_row(
+        &mut self,
+        font_size_in_lpxs: f32,
+        color: Color,
+        baseline: Baseline,
+        text: &ShapedText,
+    ) {
         for glyph in &text.glyphs {
-            self.push_glyph_onto_current_row(font_size_in_lpxs, glyph.clone());
+            self.push_glyph_onto_current_row(font_size_in_lpxs, color, baseline, glyph);
         }
     }
 
-    fn push_glyph_onto_current_row(&mut self, font_size_in_lpxs: f32, glyph: ShapedGlyph) {
+    fn push_glyph_onto_current_row(
+        &mut self,
+        font_size_in_lpxs: f32,
+        color: Color,
+        baseline: Baseline,
+        glyph: &ShapedGlyph,
+    ) {
         let glyph = LaidoutGlyph {
             font: glyph.font.clone(),
             font_size_in_lpxs,
+            color,
+            baseline,
             id: glyph.id,
+            cluster: glyph.cluster,
             advance_in_lpxs: glyph.advance_in_ems * font_size_in_lpxs,
             offset_in_lpxs: glyph.offset_in_ems * font_size_in_lpxs,
         };
@@ -354,16 +385,21 @@ impl LaidoutText {
         &self.rows
     }
 
-    pub fn walk_rows(&self, p: Point<f32>, f: impl FnMut(Point<f32>, &LaidoutRow)) {
-        let mut p = p;
+    pub fn walk_rows<B>(
+        &self,
+        initial_point_in_lpxs: Point<f32>,
+        f: impl FnMut(Point<f32>, &LaidoutRow) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
         for (row_index, row) in self.rows.iter().enumerate() {
             if row_index != 0 {
-                p.y += row.ascender_in_lpxs();
+                current_point_in_lpxs.y += row.ascender_in_lpxs();
             }
-            f(p, row);
-            p.y += -row.descender_in_lpxs() + row.line_gap_in_lpxs();
+            f(current_point_in_lpxs, row)?;
+            current_point_in_lpxs.y += -row.descender_in_lpxs() + row.line_gap_in_lpxs();
         }
+        ControlFlow::Continue(())
     }
 
     pub fn push_row(&mut self, row: LaidoutRow) {
@@ -401,13 +437,18 @@ impl LaidoutRow {
         &self.glyphs
     }
 
-    pub fn walk_glyphs(&self, p: Point<f32>, f: impl FnMut(Point<f32>, &LaidoutGlyph)) {
-        let mut p = p;
+    pub fn walk_glyphs<B>(
+        &self,
+        initial_point_in_lpxs: Point<f32>,
+        f: impl FnMut(Point<f32>, &LaidoutGlyph) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
         for glyph in &self.glyphs {
-            f(p, glyph);
-            p.x += glyph.advance_in_lpxs;
+            f(current_point_in_lpxs, glyph)?;
+            current_point_in_lpxs.x += glyph.advance_in_lpxs;
         }
+        ControlFlow::Continue(())
     }
 
     pub fn push_glyph(&mut self, glyph: LaidoutGlyph) {
@@ -423,7 +464,10 @@ impl LaidoutRow {
 pub struct LaidoutGlyph {
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
+    pub color: Color,
+    pub baseline: Baseline,
     pub id: GlyphId,
+    pub cluster: usize,
     pub advance_in_lpxs: f32,
     pub offset_in_lpxs: f32,
 }
@@ -439,6 +483,14 @@ impl LaidoutGlyph {
 
     pub fn line_gap_in_lpxs(&self) -> f32 {
         self.font.line_gap_in_ems() * self.font_size_in_lpxs
+    }
+
+    pub fn baseline_y_in_lpxs(&self) -> f32 {
+        match self.baseline {
+            Baseline::Alphabetic => 0.0,
+            Baseline::Top => self.ascender_in_lpxs(),
+            Baseline::Bottom => self.descender_in_lpxs(),
+        }
     }
 
     pub fn rasterize(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
