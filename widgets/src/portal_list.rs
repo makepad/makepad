@@ -74,8 +74,8 @@ pub struct PortalList {
     #[live(0.2)] flick_scroll_minimum: f64,
     #[live(80.0)] flick_scroll_maximum: f64,
     #[live(0.005)] flick_scroll_scaling: f64,
-    #[live(0.98)] flick_scroll_decay: f64,
-    #[live(100.0)] max_pull_down: f64,
+    #[live(0.97)] flick_scroll_decay: f64,
+    #[live(80.0)] max_pull_down: f64,
     #[live(true)] align_top_when_empty: bool,
     #[live(false)] grab_key_focus: bool,
     #[live(true)] drag_scrolling: bool,
@@ -104,7 +104,7 @@ pub struct PortalList {
     //#[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState,
     /// Whether the PortalList was actively scrolling during the most recent finger down hit.
-    #[rust] was_scrolling_upon_finger_down: bool,
+    #[rust] was_scrolling: bool,
 }
 
 
@@ -662,19 +662,45 @@ impl PortalList {
         // move the scrollbar to the right 'top' position
         self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
     }
-    
-    fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64, clip_top: bool) {
-        if self.range_start == self.range_end{
+
+    /// Sets the current scroll offset (`first_scroll`) based on the given `delta` value.
+    ///
+    /// ## Arguments
+    /// * `delta`: The amount to scroll by.
+    ///    A positive value scrolls upwards towards the top of the list,
+    ///    while a negative value scrolls downwards towards the bottom of the list.
+    /// * `clip_top`: If `true`, the scroll offset will be clamped to `0.0`, meaning that
+    ///    no pulldown "bounce" animation will occur when you scroll upwards beyond the top of the list.
+    /// * `transition_to_pulldown`: Whether to transition an existing scroll action to the `Pulldown`
+    ///    scroll state when an upwards scroll action reaches the top of the list.
+    fn delta_top_scroll(
+        &mut self,
+        cx: &mut Cx,
+        delta: f64,
+        clip_top: bool,
+        transition_to_pulldown: bool,
+    ) {
+        if self.range_start == self.range_end {
             self.first_scroll = 0.0
         }
-        else{
+        else {
             self.first_scroll += delta;
-        }            
+        }
+
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
+            if transition_to_pulldown && self.first_scroll > 0.0 {
+                log!("Transitioning to PullDown");
+                self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
+            }
         }
-        if self.first_id == self.range_start && self.first_scroll > 0.0 && clip_top {
+        if clip_top && self.first_id == self.range_start && self.first_scroll > 0.0 {
             self.first_scroll = 0.0;
+        }
+        // Stop a downwards scroll when we reach the end of the list.
+        if self.at_end && delta < 0.0 {
+            self.was_scrolling = false;
+            self.scroll_state = ScrollState::Stopped;
         }
         self.update_scroll_bar(cx);
     }
@@ -718,14 +744,14 @@ impl Widget for PortalList {
                 self.first_id = self.range_end.max(1) - 1;
                 self.first_scroll = 0.0;
                 self.tail_range = true;
-            }
-            else if self.tail_range {
+            } else {
                 self.tail_range = false;
             }
 
             self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as usize;
             self.first_scroll = 0.0;
             cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
+            self.was_scrolling = false;
             self.area.redraw(cx);
         }
 
@@ -760,12 +786,13 @@ impl Widget for PortalList {
                     if !target_reached {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
-
-                        self.delta_top_scroll(cx, delta, true);
+                        // Don't enable the pulldown animation when scrolling to a specific item.
+                        self.delta_top_scroll(cx, delta, true, false);
                         cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
-
                         self.area.redraw(cx);
                     } else {
+                        log!("ScrollingTo DONE");
+                        self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
                         cx.widget_action(uid, &scope.path, PortalListAction::SmoothScrollReached);
                     }
@@ -777,10 +804,12 @@ impl Widget for PortalList {
                     if delta.abs()>self.flick_scroll_minimum {
                         *next_frame = cx.new_next_frame();
                         let delta = *delta;
-                        self.delta_top_scroll(cx, delta, true);
+                        self.delta_top_scroll(cx, delta, false, true);
                         cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
+                        log!("FLICK DONE");
+                        self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
                     }
                 }
@@ -789,9 +818,13 @@ impl Widget for PortalList {
                 if let Some(_) = next_frame.is_event(event) {
                     // we have to bounce back
                     if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                        self.first_scroll *= 0.9;
+                        self.first_scroll *= 0.85;
                         if self.first_scroll < 1.0 {
                             self.first_scroll = 0.0;
+                            // the pulldown animation is finished
+                            log!("PULLDOWN DONE");
+                            self.was_scrolling = false;
+                            self.scroll_state = ScrollState::Stopped;
                         }
                         else {
                             *next_frame = cx.new_next_frame();
@@ -800,7 +833,9 @@ impl Widget for PortalList {
                         self.area.redraw(cx);
                     }
                     else {
-                        self.scroll_state = ScrollState::Stopped
+                        log!("PULLDOWN HERE");
+                        self.was_scrolling = false;
+                        self.scroll_state = ScrollState::Stopped;
                     }
                 }
             }
@@ -816,8 +851,10 @@ impl Widget for PortalList {
                 Hit::FingerScroll(e) => {
                     self.tail_range = false;
                     self.detect_tail_in_draw = true;
+                    log!("Finger scroll complete!");
+                    self.was_scrolling = false;
                     self.scroll_state = ScrollState::Stopped;
-                    self.delta_top_scroll(cx, -e.scroll.index(vi), true);
+                    self.delta_top_scroll(cx, -e.scroll.index(vi), false, true);
                     cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 },
@@ -889,11 +926,12 @@ impl Widget for PortalList {
                         cx.set_key_focus(self.area);
                     }
                     self.tail_range = false;
-                    self.was_scrolling_upon_finger_down = match &self.scroll_state {
+                    self.was_scrolling = match &self.scroll_state {
                         ScrollState::Drag { samples } => samples.len() > 1,
                         ScrollState::Stopped => false,
                         _ => true,
                     };
+                    log!("Set was_scrolling to {}", self.was_scrolling);
                     if self.drag_scrolling && fe.is_primary_hit() {
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample{abs: fe.abs.index(vi), time: fe.time}]
@@ -911,7 +949,7 @@ impl Widget for PortalList {
                             if samples.len()>4{
                                 samples.remove(0);
                             }
-                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false);
+                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false);
                             self.area.redraw(cx);
                         }
                         _=>()
@@ -946,7 +984,8 @@ impl Widget for PortalList {
                                     next_frame: cx.new_next_frame()
                                 };
                             }
-                            else{
+                            else {
+                                self.was_scrolling = false;
                                 self.scroll_state = ScrollState::Stopped;
                             }
                         }
@@ -1032,9 +1071,9 @@ impl PortalListRef {
         inner.visible_items()
     }
 
-    /// Returns whether this PortalList was scrolling when the previous finger down event occurred.
-    pub fn was_scrolling_on_latest_finger_down(&self) -> bool {
-        self.borrow().is_some_and(|inner| inner.was_scrolling_upon_finger_down)
+    /// Returns whether this PortalList was scrolling when the most recent finger hit occurred.
+    pub fn was_scrolling(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.was_scrolling)
     }
 
     /// Returns whether the given `actions` contain an action indicating that this PortalList was scrolled.
