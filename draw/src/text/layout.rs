@@ -14,7 +14,7 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
-        ops::Range,
+        ops::{ControlFlow, Range},
         rc::Rc,
     },
 };
@@ -398,24 +398,21 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    pub fn walk_rows(
+    pub fn walk_rows<B>(
         &self,
         initial_point_in_lpxs: Point<f32>,
-        f: impl FnMut(Point<f32>, &LaidoutRow)
-    ) {
+        f: impl FnMut(Point<f32>, &LaidoutRow) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
         let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
         for (row_index, row) in self.rows.iter().enumerate() {
             if row_index != 0 {
                 current_point_in_lpxs.y += row.ascender_in_lpxs;
             }
-            f(current_point_in_lpxs, row);
+            f(current_point_in_lpxs, row)?;
             current_point_in_lpxs.y += -row.descender_in_lpxs + row.line_gap_in_lpxs;
         }
-    }
-
-    pub fn push_row(&mut self, row: LaidoutRow) {
-        self.rows.push(row);
+        ControlFlow::Continue(())
     }
 }
 
@@ -430,61 +427,154 @@ pub struct LaidoutRow {
 }
 
 impl LaidoutRow {
-    pub fn walk_glyphs(
+    pub fn walk_glyphs<B>(
         &self,
         initial_point_in_lpxs: Point<f32>,
-        f: impl FnMut(Point<f32>, &LaidoutGlyph),
-    ) {
+        f: impl FnMut(Point<f32>, &LaidoutGlyph) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
         let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
         for glyph in &self.glyphs {
-            f(current_point_in_lpxs, glyph);
+            f(current_point_in_lpxs, glyph)?;
             current_point_in_lpxs.x += glyph.advance_in_lpxs;
         }
+        ControlFlow::Continue(())
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
-        use unicode_segmentation::UnicodeSegmentation;
+        use super::num::Zero;
 
-        fn group_glyphs_by_cluster(
-            glyphs: &[LaidoutGlyph],
-        ) -> impl Iterator<Item = &[LaidoutGlyph]> + '_ {
-            use std::iter;
+        fn handle_glyph_group(
+            text: &str,
+            start: usize,
+            start_x_in_lpxs: f32,
+            end: usize,
+            end_x_in_lpxs: f32,
+            x_in_lpxs: f32,
+        ) -> Option<usize> {
+            use unicode_segmentation::UnicodeSegmentation;
 
-            let mut start = 0;
-            iter::from_fn(move || {
-                if start == glyphs.len() {
-                    return None;
+            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let grapheme_count = text[start..end].graphemes(true).count();
+            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
+            let mut grapheme_start_x_in_lpxs = start_x_in_lpxs;
+            for grapheme_start in text[start..end]
+                .grapheme_indices(true)
+                .map(|(grapheme_start, _)| start + grapheme_start)
+            {
+                if x_in_lpxs < grapheme_start_x_in_lpxs + grapheme_width_in_lpxs {
+                    return Some(grapheme_start);
                 }
-                let end = glyphs[start..]
-                    .windows(2)
-                    .position(|window| window[0].cluster != window[1].cluster)
-                    .map_or(glyphs.len(), |index| start + index + 1);
-                let group = &glyphs[start..end];
-                start = end;
-                Some(group)
-            })
-        }
-
-        let mut current_x_in_lpxs = 0.0;
-        let mut glyph_groups = group_glyphs_by_cluster(&self.glyphs).peekable();
-        while let Some(glyph_group) = glyph_groups.next() {
-            let start = glyph_group[0].cluster;
-            let end = glyph_groups
-                .peek()
-                .map_or(self.text.len(), |glyph_group| glyph_group[0].cluster);
-            let width_in_lpxs: f32 = glyph_group.iter().map(|glyph| glyph.advance_in_lpxs).sum();
-            let grapheme_count = self.text[start..end].graphemes(true).count();
-            let width_in_lpxs_per_grapheme = width_in_lpxs / grapheme_count as f32;
-            for grapheme_index in 0..grapheme_count {
-                if x_in_lpxs < current_x_in_lpxs + width_in_lpxs_per_grapheme {
-                    unimplemented!(); // TODO
-                }
-                current_x_in_lpxs += width_in_lpxs_per_grapheme;
+                grapheme_start_x_in_lpxs += grapheme_width_in_lpxs;
             }
-            current_x_in_lpxs += width_in_lpxs_per_grapheme;
+            None
         }
-        self.text.len()
+
+        let mut start = 0;
+        let mut start_x_in_lpxs = 0.0;
+        match self.walk_glyphs(Point::ZERO, |point_in_lpxs, glyph| {
+            if glyph.cluster == start {
+                return ControlFlow::Continue(());
+            }
+            let end = glyph.cluster;
+            let end_x_in_lpxs = point_in_lpxs.x;
+            if let Some(index) = handle_glyph_group(
+                &self.text,
+                start,
+                start_x_in_lpxs,
+                end,
+                end_x_in_lpxs,
+                x_in_lpxs,
+            ) {
+                return ControlFlow::Break(index);
+            }
+            start = end;
+            start_x_in_lpxs = end_x_in_lpxs;
+            ControlFlow::Continue(())
+        }) {
+            ControlFlow::Continue(()) => {
+                if let Some(index) = handle_glyph_group(
+                    &self.text,
+                    start,
+                    start_x_in_lpxs,
+                    self.text.len(),
+                    self.width_in_lpxs,
+                    x_in_lpxs,
+                ) {
+                    return index;
+                }
+                return self.text.len();
+            }
+            ControlFlow::Break(index) => index,
+        }
+    }
+
+    pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
+        use super::num::Zero;
+
+        fn handle_glyph_group(
+            text: &str,
+            start: usize,
+            start_x_in_lpxs: f32,
+            end: usize,
+            end_x_in_lpxs: f32,
+            index: usize,
+        ) -> Option<f32> {
+            use unicode_segmentation::UnicodeSegmentation;
+
+            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let grapheme_count = text[start..end].graphemes(true).count();
+            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
+            let mut grapheme_start_x_in_lpxs = start_x_in_lpxs;
+            for grapheme_start in text[start..end]
+                .grapheme_indices(true)
+                .map(|(grapheme_start, _)| start + grapheme_start)
+            {
+                if index == grapheme_start {
+                    return Some(grapheme_start_x_in_lpxs);
+                }
+                grapheme_start_x_in_lpxs += grapheme_width_in_lpxs;
+            }
+            None
+        }
+
+        let mut start = 0;
+        let mut start_x_in_lpxs = 0.0;
+        match self.walk_glyphs(Point::ZERO, |point_in_lpxs, glyph| {
+            if glyph.cluster == start {
+                return ControlFlow::Continue(());
+            }
+            let end = glyph.cluster;
+            let end_x_in_lpxs = point_in_lpxs.x;
+            if let Some(x_in_lpxs) = handle_glyph_group(
+                &self.text,
+                start,
+                start_x_in_lpxs,
+                end,
+                end_x_in_lpxs,
+                index,
+            ) {
+                return ControlFlow::Break(x_in_lpxs);
+            }
+            start = end;
+            start_x_in_lpxs = end_x_in_lpxs;
+            ControlFlow::Continue(())
+        }) {
+            ControlFlow::Continue(()) => {
+                if let Some(x_in_lpxs) = handle_glyph_group(
+                    &self.text,
+                    start,
+                    start_x_in_lpxs,
+                    self.text.len(),
+                    self.width_in_lpxs,
+                    index,
+                ) {
+                    return x_in_lpxs;
+                }
+                return self.width_in_lpxs;
+            }
+            ControlFlow::Break(index) => index,
+        }
     }
 }
 
