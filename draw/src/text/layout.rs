@@ -259,13 +259,13 @@ impl<'a> LayoutContext<'a> {
             width_in_lpxs: self.current_x_in_lpxs,
             ascender_in_lpxs: glyphs
                 .iter()
-                .map(|glyph| glyph.ascender_in_lpxs())
+                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.ascender_in_lpxs())
                 .reduce(f32::max)
                 .unwrap_or(0.0),
             descender_in_lpxs: glyphs
                 .iter()
-                .map(|glyph| glyph.descender_in_lpxs())
-                .reduce(f32::max)
+                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.descender_in_lpxs())
+                .reduce(f32::min)
                 .unwrap_or(0.0),
             line_gap_in_lpxs: glyphs
                 .iter()
@@ -400,10 +400,11 @@ pub struct LaidoutText {
 impl LaidoutText {
     pub fn walk_rows<B>(
         &self,
-        initial_point_in_lpxs: Point<f32>,
         f: impl FnMut(Point<f32>, &LaidoutRow) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        let mut current_point_in_lpxs = initial_point_in_lpxs;
+        use super::num::Zero;
+
+        let mut current_point_in_lpxs = Point::ZERO;
         let mut f = f;
         for (row_index, row) in self.rows.iter().enumerate() {
             if row_index != 0 {
@@ -429,10 +430,11 @@ pub struct LaidoutRow {
 impl LaidoutRow {
     pub fn walk_glyphs<B>(
         &self,
-        initial_point_in_lpxs: Point<f32>,
         f: impl FnMut(Point<f32>, &LaidoutGlyph) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        let mut current_point_in_lpxs = initial_point_in_lpxs;
+        use super::num::Zero;
+
+        let mut current_point_in_lpxs = Point::ZERO;
         let mut f = f;
         for glyph in &self.glyphs {
             f(current_point_in_lpxs, glyph)?;
@@ -442,8 +444,6 @@ impl LaidoutRow {
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
-        use super::num::Zero;
-
         fn handle_glyph_group(
             text: &str,
             start: usize,
@@ -472,12 +472,12 @@ impl LaidoutRow {
 
         let mut start = 0;
         let mut start_x_in_lpxs = 0.0;
-        match self.walk_glyphs(Point::ZERO, |point_in_lpxs, glyph| {
+        match self.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
             if glyph.cluster == start {
                 return ControlFlow::Continue(());
             }
             let end = glyph.cluster;
-            let end_x_in_lpxs = point_in_lpxs.x;
+            let end_x_in_lpxs = glyph_origin_in_lpxs.x;
             if let Some(index) = handle_glyph_group(
                 &self.text,
                 start,
@@ -510,8 +510,6 @@ impl LaidoutRow {
     }
 
     pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
-        use super::num::Zero;
-
         fn handle_glyph_group(
             text: &str,
             start: usize,
@@ -540,12 +538,12 @@ impl LaidoutRow {
 
         let mut start = 0;
         let mut start_x_in_lpxs = 0.0;
-        match self.walk_glyphs(Point::ZERO, |point_in_lpxs, glyph| {
+        match self.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
             if glyph.cluster == start {
                 return ControlFlow::Continue(());
             }
             let end = glyph.cluster;
-            let end_x_in_lpxs = point_in_lpxs.x;
+            let end_x_in_lpxs = glyph_origin_in_lpxs.x;
             if let Some(x_in_lpxs) = handle_glyph_group(
                 &self.text,
                 start,
@@ -606,8 +604,8 @@ impl LaidoutGlyph {
     pub fn baseline_y_in_lpxs(&self) -> f32 {
         match self.baseline {
             Baseline::Alphabetic => 0.0,
-            Baseline::Top => self.ascender_in_lpxs(),
-            Baseline::Bottom => self.descender_in_lpxs(),
+            Baseline::Top => -self.ascender_in_lpxs(),
+            Baseline::Bottom => -self.descender_in_lpxs(),
         }
     }
 

@@ -121,7 +121,7 @@ impl DrawText2 {
     pub fn draw_laidout_text(
         &mut self,
         cx: &mut Cx2d<'_>,
-        point_in_lpxs: Point<f32>,
+        origin_in_lpxs: Point<f32>,
         text: &LaidoutText,
     ) {
         use std::ops::ControlFlow;
@@ -134,8 +134,13 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        text.walk_rows::<()>(point_in_lpxs, |point_in_lpxs, row| {
-            self.draw_laidout_row(cx, point_in_lpxs, row, &mut many_instances.instances);
+        text.walk_rows::<()>(|row_origin_in_lpxs, row| {
+            self.draw_laidout_row(
+                cx,
+                origin_in_lpxs + Size::from(row_origin_in_lpxs),
+                row,
+                &mut many_instances.instances,
+            );
             ControlFlow::Continue(())
         });
         let new_area = cx.end_many_instances(many_instances);
@@ -145,20 +150,25 @@ impl DrawText2 {
     fn draw_laidout_row(
         &mut self,
         cx: &mut Cx2d<'_>,
-        point_in_lpxs: Point<f32>,
+        origin_in_lpxs: Point<f32>,
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
         use std::ops::ControlFlow;
 
-        row.walk_glyphs::<()>(point_in_lpxs, |point_in_lpxs, glyph| {
-            self.draw_laidout_glyph(cx, point_in_lpxs, glyph, output);
+        row.walk_glyphs::<()>(|glyph_origin_in_lpxs, glyph| {
+            self.draw_laidout_glyph(
+                cx,
+                origin_in_lpxs + Size::from(glyph_origin_in_lpxs),
+                glyph,
+                output,
+            );
             ControlFlow::Continue(())
         });
 
         cx.cx.debug.rect(
             makepad_platform::Rect {
-                pos: dvec2(point_in_lpxs.x as f64, point_in_lpxs.y as f64),
+                pos: dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64),
                 size: dvec2(1000.0, 1.0),
             },
             vec4(1.0, 0.0, 0.0, 1.0),
@@ -168,7 +178,7 @@ impl DrawText2 {
     fn draw_laidout_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
-        point_in_lpxs: Point<f32>,
+        origin_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
@@ -178,8 +188,8 @@ impl DrawText2 {
             self.draw_rasterized_glyph(
                 cx,
                 Point::new(
-                    point_in_lpxs.x + glyph.offset_in_lpxs,
-                    point_in_lpxs.y + glyph.baseline_y_in_lpxs(),
+                    origin_in_lpxs.x + glyph.offset_in_lpxs,
+                    origin_in_lpxs.y - glyph.baseline_y_in_lpxs(),
                 ),
                 glyph.font_size_in_lpxs,
                 glyph.color,
