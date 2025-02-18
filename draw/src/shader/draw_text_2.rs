@@ -132,7 +132,7 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        text.walk_rows::<()>(point_in_lpxs, |point_in_lpxs, row| {
+        text.walk_rows(point_in_lpxs, |point_in_lpxs, row| {
             self.draw_laidout_row(cx, point_in_lpxs, row, &mut many_instances.instances);
         });
         let new_area = cx.end_many_instances(many_instances);
@@ -146,7 +146,7 @@ impl DrawText2 {
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        row.walk_glyphs::<()>(point_in_lpxs, |point_in_lpxs, glyph| {
+        row.walk_glyphs(point_in_lpxs, |point_in_lpxs, glyph| {
             self.draw_laidout_glyph(cx, point_in_lpxs, glyph, output);
         });
 
