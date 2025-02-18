@@ -126,7 +126,7 @@ impl Widget for MyWidget {
                 },
             ].into(),
             options: LayoutOptions {
-                max_width_in_lpxs: None // Some(NonNanF32::new(256.0).unwrap()),
+                max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
             },
         });
         self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);
