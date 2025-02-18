@@ -69,30 +69,14 @@ impl Shaper {
         end: usize,
         out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
-        fn group_glyphs_by_cluster(
-            glyphs: &[ShapedGlyph],
-        ) -> impl Iterator<Item = &[ShapedGlyph]> + '_ {
-            use std::iter;
-
-            let mut start = 0;
-            iter::from_fn(move || {
-                if start == glyphs.len() {
-                    return None;
-                }
-                let end = glyphs[start..]
-                    .windows(2)
-                    .position(|window| window[0].cluster != window[1].cluster)
-                    .map_or(glyphs.len(), |byte_index| start + byte_index + 1);
-                let glyph_group = &glyphs[start..end];
-                start = end;
-                Some(glyph_group)
-            })
-        }
+        use super::slice::SliceExt;
 
         let (font, fonts) = fonts.split_first().unwrap();
         let mut glyphs = self.reusable_glyphs.pop().unwrap_or(Vec::new());
         self.shape_step(text, font, start, end, &mut glyphs);
-        let mut glyph_groups = group_glyphs_by_cluster(&glyphs).peekable();
+        let mut glyph_groups = glyphs
+            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
+            .peekable();
         while let Some(glyph_group) = glyph_groups.next() {
             if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;

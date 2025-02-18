@@ -8,8 +8,8 @@ use {
         non_nan::NonNanF32,
         sdfer,
         shape::{self, ShapedText},
-        substr::Substr,
         style::{Baseline, Color, Style},
+        substr::Substr,
     },
     std::{
         cell::RefCell,
@@ -75,9 +75,7 @@ impl Layouter {
             out_rows: &mut rows,
         }
         .layout(&params.spans);
-        LaidoutText {
-            rows
-        }
+        LaidoutText { rows }
     }
 }
 
@@ -171,12 +169,7 @@ impl<'a> LayoutContext<'a> {
 
         let text = self.text.substr(byte_range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(
-            font_family,
-            font_size_in_lpxs,
-            text,
-            segment_lens,
-        );
+        let mut fitter = Fitter::new(font_family, font_size_in_lpxs, text, segment_lens);
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
@@ -211,12 +204,7 @@ impl<'a> LayoutContext<'a> {
 
         let text = self.text.substr(byte_range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(
-            font_family,
-            font_size_in_lpxs,
-            text,
-            segment_lens,
-        );
+        let mut fitter = Fitter::new(font_family, font_size_in_lpxs, text, segment_lens);
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
@@ -410,10 +398,10 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    pub fn walk_rows<B>(
+    pub fn walk_rows(
         &self,
         initial_point_in_lpxs: Point<f32>,
-        f: impl FnMut(Point<f32>, &LaidoutRow),
+        f: impl FnMut(Point<f32>, &LaidoutRow)
     ) {
         let mut current_point_in_lpxs = initial_point_in_lpxs;
         let mut f = f;
@@ -442,7 +430,7 @@ pub struct LaidoutRow {
 }
 
 impl LaidoutRow {
-    pub fn walk_glyphs<B>(
+    pub fn walk_glyphs(
         &self,
         initial_point_in_lpxs: Point<f32>,
         f: impl FnMut(Point<f32>, &LaidoutGlyph),
@@ -482,7 +470,9 @@ impl LaidoutRow {
         let mut glyph_groups = group_glyphs_by_cluster(&self.glyphs).peekable();
         while let Some(glyph_group) = glyph_groups.next() {
             let start = glyph_group[0].cluster;
-            let end = glyph_groups.peek().map_or(self.text.len(), |glyph_group| glyph_group[0].cluster);
+            let end = glyph_groups
+                .peek()
+                .map_or(self.text.len(), |glyph_group| glyph_group[0].cluster);
             let width_in_lpxs: f32 = glyph_group.iter().map(|glyph| glyph.advance_in_lpxs).sum();
             let grapheme_count = self.text[start..end].graphemes(true).count();
             let width_in_lpxs_per_grapheme = width_in_lpxs / grapheme_count as f32;

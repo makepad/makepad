@@ -14,8 +14,9 @@ pub mod non_nan;
 pub mod num;
 pub mod sdfer;
 pub mod shape;
-pub mod substr;
+pub mod slice;
 pub mod style;
+pub mod substr;
 
 #[cfg(test)]
 mod tests {
@@ -63,7 +64,8 @@ mod tests {
                     },
                     range: 20..text.len(),
                 },
-            ].into(),
+            ]
+            .into(),
             options: LayoutOptions {
                 max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
             },
