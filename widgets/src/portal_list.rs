@@ -690,7 +690,6 @@ impl PortalList {
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
             if transition_to_pulldown && self.first_scroll > 0.0 {
-                log!("Transitioning to PullDown");
                 self.scroll_state = ScrollState::Pulldown {next_frame: cx.new_next_frame()};
             }
         }
@@ -791,7 +790,6 @@ impl Widget for PortalList {
                         cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
-                        log!("ScrollingTo DONE");
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
                         cx.widget_action(uid, &scope.path, PortalListAction::SmoothScrollReached);
@@ -808,7 +806,6 @@ impl Widget for PortalList {
                         cx.widget_action(uid, &scope.path, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
-                        log!("FLICK DONE");
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
                     }
@@ -822,7 +819,6 @@ impl Widget for PortalList {
                         if self.first_scroll < 1.0 {
                             self.first_scroll = 0.0;
                             // the pulldown animation is finished
-                            log!("PULLDOWN DONE");
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
                         }
@@ -833,7 +829,6 @@ impl Widget for PortalList {
                         self.area.redraw(cx);
                     }
                     else {
-                        log!("PULLDOWN HERE");
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
                     }
@@ -851,7 +846,6 @@ impl Widget for PortalList {
                 Hit::FingerScroll(e) => {
                     self.tail_range = false;
                     self.detect_tail_in_draw = true;
-                    log!("Finger scroll complete!");
                     self.was_scrolling = false;
                     self.scroll_state = ScrollState::Stopped;
                     self.delta_top_scroll(cx, -e.scroll.index(vi), false, true);
@@ -931,7 +925,6 @@ impl Widget for PortalList {
                         ScrollState::Stopped => false,
                         _ => true,
                     };
-                    log!("Set was_scrolling to {}", self.was_scrolling);
                     if self.drag_scrolling && fe.is_primary_hit() {
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample{abs: fe.abs.index(vi), time: fe.time}]
@@ -1199,7 +1192,6 @@ impl PortalListRef {
 
         // First, if the target_id was too far away, jump directly to a closer starting_id.
         if let Some(start) = starting_id {
-            log!("smooth_scroll_to(): jumping from first ID {} to start ID {}", inner.first_id, start);
             inner.first_id = start;
         }
         // Then, we kick off the actual smooth scroll process.
