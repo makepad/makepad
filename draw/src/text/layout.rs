@@ -441,21 +441,20 @@ pub struct LaidoutText {
 impl LaidoutText {
     pub fn walk_rows<'a, B>(
         &'a self,
-        f: impl FnMut(Point<f32>, &'a LaidoutRow) -> ControlFlow<B>,
+        f: impl FnMut(f32, &'a LaidoutRow) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        use super::num::Zero;
-
-        let mut current_point_in_lpxs = Point::ZERO;
+        let mut current_y_in_lpxs = 0.0;
         let mut f = f;
-        let mut prev_row: Option<&LaidoutRow> = None;
-        for row in &self.rows {
-            if let Some(prev_row) = prev_row {
-                current_point_in_lpxs.y += prev_row.line_gap_in_lpxs;
-            }
-            current_point_in_lpxs.y += row.ascender_in_lpxs;
-            f(current_point_in_lpxs, row)?;
-            current_point_in_lpxs.y -= row.descender_in_lpxs;
-            prev_row = Some(row);
+        for (row_index, row) in self.rows.iter().enumerate() {
+            let line_gap_above_in_lpxs = if row_index == 0 {
+                0.0
+            } else {
+                self.rows[row_index - 1].line_gap_in_lpxs
+            };
+            current_y_in_lpxs += line_gap_above_in_lpxs;
+            current_y_in_lpxs += row.ascender_in_lpxs;
+            f(current_y_in_lpxs, row)?;
+            current_y_in_lpxs -= row.descender_in_lpxs;
         }
         ControlFlow::Continue(())
     }
@@ -463,18 +462,35 @@ impl LaidoutText {
     pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
         let mut row_index = 0;
         let mut row_start = 0;
-        self.walk_rows(|row_origin_in_lpxs, row| {
-            if point_in_lpxs.y < row_origin_in_lpxs.y - row.descender_in_lpxs + row.line_gap_in_lpxs / 2.0 {
+        self.walk_rows(|row_origin_y_in_lpxs, row| {
+            let row_top_y_in_lpxs = row_origin_y_in_lpxs - row.ascender_in_lpxs;
+            let row_bottom_y_in_lpxs = row_origin_y_in_lpxs - row.descender_in_lpxs;
+            let line_gap_below_in_lpxs = if row_index == self.rows.len() - 1 {
+                0.0
+            } else {
+                row.line_gap_in_lpxs
+            };
+            if row_index == 0 && point_in_lpxs.y < row_top_y_in_lpxs {
+                return ControlFlow::Break(Cursor {
+                    index: row_start,
+                    affinity: Affinity::After,
+                });
+            }
+            if point_in_lpxs.y < row_bottom_y_in_lpxs + line_gap_below_in_lpxs / 2.0 {
                 let index = row.x_in_lpxs_to_index(point_in_lpxs.x);
                 return ControlFlow::Break(Cursor {
                     index,
-                    affinity: Affinity::Before, // TODO
-                })
+                    affinity: if index == row_start {
+                        Affinity::After
+                    } else {
+                        Affinity::Before
+                    }
+                });
             }
             if row_index == self.rows.len() - 1 {
                 return ControlFlow::Break(Cursor {
                     index: row_start + row.text.len(),
-                    affinity: Affinity::After,
+                    affinity: Affinity::Before,
                 });
             }
             row_index += 1;
@@ -486,28 +502,26 @@ impl LaidoutText {
     pub fn cursor_to_point_in_lpxs(&self, cursor: Cursor) -> Point<f32> {
         let mut row_index = 0;
         let mut row_start = 0;
-        self.walk_rows(|row_origin_in_lpxs, row| {
+        self.walk_rows(|row_origin_y_in_lpxs, row| {
             if match cursor.affinity {
-                Affinity::Before => cursor.index <= row_start + row.text.len(),
-                Affinity::After => cursor.index < row_start + row.text.len(),
+                Affinity::Before => cursor.index < row_start + row.text.len(),
+                Affinity::After => cursor.index <= row_start + row.text.len(),
             } {
                 return ControlFlow::Break(Point::new(
                     row.index_to_x_in_lpxs(cursor.index - row_start),
-                    row_origin_in_lpxs.y,
+                    row_origin_y_in_lpxs
                 ));
             }
             if row_index == self.rows.len() - 1 {
                 return ControlFlow::Break(Point::new(
                     row.align_x_in_lpxs() + row.width_in_lpxs,
-                    row_origin_in_lpxs.y,
+                    row_origin_y_in_lpxs
                 ));
             }
             row_index += 1;
             row_start += row.text.len();
             ControlFlow::Continue(())
-        })
-        .break_value()
-        .unwrap()
+        }).break_value().unwrap()
     }
 }
 
@@ -546,13 +560,13 @@ impl LaidoutRow {
 
     pub fn walk_glyphs<'a, B>(
         &'a self,
-        f: impl FnMut(Point<f32>, &'a LaidoutGlyph) -> ControlFlow<B>,
+        f: impl FnMut(f32, &'a LaidoutGlyph) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        let mut current_point_in_lpxs = Point::new(self.align_x_in_lpxs(), 0.0);
+        let mut current_x_in_lpxs = self.align_x_in_lpxs();
         let mut f = f;
         for glyph in &self.glyphs {
-            f(current_point_in_lpxs, glyph)?;
-            current_point_in_lpxs.x += glyph.advance_in_lpxs;
+            f(current_x_in_lpxs, glyph)?;
+            current_x_in_lpxs += glyph.advance_in_lpxs;
         }
         ControlFlow::Continue(())
     }
@@ -583,12 +597,12 @@ impl LaidoutRow {
 
         let mut glyph_group_start = 0;
         let mut glyph_group_start_x_in_lpxs = self.align_x_in_lpxs();
-        match self.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
+        match self.walk_glyphs(|glyph_origin_x_in_lpxs, glyph| {
             if glyph.cluster == glyph_group_start {
                 return ControlFlow::Continue(());
             }
             let glyph_group_end = glyph.cluster;
-            let glyph_group_end_x_in_lpxs = glyph_origin_in_lpxs.x;
+            let glyph_group_end_x_in_lpxs = glyph_origin_x_in_lpxs;
             if let Some(index) = handle_glyph_group(
                 &self.text,
                 glyph_group_start,
@@ -646,12 +660,12 @@ impl LaidoutRow {
 
         let mut glyph_group_start = 0;
         let mut glyph_group_start_x_in_lpxs = self.align_x_in_lpxs();
-        match self.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
+        match self.walk_glyphs(|glyph_origin_x_in_lpxs, glyph| {
             if glyph.cluster == glyph_group_start {
                 return ControlFlow::Continue(());
             }
             let glyph_group_end = glyph.cluster;
-            let glyph_group_end_x_in_lpxs = glyph_origin_in_lpxs.x;
+            let glyph_group_end_x_in_lpxs = glyph_origin_x_in_lpxs;
             if let Some(x_in_lpxs) = handle_glyph_group(
                 &self.text,
                 glyph_group_start,
