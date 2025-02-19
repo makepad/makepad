@@ -134,10 +134,10 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        text.walk_rows::<()>(|row_origin_in_lpxs, row| {
+        text.walk_rows::<()>(|row_origin_y_in_lpxs, row| {
             self.draw_laidout_row(
                 cx,
-                origin_in_lpxs + Size::from(row_origin_in_lpxs),
+                origin_in_lpxs + Size::new(0.0, row_origin_y_in_lpxs),
                 row,
                 &mut many_instances.instances,
             );
@@ -156,10 +156,10 @@ impl DrawText2 {
     ) {
         use std::ops::ControlFlow;
 
-        row.walk_glyphs::<()>(|glyph_origin_in_lpxs, glyph| {
+        row.walk_glyphs::<()>(|glyph_origin_x_in_lpxs, glyph| {
             self.draw_laidout_glyph(
                 cx,
-                origin_in_lpxs + Size::from(glyph_origin_in_lpxs),
+                origin_in_lpxs + Size::new(glyph_origin_x_in_lpxs, 0.0),
                 glyph,
                 output,
             );
