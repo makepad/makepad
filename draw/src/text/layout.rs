@@ -238,7 +238,6 @@ impl<'a> LayoutContext<'a> {
         text: &ShapedText,
     ) {
         for glyph in &text.glyphs {
-            println!("LINE SPACING SCALE {:?}", line_spacing_scale);
             let glyph = LaidoutGlyph {
                 font: glyph.font.clone(),
                 font_size_in_lpxs,
