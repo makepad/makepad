@@ -4,10 +4,10 @@ use crate::{
     geometry::GeometryQuad2D,
     makepad_platform::*,
     text::{
+        color::Color,
         font::{AtlasKind, RasterizedGlyph},
         geom::{Point, Rect, Size, Transform},
         layout::{LaidoutGlyph, LaidoutRow, LaidoutText},
-        style::Color,
     },
 };
 
