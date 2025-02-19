@@ -150,7 +150,7 @@ impl Widget for MyWidget {
             ].into(),
             options: LayoutOptions {
                 max_width_in_lpxs: NonNanF32::new(105.0).unwrap(),
-                align: Align::Left,
+                align: Align::Center,
             },
         });
         self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);

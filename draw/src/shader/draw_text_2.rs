@@ -46,7 +46,7 @@ live_design! {
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 self.clipped.x,
                 self.clipped.y,
-                self.char_depth + self.draw_zbias,
+                self.rect_depth + self.draw_zbias,
                 1.
             )))
         }
@@ -102,7 +102,7 @@ pub struct DrawText2 {
     #[calc]
     pub draw_clip: Vec4,
     #[calc]
-    pub char_depth: f32,
+    pub rect_depth: f32,
 }
 
 impl LiveHook for DrawText2 {
@@ -134,6 +134,7 @@ impl DrawText2 {
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
+        self.rect_depth = 1.0;
         text.walk_rows::<()>(|row_origin_y_in_lpxs, row| {
             self.draw_laidout_row(
                 cx,
@@ -201,11 +202,9 @@ impl DrawText2 {
         glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
-        let lpxs_per_dpx = cx.current_dpi_factor() as f32;
-        let font_size_in_dpxs = glyph.font_size_in_lpxs * lpxs_per_dpx;
+        let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
-                cx,
                 Point::new(
                     origin_in_lpxs.x + glyph.offset_in_lpxs,
                     origin_in_lpxs.y - glyph.baseline_y_in_lpxs(),
@@ -220,7 +219,6 @@ impl DrawText2 {
 
     fn draw_rasterized_glyph(
         &mut self,
-        cx: &mut Cx2d<'_>,
         point_in_lpxs: Point<f32>,
         font_size_in_lpxs: f32,
         color: Color,
@@ -267,9 +265,9 @@ impl DrawText2 {
         self.font_t1 = point_to_vec2(tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size));
         self.font_t2 = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
         self.color = color_to_vec4(color);
-        self.char_depth += 0.001; // TODO
 
         output.extend_from_slice(self.draw_vars.as_slice());
+        self.rect_depth += 0.001;
         /*
         println!("RECT POS {:?}", self.rect_pos);
         println!("RECT SIZE {:?}", self.rect_size);
