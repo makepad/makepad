@@ -1,4 +1,4 @@
-use crate::makepad_widgets::{text::{non_nan::NonNanF32, geom::Point, layout::{LayoutParams, LayoutSpan, LayoutOptions}, style::{Baseline, Color, Style}}, *};
+use crate::makepad_widgets::{text::{color::Color, non_nan::NonNanF32, geom::Point, layout::{Align, Baseline, Style, LayoutParams, Span, LayoutOptions}}, *};
 
 live_design!{
     use link::theme::*;
@@ -97,7 +97,7 @@ impl Widget for MyWidget {
         let text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             text: text.into(),
             spans: [
-                LayoutSpan {
+                Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
@@ -106,27 +106,28 @@ impl Widget for MyWidget {
                     },
                     range: 0..10,
                 },
-                LayoutSpan {
+                Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        color: Color::BRIGHT_GREEN,
                         baseline: Baseline::Top,
+                        color: Color::BRIGHT_GREEN,
                     },
                     range: 10..20,
                 },
-                LayoutSpan {
+                Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        color: Color::BRIGHT_BLUE,
                         baseline: Baseline::Bottom,
+                        color: Color::BRIGHT_BLUE,
                     },
                     range: 20..text.len(),
                 },
             ].into(),
             options: LayoutOptions {
-                max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
+                max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
+                align: Align::Right,
             },
         });
         self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);

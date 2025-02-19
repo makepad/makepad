@@ -1,14 +1,14 @@
 use {
     super::{
+        color::Color,
         font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
-        font_family::FontFamily,
+        font_family::{FontFamily, FontFamilyId},
         font_loader::{self, FontDefinitions, FontLoader},
         geom::{Point, Size},
         non_nan::NonNanF32,
         sdfer,
         shape::{self, ShapedText},
-        style::{Baseline, Color, Style},
         substr::Substr,
     },
     std::{
@@ -116,43 +116,40 @@ struct LayoutContext<'a> {
 }
 
 impl<'a> LayoutContext<'a> {
-    fn max_width_in_lpxs(&self) -> Option<f32> {
-        self.options
-            .max_width_in_lpxs
-            .map(|max_width_in_lpxs| max_width_in_lpxs.into_inner())
+    fn max_width_in_lpxs(&self) -> f32 {
+        self.options.max_width_in_lpxs.into_inner()
     }
 
-    fn remaining_width_on_current_row_in_lpxs(&self) -> Option<f32> {
-        self.max_width_in_lpxs()
-            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_x_in_lpxs)
+    fn remaining_width_on_current_row_in_lpxs(&self) -> f32 {
+        self.max_width_in_lpxs() - self.current_x_in_lpxs
     }
 
-    fn layout(&mut self, spans: &[LayoutSpan]) {
+    fn layout(&mut self, spans: &[Span]) {
         for span in spans {
             self.layout_span(span);
         }
         self.finish_row();
     }
 
-    fn layout_span(&mut self, span: &LayoutSpan) {
+    fn layout_span(&mut self, span: &Span) {
         let font_family = self
             .loader
             .get_or_load_font_family(&span.style.font_family_id)
             .clone();
-        if self.options.max_width_in_lpxs.is_some() {
+        if self.options.max_width_in_lpxs.into_inner() == f32::INFINITY {
+            self.append_text(
+                span.style.font_size_in_lpxs.into_inner(),
+                span.style.baseline,
+                span.style.color,
+                &font_family.get_or_shape(self.text.substr(span.range.clone())),
+            );
+        } else {
             self.wrap_by_word(
                 &font_family,
                 span.style.font_size_in_lpxs.into_inner(),
-                span.style.color,
                 span.style.baseline,
+                span.style.color,
                 span.range.clone(),
-            );
-        } else {
-            self.append_text(
-                span.style.font_size_in_lpxs.into_inner(),
-                span.style.color,
-                span.style.baseline,
-                &font_family.get_or_shape(self.text.substr(span.range.clone())),
             );
         }
     }
@@ -161,8 +158,8 @@ impl<'a> LayoutContext<'a> {
         &mut self,
         font_family: &Rc<FontFamily>,
         font_size_in_lpxs: f32,
-        color: Color,
         baseline: Baseline,
+        color: Color,
         byte_range: Range<usize>,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
@@ -171,17 +168,17 @@ impl<'a> LayoutContext<'a> {
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
         let mut fitter = Fitter::new(font_family, font_size_in_lpxs, text, segment_lens);
         while !fitter.is_empty() {
-            match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
+            match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
-                    self.append_text(font_size_in_lpxs, color, baseline, &text);
+                    self.append_text(font_size_in_lpxs, baseline, color, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
                         self.wrap_by_grapheme(
                             font_family,
                             font_size_in_lpxs,
-                            color,
                             baseline,
+                            color,
                             0..fitter.pop_front(),
                         );
                     } else {
@@ -196,8 +193,8 @@ impl<'a> LayoutContext<'a> {
         &mut self,
         font_family: &Rc<FontFamily>,
         font_size_in_lpxs: f32,
-        color: Color,
         baseline: Baseline,
+        color: Color,
         byte_range: Range<usize>,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
@@ -206,16 +203,16 @@ impl<'a> LayoutContext<'a> {
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
         let mut fitter = Fitter::new(font_family, font_size_in_lpxs, text, segment_lens);
         while !fitter.is_empty() {
-            match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
+            match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
-                    self.append_text(font_size_in_lpxs, color, baseline, &text);
+                    self.append_text(font_size_in_lpxs, baseline, color, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
                         self.append_text(
                             font_size_in_lpxs,
-                            color,
                             baseline,
+                            color,
                             &font_family.get_or_shape(self.text.substr(0..fitter.pop_front())),
                         );
                     } else {
@@ -229,16 +226,16 @@ impl<'a> LayoutContext<'a> {
     fn append_text(
         &mut self,
         font_size_in_lpxs: f32,
-        color: Color,
         baseline: Baseline,
+        color: Color,
         text: &ShapedText,
     ) {
         for glyph in &text.glyphs {
             let glyph = LaidoutGlyph {
                 font: glyph.font.clone(),
                 font_size_in_lpxs,
-                color,
                 baseline,
+                color,
                 id: glyph.id,
                 cluster: self.current_index + glyph.cluster,
                 advance_in_lpxs: glyph.advance_in_ems * font_size_in_lpxs,
@@ -257,6 +254,12 @@ impl<'a> LayoutContext<'a> {
         let row = LaidoutRow {
             text: self.text.substr(self.start_index..self.current_index),
             width_in_lpxs: self.current_x_in_lpxs,
+            max_width_in_lpxs: if self.max_width_in_lpxs() == f32::INFINITY {
+                self.current_x_in_lpxs
+            } else {
+                self.max_width_in_lpxs()
+            },
+            align: self.options.align,
             ascender_in_lpxs: glyphs
                 .iter()
                 .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.ascender_in_lpxs())
@@ -377,19 +380,57 @@ impl<'a> Fitter<'a> {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutParams {
     pub text: Substr,
-    pub spans: Rc<[LayoutSpan]>,
+    pub spans: Rc<[Span]>,
     pub options: LayoutOptions,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct LayoutSpan {
+pub struct Span {
     pub style: Style,
     pub range: Range<usize>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Style {
+    pub font_family_id: FontFamilyId,
+    pub font_size_in_lpxs: NonNanF32,
+    pub baseline: Baseline,
+    pub color: Color,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Baseline {
+    Alphabetic,
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutOptions {
-    pub max_width_in_lpxs: Option<NonNanF32>,
+    pub max_width_in_lpxs: NonNanF32,
+    pub align: Align,
+}
+
+impl Default for LayoutOptions {
+    fn default() -> Self {
+        Self {
+            max_width_in_lpxs: NonNanF32::new(f32::INFINITY).unwrap(),
+            align: Align::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+impl Default for Align {
+    fn default() -> Self {
+        Self::Left
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -398,29 +439,96 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    pub fn walk_rows<B>(
-        &self,
-        f: impl FnMut(Point<f32>, &LaidoutRow) -> ControlFlow<B>,
+    pub fn walk_rows<'a, B>(
+        &'a self,
+        f: impl FnMut(Point<f32>, &'a LaidoutRow) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         use super::num::Zero;
 
         let mut current_point_in_lpxs = Point::ZERO;
         let mut f = f;
-        for (row_index, row) in self.rows.iter().enumerate() {
-            if row_index != 0 {
-                current_point_in_lpxs.y += row.ascender_in_lpxs;
+        let mut prev_row: Option<&LaidoutRow> = None;
+        for row in &self.rows {
+            if let Some(prev_row) = prev_row {
+                current_point_in_lpxs.y += prev_row.line_gap_in_lpxs;
             }
+            current_point_in_lpxs.y += row.ascender_in_lpxs;
             f(current_point_in_lpxs, row)?;
-            current_point_in_lpxs.y += -row.descender_in_lpxs + row.line_gap_in_lpxs;
+            current_point_in_lpxs.y -= row.descender_in_lpxs;
+            prev_row = Some(row);
         }
         ControlFlow::Continue(())
     }
+
+    pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
+        let mut row_index = 0;
+        let mut row_start = 0;
+        self.walk_rows(|row_origin_in_lpxs, row| {
+            if point_in_lpxs.y < row_origin_in_lpxs.y - row.descender_in_lpxs + row.line_gap_in_lpxs / 2.0 {
+                let index = row.x_in_lpxs_to_index(point_in_lpxs.x);
+                return ControlFlow::Break(Cursor {
+                    index,
+                    affinity: Affinity::Before, // TODO
+                })
+            }
+            if row_index == self.rows.len() - 1 {
+                return ControlFlow::Break(Cursor {
+                    index: row_start + row.text.len(),
+                    affinity: Affinity::After,
+                });
+            }
+            row_index += 1;
+            row_start += row.text.len();
+            ControlFlow::Continue(())
+        }).break_value().unwrap()
+    }
+
+    pub fn cursor_to_point_in_lpxs(&self, cursor: Cursor) -> Point<f32> {
+        let mut row_index = 0;
+        let mut row_start = 0;
+        self.walk_rows(|row_origin_in_lpxs, row| {
+            if match cursor.affinity {
+                Affinity::Before => cursor.index <= row_start + row.text.len(),
+                Affinity::After => cursor.index < row_start + row.text.len(),
+            } {
+                return ControlFlow::Break(Point::new(
+                    row.index_to_x_in_lpxs(cursor.index - row_start),
+                    row_origin_in_lpxs.y,
+                ));
+            }
+            if row_index == self.rows.len() - 1 {
+                return ControlFlow::Break(Point::new(
+                    row.align_x_in_lpxs() + row.width_in_lpxs,
+                    row_origin_in_lpxs.y,
+                ));
+            }
+            row_index += 1;
+            row_start += row.text.len();
+            ControlFlow::Continue(())
+        })
+        .break_value()
+        .unwrap()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Cursor {
+    pub index: usize,
+    pub affinity: Affinity,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Affinity {
+    Before,
+    After,
 }
 
 #[derive(Clone, Debug)]
 pub struct LaidoutRow {
     pub text: Substr,
     pub width_in_lpxs: f32,
+    pub max_width_in_lpxs: f32,
+    pub align: Align,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
@@ -428,13 +536,19 @@ pub struct LaidoutRow {
 }
 
 impl LaidoutRow {
-    pub fn walk_glyphs<B>(
-        &self,
-        f: impl FnMut(Point<f32>, &LaidoutGlyph) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
-        use super::num::Zero;
+    pub fn align_x_in_lpxs(&self) -> f32 {
+        match self.align {
+            Align::Left => 0.0,
+            Align::Center => (self.max_width_in_lpxs - self.width_in_lpxs) / 2.0,
+            Align::Right => self.max_width_in_lpxs - self.width_in_lpxs,
+        }
+    }
 
-        let mut current_point_in_lpxs = Point::ZERO;
+    pub fn walk_glyphs<'a, B>(
+        &'a self,
+        f: impl FnMut(Point<f32>, &'a LaidoutGlyph) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        let mut current_point_in_lpxs = Point::new(self.align_x_in_lpxs(), 0.0);
         let mut f = f;
         for glyph in &self.glyphs {
             f(current_point_in_lpxs, glyph)?;
@@ -458,47 +572,44 @@ impl LaidoutRow {
             let grapheme_count = text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut grapheme_start_x_in_lpxs = start_x_in_lpxs;
-            for grapheme_start in text[start..end]
-                .grapheme_indices(true)
-                .map(|(grapheme_start, _)| start + grapheme_start)
-            {
-                if x_in_lpxs < grapheme_start_x_in_lpxs + grapheme_width_in_lpxs {
-                    return Some(grapheme_start);
+            for (grapheme_start, _) in text[start..end].grapheme_indices(true) {
+                if x_in_lpxs < grapheme_start_x_in_lpxs + grapheme_width_in_lpxs / 2.0 {
+                    return Some(start + grapheme_start);
                 }
                 grapheme_start_x_in_lpxs += grapheme_width_in_lpxs;
             }
             None
         }
 
-        let mut start = 0;
-        let mut start_x_in_lpxs = 0.0;
+        let mut glyph_group_start = 0;
+        let mut glyph_group_start_x_in_lpxs = self.align_x_in_lpxs();
         match self.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
-            if glyph.cluster == start {
+            if glyph.cluster == glyph_group_start {
                 return ControlFlow::Continue(());
             }
-            let end = glyph.cluster;
-            let end_x_in_lpxs = glyph_origin_in_lpxs.x;
+            let glyph_group_end = glyph.cluster;
+            let glyph_group_end_x_in_lpxs = glyph_origin_in_lpxs.x;
             if let Some(index) = handle_glyph_group(
                 &self.text,
-                start,
-                start_x_in_lpxs,
-                end,
-                end_x_in_lpxs,
+                glyph_group_start,
+                glyph_group_start_x_in_lpxs,
+                glyph_group_end,
+                glyph_group_end_x_in_lpxs,
                 x_in_lpxs,
             ) {
                 return ControlFlow::Break(index);
             }
-            start = end;
-            start_x_in_lpxs = end_x_in_lpxs;
+            glyph_group_start = glyph_group_end;
+            glyph_group_start_x_in_lpxs = glyph_group_end_x_in_lpxs;
             ControlFlow::Continue(())
         }) {
             ControlFlow::Continue(()) => {
                 if let Some(index) = handle_glyph_group(
                     &self.text,
-                    start,
-                    start_x_in_lpxs,
+                    glyph_group_start,
+                    glyph_group_start_x_in_lpxs,
                     self.text.len(),
-                    self.width_in_lpxs,
+                    self.align_x_in_lpxs() + self.width_in_lpxs,
                     x_in_lpxs,
                 ) {
                     return index;
@@ -524,11 +635,8 @@ impl LaidoutRow {
             let grapheme_count = text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut grapheme_start_x_in_lpxs = start_x_in_lpxs;
-            for grapheme_start in text[start..end]
-                .grapheme_indices(true)
-                .map(|(grapheme_start, _)| start + grapheme_start)
-            {
-                if index == grapheme_start {
+            for (grapheme_start, _) in text[start..end].grapheme_indices(true) {
+                if index == start + grapheme_start {
                     return Some(grapheme_start_x_in_lpxs);
                 }
                 grapheme_start_x_in_lpxs += grapheme_width_in_lpxs;
@@ -536,35 +644,35 @@ impl LaidoutRow {
             None
         }
 
-        let mut start = 0;
-        let mut start_x_in_lpxs = 0.0;
+        let mut glyph_group_start = 0;
+        let mut glyph_group_start_x_in_lpxs = self.align_x_in_lpxs();
         match self.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
-            if glyph.cluster == start {
+            if glyph.cluster == glyph_group_start {
                 return ControlFlow::Continue(());
             }
-            let end = glyph.cluster;
-            let end_x_in_lpxs = glyph_origin_in_lpxs.x;
+            let glyph_group_end = glyph.cluster;
+            let glyph_group_end_x_in_lpxs = glyph_origin_in_lpxs.x;
             if let Some(x_in_lpxs) = handle_glyph_group(
                 &self.text,
-                start,
-                start_x_in_lpxs,
-                end,
-                end_x_in_lpxs,
+                glyph_group_start,
+                glyph_group_start_x_in_lpxs,
+                glyph_group_end,
+                glyph_group_end_x_in_lpxs,
                 index,
             ) {
                 return ControlFlow::Break(x_in_lpxs);
             }
-            start = end;
-            start_x_in_lpxs = end_x_in_lpxs;
+            glyph_group_start = glyph_group_end;
+            glyph_group_start_x_in_lpxs = glyph_group_end_x_in_lpxs;
             ControlFlow::Continue(())
         }) {
             ControlFlow::Continue(()) => {
                 if let Some(x_in_lpxs) = handle_glyph_group(
                     &self.text,
-                    start,
-                    start_x_in_lpxs,
+                    glyph_group_start,
+                    glyph_group_start_x_in_lpxs,
                     self.text.len(),
-                    self.width_in_lpxs,
+                    self.align_x_in_lpxs() + self.width_in_lpxs,
                     index,
                 ) {
                     return x_in_lpxs;
@@ -580,8 +688,8 @@ impl LaidoutRow {
 pub struct LaidoutGlyph {
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
-    pub color: Color,
     pub baseline: Baseline,
+    pub color: Color,
     pub id: GlyphId,
     pub cluster: usize,
     pub advance_in_lpxs: f32,
@@ -604,8 +712,8 @@ impl LaidoutGlyph {
     pub fn baseline_y_in_lpxs(&self) -> f32 {
         match self.baseline {
             Baseline::Alphabetic => 0.0,
-            Baseline::Top => -self.ascender_in_lpxs(),
-            Baseline::Bottom => -self.descender_in_lpxs(),
+            Baseline::Top => self.ascender_in_lpxs(),
+            Baseline::Bottom => self.descender_in_lpxs(),
         }
     }
 

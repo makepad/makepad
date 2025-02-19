@@ -1,13 +1,3 @@
-use super::{font_family::FontFamilyId, non_nan::NonNanF32};
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Style {
-    pub font_family_id: FontFamilyId,
-    pub font_size_in_lpxs: NonNanF32,
-    pub color: Color,
-    pub baseline: Baseline,
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Color {
     pub r: u8,
@@ -37,11 +27,4 @@ impl Color {
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Baseline {
-    Alphabetic,
-    Top,
-    Bottom,
 }
