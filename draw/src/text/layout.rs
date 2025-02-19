@@ -140,6 +140,7 @@ impl<'a> LayoutContext<'a> {
             self.append_text(
                 span.style.font_size_in_lpxs.into_inner(),
                 span.style.baseline,
+                span.style.line_spacing_scale.into_inner(),
                 span.style.color,
                 &font_family.get_or_shape(self.text.substr(span.range.clone())),
             );
@@ -148,6 +149,7 @@ impl<'a> LayoutContext<'a> {
                 &font_family,
                 span.style.font_size_in_lpxs.into_inner(),
                 span.style.baseline,
+                span.style.line_spacing_scale.into_inner(),
                 span.style.color,
                 span.range.clone(),
             );
@@ -159,6 +161,7 @@ impl<'a> LayoutContext<'a> {
         font_family: &Rc<FontFamily>,
         font_size_in_lpxs: f32,
         baseline: Baseline,
+        line_spacing_scale: f32,
         color: Color,
         byte_range: Range<usize>,
     ) {
@@ -170,7 +173,7 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
-                    self.append_text(font_size_in_lpxs, baseline, color, &text);
+                    self.append_text(font_size_in_lpxs, baseline, line_spacing_scale, color, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
@@ -178,6 +181,7 @@ impl<'a> LayoutContext<'a> {
                             font_family,
                             font_size_in_lpxs,
                             baseline,
+                            line_spacing_scale,
                             color,
                             0..fitter.pop_front(),
                         );
@@ -194,6 +198,7 @@ impl<'a> LayoutContext<'a> {
         font_family: &Rc<FontFamily>,
         font_size_in_lpxs: f32,
         baseline: Baseline,
+        line_spacing_scale: f32,
         color: Color,
         byte_range: Range<usize>,
     ) {
@@ -205,13 +210,14 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
-                    self.append_text(font_size_in_lpxs, baseline, color, &text);
+                    self.append_text(font_size_in_lpxs, baseline, line_spacing_scale, color, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
                         self.append_text(
                             font_size_in_lpxs,
                             baseline,
+                            line_spacing_scale,
                             color,
                             &font_family.get_or_shape(self.text.substr(0..fitter.pop_front())),
                         );
@@ -227,14 +233,17 @@ impl<'a> LayoutContext<'a> {
         &mut self,
         font_size_in_lpxs: f32,
         baseline: Baseline,
+        line_spacing_scale: f32,
         color: Color,
         text: &ShapedText,
     ) {
         for glyph in &text.glyphs {
+            println!("LINE SPACING SCALE {:?}", line_spacing_scale);
             let glyph = LaidoutGlyph {
                 font: glyph.font.clone(),
                 font_size_in_lpxs,
                 baseline,
+                line_spacing_scale,
                 color,
                 id: glyph.id,
                 cluster: self.current_index + glyph.cluster,
@@ -270,9 +279,14 @@ impl<'a> LayoutContext<'a> {
                 .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.descender_in_lpxs())
                 .reduce(f32::min)
                 .unwrap_or(0.0),
-            line_gap_in_lpxs: glyphs
+            line_spacing_above_in_lpxs:  glyphs
                 .iter()
-                .map(|glyph| glyph.line_gap_in_lpxs())
+                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.line_spacing_above_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            line_spacing_below_in_lpxs:  glyphs
+                .iter()
+                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.line_spacing_below_in_lpxs())
                 .reduce(f32::max)
                 .unwrap_or(0.0),
             glyphs,
@@ -394,6 +408,7 @@ pub struct Span {
 pub struct Style {
     pub font_family_id: FontFamilyId,
     pub font_size_in_lpxs: NonNanF32,
+    pub line_spacing_scale: NonNanF32,
     pub baseline: Baseline,
     pub color: Color,
 }
@@ -446,15 +461,12 @@ impl LaidoutText {
         let mut current_y_in_lpxs = 0.0;
         let mut f = f;
         for (row_index, row) in self.rows.iter().enumerate() {
-            let line_gap_above_in_lpxs = if row_index == 0 {
-                0.0
+            current_y_in_lpxs += if row_index == 0 {
+                row.ascender_in_lpxs
             } else {
-                self.rows[row_index - 1].line_gap_in_lpxs
+                self.rows[row_index - 1].line_spacing_below_in_lpxs + row.line_spacing_above_in_lpxs
             };
-            current_y_in_lpxs += line_gap_above_in_lpxs;
-            current_y_in_lpxs += row.ascender_in_lpxs;
             f(current_y_in_lpxs, row)?;
-            current_y_in_lpxs -= row.descender_in_lpxs;
         }
         ControlFlow::Continue(())
     }
@@ -465,10 +477,10 @@ impl LaidoutText {
         self.walk_rows(|row_origin_y_in_lpxs, row| {
             let row_top_y_in_lpxs = row_origin_y_in_lpxs - row.ascender_in_lpxs;
             let row_bottom_y_in_lpxs = row_origin_y_in_lpxs - row.descender_in_lpxs;
-            let line_gap_below_in_lpxs = if row_index == self.rows.len() - 1 {
+            let line_spacing_below_in_lpxs = if row_index == self.rows.len() - 1 {
                 0.0
             } else {
-                row.line_gap_in_lpxs
+                row.line_spacing_below_in_lpxs
             };
             if row_index == 0 && point_in_lpxs.y < row_top_y_in_lpxs {
                 return ControlFlow::Break(Cursor {
@@ -476,7 +488,7 @@ impl LaidoutText {
                     affinity: Affinity::After,
                 });
             }
-            if point_in_lpxs.y < row_bottom_y_in_lpxs + line_gap_below_in_lpxs / 2.0 {
+            if point_in_lpxs.y < row_bottom_y_in_lpxs + line_spacing_below_in_lpxs / 2.0 {
                 let index = row.x_in_lpxs_to_index(point_in_lpxs.x);
                 return ControlFlow::Break(Cursor {
                     index,
@@ -545,7 +557,8 @@ pub struct LaidoutRow {
     pub align: Align,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
-    pub line_gap_in_lpxs: f32,
+    pub line_spacing_above_in_lpxs: f32,
+    pub line_spacing_below_in_lpxs: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
@@ -703,6 +716,7 @@ pub struct LaidoutGlyph {
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
     pub baseline: Baseline,
+    pub line_spacing_scale: f32,
     pub color: Color,
     pub id: GlyphId,
     pub cluster: usize,
@@ -719,16 +733,24 @@ impl LaidoutGlyph {
         self.font.descender_in_ems() * self.font_size_in_lpxs
     }
 
-    pub fn line_gap_in_lpxs(&self) -> f32 {
-        self.font.line_gap_in_ems() * self.font_size_in_lpxs
-    }
-
     pub fn baseline_y_in_lpxs(&self) -> f32 {
         match self.baseline {
             Baseline::Alphabetic => 0.0,
             Baseline::Top => self.ascender_in_lpxs(),
             Baseline::Bottom => self.descender_in_lpxs(),
         }
+    }
+
+    fn line_gap_in_lpxs(&self) -> f32 {
+        self.font.line_gap_in_ems() * self.font_size_in_lpxs
+    }
+
+    pub fn line_spacing_above_in_lpxs(&self) -> f32 {
+        self.ascender_in_lpxs() * self.line_spacing_scale
+    }
+
+    pub fn line_spacing_below_in_lpxs(&self) -> f32 {
+        (-self.descender_in_lpxs() + self.line_gap_in_lpxs()) * self.line_spacing_scale
     }
 
     pub fn rasterize(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {

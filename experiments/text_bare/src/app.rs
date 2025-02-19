@@ -93,41 +93,64 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        let text = "The quick brown fox jumps over the lazy dog繁😊😔";
+        let text = "abc def ghi abc def ghi abc def ghi";
         let text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             text: text.into(),
             spans: [
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        color: Color::BRIGHT_RED,
+                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
                         baseline: Baseline::Alphabetic,
+                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
+                        color: Color::WHITE,
                     },
-                    range: 0..10,
+                    range: 0..4,
                 },
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        baseline: Baseline::Top,
-                        color: Color::BRIGHT_GREEN,
+                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
+                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
+                        color: Color::WHITE,
                     },
-                    range: 10..20,
+                    range: 4..12,
                 },
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        baseline: Baseline::Bottom,
-                        color: Color::BRIGHT_BLUE,
+                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
+                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
+                        color: Color::WHITE,
                     },
-                    range: 20..text.len(),
+                    range: 12..16,
+                },
+                Span {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(24.0 / 72.0 * 96.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
+                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
+                        color: Color::WHITE,
+                    },
+                    range: 16..19,
+                },
+                Span {
+                    style: Style {
+                        font_family_id: "Sans".into(),
+                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
+                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
+                        color: Color::WHITE,
+                    },
+                    range: 19..text.len(),
                 },
             ].into(),
             options: LayoutOptions {
-                max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
-                align: Align::Right,
+                max_width_in_lpxs: NonNanF32::new(105.0).unwrap(),
+                align: Align::Left,
             },
         });
         self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);
