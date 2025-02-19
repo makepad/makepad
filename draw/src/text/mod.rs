@@ -43,8 +43,9 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        color: Color::RED,
                         baseline: Baseline::Alphabetic,
+                        line_spacing_scale: NonNanF32::new(1.0).unwrap(),
+                        color: Color::RED,
                     },
                     range: 0..10,
                 },
@@ -52,8 +53,9 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        color: Color::GREEN,
                         baseline: Baseline::Top,
+                        line_spacing_scale: NonNanF32::new(1.0).unwrap(),
+                        color: Color::GREEN,
                     },
                     range: 10..20,
                 },
@@ -61,8 +63,10 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        color: Color::BLUE,
                         baseline: Baseline::Bottom,
+                        line_spacing_scale: NonNanF32::new(1.0).unwrap(),
+                        color: Color::BLUE,
+                        
                     },
                     range: 20..text.len(),
                 },

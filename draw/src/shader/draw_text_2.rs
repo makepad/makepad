@@ -126,7 +126,7 @@ impl DrawText2 {
     ) {
         use std::ops::ControlFlow;
 
-        let fonts = cx.fonts.borrow_mut();
+        let fonts = cx.fonts.borrow();
         let settings = fonts.sdfer().borrow().settings();
         self.draw_vars.user_uniforms[0] = settings.radius;
         self.draw_vars.user_uniforms[1] = settings.cutoff;
@@ -143,8 +143,8 @@ impl DrawText2 {
             );
             ControlFlow::Continue(())
         });
-        let new_area = cx.end_many_instances(many_instances);
-        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        let area = cx.end_many_instances(many_instances);
+        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, area);
     }
 
     fn draw_laidout_row(
@@ -165,13 +165,32 @@ impl DrawText2 {
             );
             ControlFlow::Continue(())
         });
-
         cx.cx.debug.rect(
-            makepad_platform::Rect {
-                pos: dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64),
-                size: dvec2(1000.0, 1.0),
-            },
-            vec4(1.0, 0.0, 0.0, 1.0),
+            makepad_platform::rect(
+                (origin_in_lpxs.x + row.align_x_in_lpxs()) as f64,
+                (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
+                row.width_in_lpxs as f64,
+                1.0,
+            ),
+            makepad_platform::vec4(1.0, 0.0, 0.0, 1.0)
+        );
+        cx.cx.debug.rect(
+            makepad_platform::rect(
+                (origin_in_lpxs.x + row.align_x_in_lpxs()) as f64,
+                origin_in_lpxs.y as f64,
+                row.width_in_lpxs as f64,
+                1.0,
+            ),
+            makepad_platform::vec4(0.0, 1.0, 0.0, 1.0)
+        );
+        cx.cx.debug.rect(
+            makepad_platform::rect(
+                (origin_in_lpxs.x + row.align_x_in_lpxs()) as f64,
+                (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
+                row.width_in_lpxs as f64,
+                1.0,
+            ),
+            makepad_platform::vec4(0.0, 0.0, 1.0, 1.0)
         );
     }
 
