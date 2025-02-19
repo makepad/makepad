@@ -1,3 +1,4 @@
+pub mod color;
 pub mod font;
 pub mod font_atlas;
 pub mod font_data;
@@ -15,7 +16,6 @@ pub mod num;
 pub mod sdfer;
 pub mod shape;
 pub mod slice;
-pub mod style;
 pub mod substr;
 
 #[cfg(test)]
@@ -24,10 +24,12 @@ mod tests {
     fn test() {
         use {
             super::{
+                color::Color,
                 font_loader::FontDefinitions,
-                layout::{LayoutOptions, LayoutParams, LayoutSpan, Layouter, Settings},
+                layout::{
+                    Align, Baseline, LayoutOptions, LayoutParams, Layouter, Settings, Span, Style,
+                },
                 non_nan::NonNanF32,
-                style::{Baseline, Color, Style},
             },
             std::{fs::File, io::BufWriter},
         };
@@ -37,7 +39,7 @@ mod tests {
         let text = layouter.get_or_layout(LayoutParams {
             text: text.into(),
             spans: [
-                LayoutSpan {
+                Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
@@ -46,7 +48,7 @@ mod tests {
                     },
                     range: 0..10,
                 },
-                LayoutSpan {
+                Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
@@ -55,7 +57,7 @@ mod tests {
                     },
                     range: 10..20,
                 },
-                LayoutSpan {
+                Span {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
@@ -67,7 +69,8 @@ mod tests {
             ]
             .into(),
             options: LayoutOptions {
-                max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
+                max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
+                align: Align::Left,
             },
         });
         for row in &text.rows {
