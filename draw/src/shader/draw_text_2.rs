@@ -167,7 +167,7 @@ impl DrawText2 {
                 row.width_in_lpxs as f64,
                 1.0,
             ),
-            makepad_platform::vec4(1.0, 0.0, 0.0, 1.0)
+            makepad_platform::vec4(1.0, 0.0, 0.0, 1.0),
         );
         cx.cx.debug.rect(
             makepad_platform::rect(
@@ -176,7 +176,7 @@ impl DrawText2 {
                 row.width_in_lpxs as f64,
                 1.0,
             ),
-            makepad_platform::vec4(0.0, 1.0, 0.0, 1.0)
+            makepad_platform::vec4(0.0, 1.0, 0.0, 1.0),
         );
         cx.cx.debug.rect(
             makepad_platform::rect(
@@ -185,7 +185,7 @@ impl DrawText2 {
                 row.width_in_lpxs as f64,
                 1.0,
             ),
-            makepad_platform::vec4(0.0, 0.0, 1.0, 1.0)
+            makepad_platform::vec4(0.0, 0.0, 1.0, 1.0),
         );
     }
 
@@ -199,10 +199,7 @@ impl DrawText2 {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
-                Point::new(
-                    origin_in_lpxs.x + glyph.offset_in_lpxs,
-                    origin_in_lpxs.y,
-                ),
+                Point::new(origin_in_lpxs.x + glyph.offset_in_lpxs(), origin_in_lpxs.y),
                 glyph.font_size_in_lpxs,
                 glyph.color,
                 rasterized_glyph,
