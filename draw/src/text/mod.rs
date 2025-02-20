@@ -26,7 +26,7 @@ mod tests {
             super::{
                 color::Color,
                 font_loader::FontDefinitions,
-                layout::{Align, LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
+                layout::{Align, Baseline, LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
                 non_nan::NonNanF32,
             },
             std::{fs::File, io::BufWriter},
@@ -41,6 +41,7 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
                         color: Color::RED,
                     },
                     range: 0..10,
@@ -49,6 +50,7 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
                         color: Color::GREEN,
                     },
                     range: 10..20,
@@ -57,6 +59,7 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
                         color: Color::BLUE,
                     },
                     range: 20..text.len(),
