@@ -14,7 +14,7 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
-        ops::{ControlFlow, Range},
+        ops::Range,
         rc::Rc,
     },
 };
@@ -63,19 +63,19 @@ impl Layouter {
     }
 
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
-        let mut rows = Vec::new();
+        use super::num::Zero;
+
         LayoutContext {
             loader: &mut self.font_loader,
             text: &params.text,
             options: params.options,
-            start_index: 0,
-            current_index: 0,
-            current_x_in_lpxs: 0.0,
+            current_row_start: 0,
+            current_row_end: 0,
+            current_point_in_lpxs: Point::ZERO,
+            rows: Vec::new(),
             glyphs: Vec::new(),
-            out_rows: &mut rows,
         }
-        .layout(&params.spans);
-        LaidoutText { rows }
+        .layout(&params.spans)
     }
 }
 
@@ -108,11 +108,11 @@ struct LayoutContext<'a> {
     loader: &'a mut FontLoader,
     text: &'a Substr,
     options: LayoutOptions,
-    start_index: usize,
-    current_index: usize,
-    current_x_in_lpxs: f32,
+    current_row_start: usize,
+    current_row_end: usize,
+    current_point_in_lpxs: Point<f32>,
+    rows: Vec<LaidoutRow>,
     glyphs: Vec<LaidoutGlyph>,
-    out_rows: &'a mut Vec<LaidoutRow>,
 }
 
 impl<'a> LayoutContext<'a> {
@@ -121,14 +121,17 @@ impl<'a> LayoutContext<'a> {
     }
 
     fn remaining_width_on_current_row_in_lpxs(&self) -> f32 {
-        self.max_width_in_lpxs() - self.current_x_in_lpxs
+        self.max_width_in_lpxs() - self.current_point_in_lpxs.x
     }
 
-    fn layout(&mut self, spans: &[Span]) {
+    fn layout(mut self, spans: &[Span]) -> LaidoutText {
         for span in spans {
             self.layout_span(span);
         }
-        self.finish_row();
+        self.finish_current_row();
+        LaidoutText {
+            rows: self.rows,
+        }
     }
 
     fn layout_span(&mut self, span: &Span) {
@@ -137,20 +140,14 @@ impl<'a> LayoutContext<'a> {
             .get_or_load_font_family(&span.style.font_family_id)
             .clone();
         if self.options.max_width_in_lpxs.into_inner() == f32::INFINITY {
-            self.append_text(
-                span.style.font_size_in_lpxs.into_inner(),
-                span.style.baseline,
-                span.style.line_spacing_scale.into_inner(),
-                span.style.color,
+            self.append_text_to_current_row(
+                &span.style,
                 &font_family.get_or_shape(self.text.substr(span.range.clone())),
             );
         } else {
             self.wrap_by_word(
                 &font_family,
-                span.style.font_size_in_lpxs.into_inner(),
-                span.style.baseline,
-                span.style.line_spacing_scale.into_inner(),
-                span.style.color,
+                &span.style,
                 span.range.clone(),
             );
         }
@@ -159,34 +156,28 @@ impl<'a> LayoutContext<'a> {
     fn wrap_by_word(
         &mut self,
         font_family: &Rc<FontFamily>,
-        font_size_in_lpxs: f32,
-        baseline: Baseline,
-        line_spacing_scale: f32,
-        color: Color,
-        byte_range: Range<usize>,
+        style: &Style,
+        range: Range<usize>,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
 
-        let text = self.text.substr(byte_range.clone());
+        let text = self.text.substr(range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(font_family, font_size_in_lpxs, text, segment_lens);
+        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs.into_inner(), text, segment_lens);
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
-                    self.append_text(font_size_in_lpxs, baseline, line_spacing_scale, color, &text);
+                    self.append_text_to_current_row(style, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
                         self.wrap_by_grapheme(
                             font_family,
-                            font_size_in_lpxs,
-                            baseline,
-                            line_spacing_scale,
-                            color,
+                            style,
                             0..fitter.pop_front(),
                         );
                     } else {
-                        self.finish_row()
+                        self.finish_current_row()
                     }
                 }
             }
@@ -196,103 +187,97 @@ impl<'a> LayoutContext<'a> {
     fn wrap_by_grapheme(
         &mut self,
         font_family: &Rc<FontFamily>,
-        font_size_in_lpxs: f32,
-        baseline: Baseline,
-        line_spacing_scale: f32,
-        color: Color,
-        byte_range: Range<usize>,
+        style: &Style,
+        range: Range<usize>,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
 
-        let text = self.text.substr(byte_range.clone());
+        let text = self.text.substr(range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(font_family, font_size_in_lpxs, text, segment_lens);
+        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs.into_inner(), text, segment_lens);
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
-                    self.append_text(font_size_in_lpxs, baseline, line_spacing_scale, color, &text);
+                    self.append_text_to_current_row(style, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
-                        self.append_text(
-                            font_size_in_lpxs,
-                            baseline,
-                            line_spacing_scale,
-                            color,
+                        self.append_text_to_current_row(style,
                             &font_family.get_or_shape(self.text.substr(0..fitter.pop_front())),
                         );
                     } else {
-                        self.finish_row();
+                        self.finish_current_row();
                     }
                 }
             }
         }
     }
 
-    fn append_text(
+    fn append_text_to_current_row(
         &mut self,
-        font_size_in_lpxs: f32,
-        baseline: Baseline,
-        line_spacing_scale: f32,
-        color: Color,
+        style: &Style,
         text: &ShapedText,
     ) {
         for glyph in &text.glyphs {
-            let glyph = LaidoutGlyph {
-                font: glyph.font.clone(),
+            let origin_in_lpxs = Point::new(self.current_point_in_lpxs.x, 0.0);
+            let font = glyph.font.clone();
+            let font_size_in_lpxs = style.font_size_in_lpxs.into_inner();
+            let cluster = self.current_row_end + glyph.cluster;
+            let advance_in_lpxs = glyph.advance_in_ems * font_size_in_lpxs;
+            let offset_in_lpxs = glyph.offset_in_ems * font_size_in_lpxs;
+            self.current_point_in_lpxs.x += advance_in_lpxs;
+            self.glyphs.push(LaidoutGlyph {
+                origin_in_lpxs,
+                font,
                 font_size_in_lpxs,
-                baseline,
-                line_spacing_scale,
-                color,
+                color: style.color,
                 id: glyph.id,
-                cluster: self.current_index + glyph.cluster,
-                advance_in_lpxs: glyph.advance_in_ems * font_size_in_lpxs,
-                offset_in_lpxs: glyph.offset_in_ems * font_size_in_lpxs,
-            };
-            self.current_x_in_lpxs += glyph.advance_in_lpxs;
-            self.glyphs.push(glyph);
+                cluster,
+                advance_in_lpxs,
+                offset_in_lpxs,
+            });
         }
-        self.current_index += text.text.len();
+        self.current_row_end += text.text.len();
     }
 
-    fn finish_row(&mut self) {
+    fn finish_current_row(&mut self) {
         use std::mem;
 
+        let width_in_lpxs = self.current_point_in_lpxs.x;
+        let text = self.text.substr(self.current_row_start..self.current_row_end);
         let glyphs = mem::take(&mut self.glyphs);
-        let row = LaidoutRow {
-            text: self.text.substr(self.start_index..self.current_index),
-            width_in_lpxs: self.current_x_in_lpxs,
-            max_width_in_lpxs: if self.max_width_in_lpxs() == f32::INFINITY {
-                self.current_x_in_lpxs
-            } else {
-                self.max_width_in_lpxs()
-            },
-            align: self.options.align,
-            ascender_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.ascender_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(0.0),
-            descender_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.descender_in_lpxs())
-                .reduce(f32::min)
-                .unwrap_or(0.0),
-            line_spacing_above_in_lpxs:  glyphs
-                .iter()
-                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.line_spacing_above_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(0.0),
-            line_spacing_below_in_lpxs:  glyphs
-                .iter()
-                .map(|glyph| glyph.baseline_y_in_lpxs() + glyph.line_spacing_below_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(0.0),
+        let ascender_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.ascender_in_lpxs())
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+        let descender_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.descender_in_lpxs())
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        let line_gap_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.line_gap_in_lpxs())
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+        if let Some(prev) = self.rows.last() {
+            self.current_point_in_lpxs.y += prev.line_gap_in_lpxs;
+        }
+        self.current_point_in_lpxs.y += ascender_in_lpxs;
+        let origin_in_lpxs = Point::new(0.0, self.current_point_in_lpxs.y);
+        self.current_point_in_lpxs.y -= descender_in_lpxs; 
+        self.rows.push(LaidoutRow {
+            origin_in_lpxs,
+            width_in_lpxs,
+            ascender_in_lpxs,
+            descender_in_lpxs,
+            line_gap_in_lpxs,
+            text,
             glyphs,
-        };
-        self.start_index = self.current_index;
-        self.current_x_in_lpxs = 0.0;
-        self.out_rows.push(row);
+        });
+        self.current_row_start = self.current_row_end;
+        self.current_point_in_lpxs.x = 0.0;
     }
 }
 
@@ -407,43 +392,19 @@ pub struct Span {
 pub struct Style {
     pub font_family_id: FontFamilyId,
     pub font_size_in_lpxs: NonNanF32,
-    pub line_spacing_scale: NonNanF32,
-    pub baseline: Baseline,
     pub color: Color,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Baseline {
-    Alphabetic,
-    Top,
-    Bottom,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutOptions {
     pub max_width_in_lpxs: NonNanF32,
-    pub align: Align,
 }
 
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
             max_width_in_lpxs: NonNanF32::new(f32::INFINITY).unwrap(),
-            align: Align::default(),
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Align {
-    Left,
-    Center,
-    Right,
-}
-
-impl Default for Align {
-    fn default() -> Self {
-        Self::Left
     }
 }
 
@@ -452,138 +413,22 @@ pub struct LaidoutText {
     pub rows: Vec<LaidoutRow>,
 }
 
-impl LaidoutText {
-    pub fn walk_rows<'a, B>(
-        &'a self,
-        f: impl FnMut(f32, &'a LaidoutRow) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
-        let mut current_y_in_lpxs = 0.0;
-        let mut f = f;
-        for (row_index, row) in self.rows.iter().enumerate() {
-            current_y_in_lpxs += if row_index == 0 {
-                row.ascender_in_lpxs
-            } else {
-                self.rows[row_index - 1].line_spacing_below_in_lpxs + row.line_spacing_above_in_lpxs
-            };
-            f(current_y_in_lpxs, row)?;
-        }
-        ControlFlow::Continue(())
-    }
-
-    pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
-        let mut row_index = 0;
-        let mut row_start = 0;
-        self.walk_rows(|row_origin_y_in_lpxs, row| {
-            let row_top_y_in_lpxs = row_origin_y_in_lpxs - row.ascender_in_lpxs;
-            let row_bottom_y_in_lpxs = row_origin_y_in_lpxs - row.descender_in_lpxs;
-            let line_spacing_below_in_lpxs = if row_index == self.rows.len() - 1 {
-                0.0
-            } else {
-                row.line_spacing_below_in_lpxs
-            };
-            if row_index == 0 && point_in_lpxs.y < row_top_y_in_lpxs {
-                return ControlFlow::Break(Cursor {
-                    index: row_start,
-                    affinity: Affinity::After,
-                });
-            }
-            if point_in_lpxs.y < row_bottom_y_in_lpxs + line_spacing_below_in_lpxs / 2.0 {
-                let index = row.x_in_lpxs_to_index(point_in_lpxs.x);
-                return ControlFlow::Break(Cursor {
-                    index,
-                    affinity: if index == row_start {
-                        Affinity::After
-                    } else {
-                        Affinity::Before
-                    }
-                });
-            }
-            if row_index == self.rows.len() - 1 {
-                return ControlFlow::Break(Cursor {
-                    index: row_start + row.text.len(),
-                    affinity: Affinity::Before,
-                });
-            }
-            row_index += 1;
-            row_start += row.text.len();
-            ControlFlow::Continue(())
-        }).break_value().unwrap()
-    }
-
-    pub fn cursor_to_point_in_lpxs(&self, cursor: Cursor) -> Point<f32> {
-        let mut row_index = 0;
-        let mut row_start = 0;
-        self.walk_rows(|row_origin_y_in_lpxs, row| {
-            if match cursor.affinity {
-                Affinity::Before => cursor.index < row_start + row.text.len(),
-                Affinity::After => cursor.index <= row_start + row.text.len(),
-            } {
-                return ControlFlow::Break(Point::new(
-                    row.index_to_x_in_lpxs(cursor.index - row_start),
-                    row_origin_y_in_lpxs
-                ));
-            }
-            if row_index == self.rows.len() - 1 {
-                return ControlFlow::Break(Point::new(
-                    row.align_x_in_lpxs() + row.width_in_lpxs,
-                    row_origin_y_in_lpxs
-                ));
-            }
-            row_index += 1;
-            row_start += row.text.len();
-            ControlFlow::Continue(())
-        }).break_value().unwrap()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Cursor {
-    pub index: usize,
-    pub affinity: Affinity,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Affinity {
-    Before,
-    After,
-}
-
 #[derive(Clone, Debug)]
 pub struct LaidoutRow {
-    pub text: Substr,
+    pub origin_in_lpxs: Point<f32>,
     pub width_in_lpxs: f32,
-    pub max_width_in_lpxs: f32,
-    pub align: Align,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
-    pub line_spacing_above_in_lpxs: f32,
-    pub line_spacing_below_in_lpxs: f32,
+    pub line_gap_in_lpxs: f32,
+    pub text: Substr,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
-    pub fn align_x_in_lpxs(&self) -> f32 {
-        match self.align {
-            Align::Left => 0.0,
-            Align::Center => (self.max_width_in_lpxs - self.width_in_lpxs) / 2.0,
-            Align::Right => self.max_width_in_lpxs - self.width_in_lpxs,
-        }
-    }
-
-    pub fn walk_glyphs<'a, B>(
-        &'a self,
-        f: impl FnMut(f32, &'a LaidoutGlyph) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
-        let mut current_x_in_lpxs = self.align_x_in_lpxs();
-        let mut f = f;
-        for glyph in &self.glyphs {
-            f(current_x_in_lpxs, glyph)?;
-            current_x_in_lpxs += glyph.advance_in_lpxs;
-        }
-        ControlFlow::Continue(())
-    }
-
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
+        unimplemented!()
+
+        /*
         fn handle_glyph_group(
             text: &str,
             start: usize,
@@ -644,9 +489,13 @@ impl LaidoutRow {
             }
             ControlFlow::Break(index) => index,
         }
+        */
     }
 
     pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
+        unimplemented!()
+
+        /*
         fn handle_glyph_group(
             text: &str,
             start: usize,
@@ -707,15 +556,15 @@ impl LaidoutRow {
             }
             ControlFlow::Break(index) => index,
         }
+        */
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct LaidoutGlyph {
+    pub origin_in_lpxs: Point<f32>,
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
-    pub baseline: Baseline,
-    pub line_spacing_scale: f32,
     pub color: Color,
     pub id: GlyphId,
     pub cluster: usize,
@@ -732,24 +581,8 @@ impl LaidoutGlyph {
         self.font.descender_in_ems() * self.font_size_in_lpxs
     }
 
-    pub fn baseline_y_in_lpxs(&self) -> f32 {
-        match self.baseline {
-            Baseline::Alphabetic => 0.0,
-            Baseline::Top => self.ascender_in_lpxs(),
-            Baseline::Bottom => self.descender_in_lpxs(),
-        }
-    }
-
-    fn line_gap_in_lpxs(&self) -> f32 {
+    pub fn line_gap_in_lpxs(&self) -> f32 {
         self.font.line_gap_in_ems() * self.font_size_in_lpxs
-    }
-
-    pub fn line_spacing_above_in_lpxs(&self) -> f32 {
-        self.ascender_in_lpxs() * self.line_spacing_scale
-    }
-
-    pub fn line_spacing_below_in_lpxs(&self) -> f32 {
-        (-self.descender_in_lpxs() + self.line_gap_in_lpxs()) * self.line_spacing_scale
     }
 
     pub fn rasterize(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
