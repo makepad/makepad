@@ -129,9 +129,7 @@ impl<'a> LayoutContext<'a> {
             self.layout_span(span);
         }
         self.finish_current_row();
-        LaidoutText {
-            rows: self.rows,
-        }
+        LaidoutText { rows: self.rows }
     }
 
     fn layout_span(&mut self, span: &Span) {
@@ -145,25 +143,21 @@ impl<'a> LayoutContext<'a> {
                 &font_family.get_or_shape(self.text.substr(span.range.clone())),
             );
         } else {
-            self.wrap_by_word(
-                &font_family,
-                &span.style,
-                span.range.clone(),
-            );
+            self.wrap_by_word(&font_family, &span.style, span.range.clone());
         }
     }
 
-    fn wrap_by_word(
-        &mut self,
-        font_family: &Rc<FontFamily>,
-        style: &Style,
-        range: Range<usize>,
-    ) {
+    fn wrap_by_word(&mut self, font_family: &Rc<FontFamily>, style: &Style, range: Range<usize>) {
         use unicode_segmentation::UnicodeSegmentation;
 
         let text = self.text.substr(range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs.into_inner(), text, segment_lens);
+        let mut fitter = Fitter::new(
+            font_family,
+            style.font_size_in_lpxs.into_inner(),
+            text,
+            segment_lens,
+        );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
@@ -171,11 +165,7 @@ impl<'a> LayoutContext<'a> {
                 }
                 None => {
                     if self.glyphs.is_empty() {
-                        self.wrap_by_grapheme(
-                            font_family,
-                            style,
-                            0..fitter.pop_front(),
-                        );
+                        self.wrap_by_grapheme(font_family, style, 0..fitter.pop_front());
                     } else {
                         self.finish_current_row()
                     }
@@ -194,7 +184,12 @@ impl<'a> LayoutContext<'a> {
 
         let text = self.text.substr(range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs.into_inner(), text, segment_lens);
+        let mut fitter = Fitter::new(
+            font_family,
+            style.font_size_in_lpxs.into_inner(),
+            text,
+            segment_lens,
+        );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs()) {
                 Some(text) => {
@@ -202,7 +197,8 @@ impl<'a> LayoutContext<'a> {
                 }
                 None => {
                     if self.glyphs.is_empty() {
-                        self.append_text_to_current_row(style,
+                        self.append_text_to_current_row(
+                            style,
                             &font_family.get_or_shape(self.text.substr(0..fitter.pop_front())),
                         );
                     } else {
@@ -213,71 +209,73 @@ impl<'a> LayoutContext<'a> {
         }
     }
 
-    fn append_text_to_current_row(
-        &mut self,
-        style: &Style,
-        text: &ShapedText,
-    ) {
+    fn append_text_to_current_row(&mut self, style: &Style, text: &ShapedText) {
+        use super::num::Zero;
+
         for glyph in &text.glyphs {
-            let origin_in_lpxs = Point::new(self.current_point_in_lpxs.x, 0.0);
-            let font = glyph.font.clone();
-            let font_size_in_lpxs = style.font_size_in_lpxs.into_inner();
-            let cluster = self.current_row_end + glyph.cluster;
-            let advance_in_lpxs = glyph.advance_in_ems * font_size_in_lpxs;
-            let offset_in_lpxs = glyph.offset_in_ems * font_size_in_lpxs;
-            self.current_point_in_lpxs.x += advance_in_lpxs;
-            self.glyphs.push(LaidoutGlyph {
-                origin_in_lpxs,
-                font,
-                font_size_in_lpxs,
+            let mut glyph = LaidoutGlyph {
+                origin_in_lpxs: Point::ZERO,
+                font: glyph.font.clone(),
+                font_size_in_lpxs: style.font_size_in_lpxs.into_inner(),
                 color: style.color,
                 id: glyph.id,
-                cluster,
-                advance_in_lpxs,
-                offset_in_lpxs,
-            });
+                cluster: self.current_row_end + glyph.cluster,
+                advance_in_ems: glyph.advance_in_ems,
+                offset_in_ems: glyph.offset_in_ems,
+            };
+            glyph.origin_in_lpxs = Point::new(self.current_point_in_lpxs.x, 0.0);
+            self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
+            self.glyphs.push(glyph);
         }
         self.current_row_end += text.text.len();
     }
 
     fn finish_current_row(&mut self) {
-        use std::mem;
+        use {super::num::Zero, std::mem};
 
-        let width_in_lpxs = self.current_point_in_lpxs.x;
-        let text = self.text.substr(self.current_row_start..self.current_row_end);
         let glyphs = mem::take(&mut self.glyphs);
-        let ascender_in_lpxs = glyphs
-            .iter()
-            .map(|glyph| glyph.ascender_in_lpxs())
-            .reduce(f32::max)
-            .unwrap_or(0.0);
-        let descender_in_lpxs = glyphs
-            .iter()
-            .map(|glyph| glyph.descender_in_lpxs())
-            .reduce(f32::min)
-            .unwrap_or(0.0);
-        let line_gap_in_lpxs = glyphs
-            .iter()
-            .map(|glyph| glyph.line_gap_in_lpxs())
-            .reduce(f32::max)
-            .unwrap_or(0.0);
+        let mut row = LaidoutRow {
+            origin_in_lpxs: Point::ZERO,
+            width_in_lpxs: self.current_point_in_lpxs.x,
+            ascender_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.ascender_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            descender_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.descender_in_lpxs())
+                .reduce(f32::min)
+                .unwrap_or(0.0),
+            line_gap_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.line_gap_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            text: self
+                .text
+                .substr(self.current_row_start..self.current_row_end),
+            glyphs,
+        };
         if let Some(prev) = self.rows.last() {
             self.current_point_in_lpxs.y += prev.line_gap_in_lpxs;
         }
-        self.current_point_in_lpxs.y += ascender_in_lpxs;
-        let origin_in_lpxs = Point::new(0.0, self.current_point_in_lpxs.y);
-        self.current_point_in_lpxs.y -= descender_in_lpxs; 
-        self.rows.push(LaidoutRow {
-            origin_in_lpxs,
-            width_in_lpxs,
-            ascender_in_lpxs,
-            descender_in_lpxs,
-            line_gap_in_lpxs,
-            text,
-            glyphs,
-        });
+        self.current_point_in_lpxs.y += row.ascender_in_lpxs;
+        let align_x_in_lpxs = if self.max_width_in_lpxs() == f32::INFINITY {
+            0.0
+        } else {
+            let unused_width_in_lpxs = self.max_width_in_lpxs() - row.width_in_lpxs;
+            match self.options.align {
+                Align::Left => 0.0,
+                Align::Center => (self.max_width_in_lpxs() - row.width_in_lpxs) / 2.0,
+                Align::Right => unused_width_in_lpxs,
+            }
+        };
+        row.origin_in_lpxs = Point::new(align_x_in_lpxs, self.current_point_in_lpxs.y);
+        self.current_point_in_lpxs.y -= row.descender_in_lpxs;
         self.current_row_start = self.current_row_end;
         self.current_point_in_lpxs.x = 0.0;
+        self.rows.push(row);
     }
 }
 
@@ -398,13 +396,28 @@ pub struct Style {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutOptions {
     pub max_width_in_lpxs: NonNanF32,
+    pub align: Align,
 }
 
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
             max_width_in_lpxs: NonNanF32::new(f32::INFINITY).unwrap(),
+            align: Align::default(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+impl Default for Align {
+    fn default() -> Self {
+        Self::Left
     }
 }
 
@@ -568,11 +581,19 @@ pub struct LaidoutGlyph {
     pub color: Color,
     pub id: GlyphId,
     pub cluster: usize,
-    pub advance_in_lpxs: f32,
-    pub offset_in_lpxs: f32,
+    pub advance_in_ems: f32,
+    pub offset_in_ems: f32,
 }
 
 impl LaidoutGlyph {
+    pub fn advance_in_lpxs(&self) -> f32 {
+        self.advance_in_ems * self.font_size_in_lpxs
+    }
+
+    pub fn offset_in_lpxs(&self) -> f32 {
+        self.offset_in_ems * self.font_size_in_lpxs
+    }
+
     pub fn ascender_in_lpxs(&self) -> f32 {
         self.font.ascender_in_ems() * self.font_size_in_lpxs
     }
