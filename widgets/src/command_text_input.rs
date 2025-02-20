@@ -160,26 +160,30 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if cx.has_key_focus(self.key_controller_text_input_ref().area()) {
             if let Event::KeyDown(key_event) = event {
-                let mut eat_the_event = true;
+                let popup_visible = self.view(id!(popup)).visible();
 
-                match key_event.key_code {
-                    KeyCode::ArrowDown => self.on_keyboard_move(cx, 1),
-                    KeyCode::ArrowUp => self.on_keyboard_move(cx, -1),
-                    KeyCode::ReturnKey => {
-                        self.on_keyboard_controller_input_submit(cx, scope);
-                    }
-                    KeyCode::Escape => {
-                        self.is_text_input_focus_pending = true;
-                        self.hide_popup(cx);
-                        self.redraw(cx);
-                    }
-                    _ => {
-                        eat_the_event = false;
-                    }
-                };
+                if popup_visible {
+                    let mut eat_the_event = true;
 
-                if eat_the_event {
-                    return;
+                    match key_event.key_code {
+                        KeyCode::ArrowDown => self.on_keyboard_move(cx, 1),
+                        KeyCode::ArrowUp => self.on_keyboard_move(cx, -1),
+                        KeyCode::ReturnKey => {
+                            self.on_keyboard_controller_input_submit(cx, scope);
+                        }
+                        KeyCode::Escape => {
+                            self.is_text_input_focus_pending = true;
+                            self.hide_popup(cx);
+                            self.redraw(cx);
+                        }
+                        _ => {
+                            eat_the_event = false;
+                        }
+                    };
+
+                    if eat_the_event {
+                        return;
+                    }
                 }
             }
         }
@@ -275,6 +279,21 @@ impl Widget for CommandTextInput {
 }
 
 impl CommandTextInput {
+
+    pub fn keyboard_focus_index(&self) -> Option<usize> {
+        self.keyboard_focus_index
+    }
+
+    /// Sets the keyboard focus index for the list of selectable items
+    /// Only updates the visual highlight state of the dropdown items
+    pub fn set_keyboard_focus_index(&mut self, idx: usize) {
+        // Only process if popup is visible and we have items
+        if !self.selectable_widgets.is_empty() {
+            // Simply update the focus index within valid bounds
+            self.keyboard_focus_index = Some(idx.clamp(0, self.selectable_widgets.len() - 1));
+        }
+    }
+
     fn on_text_inserted(&mut self, cx: &mut Cx, scope: &mut Scope, inserted: &str) {
         if graphemes(inserted).last() == self.trigger_grapheme() {
             self.show_popup(cx);
