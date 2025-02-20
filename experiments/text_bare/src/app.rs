@@ -1,4 +1,4 @@
-use crate::makepad_widgets::{text::{color::Color, non_nan::NonNanF32, geom::Point, layout::{Align, Baseline, Style, LayoutParams, Span, LayoutOptions}}, *};
+use crate::makepad_widgets::{text::{color::Color, non_nan::NonNanF32, geom::Point, layout::{Style, LayoutParams, Span, LayoutOptions}}, *};
 
 live_design!{
     use link::theme::*;
@@ -101,8 +101,6 @@ impl Widget for MyWidget {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
-                        baseline: Baseline::Alphabetic,
-                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
                         color: Color::WHITE,
                     },
                     range: 0..4,
@@ -111,8 +109,6 @@ impl Widget for MyWidget {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
-                        baseline: Baseline::Alphabetic,
-                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
                         color: Color::WHITE,
                     },
                     range: 4..12,
@@ -121,8 +117,6 @@ impl Widget for MyWidget {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
-                        baseline: Baseline::Alphabetic,
-                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
                         color: Color::WHITE,
                     },
                     range: 12..16,
@@ -131,8 +125,6 @@ impl Widget for MyWidget {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(24.0 / 72.0 * 96.0).unwrap(),
-                        baseline: Baseline::Alphabetic,
-                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
                         color: Color::WHITE,
                     },
                     range: 16..19,
@@ -141,8 +133,6 @@ impl Widget for MyWidget {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
-                        baseline: Baseline::Alphabetic,
-                        line_spacing_scale: NonNanF32::new(1.5).unwrap(),
                         color: Color::WHITE,
                     },
                     range: 19..text.len(),
@@ -150,7 +140,6 @@ impl Widget for MyWidget {
             ].into(),
             options: LayoutOptions {
                 max_width_in_lpxs: NonNanF32::new(105.0).unwrap(),
-                align: Align::Center,
             },
         });
         self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);

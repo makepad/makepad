@@ -27,7 +27,7 @@ mod tests {
                 color::Color,
                 font_loader::FontDefinitions,
                 layout::{
-                    Align, Baseline, LayoutOptions, LayoutParams, Layouter, Settings, Span, Style,
+                    LayoutOptions, LayoutParams, Layouter, Settings, Span, Style,
                 },
                 non_nan::NonNanF32,
             },
@@ -43,8 +43,6 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        baseline: Baseline::Alphabetic,
-                        line_spacing_scale: NonNanF32::new(1.0).unwrap(),
                         color: Color::RED,
                     },
                     range: 0..10,
@@ -53,8 +51,6 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        baseline: Baseline::Top,
-                        line_spacing_scale: NonNanF32::new(1.0).unwrap(),
                         color: Color::GREEN,
                     },
                     range: 10..20,
@@ -63,8 +59,6 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
-                        baseline: Baseline::Bottom,
-                        line_spacing_scale: NonNanF32::new(1.0).unwrap(),
                         color: Color::BLUE,
                         
                     },
@@ -74,7 +68,6 @@ mod tests {
             .into(),
             options: LayoutOptions {
                 max_width_in_lpxs: NonNanF32::new(256.0).unwrap(),
-                align: Align::Left,
             },
         });
         for row in &text.rows {
