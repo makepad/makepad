@@ -10,18 +10,10 @@ live_design!{
         spacing: 7.5,
         align: {x: 0.5, y: 0.5},
         padding: <THEME_MSPACE_2> {}
-        label_walk: { width: Fit, height: Fit },
-                        
+        label_walk: { width: Fit, height: Fit },   
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
+            debug: true
         }
-                        
         draw_bg: {
             fn pixel(self) -> vec4 {
                 return #0
@@ -93,23 +85,24 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        let text = "abc def ghi abc dMf ghi abc def ghi";
+        let text = "abc def ghi abc d😊f ghi abc def ghi";
         let text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             text: text.into(),
             spans: [
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
-                        baseline: Baseline::Top,
+                        font_size_in_lpxs: NonNanF32::new(8.0 / 72.0 * 96.0).unwrap(),
+                        baseline: Baseline::Alphabetic,
                         color: Color::WHITE,
                     },
-                    range: 0..4,
+                    range: 0..text.len(),
                 },
+                /*
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
+                        font_size_in_lpxs: NonNanF32::new(8.0 / 72.0 * 96.0).unwrap(),
                         baseline: Baseline::Alphabetic,
                         color: Color::WHITE,
                     },
@@ -118,7 +111,7 @@ impl Widget for MyWidget {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(12.0 / 72.0 * 96.0).unwrap(),
+                        font_size_in_lpxs: NonNanF32::new(8.0 / 72.0 * 96.0).unwrap(),
                         baseline: Baseline::Bottom,
                         color: Color::WHITE,
                     },
@@ -142,6 +135,7 @@ impl Widget for MyWidget {
                     },
                     range: 19..text.len(),
                 },
+                */
             ].into(),
             options: LayoutOptions {
                 max_width_in_lpxs: NonNanF32::new(105.0).unwrap(),

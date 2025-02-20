@@ -129,7 +129,17 @@ impl<'a> LayoutContext<'a> {
             self.layout_span(span);
         }
         self.finish_current_row();
-        LaidoutText { rows: self.rows }
+        LaidoutText {
+            size_in_lpxs: Size::new(
+                self.rows
+                    .iter()
+                    .map(|row| row.origin_in_lpxs.x + row.width_in_lpxs)
+                    .reduce(f32::max)
+                    .unwrap_or(0.0),
+                self.current_point_in_lpxs.y,
+            ),
+            rows: self.rows,
+        }
     }
 
     fn layout_span(&mut self, span: &Span) {
@@ -442,6 +452,7 @@ impl Default for Align {
 
 #[derive(Clone, Debug)]
 pub struct LaidoutText {
+    pub size_in_lpxs: Size<f32>,
     pub rows: Vec<LaidoutRow>,
 }
 

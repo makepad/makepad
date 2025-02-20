@@ -26,7 +26,9 @@ mod tests {
             super::{
                 color::Color,
                 font_loader::FontDefinitions,
-                layout::{Align, Baseline, LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
+                layout::{
+                    Align, Baseline, LayoutOptions, LayoutParams, Layouter, Settings, Span, Style,
+                },
                 non_nan::NonNanF32,
             },
             std::{fs::File, io::BufWriter},
