@@ -17,38 +17,26 @@ live_design! {
     pub DrawText2 = {{DrawText2}} {
         uniform radius: float;
         uniform cutoff: float;
+        uniform grayscale_atlas_size: vec2;
+        uniform color_atlas_size: vec2;
 
         texture grayscale_texture: texture2d
         texture color_texture: texture2d
 
-        varying tex_coord1: vec2
-        varying clipped: vec2
-        varying pos: vec2
+        varying t: vec2
 
         fn vertex(self) -> vec4 {
-            let min_pos = self.rect_pos;
-            let max_pos = self.rect_pos + self.rect_size;
+            let p = mix(self.rect_origin, self.rect_origin + self.rect_size, self.geom_pos);
+            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw);
+            let p_normalized: vec2 = (p_clipped - self.rect_origin) / self.rect_size;
 
-            self.clipped = clamp(
-                mix(min_pos, max_pos, self.geom_pos),
-                self.draw_clip.xy,
-                self.draw_clip.zw
-            )
-
-            let normalized: vec2 = (self.clipped - min_pos) / self.rect_size;
-
-            self.tex_coord1 = mix(
-                vec2(self.font_t1.x, self.font_t1.y),
-                vec2(self.font_t2.x, self.font_t2.y),
-                normalized.xy
-            )
-            self.pos = normalized;
+            self.t = mix(self.t_min, self.t_max, p_normalized.xy);
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
-                self.clipped.x,
-                self.clipped.y,
-                self.rect_depth + self.draw_zbias,
+                p_clipped.x,
+                p_clipped.y,
+                self.draw_depth + self.draw_zbias,
                 1.
-            )))
+            )));
         }
 
         fn sdf(self, scale: float, p: vec2) -> float {
@@ -58,17 +46,16 @@ live_design! {
         }
 
         fn pixel(self) -> vec4 {
-            if self.tex_index == 0 {
-                let texel_coords = self.tex_coord1.xy;
-                let dxt = length(dFdx(texel_coords));
-                let dyt = length(dFdy(texel_coords));
-                let scale = (dxt + dyt) * 512.0 * 0.5;
+            let dxt = length(dFdx(self.t));
+            let dyt = length(dFdy(self.t));
+            if self.texture_index == 0 {
+                // TODO: Support non square atlases?
+                let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
+                let s = self.sdf(scale, self.t.xy);
                 let c = self.color;
-                let s = self.sdf(scale, self.tex_coord1.xy);
                 return s * c;
             } else {
-                let texel_coords = self.tex_coord1.xy;
-                let c = sample2d(self.color_texture, self.tex_coord1.xy);
+                let c = sample2d(self.color_texture, self.t);
                 return vec4(c.rgb * c.a, c.a);
             }
         }
@@ -78,31 +65,29 @@ live_design! {
 #[derive(Live, LiveRegister)]
 #[repr(C)]
 pub struct DrawText2 {
-    #[rust]
-    pub many_instances: Option<ManyInstances>,
-
     #[live]
     pub geometry: GeometryQuad2D,
+    #[live]
+    pub debug: bool,
 
     #[deref]
     pub draw_vars: DrawVars,
-    // these values are all generated
-    #[live]
-    pub color: Vec4,
     #[calc]
-    pub tex_index: f32,
-    #[calc]
-    pub font_t1: Vec2,
-    #[calc]
-    pub font_t2: Vec2,
-    #[calc]
-    pub rect_pos: Vec2,
+    pub rect_origin: Vec2,
     #[calc]
     pub rect_size: Vec2,
     #[calc]
     pub draw_clip: Vec4,
     #[calc]
-    pub rect_depth: f32,
+    pub draw_depth: f32,
+    #[calc]
+    pub texture_index: f32,
+    #[calc]
+    pub t_min: Vec2,
+    #[calc]
+    pub t_max: Vec2,
+    #[calc]
+    pub color: Vec4,
 }
 
 impl LiveHook for DrawText2 {
@@ -124,25 +109,36 @@ impl DrawText2 {
         origin_in_lpxs: Point<f32>,
         text: &LaidoutText,
     ) {
-        let fonts = cx.fonts.borrow();
-        let settings = fonts.sdfer().borrow().settings();
-        self.draw_vars.user_uniforms[0] = settings.radius;
-        self.draw_vars.user_uniforms[1] = settings.cutoff;
-        self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
-        self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        drop(fonts);
-        let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        self.rect_depth = 1.0;
+        self.update_draw_vars(cx);
+        let mut instances: ManyInstances =
+            cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
+        self.draw_depth = 1.0;
         for row in &text.rows {
             self.draw_laidout_row(
                 cx,
                 origin_in_lpxs + Size::from(row.origin_in_lpxs),
                 row,
-                &mut many_instances.instances,
+                &mut instances.instances,
             );
         }
-        let area = cx.end_many_instances(many_instances);
+        let area = cx.end_many_instances(instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, area);
+    }
+
+    fn update_draw_vars(&mut self, cx: &mut Cx2d<'_>) {
+        let fonts = cx.fonts.borrow();
+        let settings = fonts.sdfer().borrow().settings();
+        self.draw_vars.user_uniforms[0] = settings.radius;
+        self.draw_vars.user_uniforms[1] = settings.cutoff;
+        let grayscale_atlas_size = fonts.grayscale_atlas().borrow().size();
+        self.draw_vars.user_uniforms[2] = grayscale_atlas_size.width as f32;
+        self.draw_vars.user_uniforms[3] = grayscale_atlas_size.height as f32;
+        let color_atlas_size = fonts.color_atlas().borrow().size();
+        self.draw_vars.user_uniforms[4] = color_atlas_size.width as f32;
+        self.draw_vars.user_uniforms[5] = color_atlas_size.height as f32;
+        self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
+        self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
+        drop(fonts);
     }
 
     fn draw_laidout_row(
@@ -160,33 +156,40 @@ impl DrawText2 {
                 output,
             );
         }
-        cx.cx.debug.rect(
-            makepad_platform::rect(
-                origin_in_lpxs.x as f64,
-                (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
-                row.width_in_lpxs as f64,
-                1.0,
-            ),
-            makepad_platform::vec4(1.0, 0.0, 0.0, 1.0),
-        );
-        cx.cx.debug.rect(
-            makepad_platform::rect(
-                origin_in_lpxs.x as f64,
-                origin_in_lpxs.y as f64,
-                row.width_in_lpxs as f64,
-                1.0,
-            ),
-            makepad_platform::vec4(0.0, 1.0, 0.0, 1.0),
-        );
-        cx.cx.debug.rect(
-            makepad_platform::rect(
-                origin_in_lpxs.x as f64,
-                (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
-                row.width_in_lpxs as f64,
-                1.0,
-            ),
-            makepad_platform::vec4(0.0, 0.0, 1.0, 1.0),
-        );
+        if self.debug {
+            // Ascender
+            cx.cx.debug.rect(
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
+                    row.width_in_lpxs as f64,
+                    1.0,
+                ),
+                makepad_platform::vec4(1.0, 0.0, 0.0, 1.0),
+            );
+
+            // Baseline
+            cx.cx.debug.rect(
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    origin_in_lpxs.y as f64,
+                    row.width_in_lpxs as f64,
+                    1.0,
+                ),
+                makepad_platform::vec4(0.0, 1.0, 0.0, 1.0),
+            );
+
+            // Descender
+            cx.cx.debug.rect(
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
+                    row.width_in_lpxs as f64,
+                    1.0,
+                ),
+                makepad_platform::vec4(0.0, 0.0, 1.0, 1.0),
+            );
+        }
     }
 
     fn draw_laidout_glyph(
@@ -216,13 +219,6 @@ impl DrawText2 {
         glyph: RasterizedGlyph,
         output: &mut Vec<f32>,
     ) {
-        fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
-            Point::new(
-                (2 * point.x + 1) as f32 / (2 * size.width) as f32,
-                (2 * point.y + 1) as f32 / (2 * size.height) as f32,
-            )
-        }
-
         fn point_to_vec2(point: Point<f32>) -> Vec2 {
             vec2(point.x, point.y)
         }
@@ -240,30 +236,30 @@ impl DrawText2 {
             )
         }
 
+        fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
+            Point::new(
+                (2 * point.x + 1) as f32 / (2 * size.width) as f32,
+                (2 * point.y + 1) as f32 / (2 * size.height) as f32,
+            )
+        }
+
         let transform = Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em)
             .translate(point_in_lpxs.x, point_in_lpxs.y);
-        let bounds_in_dpxs = Rect::new(
+        let bounds_in_lpxs = Rect::new(
             Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
             glyph.bounds_in_dpxs.size,
-        );
-        let bounds_in_lpxs = bounds_in_dpxs.apply_transform(transform);
-        self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
+        )
+        .apply_transform(transform);
+        self.rect_origin = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
-        self.tex_index = match glyph.atlas_kind {
+        self.texture_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
         };
-        self.font_t1 = point_to_vec2(tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size));
-        self.font_t2 = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
+        self.t_min = point_to_vec2(tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size));
+        self.t_max = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
         self.color = color_to_vec4(color);
-
         output.extend_from_slice(self.draw_vars.as_slice());
-        self.rect_depth += 0.001;
-        /*
-        println!("RECT POS {:?}", self.rect_pos);
-        println!("RECT SIZE {:?}", self.rect_size);
-        println!("FONT T1 {:?}", self.font_t1);
-        println!("FONT T2 {:?}", self.font_t2);
-        */
+        self.draw_depth += 0.001;
     }
 }
