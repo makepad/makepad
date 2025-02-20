@@ -124,8 +124,6 @@ impl DrawText2 {
         origin_in_lpxs: Point<f32>,
         text: &LaidoutText,
     ) {
-        use std::ops::ControlFlow;
-
         let fonts = cx.fonts.borrow();
         let settings = fonts.sdfer().borrow().settings();
         self.draw_vars.user_uniforms[0] = settings.radius;
@@ -135,15 +133,14 @@ impl DrawText2 {
         drop(fonts);
         let mut many_instances = cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         self.rect_depth = 1.0;
-        text.walk_rows::<()>(|row_origin_y_in_lpxs, row| {
+        for row in &text.rows {
             self.draw_laidout_row(
                 cx,
-                origin_in_lpxs + Size::new(0.0, row_origin_y_in_lpxs),
+                origin_in_lpxs + Size::from(row.origin_in_lpxs),
                 row,
                 &mut many_instances.instances,
             );
-            ControlFlow::Continue(())
-        });
+        }
         let area = cx.end_many_instances(many_instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, area);
     }
@@ -155,20 +152,17 @@ impl DrawText2 {
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        use std::ops::ControlFlow;
-
-        row.walk_glyphs::<()>(|glyph_origin_x_in_lpxs, glyph| {
+        for glyph in &row.glyphs {
             self.draw_laidout_glyph(
                 cx,
-                origin_in_lpxs + Size::new(glyph_origin_x_in_lpxs, 0.0),
+                origin_in_lpxs + Size::from(glyph.origin_in_lpxs),
                 glyph,
                 output,
             );
-            ControlFlow::Continue(())
-        });
+        }
         cx.cx.debug.rect(
             makepad_platform::rect(
-                (origin_in_lpxs.x + row.align_x_in_lpxs()) as f64,
+                origin_in_lpxs.x as f64,
                 (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
                 row.width_in_lpxs as f64,
                 1.0,
@@ -177,7 +171,7 @@ impl DrawText2 {
         );
         cx.cx.debug.rect(
             makepad_platform::rect(
-                (origin_in_lpxs.x + row.align_x_in_lpxs()) as f64,
+                origin_in_lpxs.x as f64,
                 origin_in_lpxs.y as f64,
                 row.width_in_lpxs as f64,
                 1.0,
@@ -186,7 +180,7 @@ impl DrawText2 {
         );
         cx.cx.debug.rect(
             makepad_platform::rect(
-                (origin_in_lpxs.x + row.align_x_in_lpxs()) as f64,
+                origin_in_lpxs.x as f64,
                 (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
                 row.width_in_lpxs as f64,
                 1.0,
@@ -207,7 +201,7 @@ impl DrawText2 {
             self.draw_rasterized_glyph(
                 Point::new(
                     origin_in_lpxs.x + glyph.offset_in_lpxs,
-                    origin_in_lpxs.y - glyph.baseline_y_in_lpxs(),
+                    origin_in_lpxs.y,
                 ),
                 glyph.font_size_in_lpxs,
                 glyph.color,
