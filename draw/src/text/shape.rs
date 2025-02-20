@@ -85,8 +85,8 @@ impl Shaper {
                 }) {
                     glyph_groups.next();
                 }
-                let missing_end = if let Some(glyph_group) = glyph_groups.peek() {
-                    glyph_group[0].cluster
+                let missing_end = if let Some(next_glyph_group) = glyph_groups.peek() {
+                    next_glyph_group[0].cluster
                 } else {
                     end
                 };

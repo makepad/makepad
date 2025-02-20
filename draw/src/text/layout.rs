@@ -223,7 +223,12 @@ impl<'a> LayoutContext<'a> {
                 advance_in_ems: glyph.advance_in_ems,
                 offset_in_ems: glyph.offset_in_ems,
             };
-            glyph.origin_in_lpxs = Point::new(self.current_point_in_lpxs.x, 0.0);
+            let baseline_y_in_lpxs = match style.baseline {
+                Baseline::Top => glyph.ascender_in_lpxs(),
+                Baseline::Alphabetic => 0.0,
+                Baseline::Bottom => glyph.descender_in_lpxs(),
+            };
+            glyph.origin_in_lpxs = Point::new(self.current_point_in_lpxs.x, -baseline_y_in_lpxs);
             self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
             self.glyphs.push(glyph);
         }
@@ -239,12 +244,12 @@ impl<'a> LayoutContext<'a> {
             width_in_lpxs: self.current_point_in_lpxs.x,
             ascender_in_lpxs: glyphs
                 .iter()
-                .map(|glyph| glyph.ascender_in_lpxs())
+                .map(|glyph| -glyph.origin_in_lpxs.y + glyph.ascender_in_lpxs())
                 .reduce(f32::max)
                 .unwrap_or(0.0),
             descender_in_lpxs: glyphs
                 .iter()
-                .map(|glyph| glyph.descender_in_lpxs())
+                .map(|glyph| -glyph.origin_in_lpxs.y + glyph.descender_in_lpxs())
                 .reduce(f32::min)
                 .unwrap_or(0.0),
             line_gap_in_lpxs: glyphs
@@ -390,7 +395,21 @@ pub struct Span {
 pub struct Style {
     pub font_family_id: FontFamilyId,
     pub font_size_in_lpxs: NonNanF32,
+    pub baseline: Baseline,
     pub color: Color,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Baseline {
+    Top,
+    Alphabetic,
+    Bottom,
+}
+
+impl Default for Baseline {
+    fn default() -> Self {
+        Self::Alphabetic
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -439,137 +458,87 @@ pub struct LaidoutRow {
 
 impl LaidoutRow {
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
-        unimplemented!()
+        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
 
-        /*
-        fn handle_glyph_group(
-            text: &str,
-            start: usize,
-            start_x_in_lpxs: f32,
-            end: usize,
-            end_x_in_lpxs: f32,
-            x_in_lpxs: f32,
-        ) -> Option<usize> {
-            use unicode_segmentation::UnicodeSegmentation;
-
+        let mut glyph_groups = self
+            .glyphs
+            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
+            .peekable();
+        while let Some(glyph_group) = glyph_groups.next() {
+            let start = glyph_group[0].cluster;
+            let start_x_in_lpxs = glyph_group
+                .iter()
+                .map(|glyph| glyph.origin_in_lpxs.x)
+                .reduce(f32::min)
+                .unwrap();
+            let end = if let Some(next_glyph_group) = glyph_groups.peek() {
+                next_glyph_group[0].cluster
+            } else {
+                self.text.len()
+            };
+            let end_x_in_lpxs = if let Some(next_glyph_group) = glyph_groups.peek() {
+                next_glyph_group
+                    .iter()
+                    .map(|glyph| glyph.origin_in_lpxs.x)
+                    .reduce(f32::min)
+                    .unwrap()
+            } else {
+                self.origin_in_lpxs.x + self.width_in_lpxs
+            };
             let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
-            let grapheme_count = text[start..end].graphemes(true).count();
+            let grapheme_count = self.text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut grapheme_start_x_in_lpxs = start_x_in_lpxs;
-            for (grapheme_start, _) in text[start..end].grapheme_indices(true) {
+            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
                 if x_in_lpxs < grapheme_start_x_in_lpxs + grapheme_width_in_lpxs / 2.0 {
-                    return Some(start + grapheme_start);
+                    return start + grapheme_start;
                 }
                 grapheme_start_x_in_lpxs += grapheme_width_in_lpxs;
             }
-            None
         }
-
-        let mut glyph_group_start = 0;
-        let mut glyph_group_start_x_in_lpxs = self.align_x_in_lpxs();
-        match self.walk_glyphs(|glyph_origin_x_in_lpxs, glyph| {
-            if glyph.cluster == glyph_group_start {
-                return ControlFlow::Continue(());
-            }
-            let glyph_group_end = glyph.cluster;
-            let glyph_group_end_x_in_lpxs = glyph_origin_x_in_lpxs;
-            if let Some(index) = handle_glyph_group(
-                &self.text,
-                glyph_group_start,
-                glyph_group_start_x_in_lpxs,
-                glyph_group_end,
-                glyph_group_end_x_in_lpxs,
-                x_in_lpxs,
-            ) {
-                return ControlFlow::Break(index);
-            }
-            glyph_group_start = glyph_group_end;
-            glyph_group_start_x_in_lpxs = glyph_group_end_x_in_lpxs;
-            ControlFlow::Continue(())
-        }) {
-            ControlFlow::Continue(()) => {
-                if let Some(index) = handle_glyph_group(
-                    &self.text,
-                    glyph_group_start,
-                    glyph_group_start_x_in_lpxs,
-                    self.text.len(),
-                    self.align_x_in_lpxs() + self.width_in_lpxs,
-                    x_in_lpxs,
-                ) {
-                    return index;
-                }
-                return self.text.len();
-            }
-            ControlFlow::Break(index) => index,
-        }
-        */
+        self.text.len()
     }
 
     pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
-        unimplemented!()
+        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
 
-        /*
-        fn handle_glyph_group(
-            text: &str,
-            start: usize,
-            start_x_in_lpxs: f32,
-            end: usize,
-            end_x_in_lpxs: f32,
-            index: usize,
-        ) -> Option<f32> {
-            use unicode_segmentation::UnicodeSegmentation;
-
+        let mut glyph_groups = self
+            .glyphs
+            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
+            .peekable();
+        while let Some(glyph_group) = glyph_groups.next() {
+            let start = glyph_group[0].cluster;
+            let start_x_in_lpxs = glyph_group
+                .iter()
+                .map(|glyph| glyph.origin_in_lpxs.x)
+                .reduce(f32::min)
+                .unwrap();
+            let end = if let Some(next_glyph_group) = glyph_groups.peek() {
+                next_glyph_group[0].cluster
+            } else {
+                self.text.len()
+            };
+            let end_x_in_lpxs = if let Some(next_glyph_group) = glyph_groups.peek() {
+                next_glyph_group
+                    .iter()
+                    .map(|glyph| glyph.origin_in_lpxs.x)
+                    .reduce(f32::min)
+                    .unwrap()
+            } else {
+                self.origin_in_lpxs.x + self.width_in_lpxs
+            };
             let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
-            let grapheme_count = text[start..end].graphemes(true).count();
+            let grapheme_count = self.text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut grapheme_start_x_in_lpxs = start_x_in_lpxs;
-            for (grapheme_start, _) in text[start..end].grapheme_indices(true) {
+            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
                 if index == start + grapheme_start {
-                    return Some(grapheme_start_x_in_lpxs);
+                    return grapheme_start_x_in_lpxs;
                 }
                 grapheme_start_x_in_lpxs += grapheme_width_in_lpxs;
             }
-            None
         }
-
-        let mut glyph_group_start = 0;
-        let mut glyph_group_start_x_in_lpxs = self.align_x_in_lpxs();
-        match self.walk_glyphs(|glyph_origin_x_in_lpxs, glyph| {
-            if glyph.cluster == glyph_group_start {
-                return ControlFlow::Continue(());
-            }
-            let glyph_group_end = glyph.cluster;
-            let glyph_group_end_x_in_lpxs = glyph_origin_x_in_lpxs;
-            if let Some(x_in_lpxs) = handle_glyph_group(
-                &self.text,
-                glyph_group_start,
-                glyph_group_start_x_in_lpxs,
-                glyph_group_end,
-                glyph_group_end_x_in_lpxs,
-                index,
-            ) {
-                return ControlFlow::Break(x_in_lpxs);
-            }
-            glyph_group_start = glyph_group_end;
-            glyph_group_start_x_in_lpxs = glyph_group_end_x_in_lpxs;
-            ControlFlow::Continue(())
-        }) {
-            ControlFlow::Continue(()) => {
-                if let Some(x_in_lpxs) = handle_glyph_group(
-                    &self.text,
-                    glyph_group_start,
-                    glyph_group_start_x_in_lpxs,
-                    self.text.len(),
-                    self.align_x_in_lpxs() + self.width_in_lpxs,
-                    index,
-                ) {
-                    return x_in_lpxs;
-                }
-                return self.width_in_lpxs;
-            }
-            ControlFlow::Break(index) => index,
-        }
-        */
+        self.width_in_lpxs
     }
 }
 
