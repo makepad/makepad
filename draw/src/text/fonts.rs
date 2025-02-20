@@ -1,5 +1,6 @@
 use {
     super::{
+        font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_loader::FontDefinitions,
         geom::Point,
         image::Rgba,
@@ -57,6 +58,14 @@ impl Fonts {
 
     pub fn sdfer(&self) -> &Rc<RefCell<Sdfer>> {
         self.layouter.sdfer()
+    }
+
+    pub fn grayscale_atlas(&self) -> &Rc<RefCell<GrayscaleAtlas>> {
+        self.layouter.grayscale_atlas()
+    }
+
+    pub fn color_atlas(&self) -> &Rc<RefCell<ColorAtlas>> {
+        self.layouter.color_atlas()
     }
 
     pub fn grayscale_texture(&self) -> &Texture {
