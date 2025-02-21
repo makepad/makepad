@@ -28,9 +28,9 @@ live_design! {
         varying t: vec2
 
         fn vertex(self) -> vec4 {
-            let p = mix(self.rect_origin, self.rect_origin + self.rect_size, self.geom_pos);
+            let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom_pos);
             let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw);
-            let p_normalized: vec2 = (p_clipped - self.rect_origin) / self.rect_size;
+            let p_normalized: vec2 = (p_clipped - self.rect_pos) / self.rect_size;
 
             self.t = mix(self.t_min, self.t_max, p_normalized.xy);
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
@@ -70,12 +70,14 @@ pub struct DrawText2 {
     #[live]
     pub geometry: GeometryQuad2D,
     #[live]
+    pub text_style: TextStyle,
+    #[live]
     pub debug: bool,
 
     #[deref]
     pub draw_vars: DrawVars,
     #[calc]
-    pub rect_origin: Vec2,
+    pub rect_pos: Vec2,
     #[calc]
     pub rect_size: Vec2,
     #[calc]
@@ -131,8 +133,8 @@ impl DrawText2 {
             text,
             spans: [Span {
                 style: Style {
-                    font_family_id: "Sans".into(), // TODO: Get this from DrawText2
-                    font_size_in_lpxs: NonNanF32::new(12.0).unwrap(), // TODO: Get this from DrawText2
+                    font_family_id: self.text_style.font_family.clone().into(),
+                    font_size_in_lpxs: NonNanF32::new(self.text_style.font_size).unwrap(),
                     color: Color::BRIGHT_WHITE, // TODO: Get this from DrawText2?
                 },
                 range: 0..text_len,
@@ -153,7 +155,6 @@ impl DrawText2 {
                 max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height as f64),
             ),
         });
-        println!("RECT {:?}", rect);
         self.draw_laidout_text(
             cx,
             Point::new(rect.pos.x as f32, rect.pos.y as f32),
@@ -308,7 +309,7 @@ impl DrawText2 {
             glyph.bounds_in_dpxs.size,
         )
         .apply_transform(transform);
-        self.rect_origin = point_to_vec2(bounds_in_lpxs.origin);
+        self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
         self.texture_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
@@ -320,4 +321,11 @@ impl DrawText2 {
         output.extend_from_slice(self.draw_vars.as_slice());
         self.draw_depth += 0.001;
     }
+}
+
+#[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
+#[live_ignore]
+pub struct TextStyle {
+    #[live()] pub font_family: String,
+    #[live()] pub font_size: f32
 }
