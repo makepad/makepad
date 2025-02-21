@@ -1,9 +1,7 @@
 use crate::makepad_draw::*;
 use std::collections::HashMap;
-use zune_jpeg::zune_core::bytestream::ZReaderTrait;
-use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::JpegDecoder;
-use makepad_zune_png::{post_process_image, ActlChunk, PngDecoder, PngInfo};
+use makepad_zune_png::{post_process_image, PngDecoder};
 use std::fmt;
 use std::io::prelude::*;
 use std::fs::File;
@@ -13,7 +11,7 @@ pub use zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 
 #[derive(Live, LiveHook)]
 #[live_ignore]
-pub enum ImageFit{
+pub enum ImageFit {
     #[pick] Stretch,
     Horizontal,
     Vertical,
@@ -61,7 +59,6 @@ impl ImageBuffer {
                 out[i] = ((0xff as u32)<<24) | ((r as u32)<<16) | ((r as u32)<<8) | ((r as u32)<<0);
             }
             unsupported => {
-                error!("ImageBuffer::new Image buffer pixel alignment of {unsupported} is unsupported.");
                 return Err(ImageError::InvalidPixelAlignment(unsupported));
             }     
         }
@@ -84,54 +81,62 @@ impl ImageBuffer {
         texture
     }
     
-    pub fn from_png(
-        data: &[u8]
-    ) -> Result<Self, ImageError> {
+    pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
         let mut decoder = PngDecoder::new(data);
-        
         decoder.decode_headers()?;
         
-        if decoder.is_animated(){
+        if decoder.is_animated() {
             return Ok(Self::decode_animated_png(&mut decoder)?);
         }
+
         let image = decoder.decode()?;
-        if let Some(data) = image.u8() {
-                    let (width,height) = decoder.get_dimensions().unwrap();
-                    return  Self::new(&data, width as usize, height as usize);
-         }
-        
-         error!("Error decoding PNG: image data empty");
-         Err(ImageError::EmptyData)
+        let decoded_data = image.u8().ok_or(
+            ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Failed to decode PNG image data as a slice of u8 bytes"
+            )),
+        )?;
+        let (width, height) = decoder.get_dimensions().ok_or(
+            ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Failed to get PNG image dimensions"
+            ))
+        )?;
+        Self::new(&decoded_data, width, height)
     }
+
     fn decode_animated_png(decoder: &mut PngDecoder<&[u8]>) -> Result<ImageBuffer, ImageError> {
-        // Had to compact this into one so we aren't expecting all over the place
-        fn get_colorspace_info_width_height_from_png_actl_info_decoder<T:ZReaderTrait>(decoder: &PngDecoder<T>) -> Option<(ColorSpace,PngInfo,usize,usize, ActlChunk)>{
-            let colorspace = decoder.get_colorspace()?;
-            let info = decoder.get_info()?.to_owned();
-            let (width,height) = decoder.get_dimensions()?; 
-            let actl_info = decoder.actl_info()?;
-            return  Some((colorspace,info,width,height,actl_info));
-        }
-        let (colorspace,info,width,height,actl_info) = 
-        get_colorspace_info_width_height_from_png_actl_info_decoder(&*decoder)
-        .expect("should have metadata because we just decoded it");
-        let components = colorspace.num_components();
-        let mut output =
-        vec![0; info.width * info.height * components];
-        let fits_horizontal = Cx::max_texture_width() / info.width;
-        let total_width = fits_horizontal * info.width;
-        let total_height = ((actl_info.num_frames as usize / fits_horizontal) + 1) * info.height;
+        let colorspace = decoder.get_colorspace().ok_or(
+            ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Failed to get animated PNG colorspace"
+            ))
+        )?;
+        let (width, height) = decoder.get_dimensions().ok_or(
+            ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Failed to get animated PNG image dimensions"
+            ))
+        )?;
+        let actl_info = decoder.actl_info().ok_or(
+            ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Failed to get animated PNG actl info"
+            ))
+        )?;
+
+        let num_components = colorspace.num_components();
+        let mut output = vec![0; width * height * num_components];
+        let fits_horizontal = Cx::max_texture_width() / width;
+        let total_width = fits_horizontal * width;
+        let total_height = ((actl_info.num_frames as usize / fits_horizontal) + 1) * height;
         let mut final_buffer = ImageBuffer::default();
         final_buffer.data.resize(total_width * total_height, 0);
         final_buffer.width = total_width;
         final_buffer.height = total_height;
         let mut cx = 0;
         let mut cy = 0;
-        final_buffer.animation = Some(TextureAnimation{
+        final_buffer.animation = Some(TextureAnimation {
             width,
             height,
             num_frames: actl_info.num_frames as usize
         });
+        let mut previous_frame = None;
         while decoder.more_frames() {
             // decoding a video
             // decode the header, in case we haven't processed a frame header
@@ -142,21 +147,39 @@ impl ImageBuffer {
             let frame = decoder.frame_info().expect("to have already been decoded");
             // decode the raw pixels, even on smaller frames, we only allocate frame_info.width*frame_info.height
             let pix = decoder.decode_raw()?;
+            // Get the PNG image info here instead of outside the loop, which prevents borrow checker errors.
+            // It is way more efficient to do this here instead of to clone the PngInfo outside of this loop.
+            let info = decoder.get_info().ok_or(
+                ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                    "Failed to get animated PNG image info"
+                ))
+            )?;
             // call post process
             post_process_image(
                 &info,
                 colorspace,
                 &frame,
                 &pix,
-                None,
+                previous_frame.as_deref(),
                 &mut output,
                 None
             )?;
-            match components {
-                3 =>  {
-                    // copy output in
-                    for y in 0..height{
-                        for x in 0..width{
+            previous_frame = Some(pix);
+            match num_components {
+                4 => {
+                    for y in 0..height {
+                        for x in 0..width {
+                            let r = output[y * width * 4 + x * 4 + 0];
+                            let g = output[y * width * 4 + x * 4 + 1];
+                            let b = output[y * width * 4 + x * 4 + 2];
+                            let a = output[y * width * 4 + x * 4 + 3];
+                            final_buffer.data[(y+cy) * total_width + (x+cx)] = ((a as u32)<<24) | ((r as u32)<<16) | ((g as u32)<<8) | ((b as u32)<<0);
+                        }
+                    }
+                }
+                3 => {
+                    for y in 0..height {
+                        for x in 0..width {
                             let r = output[y * width * 3 + x * 3 + 0];
                             let g = output[y * width * 3 + x * 3 + 1];
                             let b = output[y * width * 3 + x * 3 + 2];
@@ -164,12 +187,12 @@ impl ImageBuffer {
                         }
                     }
                 }
-                _=> {
-                    return Err(ImageError::InvalidPixelAlignment(components));
+                _ => {
+                    return Err(ImageError::InvalidPixelAlignment(num_components));
                 }     
             }
             cx += width;
-            if cx >= total_width{
+            if cx >= total_width {
                 cy += height;
                 cx = 0
             } 
@@ -177,19 +200,18 @@ impl ImageBuffer {
         Ok(final_buffer)
     }
 
-    pub fn from_jpg(
-        data: &[u8]
-    ) -> Result<Self, ImageError> {
+    pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
         let mut decoder = JpegDecoder::new(&*data);
-        // decode the file
         match decoder.decode() {
             Ok(data) => {
-                let info = decoder.info().unwrap();
+                let info = decoder.info().ok_or(
+                    ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
+                        "Failed to decode JPG image info"
+                    )),
+                )?;
                 ImageBuffer::new(&data, info.width as usize, info.height as usize)
             },
-            Err(err) => {
-                Err(ImageError::JpgDecode(err))
-            }
+            Err(err) => Err(ImageError::JpgDecode(err)),
         }
     }
 }
@@ -210,7 +232,7 @@ impl ImageCache {
 /// The possible errors that can occur when loading or creating an image texture.
 #[derive(Debug)]
 pub enum ImageError {
-    /// The image data buffer was empty.
+    /// The image data buffer was empty or otherwise invalid.
     EmptyData,
     /// The image's pixel data was not aligned to 3-byte or 4-byte pixels.
     /// The unsupported alignment value (in bytes) is included.
