@@ -29,8 +29,8 @@ live_design!{
                         }
                     }
                     b0= <Button> {
-                        text: "Moge je vader je moeder wezen. Lorem ipsum odor amet, consectetuer adipiscing elit. Laoreet ad elit odio taciti, dignissim ullamcor"
-                        draw_text:{color:#fff, text_style: { font_size: 7.5 }}
+                        text: "😊不对😭不对😊"
+                        draw_text:{color:#fff, text_style: { font_size: 24.0 } }
                     }
                     button1 = <Button> {
                         text: "Click me 234"
