@@ -318,8 +318,8 @@ impl MacosApp {
         }
     }*/
     pub fn startup_focus_hack(&mut self) {
+        return;
         /*
-         *
         unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
