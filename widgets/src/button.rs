@@ -342,7 +342,7 @@ pub struct Button {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText,
+    draw_text: DrawText2,
     #[live]
     draw_icon: DrawIcon,
     #[live]
@@ -443,8 +443,7 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_text.draw_walk(cx, self.label_walk, self.text.as_ref());
         self.draw_bg.end(cx);
         DrawStep::done()
     }
@@ -464,8 +463,7 @@ impl Button {
     pub fn draw_button(&mut self, cx: &mut Cx2d, label:&str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), label);
+        self.draw_text.draw_walk(cx, self.label_walk, label);
         self.draw_bg.end(cx);
     }
     
