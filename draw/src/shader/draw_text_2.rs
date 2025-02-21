@@ -88,7 +88,7 @@ pub struct DrawText2 {
     pub t_min: Vec2,
     #[calc]
     pub t_max: Vec2,
-    #[calc]
+    #[live]
     pub color: Vec4,
 }
 
@@ -105,7 +105,7 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d<'_>, walk: Walk, text: Substr) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d<'_>, walk: Walk, text: impl Into<Substr>) {
         use crate::{
             text::{
                 layout::{LayoutOptions, LayoutParams, Span, Style},
@@ -113,14 +113,15 @@ impl DrawText2 {
             },
             turtle,
         };
-
+        
+        let text = text.into();
         let turtle = cx.turtle();
         let max_width_in_lpxs = if walk.width.is_fit() {
             None
         } else {
             Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow))
         };
-        let max_height_in_lpxs = if !walk.height.is_fit() {
+        let max_height_in_lpxs = if walk.height.is_fit() {
             None
         } else {
             Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow))
@@ -152,6 +153,7 @@ impl DrawText2 {
                 max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height as f64),
             ),
         });
+        println!("RECT {:?}", rect);
         self.draw_laidout_text(
             cx,
             Point::new(rect.pos.x as f32, rect.pos.y as f32),
