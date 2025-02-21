@@ -19,7 +19,8 @@ live_design! {
             instance hover: 0.0,
             instance pressed: 0.0,
             color: (THEME_COLOR_TEXT_DEFAULT)
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -168,7 +169,8 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -245,7 +247,8 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
