@@ -6,24 +6,26 @@ use {
         OpenglWindow,
         OpenglCx
     },
+    //self::super::url_session::*,
     self::super::super::{
         egl_sys,
         x11::xlib_event::*,
         x11::xlib_app::*,
         x11::x11_sys,
-        linux_media::CxLinuxMedia
+        linux_media::CxLinuxMedia,
     },
     crate::{
         cx_api::{CxOsOp, CxOsApi, OpenUrlInPlace}, 
         makepad_math::dvec2,
         makepad_live_id::*,
         thread::SignalToUI,
-        event::Event,
+        event::{Event, NetworkResponseChannel},
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
         os::cx_stdin::{PollTimers},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
+        os::linux::x11::url_session::X11HttpRequests
     }
 };
 
@@ -34,6 +36,7 @@ impl Cx {
             custom_window_chrome: false
         });
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
+        cx.borrow_mut().os.http_requests = X11HttpRequests::new();
 
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
         let is_stdin_loop = std::env::args().find(|v| v=="--stdin-loop").is_some();
@@ -205,6 +208,7 @@ impl Cx {
                         self.call_event_handler(&Event::Signal);
                     }
                     self.handle_action_receiver();
+		    self.handle_networking_events();
                 }
                 else{
                     self.call_event_handler(&Event::Timer(e))
@@ -226,6 +230,15 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
+        let mut out = Vec::new();
+        while let Ok(item) = self.os.network_response.receiver.try_recv() {
+            // remove the request object on error or end
+            self.os.http_requests.handle_response_item(&item);
+            out.push(item);
+        }
+        if out.len()>0 {
+            self.call_event_handler(&Event::NetworkResponses(out))
+        }
     }
     
     pub (crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>) {
@@ -344,11 +357,11 @@ impl Cx {
                 },
                 CxOsOp::UpdateMacosMenu(_menu) => {
                 },
-                CxOsOp::HttpRequest{request_id:_, request:_} => {
-                    todo!()
+                CxOsOp::HttpRequest{request_id, request} => {
+                    self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
-                CxOsOp::CancelHttpRequest {request_id:_} => {
-                    todo!();
+                CxOsOp::CancelHttpRequest {request_id} => {
+                    self.os.http_requests.cancel_http_request(request_id);
                 }
                 CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
                 CxOsOp::BeginVideoPlayback(_) => todo!(),
@@ -404,5 +417,7 @@ pub struct CxOs {
     pub (crate) start_time: Option<Instant>,
     // HACK(eddyb) generalize this to EGL, properly.
     pub(super) opengl_cx: Option<OpenglCx>,
+    pub(crate) http_requests: X11HttpRequests,
+    pub(crate) network_response: NetworkResponseChannel,
 }
 
