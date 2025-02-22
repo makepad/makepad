@@ -797,6 +797,11 @@ impl Event {
                     return Hit::TextCut(tc.clone());
                 }
             },
+            Event::BackPressed => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::BackPressed;
+                }
+            },
             Event::Scroll(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
                     // log!("Skipping Scroll sweep_area: {:?}", options.sweep_area);
