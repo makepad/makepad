@@ -30,7 +30,7 @@ live_design!{
             instance hover: float
             instance focus: float
             instance drag: float
-            
+
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
                 let nub_size = mix(3, 5, self.hover);
@@ -101,13 +101,14 @@ live_design!{
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
             draw_bg: {
-                instance radius: 1.0
-                instance border_width: 0.0
-                instance border_color: (#f00) // TODO: This appears not to do anything.
-                instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-                instance focus: 0.0,
                 color: (THEME_COLOR_D_HIDDEN)
-                instance color_focus: (THEME_COLOR_D_HIDDEN)
+
+                uniform radius: 1.0
+                uniform border_size: 0.0
+                uniform border_color: (#f00) // TODO: This appears not to do anything.
+                uniform inset: vec4(0.0, 0.0, 0.0, 0.0)
+                uniform focus: 0.0,
+                uniform color_focus: (THEME_COLOR_D_HIDDEN)
                     
                 fn get_color(self) -> vec4 {
                     return mix(self.color, self.color_focus, self.focus)
@@ -120,15 +121,15 @@ live_design!{
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(
-                        self.inset.x + self.border_width,
-                        self.inset.y + self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        self.inset.x + self.border_size,
+                        self.inset.y + self.border_size,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
                         max(1.0, self.radius)
                     )
                     sdf.fill_keep(self.get_color())
-                    if self.border_width > 0.0 {
-                        sdf.stroke(self.get_border_color(), self.border_width)
+                    if self.border_size > 0.0 {
+                        sdf.stroke(self.get_border_color(), self.border_size)
                     }
                     return sdf.result;
                 }
@@ -194,8 +195,8 @@ live_design!{
             },
         }
         draw_slider: {
-            instance line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG),
-            instance bipolar: 0.0,
+            uniform line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG),
+            uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
                 let nub_size = 3
@@ -316,7 +317,9 @@ live_design!{
         // Label
         draw_text: {
             instance hover: 0.0;
+
             uniform color: (SLIDER_ALT1_LABEL_COLOR),
+
             text_style: <THEME_FONT_BOLD> {
                 font_size: (SLIDER_ALT1_LABEL_FONTSIZE)
             }
@@ -338,7 +341,9 @@ live_design!{
             draw_selection: {
                 instance hover: 0.0
                 instance focus: 0.0
+
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
@@ -358,13 +363,14 @@ live_design!{
             }
 
             draw_bg: {
-                instance radius: 1.0
-                instance border_width: 0.0
-                instance border_color: (#f00) // TODO: This appears not to do anything.
-                instance inset: vec4(0.0, 0.0, 0.0, 0.0)
                 instance focus: 0.0,
+
                 color: (THEME_COLOR_D_HIDDEN)
-                instance color_focus: (THEME_COLOR_D_HIDDEN)
+                uniform color_focus: (THEME_COLOR_D_HIDDEN)
+                uniform radius: 1.0
+                uniform border_size: 0.0
+                uniform border_color: (#f00) // TODO: This appears not to do anything.
+                uniform inset: vec4(0.0, 0.0, 0.0, 0.0)
                     
                 fn get_color(self) -> vec4 {
                     return mix(self.color, self.color_focus, self.focus)
@@ -377,15 +383,15 @@ live_design!{
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(
-                        self.inset.x + self.border_width,
-                        self.inset.y + self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        self.inset.x + self.border_size,
+                        self.inset.y + self.border_size,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
                         max(1.0, self.radius)
                     )
                     sdf.fill_keep(self.get_color())
-                    if self.border_width > 0.0 {
-                        sdf.stroke(self.get_border_color(), self.border_width)
+                    if self.border_size > 0.0 {
+                        sdf.stroke(self.get_border_color(), self.border_size)
                     }
                     return sdf.result;
                 }
@@ -430,10 +436,10 @@ live_design!{
             instance drag: float
 
             label_size: (SLIDER_ALT1_LABEL_SIZE);
-            uniform val_color_a: (SLIDER_ALT1_VAL_COLOR_A);
-            uniform val_color_b: (SLIDER_ALT1_VAL_COLOR_B);
-            uniform handle_color_a: (SLIDER_ALT1_HANDLE_COLOR_A);
-            uniform handle_color_b: (SLIDER_ALT1_HANDLE_COLOR_B);
+            uniform val_color_1: (SLIDER_ALT1_VAL_COLOR_A);
+            uniform val_color_2: (SLIDER_ALT1_VAL_COLOR_B);
+            uniform handle_color_1: (SLIDER_ALT1_HANDLE_COLOR_A);
+            uniform handle_color_2: (SLIDER_ALT1_HANDLE_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -491,11 +497,11 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.val_color_a, self.val_color_b, pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
-                            mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
+                            mix(self.val_color_1, self.val_color_2, pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
+                            mix(mix(self.val_color_1, #f, 0.05), mix(self.val_color_2, #f, 0.05), pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
                             self.hover
                         ),
-                        mix(mix(self.val_color_a, #f, 0.05), mix(self.val_color_b, #f, 0.05), pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
+                        mix(mix(self.val_color_1, #f, 0.05), mix(self.val_color_2, #f, 0.05), pow(self.pos.x, SLIDER_ALT1_PEAK_COMPRESSION)),
                         self.drag
                     )
                 )
@@ -512,20 +518,20 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                self.handle_color_a,
-                                self.handle_color_b,
+                                self.handle_color_1,
+                                self.handle_color_2,
                                 self.pos.y
                             ),
                             mix(
-                                self.handle_color_a,
-                                self.handle_color_b,
+                                self.handle_color_1,
+                                self.handle_color_2,
                                 self.pos.y
                             ),
                             self.hover
                         ),
                         mix(
-                            mix(self.handle_color_a, #0, 1.0),
-                            mix(self.handle_color_b, #0, 0.1),
+                            mix(self.handle_color_1, #0, 1.0),
+                            mix(self.handle_color_2, #0, 0.1),
                             self.pos.y
                         ),
                         self.drag
@@ -630,7 +636,9 @@ live_design!{
         // Label
         draw_text: {
             instance hover: 0.0;
+
             uniform color: (ROTARY_LABEL_COLOR),
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (ROTARY_LABEL_FONTSIZE)
             }
@@ -650,11 +658,12 @@ live_design!{
             label_align: {x: 0.0, y: 0.0 },
 
             draw_bg: {
-                instance radius: (THEME_CORNER_RADIUS)
                 instance hover: 0.0
                 instance focus: 0.0
-                instance bodytop: (THEME_COLOR_INSET_DEFAULT)
-                instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+
+                uniform radius: (THEME_CORNER_RADIUS)
+                uniform bodytop: (THEME_COLOR_INSET_DEFAULT)
+                uniform bodybottom: (THEME_COLOR_CTRL_ACTIVE)
                 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -665,7 +674,9 @@ live_design!{
             draw_selection: {
                 instance hover: 0.0
                 instance focus: 0.0
+
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
@@ -722,8 +733,8 @@ live_design!{
             uniform padding: 2.0
             uniform width: 10.
             uniform handle_color: (ROTARY_HANDLE_COLOR);
-            uniform val_color_a: (ROTARY_VAL_COLOR_A);
-            uniform val_color_b: (ROTARY_VAL_COLOR_B);
+            uniform val_color_1: (ROTARY_VAL_COLOR_A);
+            uniform val_color_2: (ROTARY_VAL_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -849,17 +860,17 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                            mix(self.val_color_1, self.val_color_2, self.slide_pos),
                             mix(
-                                mix(self.val_color_a, #f, 0.1),
-                                mix(self.val_color_b, #f, 0.1),
+                                mix(self.val_color_1, #f, 0.1),
+                                mix(self.val_color_2, #f, 0.1),
                                 self.slide_pos
                             ),
                             self.hover
                         ),
                         mix(
-                            mix(self.val_color_a, #0, 0.1),
-                            mix(self.val_color_b, #0, 0.1),
+                            mix(self.val_color_1, #0, 0.1),
+                            mix(self.val_color_2, #0, 0.1),
                             self.slide_pos
                         ),
                         self.drag
@@ -988,7 +999,9 @@ live_design!{
         // Label
         draw_text: {
             instance hover: 0.0;
+
             uniform color: (ROTARY_FLAT_LABEL_COLOR),
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (ROTARY_FLAT_LABEL_FONTSIZE)
             }
@@ -1008,11 +1021,12 @@ live_design!{
             label_align: {x: 0.0, y: 0.0 },
 
             draw_bg: {
-                instance radius: (THEME_CORNER_RADIUS)
                 instance hover: 0.0
                 instance focus: 0.0
-                instance bodytop: (THEME_COLOR_INSET_DEFAULT)
-                instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+
+                uniform radius: (THEME_CORNER_RADIUS)
+                uniform bodytop: (THEME_COLOR_INSET_DEFAULT)
+                uniform bodybottom: (THEME_COLOR_CTRL_ACTIVE)
                 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1023,7 +1037,9 @@ live_design!{
             draw_selection: {
                 instance hover: 0.0
                 instance focus: 0.0
+
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
@@ -1080,8 +1096,8 @@ live_design!{
             uniform width: 5.
             uniform padding: 4.0
             uniform handle_color: (ROTARY_FLAT_HANDLE_COLOR);
-            uniform val_color_a: (ROTARY_FLAT_VAL_COLOR_A);
-            uniform val_color_b: (ROTARY_FLAT_VAL_COLOR_B);
+            uniform val_color_1: (ROTARY_FLAT_VAL_COLOR_A);
+            uniform val_color_2: (ROTARY_FLAT_VAL_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1152,17 +1168,17 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.val_color_a, self.val_color_b, self.slide_pos),
+                            mix(self.val_color_1, self.val_color_2, self.slide_pos),
                             mix(
-                                mix(self.val_color_a, #f, 0.1),
-                                mix(self.val_color_b, #f, 0.1),
+                                mix(self.val_color_1, #f, 0.1),
+                                mix(self.val_color_2, #f, 0.1),
                                 self.slide_pos
                             ),
                             self.hover
                         ),
                         mix(
-                            mix(self.val_color_a, #0, 0.1),
-                            mix(self.val_color_b, #0, 0.1),
+                            mix(self.val_color_1, #0, 0.1),
+                            mix(self.val_color_2, #0, 0.1),
                             self.slide_pos
                         ),
                         self.drag
@@ -1287,7 +1303,9 @@ live_design!{
         // Label
         draw_text: {
             instance hover: 0.;
+
             uniform color: (ROTARY_SOLID_LABEL_COLOR),
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (ROTARY_SOLID_LABEL_FONTSIZE)
             }
@@ -1307,11 +1325,12 @@ live_design!{
             label_align: {x: 0.0, y: 0.0 },
 
             draw_bg: {
-                instance radius: (THEME_CORNER_RADIUS)
                 instance hover: 0.0
                 instance focus: 0.0
-                instance bodytop: (THEME_COLOR_INSET_DEFAULT)
-                instance bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+
+                uniform radius: (THEME_CORNER_RADIUS)
+                uniform bodytop: (THEME_COLOR_INSET_DEFAULT)
+                uniform bodybottom: (THEME_COLOR_CTRL_ACTIVE)
                 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1322,7 +1341,9 @@ live_design!{
             draw_selection: {
                 instance hover: 0.0
                 instance focus: 0.0
+
                 uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box(
