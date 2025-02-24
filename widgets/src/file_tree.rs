@@ -50,7 +50,7 @@ live_design!{
                             self.is_even
                         ),
                         THEME_COLOR_CTRL_SELECTED,
-                        self.selected
+                        self.active
                     )
                 )
                 return sdf.result
@@ -68,7 +68,7 @@ live_design!{
                 return sdf.fill(mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
                     THEME_COLOR_TEXT_SELECTED,
-                    self.selected
+                    self.active
                 ));
             }
         }
@@ -78,7 +78,7 @@ live_design!{
                 return mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
                     THEME_COLOR_TEXT_SELECTED,
-                    self.selected
+                    self.active
                 )
             }
             
@@ -135,19 +135,19 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        selected: 0.0
-                        draw_bg: {selected: 0.0}
-                        draw_name: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
+                        active: 0.0
+                        draw_bg: {active: 0.0}
+                        draw_name: {active: 0.0}
+                        draw_icon: {active: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        selected: 1.0
-                        draw_bg: {selected: 1.0}
-                        draw_name: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
+                        active: 1.0
+                        draw_bg: {active: 1.0}
+                        draw_name: {active: 1.0}
+                        draw_icon: {active: 1.0}
                     }
                 }
                 
@@ -225,7 +225,7 @@ live_design!{
                         THEME_COLOR_CTRL_SELECTED,
                         self.focussed
                     ),
-                    self.selected
+                    self.active
                 );
             }
         }
@@ -240,7 +240,7 @@ struct DrawBgQuad {
     #[live] scale: f32,
     #[live] is_folder: f32,
     #[live] focussed: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
     #[live] hover: f32,
     #[live] opened: f32,
 }
@@ -252,7 +252,7 @@ struct DrawNameText {
     #[live] scale: f32,
     #[live] is_folder: f32,
     #[live] focussed: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
     #[live] hover: f32,
     #[live] opened: f32,
 }
@@ -264,7 +264,7 @@ struct DrawIconQuad {
     #[live] scale: f32,
     #[live] is_folder: f32,
     #[live] focussed: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
     #[live] hover: f32,
     #[live] opened: f32,
 }
@@ -290,7 +290,7 @@ pub struct FileTreeNode {
     #[live] opened: f32,
     #[live] focussed: f32,
     #[live] hover: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
 }
 
 #[derive(Live, Widget)]
