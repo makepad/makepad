@@ -20,14 +20,21 @@ live_design! {
 
         show_bg: true, 
         draw_bg: {
+            uniform color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform color_2: (THEME_COLOR_BEVEL_LIGHT)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                sdf.hline(1.0, 1.0);
-                sdf.fill(THEME_COLOR_BEVEL_SHADOW);
+                let stroke_width = 1.
+                sdf.move_to(1., 0.);
+                sdf.line_to(self.rect_size.x, 0.0);
+                sdf.stroke(self.color_1, stroke_width);
 
-                sdf.hline(2.0, 1.0);
-                sdf.fill(THEME_COLOR_BEVEL_LIGHT);
+                let offset = stroke_width * 2.0;
+                sdf.move_to(0., 1. + stroke_width);
+                sdf.line_to(self.rect_size.x, 1. + stroke_width);
+                sdf.stroke(self.color_2, stroke_width);
 
                 return sdf.result
             }
@@ -42,19 +49,21 @@ live_design! {
 
         show_bg: true, 
         draw_bg: {
+            uniform color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform color_2: (THEME_COLOR_BEVEL_LIGHT)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let stroke_width = 1.;
-
+                let stroke_width = 1.
                 sdf.move_to(1., 0.);
                 sdf.line_to(0.0, self.rect_size.y);
-                sdf.stroke(THEME_COLOR_BEVEL_SHADOW, stroke_width);
+                sdf.stroke(self.color_1, stroke_width);
 
                 let offset = stroke_width * 2.0;
                 sdf.move_to(1. + stroke_width, 0.);
                 sdf.line_to(1. + stroke_width, self.rect_size.y);
-                sdf.stroke(THEME_COLOR_BEVEL_LIGHT, stroke_width);
+                sdf.stroke(self.color_2, stroke_width);
 
                 return sdf.result
             }
@@ -87,9 +96,9 @@ live_design! {
     pub RectView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                         
             fn get_color(self) -> vec4 {
                 return self.color
@@ -102,14 +111,14 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.rect(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0)
+                    self.border_inset.x + self.border_size,
+                    self.border_inset.y + self.border_size,
+                    self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                 )
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result
             }
@@ -122,11 +131,11 @@ live_design! {
                 
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance shadow_color: #0007
-            instance shadow_offset: vec2(0.0,0.0)
-            instance shadow_radius: 10.0
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform shadow_color: #0007
+            uniform shadow_offset: vec2(0.0,0.0)
+            uniform shadow_radius: 10.0
                     
             varying rect_size2: vec2,
             varying rect_size3: vec2,
@@ -134,7 +143,7 @@ live_design! {
             varying sdf_rect_size: vec2,
             varying rect_pos2: vec2,     
             varying rect_shift: vec2,  
-                        
+
             fn get_color(self) -> vec4 {
                 return self.color
             }
@@ -145,8 +154,8 @@ live_design! {
                 self.rect_size3 = self.rect_size2 + abs(self.shadow_offset);
                 self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset;
                 self.rect_shift = -min_offset;
-                self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_width * 2.0)
-                self.sdf_rect_pos = -min_offset + vec2(self.border_width + self.shadow_radius);
+                self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_size * 2.0)
+                self.sdf_rect_pos = -min_offset + vec2(self.border_size + self.shadow_radius);
                 return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
             }
                                                 
@@ -171,8 +180,8 @@ live_design! {
                 }
                                                                 
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result
             }
@@ -183,14 +192,15 @@ live_design! {
         clip_x:false,
         clip_y:false,
                             
-        show_bg: true, draw_bg: {
-            color:#8
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance shadow_color: #0007
-            instance shadow_radius: 20.0,
-            instance shadow_offset: vec2(0.0,0.0)
-            instance radius: 2.5
+        show_bg: true,
+        draw_bg: {
+            color: #8
+            uniform border_radius: 2.5
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform shadow_color: #0007
+            uniform shadow_radius: 20.0,
+            uniform shadow_offset: vec2(0.0,0.0)
                                             
             varying rect_size2: vec2,
             varying rect_size3: vec2,
@@ -208,8 +218,8 @@ live_design! {
                 self.rect_size2 = self.rect_size + 2.0*vec2(self.shadow_radius);
                 self.rect_size3 = self.rect_size2 + abs(self.shadow_offset);
                 self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset;
-                self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_width * 2.0)
-                self.sdf_rect_pos = -min_offset + vec2(self.border_width + self.shadow_radius);
+                self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_size * 2.0)
+                self.sdf_rect_pos = -min_offset + vec2(self.border_size + self.shadow_radius);
                 self.rect_shift = -min_offset;
                                                             
                 return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
@@ -227,18 +237,18 @@ live_design! {
                     self.sdf_rect_pos.y,
                     self.sdf_rect_size.x,
                     self.sdf_rect_size.y, 
-                    max(1.0, self.radius)
+                    max(1.0, self.border_radius)
                 )
                 if sdf.shape > -1.0{ // try to skip the expensive gauss shadow
                     let m = self.shadow_radius;
                     let o = self.shadow_offset + self.rect_shift;
-                    let v = GaussShadow::rounded_box_shadow(vec2(m) + o, self.rect_size2+o, self.pos * (self.rect_size3+vec2(m)), self.shadow_radius*0.5, self.radius*2.0);
+                    let v = GaussShadow::rounded_box_shadow(vec2(m) + o, self.rect_size2+o, self.pos * (self.rect_size3+vec2(m)), self.shadow_radius*0.5, self.border_radius*2.0);
                     sdf.clear(self.shadow_color*v)
                 }
                                                                     
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result
             }
@@ -248,10 +258,10 @@ live_design! {
     pub RoundedView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: 2.5
+            uniform border_size: 0.0
+            uniform border_radius: 2.5
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                                 
             fn get_color(self) -> vec4 {
                 return self.color
@@ -264,15 +274,15 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    max(1.0, self.radius)
+                    self.border_inset.x + self.border_size,
+                    self.border_inset.y + self.border_size,
+                    self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
+                    max(1.0, self.border_radius)
                 )
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result;
             }
@@ -282,10 +292,10 @@ live_design! {
     pub RoundedXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: vec2(2.5, 2.5)
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+            uniform border_radius: vec2(2.5, 2.5)
                             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -298,16 +308,16 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box_x(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    self.radius.x,
-                    self.radius.y
+                    self.border_inset.x + self.border_size,
+                    self.border_inset.y + self.border_size,
+                    self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
+                    self.border_radius.x,
+                    self.border_radius.y
                 )
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result;
             }
@@ -317,10 +327,10 @@ live_design! {
     pub RoundedYView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: vec2(2.5, 2.5)
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+            uniform border_radius: vec2(2.5, 2.5)
                             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -333,16 +343,16 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box_y(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    self.radius.x,
-                    self.radius.y
+                    self.border_inset.x + self.border_size,
+                    self.border_inset.y + self.border_size,
+                    self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
+                    self.border_radius.x,
+                    self.border_radius.y
                 )
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result;
             }
@@ -352,10 +362,10 @@ live_design! {
     pub RoundedAllView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: vec4(2.5, 2.5, 2.5, 2.5)
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+            uniform border_radius: vec4(2.5, 2.5, 2.5, 2.5)
                             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -368,18 +378,18 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box_all(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    self.radius.x,
-                    self.radius.y,
-                    self.radius.z,
-                    self.radius.w
+                    self.border_inset.x + self.border_size,
+                    self.border_inset.y + self.border_size,
+                    self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
+                    self.border_radius.x,
+                    self.border_radius.y,
+                    self.border_radius.z,
+                    self.border_radius.w
                 )
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result;
             }
@@ -389,10 +399,10 @@ live_design! {
     pub CircleView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: 5.0
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+            uniform border_radius: 5.0
                             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -404,11 +414,11 @@ live_design! {
                             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                if self.radius > 0.0 {
+                if self.border_radius > 0.0 {
                     sdf.circle(
                         self.rect_size.x * 0.5,
                         self.rect_size.y * 0.5,
-                        self.radius
+                        self.border_radius
                     )
                 }
                 else {
@@ -416,14 +426,14 @@ live_design! {
                         self.rect_size.x * 0.5,
                         self.rect_size.y * 0.5,
                         min(
-                            (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
-                            (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
+                            (self.rect_size.x - (self.border_inset.x + self.border_inset.z + 2.0 * self.border_size)) * 0.5,
+                            (self.rect_size.y - (self.border_inset.y + self.border_inset.w + 2.0 * self.border_size)) * 0.5
                         )
                     )
                 }
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result
             }
@@ -433,10 +443,10 @@ live_design! {
     pub HexagonView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: 5
+            uniform border_size: 0.0
+            uniform border_color: #0000
+            uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+            uniform border_radius: vec2(0.0, 1.0)
                             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -448,11 +458,11 @@ live_design! {
                             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                if self.radius.x > 0.0 {
+                if self.border_radius.x > 0.0 {
                     sdf.hexagon(
                         self.rect_size.x * 0.5,
                         self.rect_size.y * 0.5,
-                        self.radius
+                        self.border_radius.x
                     )
                 }
                 else {
@@ -460,14 +470,14 @@ live_design! {
                         self.rect_size.x * 0.5,
                         self.rect_size.y * 0.5,
                         min(
-                            (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
-                            (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
+                            (self.rect_size.x - (self.border_inset.x + self.border_inset.z + 2.0 * self.border_size)) * 0.5,
+                            (self.rect_size.y - (self.border_inset.y + self.border_inset.w + 2.0 * self.border_size)) * 0.5
                         )
                     )
                 }
-                sdf.fill_keep(color)
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.border_color, self.border_width)
+                sdf.fill_keep(self.color)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.border_color, self.border_size)
                 }
                 return sdf.result
             }
@@ -477,11 +487,14 @@ live_design! {
     pub GradientXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance color2: #f00
-            instance dither: 1.0
+            uniform color_1: #00f
+            uniform color_2: #f00
+            uniform color_dither: 1.0
+
             fn get_color(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-                return mix(self.color, self.color2, self.pos.x + dither)
+                
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                return mix(self.color_1, self.color_2, self.pos.x + dither)
             }
                             
             fn pixel(self) -> vec4 {
@@ -493,11 +506,13 @@ live_design! {
     pub GradientYView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            instance color2: #f00
-            instance dither: 1.0
+            uniform color_1: #00f
+            uniform color_2: #f00
+            uniform color_dither: 1.0
+
             fn get_color(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-                return mix(self.color, self.color2, self.pos.y + dither)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                return mix(self.color_1, self.color_2, self.pos.y + dither)
             }
                             
             fn pixel(self) -> vec4 {
@@ -510,7 +525,6 @@ live_design! {
         optimize: Texture,
         draw_bg: {
             texture image: texture2d
-            uniform marked: float,
             varying scale: vec2
             varying shift: vec2
             fn vertex(self) -> vec4 {
@@ -522,22 +536,20 @@ live_design! {
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);// + mix(#f00,#0f0,self.pos.y);
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift);// + mix(#f00,#0f0,self.pos.y);
             }
         }
     }
             
     pub CachedRoundedView = <ViewBase> {
-                                
         optimize: Texture,
         draw_bg: {
-            instance border_width: 0.0
-            instance border_color: #0000
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0)
-            instance radius: 2.5
+            uniform border_size: 0.0
+            uniform border_color: #000F
+            uniform border_inset: vec4(0., 0., 0., 0.)
+            uniform border_radius: 2.5
                                 
             texture image: texture2d
-            uniform marked: float,
             varying scale: vec2
             varying shift: vec2
                                             
@@ -558,16 +570,16 @@ live_design! {
                                         
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    max(1.0, self.radius)
+                    self.border_inset.x + self.border_size,
+                    self.border_inset.y + self.border_size,
+                    self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
+                    max(1.0, self.border_radius)
                 )
                 let color = sample2d_rt(self.image, self.pos * self.scale + self.shift);
                 sdf.fill_keep_premul(color);
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result;
             }
