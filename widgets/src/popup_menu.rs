@@ -17,39 +17,53 @@ live_design!{
         align: { y: 0.5 }
         padding: <THEME_MSPACE_1> { left: 15. }
         
-        draw_name: {
-            instance selected: 0.0
+        draw_text: {
+            instance active: 0.0
             instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_active: (THEME_COLOR_TEXT_PRESSED)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P),
             }
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_SELECTED,
-                        self.selected
+                        self.color,
+                        self.color_active,
+                        self.active
                     ),
-                    THEME_COLOR_TEXT_HOVER,
+                    self.color_hover,
                     self.hover
                 )
             }
         }
         
         draw_bg: {
-            instance selected: 0.0
+            instance active: 0.0
             instance hover: 0.0
-            instance color: (THEME_COLOR_FLOATING_BG)
-            instance color_on: (THEME_COLOR_CTRL_HOVER)
+
+            uniform color: (THEME_COLOR_FLOATING_BG)
+            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 
-                sdf.clear(mix(
-                    self.color,
-                    self.color_on,
-                    self.hover
-                ))
+                sdf.clear(
+                    mix(
+                        mix(
+                            self.color,
+                            self.color_active,
+                            self.active
+                        ),
+                        self.color_hover,
+                        self.hover
+                    )
+                )
                 
                 //
                 // we have 3 points, and need to rotate around its center
@@ -59,7 +73,7 @@ live_design!{
                 sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
                 sdf.line_to(c.x, c.y + sz);
                 sdf.line_to(c.x + sz, c.y - sz);
-                sdf.stroke(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_DEFAULT, self.selected), 1.0);
+                sdf.stroke(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_DEFAULT, self.active), 1.0);
                 
                 return sdf.result;
             }
@@ -72,7 +86,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                     }
                 }
                 on = {
@@ -80,25 +94,25 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                     }
                 }
             }
             
-            select = {
+            active = {
                 default: off
                 off = {
                     from: {all: Snap}
                     apply: {
-                        draw_bg: {selected: 0.0,}
-                        draw_name: {selected: 0.0,}
+                        draw_bg: {active: 0.0,}
+                        draw_text: {active: 0.0,}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_bg: {selected: 1.0,}
-                        draw_name: {selected: 1.0,}
+                        draw_bg: {active: 1.0,}
+                        draw_text: {active: 1.0,}
                     }
                 }
             }
@@ -114,11 +128,11 @@ live_design!{
         menu_item: <PopupMenuItem> {}
         
         draw_bg: {
-            instance color: (THEME_COLOR_FLOATING_BG)
-            instance border_width: 1.0,
-            instance inset: vec4(0.0, 0.0, 0.0, 0.0),
-            instance radius: 2.0
-            instance blur: 0.0
+            uniform color: (THEME_COLOR_FLOATING_BG)
+            uniform border_size: 1.0,
+            uniform inset: vec4(0.0, 0.0, 0.0, 0.0),
+            uniform radius: 2.0
+            uniform blur: 0.0
             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -132,14 +146,14 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.blur = self.blur
                 sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    self.inset.x + self.border_size,
+                    self.inset.y + self.border_size,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
                     max(1.0, self.radius)
                 )
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
+                if self.border_size > 0.0 {
                     sdf.stroke(self.get_border_color(), THEME_BEVELING)
                 }
                 return sdf.result;
@@ -154,7 +168,7 @@ live_design!{
 pub struct PopupMenuItem {
     
     #[live] draw_bg: DrawQuad,
-    #[live] draw_name: DrawText,
+    #[live] draw_text: DrawText,
     
     #[layout] layout: Layout,
     #[animator] animator: Animator,
@@ -165,7 +179,7 @@ pub struct PopupMenuItem {
     
     #[live] opened: f32,
     #[live] hover: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
 }
 
 #[derive(Live, LiveRegister)]
@@ -220,7 +234,7 @@ impl PopupMenuItem {
         label: &str,
     ) {
         self.draw_bg.begin(cx, self.walk, self.layout);
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
     }
     
@@ -249,7 +263,7 @@ impl PopupMenuItem {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
                 self.animator_play(cx, id!(hover.on));
-                self.animator_play(cx, id!(select.on));
+                self.animator_play(cx, id!(active.on));
             }
             Hit::FingerUp(se) if se.is_primary_hit() => {
                 if !se.is_sweep {
@@ -263,7 +277,7 @@ impl PopupMenuItem {
                 }
                 else {
                     self.animator_play(cx, id!(hover.off));
-                    self.animator_play(cx, id!(select.off));
+                    self.animator_play(cx, id!(active.off));
                 }
             }
             _ => {}
@@ -334,11 +348,11 @@ impl PopupMenu {
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
             if *id == which_id {
-                item.animator_cut(cx, id!(select.on));
+                item.animator_cut(cx, id!(active.on));
                 item.animator_cut(cx, id!(hover.on));
             }
             else {
-                item.animator_cut(cx, id!(select.off));
+                item.animator_cut(cx, id!(active.off));
                 item.animator_cut(cx, id!(hover.off));
             }
         }
