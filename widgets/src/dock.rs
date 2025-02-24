@@ -108,7 +108,7 @@ live_design!{
         spacing: 0.,
 
         draw_bg: {
-            border_width: 0.0
+            border_size: 0.0
             border_color: (THEME_COLOR_BEVEL_LIGHT)
             shadow_color: (THEME_COLOR_D_4)
             shadow_radius: 7.5
