@@ -14,12 +14,12 @@ live_design!{
     pub SplitterBase = {{Splitter}} {}
     pub Splitter = <SplitterBase> {
         draw_splitter: {
+            instance pressed: 0.0
+            instance hover: 0.0
+            
             uniform border_radius: 1.0
             uniform splitter_pad: 1.0
             uniform splitter_grabber: 110.0
-            
-            instance pressed: 0.0
-            instance hover: 0.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
