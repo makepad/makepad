@@ -37,6 +37,7 @@ live_design!{
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -88,6 +89,7 @@ live_design!{
         draw_bg: {
             instance pressed: 0.0
             instance hover: 0.0
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let offset_y = 1.0
@@ -102,12 +104,14 @@ live_design!{
         }
         
         draw_text: {
-            wrap: Word
-            color: (THEME_COLOR_TEXT_DEFAULT),
-            instance color_hover: (THEME_COLOR_TEXT_HOVER),
-            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
+
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
+            uniform color_pressed: (THEME_COLOR_TEXT_PRESSED),
+
+            wrap: Word
+            color: (THEME_COLOR_TEXT_DEFAULT),
             text_style: <THEME_FONT_REGULAR>{
                 font_size: (THEME_FONT_SIZE_P)
             }
