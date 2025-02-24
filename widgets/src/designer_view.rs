@@ -48,7 +48,7 @@ live_design!{
         view = <RoundedView>{
             draw_bg:{
                 color:#4,
-                border_width:2
+                border_size:2
                 border_color:#5
             }
             padding: 10
@@ -65,7 +65,7 @@ live_design!{
             clip_x: false, clip_y: false,
             
             draw_bg: {
-                border_width: 1.0
+                border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_3)
                 shadow_radius: 5.0,
