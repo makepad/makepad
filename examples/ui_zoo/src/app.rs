@@ -1,1399 +1,1514 @@
-use makepad_widgets::*;
-use makepad_platform::live_atomic::*;
+    use makepad_widgets::*;
+    use makepad_platform::live_atomic::*;
 
 
-live_design!{
-    use link::theme::*;
-    use link::shaders::*;
-    use link::widgets::*;
-    use makepad_widgets::vectorline::*;
-    use makepad_example_ui_zoo::demofiletree::*;
+    live_design!{
+        use link::theme::*;
+        use link::shaders::*;
+        use link::widgets::*;
+        use makepad_widgets::vectorline::*;
+        use makepad_example_ui_zoo::demofiletree::*;
 
-    COLOR_CONTAINER = (THEME_COLOR_D_1)
-    COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
+        COLOR_CONTAINER = (THEME_COLOR_D_1)
+        COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
 
-    DEMO_COLOR_1 = #8f0
-    DEMO_COLOR_2 = #0f8
-    DEMO_COLOR_3 = #80f
+        DEMO_COLOR_1 = #8f0
+        DEMO_COLOR_2 = #0f8
+        DEMO_COLOR_3 = #80f
 
-    ZooTitle = <View> {
-        width: Fill, height: Fit,
-        flow: Down,
-        align: { x: 0.0, y: 0.5},
-        margin: <THEME_MSPACE_3> {},
-        spacing: 10.,
-        show_bg: false,
-        title = <H2> { text: "Makepad UI Zoo" }
-    }
-
-    ZooHeader = <View> {
-        width: Fill, height: Fit,
-        flow: Down,
-        spacing: (THEME_SPACE_1),
-        margin: <THEME_MSPACE_H_3> {}
-        divider = <Hr> { }
-        title = <H3> { text: "Header" }
-    }
-
-    ZooGroup = <RoundedView> {
-        height: Fit, width: Fill,
-        flow: Right,
-        align: { x: 0.0, y: 0.5},
-        margin: 0.,
-        show_bg: false;
-        draw_bg: { color: (COLOR_CONTAINER) }
-    }
-
-    ZooDesc = <P> { text: "" }
-
-    ZooBlock = <RoundedView> {
-        width: 50., height: 50.
-        margin: 0.,
-        spacing: 0.,
-
-        show_bg: true;
-        draw_bg: {
-            fn get_color(self) -> vec4 {
-                return mix(self.color, self.color*0.5, self.pos.y);
-            }
-            radius: (THEME_CONTAINER_CORNER_RADIUS)
+        ZooHeader = <View> {
+            width: Fill, height: Fit,
+            flow: Down,
+            spacing: (THEME_SPACE_1),
+            margin: <THEME_MSPACE_H_3> {}
+            divider = <Hr> { }
+            title = <H3> { text: "Header" }
         }
-    }
 
-    App = {{App}} {
-        ui: <Window> {
-            width: Fill, height: Fill,
-            show_bg: true,
+        ZooGroup = <RoundedView> {
+            height: Fit, width: Fill,
+            flow: Right,
+            align: { x: 0.0, y: 0.5},
+            margin: 0.,
+            show_bg: false;
+            draw_bg: { color: (COLOR_CONTAINER) }
+        }
+
+        ZooDesc = <P> { text: "" }
+
+        ZooBlock = <RoundedView> {
+            width: 50., height: 50.
+            margin: 0.,
+            spacing: 0.,
+
+            show_bg: true;
             draw_bg: {
-                fn pixel(self) -> vec4 {
-                    return (THEME_COLOR_BG_APP);
+                fn get_color(self) -> vec4 {
+                    return mix(self.color, self.color*0.5, self.pos.y);
                 }
+                border_radius: (THEME_CONTAINER_CORNER_RADIUS)
             }
+        }
 
-            caption_bar = {
-                visible: true,
-                margin: {left: -100},
-                caption_label = { label = {text: "Makepad UI Zoo "} }
-            },
-
-            body = <View> {
+        UIZooTab = <RectView> {
+            height: Fill, width: Fill
+            padding: 10.,
+            flow: Down,
+            spacing: 10.,
+            scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+        }        
+                            
+        App = {{App}} {
+            ui: <Window> {
                 width: Fill, height: Fill,
-                flow: Down,
-                spacing: 10.,
-                margin: 0.,
-                scroll_bars: <ScrollBars> {}
-
-                <ZooTitle> {}
-
-                <ZooHeader> {
-                    title = {text: "Intro"}
-                    <ZooDesc> {
-                        text: "Intro."
-                    }
-                    <View> {
-                        width: Fill, height: Fit,
-                        flow: Down,
-                        <P> { text: "- Shader-based: what does that mean for how things work." }
-                        <P> { text: "- Inheritance mechanisms in the DSL." }
-                        <P> { text: "- Introduction to the layout system." }
-                        <P> { text: "- Base theme parameters." }
-                        <P> { text: "- Typographic system. Base font-size and contrast." }
-                        <P> { text: "- Space constants to control denseness of the design." }
-                        <P> { text: "- Transparency mechanism of the widgets. Nesting for structure." }
+                show_bg: true,
+                draw_bg: {
+                    fn pixel(self) -> vec4 {
+                        return (THEME_COLOR_BG_APP);
                     }
                 }
 
-                <ZooHeader> {
-                    title = {text: "Control Heights & Text Baselines"}
-                    <ZooDesc> {
-                        text: "Control heights and text baselines"
-                    }
-                    <View> {
-                        width: Fill, height: Fit,
-                        align: { x: 0., y: 0.}
-                        flow: Right,
-                        spacing: (THEME_SPACE_2)
-                        <P> { text: "TestLabel", width: Fit}
-                        <Vr> {} 
-                        <LinkLabel> { text: "TestButton", width: Fit}
-                        <CheckBox> { text: "TestButton"}
-                        <CheckBoxToggle> { text: "TestButton"}
-                        <ButtonFlat> { text: "TestButton"}
-                        <Button> { text: "TestButton"}
-                        <TextInput> { text: "TestButton"}
-                        <DropDown> { }
-                        <Slider> { text: "TestButton"}
-                        <SliderBig> { text: "TestButton"}
-                        // <RadioButton> { }
-                        // <RadioButtonTextual> { }
-                        // <RadioButtonTab> { }
-                    }
-                }
+                caption_bar = {
+                    visible: true,
+                    margin: {left: -100},
+                    caption_label = { label = {text: "Makepad UI Zoo "} }
+                },
 
-                <ZooHeader> {
-                    title = {text: "Typography"}
-                    <ZooDesc> {
-                        text: "Typography."
-                    }
-                    <View> {
-                        width: Fill, height: Fit,
-                        flow: Down,
+                body = <View> {
+                    width: Fill, height: Fill,
+                    flow: Down,
+                    spacing: 10.,
+                    margin: 0.,
 
-                        <H1> { text: "H1 headline" }
-                        <H1italic> { text: "H1 italic headline" }
-                        <H2> { text: "H2 headline" }
-                        <H2italic> { text: "H2 italic headline" }
-                        <H3> { text: "H3 headline" }
-                        <H3italic> { text: "H3 italic headline" }
-                        <H4> { text: "H4 headline" }
-                        <H4italic> { text: "H4 italic headline" }
-                        <P> { text: "P copy text" }
-                        <Pitalic> { text: "P italic copy text" }
-                        <Pbold> { text: "P bold copy text" }
-                        <Pbolditalic> { text: "P bold italic copy text" }
-                    }
-                }
+                    <Dock> {
+                        height: Fill, width: Fill
 
-                <ZooHeader> {
-                    title = {text: "<View>" }
-                    <ZooDesc> {text:"This is a gray view with flow set to Right\nTo show the extend, the background has been enabled using show_bg and a gray pixelshader has been provided to draw_bg."}
-                    <View> {
-                        height: Fit
-                        flow: Right,
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
-                        padding: 10.
-                        spacing: 10.
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                    }
-
-                    <ZooDesc> {text:"This utlizes a <Filler> to separate items."}
-                    <View> {
-                        height: Fit
-                        flow: Right,
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
-                        padding: 10.
-                        spacing: 10.
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                        <Filler> {}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                    }
-
-                    <ZooDesc> { text:"This is a view with flow set to Down" }
-                    <View> {
-                        height: Fit,
-                        flow: Down,
-                        padding: 10.
-                        spacing: 10.
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                    }
-
-                    <ZooDesc> {text:"This view is bigger on the inside"}
-                    <View> {
-                        width: 150, height: 150,
-                        flow: Right,
-                        padding: 10.
-                        spacing: 10.
-
-                        show_bg: true,
-                        draw_bg: { color: (COLOR_CONTAINER) }
-                        scroll_bars: <ScrollBars> {}
-
-                        <View> {
-                            width: Fit, height: Fit,
-                            flow: Down,
-                            show_bg: false,
-                            spacing: 10
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                        root = Splitter {
+                            axis: Horizontal,
+                            align: FromA(0.0),
+                            a: tab_set_1,
+                            b: tab_set_2
                         }
 
-                        <View> {
-                            width: Fit, height: Fit,
-                            flow: Down,
-                            show_bg: false,
-                            spacing: 10
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+                        tab_set_1 = Tabs {
+                            tabs: [tab_a],
+                            selected: 0
                         }
 
-                        <View> {
-                            width: Fit, height: Fit,
-                            flow: Down,
-                            show_bg: false,
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
+
+                        tab_set_2 = Tabs {
+                            tabs: [
+                                tTests,
+                                tButton,
+                                tCheckbox,
+                                tCommandTextInput,
+                                tDesktopButton,
+                                tDropDown
+                                tFiletree,
+                                tFoldButton,
+                                tHTML,
+                                tIcon,
+                                tImage,
+                                tLabel,
+                                tLinkLabel,
+                                tMarkdown,
+                                tRadioButton,
+                                tScrollbar,
+                                tSlider,
+                                tSlidesView,
+                                tTextInput,
+                                tTypography,
+                                tView,
+
+                            ],
+                            selected: 0
                         }
 
-                        <View> {
-                            width: Fit, height: Fit,
-                            flow: Down,
-                            show_bg: false,
-                            spacing: 10
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                        }
+                        tTests = Tab { name: "Tests", template: CloseableTab, kind: TabTests }
+                        tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
+                        tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
+                        tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
+                        tTypography = Tab { name: "Typography", template: PermanentTab, kind: TabTypography }
+                        tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
+                        tTextInput = Tab { name: "TextInput", template: PermanentTab, kind: TabTextInput }
+                        tLabel = Tab { name: "Label", template: PermanentTab, kind: TabLabel }
+                        tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
+                        tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
+                        tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
+                        tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
+                        tImage = Tab { name: "Image", template: PermanentTab, kind: TabImage }
+                        tView = Tab { name: "View", template: PermanentTab, kind: TabView }
+                        tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
+                        tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
+                        tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
+                        tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
+                        tSlidesView = Tab { name: "SlidesView", template: PermanentTab, kind: TabSlidesView }
+                        tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
+                        tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
 
-                        <View> {
-                            width: Fit, height: Fit,
-                            flow: Down,
-                            show_bg: false,
-                            spacing: 10
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                            <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                        }
-                    }
-                }
 
-                <ZooHeader> {
-                    title = {text:"RoundedView"}
-                    <ZooDesc> {
-                        text:"This is a Rounded View. Please note that the radius has to be represented as a float value (with a decimal point) to work. Also note that instead of replacing the main pixel shader - you now replace get_color instead so the main shader can take care of rendering the radius."
-                    }
-                    <RoundedView> {
-                        height: Fit
-                        flow: Right,
-                        padding: 10
-                        spacing: 10
-                        show_bg: true,
-                        draw_bg: {
-                            color: (COLOR_CONTAINER),
-                            radius: 10.
-                        }
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_1)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_2)}}
-                        <ZooBlock> {draw_bg:{color: (DEMO_COLOR_3)}}
-                    }
-                }
+                        TabTests = <UIZooTab> {
 
-                <ZooHeader> {
-                    title = {text:"<Button>"}
-                    <ZooDesc> {text:"A small clickable region"}
-                    <ZooGroup> {
-                        flow: Down,
-                        width: Fill, height: Fit,
-                        align: { x: 0.0, y: 0.5 }
-                        spacing: 10.,
+                            <View> {
+                                flow: Right,
+                                height: Fit,
+                                <P> { text: "TestLabel", width: Fit}
+                                <LinkLabel> { text: "TestButton", width: Fit}
+                                <FoldButton> {
+                                    height: 25, width: 15,
+                                    margin: { left: (THEME_SPACE_2) }
+                                    animator: { open = { default: off } },
+                                }
 
-                        <H4> { text: "Default"}
-                        <Label> { text: "<Button>"}
-                        basicbutton = <Button> { text: "I can be clicked" }
-
-                        <H4> { text: "Button with an icon"}
-                        <Label> { text: "<ButtonIcon>"}
-                        iconbutton = <ButtonIcon> {
-                            draw_icon: {
-                                color: #f00,
-                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                <CheckBox> { text: "TestButton"}
+                                <CheckBoxToggle> { text: "TestButton"}
+                                <ButtonFlat> { text: "TestButton"}
+                                <Button> { text: "TestButton, disabled", enabled: true}
+                                <TextInput> { text: "TestButton"}
+                                <Slider> { text: "TestButton"}
+                                <SliderBig> { text: "TestButton"}
                             }
-                            text: "I can have a icon!"
+                            <Hr> {}
+                            <H3> { text: "Missing"}
+                            <Label> { text: "FoldHeader > Requires Rust code?" }
+                            <Label> { text: "NavControl > OS level widget that's not suitable for UI zoo?" }
+                            <Label> { text: "ImageBlend > Requires Rust code?" }
+                            <Label> { text: "PortalList > not suited for UI Zoo?" }
+                            <Label> { text: "Splitter > Can docks be nested to show this?" }
+                            <Label> { text: "StackNavigation > not suited for UI Zoo?" }
+                            <Label> { text: "SidePanel > Investigate Robrix / Moly for examples." }
+                            <Label> { text: "TextFlow > Not a widget in that sense that would need to be part of UI Zoo or that needs to be styled? Is this rather a helper widget for HTML, Markdown and LogList?" }
+                            <Label> { text: "TogglePanel > at least the example in experiments/toggle_panel_overlay seems to be broken" }
+                            <Label> { text: "ColorPicker > broken?" }
+                            <Label> { text: "Tooltip > Investigate Robrix / Moly for examples." }
+                            <Label> { text: "VectorLine > example in experiments appears to be broken" }
+                            <Label> { text: "VectorSpline > example in experiments appears to be broken" }
                         }
 
-                        <H4> { text: "Flat Mode"}
-                        <Label> { text: "<ButtonFlat>"}
-                        <View> {
+                        TabDesktopButton = <UIZooTab> {
+                            align: { x: 0.5, y: 0.5 }
                             flow: Right,
-                            align: { x: 0., y: 0.5 }
-                            width: Fill, height: Fit,
-                            <ButtonFlat> {
-                                draw_icon: {
-                                    color: #f00,
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                                text: "I can have a lovely icon!"
-                            }
+                            <DesktopButton> { draw_bg: { button_type: WindowsMax} }
+                            <DesktopButton> { draw_bg: { button_type: WindowsMaxToggled} }
+                            <DesktopButton> { draw_bg: { button_type: WindowsClose} }
+                            <DesktopButton> { draw_bg: { button_type: XRMode} }
+                            <DesktopButton> { draw_bg: { button_type: Fullscreen } }
+                        }
 
-                            <ButtonFlat> {
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                            }
+                        TabFoldButton = <UIZooTab> {
+                            align: { x: 0.5, y: 0.5 }
+                            <FoldButton> { }
+                        }
 
-                            <ButtonFlat> {
+                        TabScrollbar = <UIZooTab> {
+                            <H1> { text: "Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up."}
+                            scroll_bars: <ScrollBars> {}
+                        }
+
+                        TabImageBlend = <UIZooTab> {
+                        }
+
+                        TabIcon = <UIZooTab> {
+                            align: { x: 0.5, y: 0.5 }
+
+                            <Icon> {
+                                icon_walk: { width: 100.  }
+                                draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                            }
+                        }
+
+                        TabDropDown = <UIZooTab> {
+                            align: { x: 0.5, y: 0.5 }
+                            dropdown = <DropDown> {
+                                labels: ["Value One", "Value Two", "Thrice", "Fourth Value", "Option E", "Hexagons"],
+                                values: [ValueOne, ValueTwo, Thrice, FourthValue, OptionE, Hexagons]
+                            }
+                        }
+
+                        TabCommandTextInput = <UIZooTab> {
+                            <CommandTextInput> {}
+                        }
+                        
+                        TabSlidesView = <UIZooTab> {
+                            <SlidesView> {
+                                width: Fill, height: Fill,
+
+                                <SlideChapter> {
+                                    title = {text: "Hey!"},
+                                    <SlideBody> {text: "This is the 1st slide. Use your right\ncursor key to show the next slide."}
+                                }
+
+                                <Slide> {
+                                    title = {text: "Second slide"},
+                                    <SlideBody> {text: "This is the 2nd slide. Use your left\ncursor key to show the previous slide."}
+                                }
+
+                            }
+                        }
+
+                        TabRadioButton = <UIZooTab> {
+                            <ZooGroup> {
                                 flow: Down,
-                                icon_walk: { width: 15. }
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                                text: "Vertical Layout"
-                            }
-                        }
-
-                        <H4> { text: "Freely styled button"}
-                        <Label> { text: "<Button>"}
-                        styledbutton = <Button> {
-                            draw_bg: {
-                                fn pixel(self) -> vec4 {
-                                    return (THEME_COLOR_MAKEPAD) + self.down * vec4(1., 1., 1., 1.)
-                                }
-                            }
-                            draw_text: {
-                                fn get_color(self) -> vec4 {
-                                    return (THEME_COLOR_U_5) - vec4(0., 0.1, 0.4, 0.) * self.hover - self.down * vec4(1., 1., 1., 0.);
-                                }
-                            }
-                            text: "I can be styled!"
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<TextInput>"}
-                    <ZooDesc> { text:"Simple 1 line textbox" }
-                    <ZooGroup> {
-                        flow: Down,
-                        spacing: (THEME_SPACE_1)
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "Default", width: 175.}
-                            simpletextinput = <TextInput> { }
-                            simpletextinput_outputbox = <P> {
-                                text: "Output"
-                            }
-                        }
-                        <View> {
-                            height: Fit, width: Fill,
-                            spacing: (THEME_SPACE_2),
-                            <H4> { text: "Inline Label", width: 175.}
-                            <TextInput> { empty_message: "Inline Label" }
-                        }
-                        // <View> {
-                        //     height: Fit, width: Fill,
-                        //     spacing: (THEME_SPACE_2),
-                        //     <H4> { text: "Secret", width: 175.}
-                        //     <TextInput> { text: "1234567", empty_message: "Password", secret: true }
-                        // }
-                        // <View> {
-                        //     height: Fit, width: Fill,
-                        //     spacing: (THEME_SPACE_2),
-                        //     <H4> { text: "On focus select all", width: 175.}
-                        //     <TextInput> { text: "Lorem Ipsum", empty_message: "Inline Label", on_focus_select_all: true }
-                        // }
-                        // <View> {
-                        //     height: Fit, width: Fill,
-                        //     spacing: (THEME_SPACE_2),
-                        //     <H4> { text: "Read only", width: 175.}
-                        //     <TextInput> { text: "You can't change me", read_only: true }
-                        // }
-                        // <View> {
-                        //     height: Fit, width: Fill,
-                        //     spacing: (THEME_SPACE_2),
-                        //     <H4> { text: "ASCII only", width: 175.}
-                        //     <TextInput> { empty_message: "No fancy characters", ascii_only: true }
-                        // }
-                        // <View> {
-                        //     height: Fit, width: Fill,
-                        //     spacing: (THEME_SPACE_2),
-                        //     <H4> { text: "Double Tap start", width: 175.}
-                        //     <TextInput> { empty_message: "Click twice", double_tap_start: TODO: UNCLEAR WHAT VALUE THIS NEEDS }
-                        // }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<Label>"}
-                    <ZooDesc> { text:"Default single line textbox" }
-                    <ZooGroup> { <Label> { text: "This is a small line of text" } }
-                    <ZooGroup> {
-                        <Label> {
-                            draw_text: {
-                                color: (COLOR_ACCENT)
-                                text_style: {
-                                    font_size: 20,
-                                }
-                            },
-                            text: "You can style text using colors and fonts"
-                        }
-                    }
-                    <ZooGroup> {
-                        <Label> {
-                            draw_text: {
-                                fn get_color(self) ->vec4{
-                                    return mix((COLOR_ACCENT), (THEME_COLOR_U_HIDDEN), self.pos.x)
-                                }
-                                color: (THEME_COLOR_MAKEPAD)
-                                text_style: {
-                                    font_size: 40.,
-                                }
-                            },
-                            text: "OR EVEN SOME PIXELSHADERS"
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = { text:"<Slider>" }
-                    <ZooDesc> { text:"A parameter dragger" }
-                    <ZooGroup> {
-                        width: Fill, height: Fit,
-                        flow: Right,
-                        spacing: 10.0,
-                        align: { x: 0., y: 0.}
-                        <View> {
-                            width: Fill, height: Fit,
-                            flow: Down,
-                            <Slider> { text: "Default" }
-                            <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
-                            <Slider> { text: "min/max", min: 0., max: 100. }
-                            <Slider> { text: "precision", precision: 20 }
-                            <Slider> { text: "stepped", step: 0.1 }
-                        }
-                        <View> {
-                            width: Fill, height: Fit,
-                            flow: Down,
-                            <SliderBig> { text: "Default" }
-                            <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
-                            <SliderBig> { text: "min/max", min: 0., max: 100. }
-                            <SliderBig> { text: "precision", precision: 20 }
-                            <SliderBig> { text: "stepped", step: 0.1 }
-                        }
-                        <View> {
-                            width: Fill, height: Fit,
-                            flow: Down,
-                            <SliderAlt1> {
-                                text: "Colored",
-                                draw_slider: {
-                                    val_color_a: (#FFCC00),
-                                    val_color_b: #f00,
-                                    handle_color_a: #0,
-                                    handle_color_b: #0,
-                               }
-                            }
-                            <SliderAlt1> {
-                                text: "Solid",
-                                draw_text: {
-                                    color: #0ff;
-                                }
-                                draw_slider: {
-                                    val_color_a: #f08,
-                                    val_color_b: #f08,
-                                    handle_color_a: #FFFF,
-                                    handle_color_b: #FFF0,
-                                }
-                            }
-                            <SliderAlt1> {
-                                text: "Solid",
-                                draw_slider: {
-                                    val_color_a: #6,
-                                    val_color_b: #6,
-                                    handle_color_a: #0,
-                                    handle_color_b: #C,
-                                }
-                            }
-                            <SliderAlt1> { text: "min/max", min: 0., max: 100. }
-                            <SliderAlt1> { text: "precision", precision: 20 }
-                            <SliderAlt1> { text: "stepped", step: 0.1 }
-                            <SliderAlt1> {
-                                text: "label_size",
-                                draw_slider: {label_size: 150. },
-                            }
-                        }
-                    }
-                }
-
-                <View> {
-                    width: Fill, height: Fit,
-                    flow: Right,
-                    <Rotary> {
-                        width: 100, height: 100,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 90.,
-                            width: 20.
-                            padding: 2.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 100, height: 200,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 60.,
-                            width: 10.,
-                            padding: 4.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 200, height: 100,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 75.,
-                            width: 20.
-                            padding: 4,
-                        }
-                    }
-                    <Rotary> {
-                        width: 200, height: 150,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 90.,
-                            width: 20.
-                            padding: 4.,
-                        }
-                    }
-                    <Rotary> {
-                        width: Fill, height: 150,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 60.,
-                            width: 20.
-                            padding: 2.,
-                        }
-                    }
-                }
-                <View> {
-                    width: Fill, height: Fit,
-                    flow: Right,
-                    <Rotary> {
-                        width: 100., height: 100.,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 0.,
-                            width: 20.
-                            padding: 0.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 120., height: 120.,
-                        text: "Solid",
-                        draw_text: {
-                            color: #0ff;
-                        }
-                        draw_slider: {
-                            val_color_a: #ff0,
-                            val_color_b: #f00,
-                            handle_color: #f,
-                            gap: 180.,
-                            width: 20.,
-                            padding: 2.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 120., height: 120.,
-                        text: "Solid",
-                        draw_slider: {
-                            val_color_a: #0ff,
-                            val_color_b: #ff0,
-                            handle_color: #f,
-                            gap: 90.,
-                            width: 20.,
-                            padding: 2.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 100., height: 90.,
-                        text: "Solid",
-                        draw_slider: {
-                            gap: 90.,
-                            padding: 10.,
-                            width: 20.,
-                            padding: 2.
-                            handle_color: #f0f,
-                        }
-                    }
-                    <Rotary> {
-                        width: 150., height: 150.,
-                        text: "Solid",
-                        draw_slider: {
-                            val_color_a: #0ff,
-                            val_color_b: #0ff,
-                            gap: 180.,
-                            padding: 4.,
-                            width: 6.,
-                        }
-                    }
-                    <Rotary> {
-                        width: 150., height: 150.,
-                        text: "Solid",
-                        draw_slider: {
-                            gap: 0.,
-                            width: 10.0,
-                            padding: 4.,
-                        }
-                    }
-                }
-                
-                <View> {
-                    width: Fill, height: Fit,
-                    flow: Right,
-                    <RotaryFlat> {
-                        width: 100., height: 100.,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 0.,
-                            width: 20.
-                            padding: 0.,
-                        }
-                    }
-                    <RotaryFlat> {
-                        width: 120., height: 120.,
-                        text: "Solid",
-                        draw_text: {
-                            color: #0ff;
-                        }
-                        draw_slider: {
-                            val_color_a: #ff0,
-                            val_color_b: #f00,
-                            handle_color: #f,
-                            gap: 180.,
-                            width: 20.,
-                            padding: 2.,
-                        }
-                    }
-                    <RotaryFlat> {
-                        width: 120., height: 120.,
-                        text: "Solid",
-                        draw_slider: {
-                            val_color_a: #0ff,
-                            val_color_b: #ff0,
-                            handle_color: #f,
-                            gap: 90.,
-                            width: 20.,
-                            padding: 2.,
-                        }
-                    }
-                    <RotaryFlat> {
-                        width: 100., height: 90.,
-                        text: "Solid",
-                        draw_slider: {
-                            gap: 90.,
-                            padding: 10.,
-                            width: 20.,
-                            handle_color: #f0f,
-                        }
-                    }
-                    <RotaryFlat> {
-                        width: 150., height: 150.,
-                        text: "Solid",
-                        draw_slider: {
-                            val_color_a: #0ff,
-                            val_color_b: #0ff,
-                            gap: 180.,
-                            padding: 4.,
-                            width: 6.,
-                        }
-                    }
-                    <RotaryFlat> {
-                        width: Fill, height: 150.,
-                        text: "Solid",
-                        draw_slider: {
-                            val_color_a: #8;
-                            val_color_b: #ff0;
-                            gap: 75.,
-                            width: 40.0,
-                            padding: 4.,
-                        }
-                    }
-                }
-                <View> {
-                    width: Fill, height: Fit,
-                    flow: Right,
-                    <RotarySolid> {
-                        width: 100, height: 100,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 90.,
-                        }
-                    }
-                    <RotarySolid> {
-                        width: 200, height: 150,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 180.,
-                        }
-                    }
-                    <RotarySolid> {
-                        width: Fill, height: 150,
-                        text: "Colored",
-                        draw_slider: {
-                            gap: 60.,
-                        }
-                    }
-                }
-                <ZooHeader> {
-                    title = {text:"<DropDown>"}
-                    title = {text:"<DropDown>"}
-                    <ZooDesc> {text:"DropDown control. This control currently needs to be databound which needs some plumbing. In this sample there is a binding context struct in the main app struct - which gets bound on app start - and updated during handle_actions."}
-                    <ZooGroup> {
-                        dropdown = <DropDown> {
-                            labels: ["Value One", "Value Two", "Thrice", "Fourth Value", "Option E", "Hexagons"],
-                            values: [ValueOne, ValueTwo, Thrice, FourthValue, OptionE, Hexagons]
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<FileTree>"}
-                    <ZooDesc> {text:"File Tree"}
-                    <ZooGroup> {
-                        <DemoFileTree> { file_tree:{ height: 400. } }
-                    }
-                }
-
-                // <ZooHeader> {
-                //     title = { text:"<FoldHeader>" }
-                //     <ZooDesc> { text:"This widget allows you to have a header with a foldbutton (has to be named fold_button for the magic to work)" }
-                //     <ZooGroup> {
-                //         thefoldheader= <FoldHeader> {
-                //             header: <View> {
-                //                 height: Fit
-                //                 align: {x: 0., y: 0.5}
-                //                 fold_button = <FoldButton> {} <P> {text: "Fold me!"}
-                //             }
-                //             body: <View> {
-                //                 width: Fill, height: Fit
-                //                 show_bg: false,
-                //                 padding: 5.0,
-                //                 <P> { text:"This is the body that can be folded away" }
-                //             }
-                //         }
-                //     }
-                // }
-
-                <ZooHeader> {
-                    title = {text:"<Html>"}
-                    <ZooDesc> {text:"HTML Widget"}
-                    <ZooGroup> {
-                        <Html> {
-                            width:Fill, height:Fit,
-                            body:"<H1>H1 Headline</H1><H2>H2 Headline</H2><H3>H3 Headline</H3><H4>H4 Headline</H4><H5>H5 Headline</H5><H6>H6 Headline</H6>This is <b>bold</b>&nbsp;and <i>italic text</i>.<sep><b><i>Bold italic</i></b>, <u>underlined</u>, and <s>strike through</s> text. <p>This is a paragraph</p> <code>A code block</code>. <br/> And this is a <a href='https://www.google.com/'>link</a><br/><ul><li>lorem</li><li>ipsum</li><li>dolor</li></ul><ol><li>lorem</li><li>ipsum</li><li>dolor</li></ol><br/> <blockquote>Blockquote</blockquote> <pre>pre</pre><sub>sub</sub><del>del</del>"
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<Markdown>"}
-                    <ZooDesc> {text:"Markdown"}
-                    <ZooGroup> {
-                        <Markdown> {
-                            width:Fill, height: Fit,
-                            body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote.\n\nThis is `inline code`.\n\n ```code block```"
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<Image>"}
-                    <ZooDesc> {text:"A static inline image from a resource."}
-                    <ZooGroup> {
-                        height: Fit, width: Fill,
-                        spacing: (THEME_SPACE_2)
-                        scroll_bars: <ScrollBars> {}
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250, flow: Down,
-                                <Image> { source: dep("crate://self/resources/ducky.png" ) }
-                            }
-                            <P> { text: "Default" }
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { height: Fill, source: dep("crate://self/resources/ducky.png" ), min_height: 100 }
-                            }
-                            <P> { text: "min_height: 100" } // TODO: get this to work correctly
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { width: Fill, source: dep("crate://self/resources/ducky.png" ), width_scale: 1.1 }
-                            }
-                            <P> { text: "width_scale: 1.5" } // TODO: get this to work correctly
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png"), fit: Stretch }
-                            }
-                            <P> { text: "fit: Stretch" }
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
-                            }
-                            <P> { text: "fit: Horizontal" }
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
-                            }
-                            <P> { text: "fit: Vertical" }
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
-                            }
-                            <P> { text: "fit: Smallest" }
-                        }
-                        <View> {
-                            width: Fit, height: Fit, flow: Down,
-                            <View> {
-                                show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
-                                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
-                            }
-                            <P> { text: "fit: Biggest" }
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<LinkLabel>"}
-                    <ZooDesc> {text:"Link Label"}
-                    <ZooGroup> {
-                        width: Fill, height: Fit,
-                        flow: Down,
-                        spacing: (THEME_SPACE_2)
-                        <View> {
-                            width: Fill, height: Fit,
-                            spacing: (THEME_SPACE_2)
-                            <LinkLabel> { text: "Click me!"}
-                            <LinkLabel> { text: "Click me!"}
-                            <LinkLabel> { text: "Click me!"}
-                        }
-                        <View> {
-                            width: Fill, height: Fit,
-                            spacing: (THEME_SPACE_2)
-                            <LinkLabelIcon> {
-                                text: "Click me!"
-                                draw_icon: {
-                                    color: #f00,
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-
-                                icon_walk: {
-                                    width: 12.5, height: Fit,
-                                    margin: 0.0
-                                }
-                            }
-                            <LinkLabelIcon> {
-                                text: "Click me!"
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-
-                                icon_walk: {
-                                    width: 12.5,height: Fit,
-                                    margin: 0.0
-                                }
-                            }
-                            <LinkLabelIcon> {
-                                text: "Click me!"
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-
-                                icon_walk: {
-                                    width: 12.5, height: Fit,
-                                    margin: 0.0
-                                }
-                            }
-
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<CheckBox>"}
-                    <ZooDesc> {text:"Checkbox"}
-                    <ZooGroup> {
-                        height: Fit
-                        spacing: (THEME_SPACE_2)
-                        flow: Down,
-                        <H4> { text: "Output demo"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5}
-                            simplecheckbox = <CheckBox> {text:"Check me out!"}
-                            simplecheckbox_output = <Label> { text:"hmm" }
-                        }
-                        <H4> { text: "Standard Mode"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            spacing: (THEME_SPACE_1)
-                            align: { x: 0.0, y: 0.5}
-                            <CheckBox> {text:"Check me out!"}
-                            <CheckBox> {text:"Check me out!"}
-                            <CheckBox> {text:"Check me out!"}
-                        }
-                        <H4> { text: "Toggle Mode"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            spacing: (THEME_SPACE_1)
-                            align: { x: 0.0, y: 0.5}
-                            <CheckBoxToggle> {text:"Check me out!" }
-                            <CheckBoxToggle> {text:"Check me out!" }
-                            <CheckBoxToggle> {text:"Check me out!" }
-                        }
-                        <H4> { text: "Custom Icon Mode"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            spacing: (THEME_SPACE_1)
-                            align: { x: 0.0, y: 0.5}
-                            <CheckBoxCustom> {
-                                text:"Check me out!"
-                                draw_check: { check_type: None }
-                                draw_icon: {
-                                    color_on: #f00,
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                            }
-                            <CheckBoxCustom> {
-                                text:"Check me out!"
-                                draw_check: { check_type: None }
-                                draw_icon: {
-                                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                }
-                            }
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<RadioButton>"}
-                    <ZooDesc> {text:"Todo: List the different radio button templates."}
-                    <ZooGroup> {
-                        flow: Down,
-                        spacing: (THEME_SPACE_2)
-                        <H4> { text: "Default"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                            radios_demo = <View> {
                                 spacing: (THEME_SPACE_2)
-                                width: Fit, height: Fit,
-                                radio1 = <RadioButton> { text: "Option 1" }
-                                radio2 = <RadioButton> { text: "Option 2" }
-                                radio3 = <RadioButton> { text: "Option 3" }
-                                radio4 = <RadioButton> { text: "Option 4" }
+                                <H4> { text: "Default"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    radios_demo = <View> {
+                                        spacing: (THEME_SPACE_2)
+                                        width: Fit, height: Fit,
+                                        radio1 = <RadioButton> {
+                                            text: "Option 1"
+
+                                            label_walk: {
+                                                width: Fit, height: Fit,
+                                                margin: { left: 20. }
+                                            }
+
+                                            label_align: { y: 0.0 }
+                                            
+                                            draw_bg: {
+                                                border_size: (THEME_BEVELING)
+
+                                                color_dither: 1.0
+
+                                                color_1: #F00
+                                                color_1_hover: #F44
+                                                color_1_active: #F00
+
+                                                color_2: #F80
+                                                color_2_hover: #FA4
+                                                color_2_active: #F80
+
+                                                border_color_1: #0
+                                                border_color_1_hover: #F
+                                                border_color_1_active: #8
+
+                                                border_color_2: #0
+                                                border_color_2_hover: #F
+                                                border_color_2_active: #8
+
+                                                mark_color: #FFF0
+                                                mark_color_hover: #FFFF
+                                                mark_color_active: #FFFC
+                                                
+                                            }
+                                                
+                                            draw_text: {
+                                                color: #A
+                                                color_hover: #F
+                                                color_active: #C
+
+                                                text_style: <THEME_FONT_REGULAR> {
+                                                    font_size: (THEME_FONT_SIZE_P)
+                                                }
+                                            }
+
+                                            icon_walk: { width: 13.0, height: Fit }
+                                                
+                                            draw_icon: {
+                                                color_1: #F00
+                                                color_1_hover: #F44
+                                                color_1_active: #F00
+
+                                                color_2: #F00
+                                                color_2_hover: #F44
+                                                color_2_active: #F00
+                                            }
+                                        }
+                                        radio2 = <RadioButton> { text: "Option 2" }
+                                        radio3 = <RadioButton> { text: "Option 3" }
+                                        radio4 = <RadioButton> { text: "Option 4" }
+                                    }
+                                }
+
+                                <H4> { text: "Custom Radios"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    iconradios_demo = <View> {
+                                        width: Fit, height: Fit,
+                                        spacing: (THEME_SPACE_2)
+                                        flow: Down,
+
+                                        radio1 = <RadioButtonCustom> {
+                                            text: "Option 1"
+                                            icon_walk: { width: 12.5, height: Fit }
+                                            draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+
+                                            label_align: { y: 0.0 }
+                                            
+                                            draw_text: {
+                                                color: #A
+                                                color_hover: #F
+                                                color_active: #C
+
+                                                text_style: <THEME_FONT_REGULAR> {
+                                                    font_size: (THEME_FONT_SIZE_P)
+                                                }
+                                            }
+
+                                            draw_icon: {
+                                                color_1: #000
+                                                color_1_hover: #F44
+                                                color_1_active: #F00
+
+                                                color_2: #F00
+                                                color_2_hover: #F44
+                                                color_2_active: #F00
+                                            }
+                                        }
+                                        radio2 = <RadioButtonCustom> {
+                                            text: "Option 2"
+                                            icon_walk: {
+                                                width: 12.5, height: Fit,
+                                            }
+                                            draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                                        }
+                                        radio3 = <RadioButtonCustom> {
+                                            text: "Option 3"
+                                            icon_walk: {
+                                                width: 12.5, height: Fit,
+                                            }
+                                            draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                                        }
+                                        radio4 = <RadioButtonCustom> {
+                                            text: "Option 4"
+                                            icon_walk: {
+                                                width: 12.5, height: Fit,
+                                            }
+                                            draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                                        }
+                                    }
+                                }
+
+                                <H4> { text: "Text only"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    textonlyradios_demo = <View> {
+                                        width: Fit, height: Fit,
+                                        flow: Right,
+                                        spacing: (THEME_SPACE_2)
+                                        radio1 = <RadioButtonTextual> { 
+                                            text: "Option 1"
+
+                                            draw_text: {
+                                                color: #C80,
+                                                color_hover: #FC0,
+                                                color_active: #FF4,
+                                                    
+                                                text_style: <THEME_FONT_REGULAR> {
+                                                    font_size: (THEME_FONT_SIZE_P)
+                                                }
+                                            }
+                                        }
+                                        radio2 = <RadioButtonTextual> { text: "Option 2" }
+                                        radio3 = <RadioButtonTextual> { text: "Option 3" }
+                                        radio4 = <RadioButtonTextual> { text: "Option 4" }
+                                    }
+                                }
+
+                                <H4> { text: "Button Group"}
+                                <ButtonGroup> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    radiotabs_demo = <View> {
+                                        spacing: 5.
+                                        width: Fit, height: Fit,
+                                        radio1 = <RadioButtonTab> {
+                                            text: "Option 1"
+
+                                            icon_walk: {
+                                                width: 12.5, height: Fit,
+                                            }
+                                            label_walk: {
+                                                margin: { left: 5. }
+                                            }
+                                            draw_icon: {
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg")
+
+                                                color_1: #0
+                                                color_1_hover: #FF0
+                                                color_1_active: #BB0
+
+                                                color_2: #0
+                                                color_2_hover: #F00
+                                                color_2_active: #B00
+                                            }
+
+                                            draw_text: {
+                                                color: #0
+                                                color_hover: #C
+                                                color_active: #F
+                                            }
+
+                                            draw_bg: {
+                                                border_size: 1.,
+                                                border_radius: 4.,
+
+                                                color_dither: 1.0
+                                                color: #F00
+                                                color_hover: #F44
+                                                color_active: #300
+
+                                                border_color_1: #0
+                                                border_color_1_hover: #F
+                                                border_color_1_active: #8
+
+                                                border_color_2: #0
+                                                border_color_2_hover: #F
+                                                border_color_2_active: #8
+                                            }
+                                        }
+                                        radio2 = <RadioButtonTab> { text: "Option 2" }
+                                        radio3 = <RadioButtonTab> { text: "Option 3" }
+                                        radio4 = <RadioButtonTab> { text: "Option 4" }
+                                    }
+                                }
+
+                                <ButtonGroup> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    radiotabs_demo = <View> {
+                                        spacing: 5.
+                                        width: Fit, height: Fit,
+                                        radio1 = <RadioButtonTabGradientY> {
+                                            text: "Option 1"
+
+                                            draw_text: {
+                                                color: #0
+                                                color_hover: #C
+                                                color_active: #F
+                                            }
+
+                                            draw_bg: {
+                                                border_size: (THEME_BEVELING)
+                                                border_radius: 6.
+
+                                                color_dither: 1.0
+
+                                                color_1: #F00
+                                                color_1_hover: #F44
+                                                color_1_active: #300
+
+                                                color_2: #F80
+                                                color_2_hover: #FA4
+                                                color_2_active: #310
+
+                                                border_color_1: #0
+                                                border_color_1_hover: #F
+                                                border_color_1_active: #8
+
+                                                border_color_2: #0
+                                                border_color_2_hover: #F
+                                                border_color_2_active: #8
+                                            }
+                                        }
+                                        radio2 = <RadioButtonTabGradientY> { text: "Option 2" }
+                                        radio3 = <RadioButtonTabGradientY> { text: "Option 3" }
+                                        radio4 = <RadioButtonTabGradientY> { text: "Option 4" }
+                                    }
+                                }
+
+                                <ButtonGroup> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    radiotabs_demo = <View> {
+                                        spacing: 5.
+                                        width: Fit, height: Fit,
+                                        radio1 = <RadioButtonTabGradientX> {
+                                            text: "Option 1"
+
+                                            draw_text: {
+                                                color: #0
+                                                color_hover: #C
+                                                color_active: #F
+                                            }
+
+                                            draw_bg: {
+                                                border_size: (THEME_BEVELING)
+
+                                                color_dither: 1.0
+
+                                                color_1: #F00
+                                                color_1_hover: #F44
+                                                color_1_active: #300
+
+                                                color_2: #F80
+                                                color_2_hover: #FA4
+                                                color_2_active: #310
+
+                                                border_color_1: #0
+                                                border_color_1_hover: #F
+                                                border_color_1_active: #8
+
+                                                border_color_2: #0
+                                                border_color_2_hover: #F
+                                                border_color_2_active: #8
+                                            }
+                                        }
+                                        radio2 = <RadioButtonTabGradientX> { text: "Option 2" }
+                                        radio3 = <RadioButtonTabGradientX> { text: "Option 3" }
+                                        radio4 = <RadioButtonTabGradientX> { text: "Option 4" }
+                                    }
+                                }
+
+                                <H4> { text: "Media"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5 }
+                                    mediaradios_demo = <View> {
+                                        width: Fit, height: Fit,
+                                        flow: Right,
+                                        spacing: (THEME_SPACE_2)
+                                        radio1 = <RadioButtonImage> {
+                                            width: 50, height: 50,
+                                            media: Image,
+                                            image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                        }
+                                        radio2 = <RadioButtonImage> {
+                                            width: 50, height: 50,
+                                            media: Image,
+                                            image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                        }
+                                        radio3 = <RadioButtonImage> {
+                                            width: 50, height: 50,
+                                            media: Image,
+                                            image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                        }
+                                        radio4 = <RadioButtonImage> {
+                                            width: 50, height: 50,
+                                            media: Image,
+                                            image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                        }
+                                    }
+                                }
                             }
                         }
 
-                        <H4> { text: "Custom Radios"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                            iconradios_demo = <View> {
-                                width: Fit, height: Fit,
-                                spacing: (THEME_SPACE_2)
-                                flow: Down,
 
-                                radio1 = <RadioButtonCustom> {
-                                    text: "Option 1"
-                                    icon_walk: {
-                                        width: 12.5, height: Fit,
-                                    }
-                                    draw_icon: {
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                }
-                                radio2 = <RadioButtonCustom> {
-                                    text: "Option 2"
-                                    icon_walk: {
-                                        width: 12.5, height: Fit,
-                                    }
-                                    draw_icon: {
-                                        color_on: #0f0,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                }
-                                radio3 = <RadioButtonCustom> {
-                                    text: "Option 3"
-                                    icon_walk: {
-                                        width: 12.5, height: Fit,
-                                    }
-                                    draw_icon: {
-                                        color_on: #0ff,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                }
-                                radio4 = <RadioButtonCustom> {
-                                    text: "Option 4"
-                                    icon_walk: {
-                                        width: 12.5, height: Fit,
-                                    }
-                                    draw_icon: {
-                                        color_on: #f00,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                }
-                            }
-                        }
-
-                        <H4> { text: "Text only"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                            textonlyradios_demo = <View> {
-                                width: Fit, height: Fit,
-                                flow: Right,
-                                spacing: (THEME_SPACE_2)
-                                radio1 = <RadioButtonTextual> { text: "Option 1" }
-                                radio2 = <RadioButtonTextual> { text: "Option 2" }
-                                radio3 = <RadioButtonTextual> { text: "Option 3" }
-                                radio4 = <RadioButtonTextual> { text: "Option 4" }
-                            }
-                        }
-
-
-                        <H4> { text: "Button Group"}
-                        <ButtonGroup> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                            radiotabs_demo = <View> {
-                                width: Fit, height: Fit,
-                                radio1 = <RadioButtonTab> { text: "Option 1" }
-                                radio2 = <RadioButtonTab> { text: "Option 2" }
-                                radio3 = <RadioButtonTab> { text: "Option 3" }
-                                radio4 = <RadioButtonTab> { text: "Option 4" }
-                            }
-                        }
-
-                        <H4> { text: "Media"}
-                        <View> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                            mediaradios_demo = <View> {
-                                width: Fit, height: Fit,
-                                flow: Right,
-                                spacing: (THEME_SPACE_2)
-                                radio1 = <RadioButtonImage> {
-                                    width: 50, height: 50,
-                                    media: Image,
-                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
-                                }
-                                radio2 = <RadioButtonImage> {
-                                    width: 50, height: 50,
-                                    media: Image,
-                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
-                                }
-                                radio3 = <RadioButtonImage> {
-                                    width: 50, height: 50,
-                                    media: Image,
-                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
-                                }
-                                radio4 = <RadioButtonImage> {
-                                    width: 50, height: 50,
-                                    media: Image,
-                                    image: <Image> { source: dep("crate://self/resources/ducky.png" ) }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                <ZooHeader> {
-                    title = {text:"<SlidesView>"}
-                    width: Fill, height: Fit,
-                    <ZooDesc> {text:"Slides View"}
-                    <View> {
-                        width: Fill, height: Fit,
-                        <SlidesView> {
-                            width: Fill, height: 400,
-
-                            <SlideChapter> {
-                                title = {text: "Hey!"},
-                                <SlideBody> {text: "This is the 1st slide. Use your right\ncursor key to show the next slide."}
-                            }
-
-                            <Slide> {
-                                title = {text: "Second slide"},
-                                <SlideBody> {text: "This is the 2nd slide. Use your left\ncursor key to show the previous slide."}
-                            }
-
-                        }
-                    }
-                }
-
-                // TODO: SHOW
-                // <ZooHeader> {
-                //     title = {text:"<Dock>"}
-                //     <ZooDesc> {text:"Dock"}
-                //     <CachedRoundedView> {
-                //         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
-                //         width: Fill, height: Fit,
-                //             <View> {
-                //                 height: Fit, width: Fill
-                //                 show_bg: true,
-                //                 draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-                //                 <Dock> {
-                //                     height: 500., width: Fill
-
-                //                     root = Splitter {
-                //                         axis: Horizontal,
-                //                         align: FromA(300.0),
-                //                         a: tab_set_1,
-                //                         b: tab_set_2
-                //                     }
-
-                //                     tab_set_1 = Tabs {
-                //                         tabs: [tab_a, tab_b],
-                //                         selected: 1
-                //                     }
-
-                //                     tab_set_2 = Tabs {
-                //                         tabs: [tab_c, tab_d, tab_e, tab_f],
-                //                         selected: 1
-                //                     }
-
-                //                     tab_a = Tab {
-                //                         name: "Tab A"
-                //                         template: PermanentTab,
-                //                         kind: Container_A
-                //                     }
-
-                //                     tab_b = Tab {
-                //                         name: "Tab B"
-                //                         template: PermanentTab,
-                //                         kind: Container_B
-                //                     }
-
-                //                     tab_c = Tab {
-                //                         name: "Tab C"
-                //                         template: CloseableTab,
-                //                         kind: Container_C
-                //                     }
-
-                //                     tab_d = Tab {
-                //                         name: "Tab D"
-                //                         template: CloseableTab,
-                //                         kind: Container_D
-                //                     }
-
-                //                     tab_e = Tab {
-                //                         name: "Tab E"
-                //                         template: CloseableTab,
-                //                         kind: Container_E
-                //                     }
-
-                //                     tab_f = Tab {
-                //                         name: "Tab F"
-                //                         template: CloseableTab,
-                //                         kind: Container_F
-                //                     }
-
-                //                     Container_A = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         <Label> {text: "Hallo"}
-                //                     }
-
-                //                     Container_B = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         <Label> {text: "Kuckuck"}
-                //                     }
-
-                //                     Container_C = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         <Label> {text: "Ahoy"}
-                //                     }
-
-                //                     Container_D = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         <Label> {text: "Hi"}
-                //                     }
-
-                //                     Container_E = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         <Label> {text: "Ahoy"}
-                //                     }
-
-                //                     Container_F = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         <Label> {text: "Hi"}
-                //                     }
-                //                 }
-
-                //             }
-                //         }
-                //     }
-
-                // <ZooHeader> {
-                //     title = {text:"<DockMinimal>"}
-                //     <ZooDesc> {text:"DockMinimal"}
-                //     <CachedRoundedView> {
-                //         draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
-                //         width: Fill, height: Fit,
-                //             <View> {
-                //                 height: Fit, width: Fill
-                //                 show_bg: true,
-                //                 draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-                //                 <DockMinimal> {
-                //                     height: 500., width: Fill
-
-                //                     root = Splitter {
-                //                         axis: Horizontal,
-                //                         align: FromA(300.0),
-                //                         a: tab_set_1,
-                //                         b: tab_set_2
-                //                     }
-
-                //                     tab_set_1 = Tabs {
-                //                         tabs: [tab_a, tab_b],
-                //                         selected: 1
-                //                     }
-
-                //                     tab_set_2 = Tabs {
-                //                         tabs: [tab_c, tab_d, tab_e, tab_f],
-                //                         selected: 1
-                //                     }
-
-                //                     tab_a = Tab {
-                //                         name: "Tab A"
-                //                         template: CloseableTab,
-                //                         kind: Container_A
-                //                     }
-
-                //                     tab_b = Tab {
-                //                         name: "Tab B"
-                //                         template: PermanentTab,
-                //                         kind: Container_B
-                //                     }
-
-                //                     tab_c = Tab {
-                //                         name: "Tab C"
-                //                         template: CloseableTab,
-                //                         kind: Container_C
-                //                     }
-
-                //                     tab_d = Tab {
-                //                         name: "Tab D"
-                //                         template: CloseableTab,
-                //                         kind: Container_D
-                //                     }
-
-                //                     tab_e = Tab {
-                //                         name: "Tab E"
-                //                         template: CloseableTab,
-                //                         kind: Container_E
-                //                     }
-
-                //                     tab_f = Tab {
-                //                         name: "Tab F"
-                //                         template: CloseableTab,
-                //                         kind: Container_F
-                //                     }
-
-                //                     Container_A = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         padding: 10.,
-                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                //                         <Label> {text: "Hallo"}
-                //                     }
-
-                //                     Container_B = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                //                         padding: 10.,
-                //                         <Label> {text: "Kuckuck"}
-                //                     }
-
-                //                     Container_C = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                //                         padding: 10.,
-                //                         <Label> {text: "Ahoy"}
-                //                     }
-
-                //                     Container_D = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                //                         padding: 10.,
-                //                         <Label> {text: "Hi"}
-                //                     }
-
-                //                     Container_E = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                //                         padding: 10.,
-                //                         <Label> {text: "Ahoy"}
-                //                     }
-
-                //                     Container_F = <RectView> {
-                //                         height: Fill, width: Fill
-                //                         draw_bg: { color: (THEME_COLOR_D_HIDDEN)}
-                //                         padding: 10.,
-                //                         <Label> {text: "Hi"}
-                //                     }
-                //                 }
-
-                //             }
-                //         }
-                //     }
-
-                <ZooHeader> {
-                    title = {text:"Docs tests"}
-                    <ZooDesc> {text:"Docs tests"}
-                    <RoundedView> {
-                        draw_bg: { radius: (THEME_CONTAINER_CORNER_RADIUS) }
-                        width: Fill, height: Fit,
+                        TabCheckbox = <UIZooTab> {
+                            <H4> { text: "Output demo"}
                             <View> {
-                                height: Fit, width: Fill
-                                show_bg: false,
-                                margin: { bottom: 200.}
-                                draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
-                                spacing: 5.0,
-                                flow: Down,
-                                <H3> { text: "Button" }
-                                <H4> { text: "Basic"}
-                                <Button> { text: "I can be clicked" } // Default button with a custom label.
+                                height: Fit
+                                flow: Right
+                                align: { x: 0.0, y: 0.5}
+                                simplecheckbox = <CheckBox> {text:"Check me out!"}
+                                simplecheckbox_output = <Label> { text:"hmm" }
+                            }
+                            <H4> { text: "Standard Mode"}
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                spacing: (THEME_SPACE_1)
+                                align: { x: 0.0, y: 0.5}
+                                <CheckBox> {
+                                    text:"Check me out!"
 
-                                <H4> { text: "Typical"}
-                                <Button> {
-                                    text: "I can be clicked", // Text label.
+                                    label_walk: {
+                                        width: Fit, height: Fit,
+                                        margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                                    }
+
                                     draw_bg: {
-                                        color: #3, // Set the hover-state color.
-                                        color_hover: #f00, // Set the pressed-state color.
-                                    },
-                                    height: Fit, // Element assumes height of its children.
-                                    width: Fit, // Element expands to use all available horizontal space.
-                                    margin: 0.0, // Homogenous spacing of 10.0 around the element.
-                                    padding: 10.  // Homogenous spacing of 7.5 between all the element's
-                                                // borders and its content.
+                                        border_size: 1.0
+
+                                        color_1: #F00
+                                        color_1_hover: #F44
+                                        color_1_active: #F00
+
+                                        color_2: #F80
+                                        color_2_hover: #FA4
+                                        color_2_active: #F80
+
+                                        border_color_1: #0
+                                        border_color_1_hover: #F
+                                        border_color_1_active: #8
+
+                                        border_color_2: #0
+                                        border_color_2_hover: #F
+                                        border_color_2_active: #8
+
+                                        mark_color: #FFF0
+                                        mark_color_hover: #FFFF
+                                        mark_color_active: #FFFC
+                                    }  
+                                
+                                    draw_text: {
+                                        color: #A
+                                        color_hover: #F
+                                        color_active: #C
+
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
+                                    }
+
+                                    draw_icon: {
+                                        color: #F00
+                                        color_hover: #F44
+                                        color_active: #F00
+                                    }
+
+                                    icon_walk: { width: 13.0, height: Fit }
+                                }
+                                <CheckBox> {text:"Check me out!"}
+                                <CheckBox> {text:"Check me out!"}
+                            }
+                            <H4> { text: "Toggle Mode"}
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                spacing: (THEME_SPACE_1)
+                                align: { x: 0.0, y: 0.5}
+                                <CheckBoxToggle> {
+                                    text:"Check me out!"
+
+                                    draw_bg: {
+                                        border_size: 1.0
+
+                                        color_1: #F00
+                                        color_1_hover: #F44
+                                        color_1_active: #F00
+
+                                        color_2: #F80
+                                        color_2_hover: #FA4
+                                        color_2_active: #F80
+
+                                        border_color_1: #0
+                                        border_color_1_hover: #F
+                                        border_color_1_active: #8
+
+                                        border_color_2: #0
+                                        border_color_2_hover: #F
+                                        border_color_2_active: #8
+
+                                        mark_color: #FFFF
+                                        mark_color_hover: #FFFF
+                                        mark_color_active: #FFFC
+                                    }  
+                                
+                                    draw_text: {
+                                        color: #A
+                                        color_hover: #F
+                                        color_active: #C
+
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
+                                    }
+
+                                    draw_icon: {
+                                        color: #F00
+                                        color_hover: #F44
+                                        color_active: #F00
+                                    }
+
+                                    icon_walk: { width: 13.0, height: Fit }
+
+                                }
+                                <CheckBoxToggle> {text:"Check me out!" }
+                                <CheckBoxToggle> {text:"Check me out!" }
+                            }
+                            <H4> { text: "Custom Icon Mode"}
+                            <View> {
+                                height: Fit
+                                flow: Right
+                                spacing: (THEME_SPACE_1)
+                                align: { x: 0.0, y: 0.5}
+                                <CheckBoxCustom> {
+                                    text:"Check me out!"
+                                    draw_bg: { check_type: None }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+
+                                    label_walk: {
+                                        width: Fit, height: Fit,
+                                        margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                                    }
+
+                                    draw_bg: {
+                                        border_size: 1.0
+
+                                        color_1: #F00
+                                        color_1_hover: #F44
+                                        color_1_active: #F00
+
+                                        color_2: #F80
+                                        color_2_hover: #FA4
+                                        color_2_active: #F80
+
+                                        border_color_1: #0
+                                        border_color_1_hover: #F
+                                        border_color_1_active: #8
+
+                                        border_color_2: #0
+                                        border_color_2_hover: #F
+                                        border_color_2_active: #8
+
+                                        mark_color: #FFF0
+                                        mark_color_hover: #FFFF
+                                        mark_color_active: #FFFC
+                                    }  
+                                
+                                    draw_text: {
+                                        color: #330
+                                        color_hover: #8
+                                        color_active: #F80
+
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
+                                    }
+
+                                    draw_icon: {
+                                        color: #300
+                                        color_hover: #800
+                                        color_active: #F00
+                                    }
+
+                                    icon_walk: { width: 13.0, height: Fit }
+                                }
+                                <CheckBoxCustom> {
+                                    text:"Check me out!"
+                                    draw_bg: { check_type: None }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                }
+                            }
+                        }
+
+                        TabFiletree = <UIZooTab> {
+                            <DemoFileTree> { file_tree:{ width: Fill, height: Fill } }
+                        }
+
+                        TabView = <UIZooTab> {
+                            <View> {
+                                height: Fit
+                                flow: RightWrap,
+                                show_bg: true,
+                                padding: 10.
+                                spacing: 10.
+
+                                <View> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+                                    <Label> { text: "<View>" }
+                                }
+                                
+                                <Vr> {
+                                    draw_bg: {
+                                        color_1: #000,
+                                        color_2: #000,
+                                    }
                                 }
 
-                                <H4> { text: "Advanced"}
-                                <Button> {
+                                <Hr> {
+                                    width: 25.,
+                                    draw_bg: {
+                                        color_1: #0,
+                                        color_2: #5,
+                                    }
+                                }
+
+                                <SolidView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+                                    draw_bg: { color: #0 }
+                                    <Label> { text: "<SolidView>" }
+                                }
+
+
+                                <RectView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+                                    draw_bg: {
+                                        color: #000,
+                                        border_size: 2.,
+                                        border_color: #8,
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                    }
+                                    <Label> { text: "<RectView>" }
+                                }
+
+                                <RectShadowView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #000,
+                                        border_size: 2.0
+                                        border_color: #8
+                                        shadow_color: #0007
+                                        shadow_offset: vec2(5.0,5.0)
+                                        shadow_radius: 10.0
+                                    }
+
+                                    <Label> { text: "<RectShadowView>" }
+                                }
+
+                                <RoundedShadowView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #000,
+                                        border_radius: 5.,
+                                        border_color: #8
+                                        border_size: 2.0
+                                        shadow_color: #0007
+                                        shadow_radius: 10.0
+                                        shadow_offset: vec2(5.0,5.0)
+                                    }
+
+                                    <Label> { text: "<RoundedShadowView>" }
+                                }
+
+                                <RoundedView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #000,
+                                        border_radius: 5.,
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                    }
+
+                                    <Label> { text: "<RoundedView>" }
+                                }
+
+                                <RoundedXView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #000,
+                                        border_radius: vec2(1.0, 5.0),
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                    }
+
+                                    <Label> { text: "<RoundedXView>" }
+                                }
+
+                                <RoundedYView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #000,
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_radius: vec2(1.0, 5.0),
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                    }
+
+                                    <Label> { text: "<RoundedYView>" }
+                                }
+
+                                <RoundedAllView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #000,
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_radius: vec4(1.0, 5.0, 2.0, 3.0),
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                    }
+
+                                    <Label> { text: "<RoundedAllView>" }
+                                }
+
+                                <CircleView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 15.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #0,
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_radius: 30.,
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                    }
+
+                                    <Label> { text: "<CircleView>" }
+                                }
+
+                                <HexagonView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color: #0,
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_inset: vec4(0.0, 0.0, 0.0, 0.0)
+                                        border_radius: vec2(0.0, 0.0)
+                        
+                                    }
+
+                                    <Label> { text: "<HexagonView>" }
+                                }
+
+                                <GradientXView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color_1: #f00,
+                                        color_2: #f80,
+                                        color_dither: 2.0
+                                    }
+
+                                    <Label> { text: "<GradientXView>" }
+                                }
+
+                                <GradientYView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    draw_bg: {
+                                        color_1: #f00,
+                                        color_2: #f80,
+                                        color_dither: 2.0
+                                    }
+
+                                    <Label> { text: "<GradientYView>" }
+                                }
+
+                                <CachedView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 10.,
+                                    align: { x: 0.5, y: 0.5 }
+
+                                    <View> {
+                                        width: Fit, height: Fit,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<CachedView>" }
+                                    }
+
+                                }
+
+                                <CachedRoundedView> {
+                                    width: Fit, height: Fit, 
+                                    padding: 0.,
+                                    align: { x: 0.5, y: 0.5 }
+                                    draw_bg: {
+                                        border_size: 2.0
+                                        border_color: #8
+                                        border_inset: vec4(0., 0., 0., 0.)
+                                        border_radius: 2.5
+                                    }
+
+                                    <View> {
+                                        width: Fit, height: Fit,
+                                        padding: 10.,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<CachedRoundedView>" }
+                                    }
+
+                                }
+
+                                <CachedScrollXY> {
+                                    width: 100, height: 100, 
+                                    padding: 10.,
+                                    align: { x: 0., y: 0. }
+
+                                    <View> {
+                                        width: 400., height: 400.,
+                                        flow: Down,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                        <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
+                                    }
+                                }
+
+                                <CachedScrollX> {
+                                    width: 100, height: 100, 
+                                    padding: 10.,
+                                    align: { x: 0., y: 0. }
+
+                                    <View> {
+                                        width: 400., height: 400.,
+                                        flow: Down,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                        <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
+                                    }
+                                }
+
+                                <CachedScrollY> {
+                                    width: 100, height: 100, 
+                                    padding: 10.,
+                                    align: { x: 0., y: 0. }
+
+                                    <View> {
+                                        width: 400., height: 400.,
+                                        flow: Down,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                        <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
+                                    }
+                                }
+
+                                <ScrollXYView> {
+                                    width: 100, height: 100, 
+                                    padding: 10.,
+                                    align: { x: 0., y: 0. }
+                                    show_bg: true,
+                                    draw_bg: {
+                                        color: #8
+                                    }
+
+                                    <View> {
+                                        width: 400., height: 400.,
+                                        flow: Down,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                        <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
+                                    }
+                                }
+
+                                <ScrollXView> {
+                                    width: 100, height: 100, 
+                                    padding: 10.,
+                                    align: { x: 0., y: 0. }
+                                    show_bg: true,
+                                    draw_bg: {
+                                        color: #8
+                                    }
+
+                                    <View> {
+                                        width: 400., height: 400.,
+                                        flow: Down,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                        <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
+                                    }
+                                }
+
+                                <ScrollYView> {
+                                    width: 100, height: 100, 
+                                    padding: 10.,
+                                    align: { x: 0., y: 0. }
+                                    show_bg: true,
+                                    draw_bg: {
+                                        color: #8
+                                    }
+
+                                    <View> {
+                                        width: 400., height: 400.,
+                                        flow: Down,
+                                        show_bg: true, 
+                                        draw_bg: { color: #0 }
+
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                        <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
+                                    }
+                                }
+
+                            }
+                        } 
+
+                        TabTypography = <UIZooTab> {
+                            <H1> { text: "H1 headline" }
+                            <H1italic> { text: "H1 italic headline" }
+                            <H2> { text: "H2 headline" }
+                            <H2italic> { text: "H2 italic headline" }
+                            <H3> { text: "H3 headline" }
+                            <H3italic> { text: "H3 italic headline" }
+                            <H4> { text: "H4 headline" }
+                            <H4italic> { text: "H4 italic headline" }
+                            <P> { text: "P copy text" }
+                            <Pitalic> { text: "P italic copy text" }
+                            <Pbold> { text: "P bold copy text" }
+                            <Pbolditalic> { text: "P bold italic copy text" }
+
+                        }
+
+                        TabImage = <UIZooTab> {
+                            flow: Right,
+
+                            <ZooGroup> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2)
+                                scroll_bars: <ScrollBars> {}
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250, flow: Down,
+                                        <Image> { source: dep("crate://self/resources/ducky.png" ) }
+                                    }
+                                    <P> { text: "Default" }
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { height: Fill, source: dep("crate://self/resources/ducky.png" ), min_height: 100 }
+                                    }
+                                    <P> { text: "min_height: 100" } // TODO: get this to work correctly
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { width: Fill, source: dep("crate://self/resources/ducky.png" ), width_scale: 1.1 }
+                                    }
+                                    <P> { text: "width_scale: 1.5" } // TODO: get this to work correctly
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png"), fit: Stretch }
+                                    }
+                                    <P> { text: "fit: Stretch" }
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
+                                    }
+                                    <P> { text: "fit: Horizontal" }
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
+                                    }
+                                    <P> { text: "fit: Vertical" }
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
+                                    }
+                                    <P> { text: "fit: Smallest" }
+                                }
+                                <View> {
+                                    width: Fit, height: Fit, flow: Down,
+                                    <View> {
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
+                                    }
+                                    <P> { text: "fit: Biggest" }
+                                    }
+                                }
+                            }
+
+                            TabLinkLabel = <UIZooTab> {
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    spacing: (THEME_SPACE_2)
+                                    <LinkLabel> {
+                                        draw_bg: {
+                                            color: #0AA
+                                            color_hover: #0FF
+                                            color_down: #0
+                                        }
+
+                                        draw_text: {
+                                            color: #0AA
+                                            color_hover: #0FF
+                                            color_down: #0
+                                        }
+
+                                        text: "Click me!"
+                                    }
+                                    <LinkLabel> { text: "Click me!"}
+                                    <LinkLabel> { text: "Click me!"}
+                                }
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    spacing: (THEME_SPACE_2)
+                                    <LinkLabelGradientY> { text: "<LinkLabelGradientY>"}
+                                    <LinkLabelGradientX> { text: "<LinkLabelGradientX>"}
+                                }
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    spacing: (THEME_SPACE_2)
+                                    <LinkLabelIcon> {
+                                        text: "Click me!"
+                                        draw_icon: {
+                                            color: #f00,
+                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                        }
+
+                                        icon_walk: {
+                                            width: 12.5, height: Fit,
+                                            margin: 0.0
+                                        }
+                                    }
+                                    <LinkLabelIcon> {
+                                        text: "Click me!"
+                                        draw_icon: {
+                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                        }
+
+                                        icon_walk: {
+                                            width: 12.5,height: Fit,
+                                            margin: 0.0
+                                        }
+                                    }
+                                    <LinkLabelIcon> {
+                                        text: "Click me!"
+                                        draw_icon: {
+                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                        }
+
+                                        icon_walk: {
+                                            width: 12.5, height: Fit,
+                                            margin: 0.0
+                                        }
+                                    }
+
+                                }
+                            }
+
+                            TabButton = <UIZooTab> {
+                                height: Fill, width: Fill
+                                padding: 10.,
+                                flow: Down,
+                                spacing: 10.,
+                                scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+                                
+                                basicbutton = <Button> {
+
+                                    draw_text: {
+                                        color: (THEME_COLOR_TEXT_DEFAULT)
+                                        color_hover: (THEME_COLOR_TEXT_HOVER)
+                                        color_down: (THEME_COLOR_TEXT_PRESSED)
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
+                                    }
+
+
+                                    icon_walk: {
+                                        width: (THEME_DATA_ICON_WIDTH), height: Fit,
+                                    }
+
+                                    draw_icon: {
+                                        color: (THEME_COLOR_TEXT_DEFAULT)
+                                        color_hover: (THEME_COLOR_TEXT_HOVER)
+                                        color_down: (THEME_COLOR_TEXT_PRESSED)
+                                    }
+
+                                    draw_bg: {
+                                        border_radius: (THEME_BEVELING)
+                                        border_radius: (THEME_CORNER_RADIUS)
+
+                                        color: (THEME_COLOR_CTRL_DEFAULT)
+                                        color_hover: (THEME_COLOR_CTRL_HOVER)
+                                        color_down: (THEME_COLOR_CTRL_PRESSED)
+
+                                        border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+                                        border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+                                        border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+                                        border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+                                        border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+                                        border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+                                    }
+
+                                    text: "<Button>"
+                                }
+
+                                iconbutton = <ButtonIcon> {
+                                    draw_icon: {
+                                        color: #f00,
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                    text: "<ButtonIcon>"
+                                }
+                                <ButtonGradientX> {
+                                    draw_bg: {
+                                        border_radius: 1.0,
+                                        border_radius: 4.0
+
+                                        color_1: #C00
+                                        color_1_hover: #F0F
+                                        color_1_down: #800
+
+                                        color_2: #0CC
+                                        color_2_hover: #0FF
+                                        color_2_down: #088
+
+                                        border_color_1: #C
+                                        border_color_1_hover: #F
+                                        border_color_1_down: #0
+
+                                        border_color_2: #3
+                                        border_color_2_hover: #6
+                                        border_color_2_down: #8
+
+                                    }
+                                    text: "<ButtonGradientX>"
+                                }
+
+                                <ButtonGradientY> {
+                                    draw_bg: {
+                                        border_radius: 1.0,
+                                        border_radius: 4.0
+
+                                        color_1: #C00
+                                        color_1_hover: #F0F
+                                        color_1_down: #800
+
+                                        color_2: #0CC
+                                        color_2_hover: #0FF
+                                        color_2_down: #088
+
+                                        border_color_1: #C
+                                        border_color_1_hover: #F
+                                        border_color_1_down: #0
+
+                                        border_color_2: #3
+                                        border_color_2_hover: #6
+                                        border_color_2_down: #8
+
+                                    }
+                                    text: "<ButtonGradientX>"
+                                }
+
+                                <ButtonFlat> {
+                                    draw_icon: {
+                                        color: #f00,
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                    text: "<ButtonFlat>"
+                                }
+
+                                <ButtonFlat> {
+                                    flow: Down,
+                                    icon_walk: { width: 15. }
+                                    draw_icon: {
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                    text: "<ButtonFlat> (Vertical)"
+                                }
+
+                                <ButtonFlatter> {
+                                    draw_icon: {
+                                        color: #f00,
+                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    }
+                                    text: "<ButtonFlatter>"
+                                }
+
+                                styledbutton = <Button> {
                                 // Allows instantiation of customly styled elements as i.e. <MyButton> {}.
 
                                     // BUTTON SPECIFIC PROPERTIES
@@ -1429,29 +1544,6 @@ live_design!{
                                         }
                                     }
 
-                                    // draw_text: { // Shader object that draws the icon.
-                                    //     wrap: Word, // Wraps text between words.
-                                    //     text_style: {
-                                    //     // Controls the appearance of text.
-                                    //         font: {path: dep("crate://self/resources/GoNotoKurrent-Bold.ttf")},
-                                    //         // Font file dependency.
-
-                                    //         font_size: 12.0, // Font-size of 12.0.
-                                    //     }
-
-                                    //     fn get_color(self) -> vec4 { // Overwrite the shader's fill method.
-                                    //         return mix( // State transition animations.
-                                    //             mix(
-                                    //                 self.color,
-                                    //                 self.color,
-                                    //                 self.color_down
-                                    //             ),
-                                    //             self.color_pressed,
-                                    //             self.pressed
-                                    //         )
-                                    //     }
-                                    // }
-
                                     grab_key_focus: true, // Keyboard gets focus when clicked.
 
                                     icon_walk: {
@@ -1466,7 +1558,7 @@ live_design!{
                                         height: Fit,
                                     }
 
-                                    text: "I can be clicked", // Text label.
+                                    text: "Freely Styled <Button> clicked: 0", // Text label.
 
                                     animator: { // State change triggered animations.
                                         hover = { // State
@@ -1531,262 +1623,519 @@ live_design!{
                                     align: { x: 0.5, y: 0.5 },
                                     // Positions children at the left (x) bottom (y) corner of the parent.
                                 }
+                        }
 
-                                <H4> { text: "Preset: ButtonFlat"}
-                                <ButtonFlat> {
-                                    text: "Flat Button"
+                        TabTextInput = <UIZooTab> {
+                            flow: Down,
+                            spacing: (THEME_SPACE_1)
+                            <View> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2),
+                                <H4> { text: "Default", width: 175.}
+                                simpletextinput = <TextInput> { }
+                                simpletextinput_outputbox = <P> {
+                                    text: "Output"
                                 }
+                            }
+                            <View> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2),
+                                <H4> { text: "Inline Label", width: 175.}
+                                <TextInput> { empty_message: "Inline Label" }
+                            }
+                            <View> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2),
+                                <H4> { text: "TextInputGradientY", width: 175.}
+                                <TextInputGradientY> { empty_message: "Inline Label" }
+                            }
+                            <View> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2),
+                                <H4> { text: "TextInputGradientX", width: 175.}
+                                <TextInputGradientX> { empty_message: "Inline Label" }
+                            }
 
-                                <H4> { text: "Preset: ButtonFlatter"}
-                                <ButtonFlatter> {
-                                    draw_icon: {
-                                        color: #f00,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                            <View> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2),
+                                <H4> { text: "Customized A", width: 175.}
+                                <TextInputGradientX> {
+                                    draw_bg: {
+                                        border_radius: 7.
+                                        border_size: 1.5
+
+                                        color_dither: 1.0
+
+                                        color_1: #F
+                                        color_1_hover: #F
+                                        color_1_focus: #F
+
+                                        color_2: #AA0
+                                        color_2_hover: #FF0
+                                        color_2_focus: #CC0
+
+                                        border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+                                        border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+                                        border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+
+                                        border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+                                        border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+                                        border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
                                     }
-                                    text: "Flatter Button"
+
+                                    draw_text: {
+                                        color: #3
+                                        color_hover: #484848
+                                        color_focus: #0
+                                        color_empty: #7
+                                        color_empty_focus: #6
+
+                                        wrap: Word,
+
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            line_spacing: (THEME_FONT_LINE_SPACING),
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
+
+                                        fn get_color(self) -> vec4 {
+                                            return
+                                            mix(
+                                                mix(
+                                                    mix(self.color, self.color_hover, self.hover),
+                                                    self.color_focus,
+                                                    self.focus
+                                                ),
+                                                mix(self.color_empty, self.color_empty_focus, self.hover),
+                                                self.is_empty
+                                            )
+                                        }
+                                    }
+
+                                    draw_selection: {
+                                        color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+                                        color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
+                                        color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
+
+                                        color_2: #0AA
+                                        color_2_hover: #0FF
+                                        color_2_focus: #0CC
+                                    }
+
+                                    draw_cursor: { color: #f00 }
+
+                                    empty_message: "Inline Label"
                                 }
 
-                                <H3> { text: "Checkbox" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                <TextInputGradientY> {
+                                    draw_bg: {
+                                        border_radius: 7.
+                                        border_size: 1.5
 
-                                <H3> { text: "ColorPicker" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        color_dither: 1.0
 
-                                <H3> { text: "Dock" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        color_1: #F
+                                        color_1_hover: #F
+                                        color_1_focus: #F
 
-                                <H3> { text: "DropDown" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        color_2: #AA0
+                                        color_2_hover: #FF0
+                                        color_2_focus: #CC0
 
-                                <H3> { text: "ExpandablePanel" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+                                        border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+                                        border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
 
-                                <H3> { text: "FileTree" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+                                        border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+                                        border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+                                    }
 
-                                <H3> { text: "FlatList" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                    draw_text: {
+                                        color: #3
+                                        color_hover: #484848
+                                        color_focus: #0
+                                        color_empty: #7
+                                        color_empty_focus: #6
 
-                                <H3> { text: "FoldButton" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        wrap: Word,
 
-                                <H3> { text: "FoldHeader" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            line_spacing: (THEME_FONT_LINE_SPACING),
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
 
-                                <H3> { text: "Html" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        fn get_color(self) -> vec4 {
+                                            return
+                                            mix(
+                                                mix(
+                                                    mix(self.color, self.color_hover, self.hover),
+                                                    self.color_focus,
+                                                    self.focus
+                                                ),
+                                                mix(self.color_empty, self.color_empty_focus, self.hover),
+                                                self.is_empty
+                                            )
+                                        }
+                                    }
 
-                                <H3> { text: "Icon" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                    draw_selection: {
+                                        color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+                                        color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
+                                        color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
 
-                                <H3> { text: "Image" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                        color_2: #0AA
+                                        color_2_hover: #0FF
+                                        color_2_focus: #0CC
+                                    }
 
-                                <H3> { text: "ImageBlend" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
+                                    draw_cursor: { color: #f00 }
 
-                                <H3> { text: "Label" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "LinkLabel" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "Markdown" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "NavControl" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "PageFlip" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "Piano" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "PopupMenu" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "PortalList" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "RadioButton" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "RotatedImage" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "ScrollBar" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "ScrollBars" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "SlidePanel" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "Slider" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "SlidesView" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "Splitter" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "StackNavigation" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "Tab" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "TabBar" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "TabCloseButton" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "TextInput" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "VectorLine" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "Video" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-                                <H3> { text: "View" }
-                                <H4> { text: "Basic"}
-                                <H4> { text: "Typical"}
-                                <H4> { text: "Advanced"}
-
-
+                                    empty_message: "Inline Label"
+                                }
                             }
                         }
+
+                        TabLabel = <UIZooTab> {
+                            <Label> { text:"Default single line textbox" }
+                            <Label> { <Label> { text: "This is a small line of text" } }
+                            <Label> {
+                                draw_text: {
+                                    color: (COLOR_ACCENT)
+                                    text_style: {
+                                        font_size: 20,
+                                    }
+                                },
+                                text: "You can style text using colors and fonts"
+                            }
+                            <LabelGradientX> {
+                                draw_text: {
+                                    color_1: #0ff
+                                    color_1: #088
+                                    text_style: {
+                                        font_size: 20,
+                                    }
+                                },
+                                
+                                text: "<LabelGradientX>"
+                            }
+                            <LabelGradientX> { text: "<LabelGradientY>" }
+                            <LabelGradientY> {
+                                draw_text: {
+                                    color_1: #0ff
+                                    color_1: #088
+                                    text_style: {
+                                        font_size: 20,
+                                    }
+                                },
+                                
+                                text: "<LabelGradientX>"
+                            }
+                            <LabelGradientY> { text: "<LabelGradientY>" }
+                            <Label> {
+                                draw_text: {
+                                    fn get_color(self) ->vec4{
+                                        return mix((COLOR_ACCENT), (THEME_COLOR_U_HIDDEN), self.pos.x)
+                                    }
+                                    color: (THEME_COLOR_MAKEPAD)
+                                    text_style: {
+                                        font_size: 40.,
+                                    }
+                                },
+                                text: "OR EVEN SOME PIXELSHADERS"
+                            }
+                        }
+
+                        TabSlider = <UIZooTab> {
+                            flow: Right,
+                            <View> {
+                                flow: Down,
+                                <Slider> { text: "Default" }
+                                <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+                                <Slider> { text: "min/max", min: 0., max: 100. }
+                                <Slider> { text: "precision", precision: 20 }
+                                <Slider> { text: "stepped", step: 0.1 }
+                                <SliderBig> { text: "Default" }
+                                <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+                                <SliderBig> { text: "min/max", min: 0., max: 100. }
+                                <SliderBig> { text: "precision", precision: 20 }
+                                <SliderBig> { text: "stepped", step: 0.1 }
+                                <SliderAlt1> {
+                                    text: "Colored",
+                                    draw_slider: {
+                                        val_color_1: (#FFCC00),
+                                        val_color_2: #f00,
+                                        handle_color_1: #0,
+                                        handle_color_2: #0,
+                                    }
+                                }
+                                <SliderAlt1> {
+                                    text: "Solid",
+                                    draw_text: {
+                                        color: #0ff;
+                                    }
+                                    draw_slider: {
+                                        val_color_1: #f08,
+                                        val_color_2: #f08,
+                                        handle_color_1: #FFFF,
+                                        handle_color_2: #FFF0,
+                                    }
+                                }
+                                <SliderAlt1> {
+                                    text: "Solid",
+                                    draw_slider: {
+                                        val_color_1: #6,
+                                        val_color_2: #6,
+                                        handle_color_1: #0,
+                                        handle_color_2: #C,
+                                    }
+                                }
+                                <SliderAlt1> { text: "min/max", min: 0., max: 100. }
+                                <SliderAlt1> { text: "precision", precision: 20 }
+                                <SliderAlt1> { text: "stepped", step: 0.1 }
+                                <SliderAlt1> {
+                                    text: "label_size",
+                                    draw_slider: {label_size: 150. },
+                                }
+                            }
+                            <View> {
+                                flow: Down,
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    flow: Right,
+                                    <Rotary> {
+                                        width: 100, height: 100,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 90.,
+                                            width: 20.
+                                            padding: 2.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 100, height: 200,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 60.,
+                                            width: 10.,
+                                            padding: 4.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 200, height: 100,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 75.,
+                                            width: 20.
+                                            padding: 4,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 200, height: 150,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 90.,
+                                            width: 20.
+                                            padding: 4.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: Fill, height: 150,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 60.,
+                                            width: 20.
+                                            padding: 2.,
+                                        }
+                                    }
+                                }
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    flow: Right,
+                                    <Rotary> {
+                                        width: 100., height: 100.,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 0.,
+                                            width: 20.
+                                            padding: 0.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 120., height: 120.,
+                                        text: "Solid",
+                                        draw_text: {
+                                            color: #0ff;
+                                        }
+                                        draw_slider: {
+                                            val_color_1: #ff0,
+                                            val_color_2: #f00,
+                                            handle_color: #f,
+                                            gap: 180.,
+                                            width: 20.,
+                                            padding: 2.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 120., height: 120.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            val_color_1: #0ff,
+                                            val_color_2: #ff0,
+                                            handle_color: #f,
+                                            gap: 90.,
+                                            width: 20.,
+                                            padding: 2.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 100., height: 90.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            gap: 90.,
+                                            padding: 10.,
+                                            width: 20.,
+                                            padding: 2.
+                                            handle_color: #f0f,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 150., height: 150.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            val_color_1: #0ff,
+                                            val_color_2: #0ff,
+                                            gap: 180.,
+                                            padding: 4.,
+                                            width: 6.,
+                                        }
+                                    }
+                                    <Rotary> {
+                                        width: 150., height: 150.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            gap: 0.,
+                                            width: 10.0,
+                                            padding: 4.,
+                                        }
+                                    }
+                                }
+                                
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    flow: Right,
+                                    <RotaryFlat> {
+                                        width: 100., height: 100.,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 0.,
+                                            width: 20.
+                                            padding: 0.,
+                                        }
+                                    }
+                                    <RotaryFlat> {
+                                        width: 120., height: 120.,
+                                        text: "Solid",
+                                        draw_text: {
+                                            color: #0ff;
+                                        }
+                                        draw_slider: {
+                                            val_color_1: #ff0,
+                                            val_color_2: #f00,
+                                            handle_color: #f,
+                                            gap: 180.,
+                                            width: 20.,
+                                            padding: 2.,
+                                        }
+                                    }
+                                    <RotaryFlat> {
+                                        width: 120., height: 120.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            val_color_1: #0ff,
+                                            val_color_2: #ff0,
+                                            handle_color: #f,
+                                            gap: 90.,
+                                            width: 20.,
+                                            padding: 2.,
+                                        }
+                                    }
+                                    <RotaryFlat> {
+                                        width: 100., height: 90.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            gap: 90.,
+                                            padding: 10.,
+                                            width: 20.,
+                                            handle_color: #f0f,
+                                        }
+                                    }
+                                    <RotaryFlat> {
+                                        width: 150., height: 150.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            val_color_1: #0ff,
+                                            val_color_2: #0ff,
+                                            gap: 180.,
+                                            padding: 4.,
+                                            width: 6.,
+                                        }
+                                    }
+                                    <RotaryFlat> {
+                                        width: Fill, height: 150.,
+                                        text: "Solid",
+                                        draw_slider: {
+                                            val_color_1: #8;
+                                            val_color_2: #ff0;
+                                            gap: 75.,
+                                            width: 40.0,
+                                            padding: 4.,
+                                        }
+                                    }
+                                }
+                                <View> {
+                                    width: Fill, height: Fit,
+                                    flow: Right,
+                                    <RotarySolid> {
+                                        width: 100, height: 100,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 90.,
+                                        }
+                                    }
+                                    <RotarySolid> {
+                                        width: 200, height: 150,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 180.,
+                                        }
+                                    }
+                                    <RotarySolid> {
+                                        width: Fill, height: 150,
+                                        text: "Colored",
+                                        draw_slider: {
+                                            gap: 60.,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        TabHTML = <UIZooTab> {
+                            <Html> {
+                                width:Fill, height:Fit,
+                                body:"<H1>H1 Headline</H1><H2>H2 Headline</H2><H3>H3 Headline</H3><H4>H4 Headline</H4><H5>H5 Headline</H5><H6>H6 Headline</H6>This is <b>bold</b>&nbsp;and <i>italic text</i>.<sep><b><i>Bold italic</i></b>, <u>underlined</u>, and <s>strike through</s> text. <p>This is a paragraph</p> <code>A code block</code>. <br/> And this is a <a href='https://www.google.com/'>link</a><br/><ul><li>lorem</li><li>ipsum</li><li>dolor</li></ul><ol><li>lorem</li><li>ipsum</li><li>dolor</li></ol><br/> <blockquote>Blockquote</blockquote> <pre>pre</pre><sub>sub</sub><del>del</del>"
+                            }
+                        }
+
+                        TabMarkdown = <UIZooTab> {
+                            <Markdown> {
+                                width:Fill, height: Fit,
+                                body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote.\n\nThis is `inline code`.\n\n ```code block```"
+                            }
+                        }
+
                     }
-
-                    // TODO: SHOW
-                    // SEEMS NOT TO WORK WITHOUT DUMMY DATA
-                    // <ZooHeader> {
-                    //     title = {text:"Portal List"}
-                    //     <ZooDesc> {text:"Portal List"}
-                    //     <ZooGroup> { <PortalList> { width: Fill, height: 100.} }
-                    // }
-
-                    // TODO: SHOW
-                    // <ZooHeader> {
-                    //     title = {text:"Stack Navigation"}
-                    //     <ZooDesc> {text:"Stack Navigation"}
-                    //     <ZooGroup> { <StackNavigation> { width: Fill, height: 100.} }
-                    // }
-
-                    // TODO: SHOW
-                    // <ZooHeader> {
-                    //     title = {text:"Flat list"}
-                    //     <ZooDesc> {text:"Flat list"}
-                    //     <ZooGroup> { <FlatList> { width: Fill, height: 100.} }
-                    // }
-
-                    // TODO: SHOW
-                    // REFERENCE: https://github.com/project-robius/makepad_wonderous/blob/main/src/timeline/timeline_screen.rs#L242-L264
-                    // <ZooHeader> {
-                    //     title = {text: "Expandable Panel"}
-                    //     <ZooDesc> {text: "Expandable Panel"}
-                    //     <ZooGroup> {
-                    //         expandable_panel = <ExpandablePanel> {
-                    //             body = {
-                    //                 flow: Down,
-                    //                 spacing: 10,
-                    //                 header = <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_2)} }
-                    //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: (DEMO_COLOR_1)} }
-                    //             }
-
-                    //             panel = {
-                    //                 draw_bg: { color: (DEMO_COLOR_3) }
-
-                    //                 scroll_handler = {
-                    //                     draw_bg: {
-                    //                         color: #aaa
-                    //                         radius: 2.
-                    //                     }
-                    //                 }
-
-                    //                 <View> { height: 100., width: 100., show_bg: true, draw_bg: { color: #ff0} }
-                    //             }
-                    //         }
-                    //     }
-                    // }
 
                 }
             }
