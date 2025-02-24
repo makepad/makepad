@@ -15,10 +15,11 @@ live_design!{
         min_handle_size: 30.0
         draw_bar: {
             //draw_depth: 5.0
-            uniform border_radius: 1.5
-            instance bar_width: 6.0
-            instance pressed: 0.0
+            instance down: 0.0
             instance hover: 0.0
+
+            uniform border_radius: 1.5
+            uniform bar_width: 6.0
                                     
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -49,7 +50,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bar: {pressed: 0.0, hover: 0.0}
+                        draw_bar: {down: 0.0, hover: 0.0}
                     }
                 }
                                                 
@@ -57,22 +58,22 @@ live_design!{
                     cursor: Default,
                     from: {
                         all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+                        down: Forward {duration: 0.01}
                     }
                     apply: {
                         draw_bar: {
-                            pressed: 0.0,
+                            down: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                                                 
-                pressed = {
+                down = {
                     cursor: Default,
                     from: {all: Snap}
                     apply: {
                         draw_bar: {
-                            pressed: 1.0,
+                            down: 1.0,
                             hover: 1.0,
                         }
                     }
@@ -89,7 +90,7 @@ live_design!{
             //draw_depth: 5.0
             uniform border_radius: 1.5
             instance bar_width: 6.0
-            instance pressed: 0.0
+            instance down: 0.0
             instance hover: 0.0
                         
             fn pixel(self) -> vec4 {
@@ -117,7 +118,7 @@ live_design!{
                     mix(
                         THEME_COLOR_CTRL_SCROLLBAR_HOVER,
                         THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
-                        self.pressed
+                        self.down
                     ),
                     self.hover
                 ));
@@ -129,7 +130,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bar: {pressed: 0.0, hover: 0.0}
+                        draw_bar: {down: 0.0, hover: 0.0}
                     }
                 }
                                 
@@ -137,22 +138,22 @@ live_design!{
                     cursor: Default,
                     from: {
                         all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+                        down: Forward {duration: 0.01}
                     }
                     apply: {
                         draw_bar: {
-                            pressed: 0.0,
+                            down: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                                 
-                pressed = {
+                down = {
                     cursor: Default,
                     from: {all: Snap}
                     apply: {
                         draw_bar: {
-                            pressed: 1.0,
+                            down: 1.0,
                             hover: 1.0,
                         }
                     }
@@ -432,7 +433,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.draw_bar.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                    self.animator_play(cx, id!(hover.pressed));
+                    self.animator_play(cx, id!(hover.down));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         ScrollAxis::Horizontal => rel.x,
