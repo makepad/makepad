@@ -192,7 +192,7 @@ live_design!{
             clip_x: false, clip_y: false,
             
             draw_bg: {
-                border_width: 1.0
+                border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_4)
                 shadow_radius: 10.0,
@@ -297,7 +297,7 @@ live_design!{
             clip_x: false, clip_y: false,
             
             draw_bg: {
-                border_width: 1.0
+                border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_4)
                 shadow_radius: 10.0,
