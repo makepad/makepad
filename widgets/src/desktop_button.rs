@@ -17,6 +17,10 @@ live_design!{
     
     pub DesktopButton = <DesktopButtonBase> {
         draw_bg: {
+            uniform color: (THEME_COLOR_APP_CAPTION_BAR)
+            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_down: (THEME_COLOR_CTRL_PRESSED)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.aa *= 3.0;
@@ -26,20 +30,39 @@ live_design!{
                 // WindowsMin
                 match self.button_type {
                     DesktopButtonType::WindowsMin => {
-                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.down), self.hover));
                         sdf.move_to(c.x - sz, c.y);
                         sdf.line_to(c.x + sz, c.y);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMax => {
-                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(
+                            mix(
+                                self.color,
+                                mix(
+                                    self.color_hover,
+                                    self.color_down,
+                                    self.down
+                                ), 
+                                self.hover
+                            )
+                        );
                         sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMaxToggled => {
-                        let clear = mix(THEME_COLOR_APP_CAPTION_BAR, mix(#6, #9, self.pressed), self.hover);
+                        let clear = 
+                            mix(
+                                self.color,
+                                mix(
+                                    self.color_hover,
+                                    self.color_down,
+                                    self.down
+                                ), 
+                                self.hover
+                        );
                         sdf.clear(clear);
                         let sz = 3.5;
                         sdf.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
@@ -50,7 +73,17 @@ live_design!{
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsClose => {
-                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#e00, #c00, self.pressed), self.hover));
+                        sdf.clear(
+                            mix(
+                                self.color,
+                                mix(
+                                    self.color_hover,
+                                    self.color_down,
+                                    self.down
+                                ), 
+                                self.hover
+                            )
+                        );
                         sdf.move_to(c.x - sz, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.move_to(c.x - sz, c.y + sz);
@@ -59,7 +92,17 @@ live_design!{
                         return sdf.result;
                     }
                     DesktopButtonType::XRMode => {
-                        sdf.clear(mix(THEME_COLOR_APP_CAPTION_BAR, mix(#0aa, #077, self.pressed), self.hover));
+                        sdf.clear(
+                            mix(
+                                self.color,
+                                mix(
+                                    self.color_hover,
+                                    self.color_down,
+                                    self.down
+                                ), 
+                                self.hover
+                            )
+                        );
                         let w = 12.;
                         let h = 8.;
                         sdf.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
@@ -76,7 +119,17 @@ live_design!{
                     }
                     DesktopButtonType::Fullscreen => {
                         sz = 8.;
-                        sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                        sdf.clear(
+                            mix(
+                                self.color,
+                                mix(
+                                    self.color_hover,
+                                    self.color_down,
+                                    self.down
+                                ), 
+                                self.hover
+                            )
+                        );
                         sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                         sdf.rect(c.x - sz + 1.5, c.y - sz + 1.5, 2. * (sz - 1.5), 2. * (sz - 1.5));
                         sdf.subtract();
@@ -98,7 +151,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {down: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -109,17 +162,17 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {
-                            pressed: 0.0,
+                            down: 0.0,
                             hover: 1.0,
                         }
                     }
                 }
                 
-                pressed = {
+                down = {
                     from: {all: Snap}
                     apply: {
                         draw_bg: {
-                            pressed: 1.0,
+                            down: 1.0,
                             hover: 1.0,
                         }
                     }
@@ -135,6 +188,7 @@ pub struct DesktopButton {
     #[animator] animator: Animator,
     #[walk] walk: Walk,
     #[redraw] #[live] draw_bg: DrawDesktopButton,
+
 }
 
 impl Widget for DesktopButton{
@@ -145,7 +199,7 @@ impl Widget for DesktopButton{
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) => {
                 cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                self.animator_play(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.down));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
@@ -197,7 +251,7 @@ pub enum DesktopButtonType {
 pub struct DrawDesktopButton {
     #[deref] draw_super: DrawQuad,
     #[live] hover: f32,
-    #[live] pressed: f32,
+    #[live] down: f32,
     #[live] button_type: DesktopButtonType
 }
 
