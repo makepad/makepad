@@ -29,26 +29,33 @@ live_design!{
         }
         label_align: { y: 0.0 }
         
-        draw_radio: {
+        draw_bg: {
             uniform size: 7.0;
-            uniform bevel: (THEME_BEVELING)
+
+            uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_top: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_top_hover: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_top_active: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_dither: 1.0
 
-            uniform color_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_bottom_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_bottom_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
 
-            uniform outline_color_top: (THEME_COLOR_BEVEL_SHADOW)
-            uniform outline_color_top_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform outline_color_top_active: (THEME_COLOR_BEVEL_SHADOW)
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_active: (THEME_COLOR_INSET_PIT_TOP)
 
-            uniform outline_color_bottom: (THEME_COLOR_BEVEL_LIGHT)
-            uniform outline_color_bottom_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform outline_color_bottom_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform mark_color: (THEME_COLOR_CTRL_DEFAULT)
             uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
@@ -57,6 +64,8 @@ live_design!{
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 match self.radio_type {
                     RadioType::Round => {
                         let sz = self.size;
@@ -66,24 +75,24 @@ live_design!{
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_top, self.color_bottom, self.pos.y),
-                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                                 self.hover
                             )
                         )
                         sdf.stroke(
                             mix(
                                 mix(
-                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
-                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                                 self.hover
-                            ), self.bevel
+                            ), self.border_size
                         )
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
@@ -98,45 +107,39 @@ live_design!{
                                 self.active
                             )
                         );
-                        
                     }
                     RadioType::Tab => {
-                        let grad_top = 5.0;
-                        let grad_bot = 1.0;
-                        let body = mix(
-                            mix(self.mark_color, self.mark_color_hover, self.hover),
-                            mix(self.mark_color_active, self.mark_color_active * 1.5, self.hover),
-                            self.active
-                        );
-                        let body_transp = vec4(body.xyz, 0.0);
-                        let top_gradient = mix(body_transp, mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.active), max(0.0, grad_top - sdf.pos.y) / grad_top);
-                        let bot_gradient = mix(
-                            mix(body_transp, THEME_COLOR_BEVEL_LIGHT, self.active),
-                            top_gradient,
-                            clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                        );
-                        
-                        // the little drop shadow at the bottom
-                        let shift_inward = 0. * 1.75;
-                        sdf.move_to(shift_inward, self.rect_size.y);
-                        sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y);
-                        sdf.stroke(
-                            mix(THEME_COLOR_BEVEL_SHADOW,
-                                THEME_COLOR_U_HIDDEN,
-                                self.active
-                            ), THEME_BEVELING * 2.
-                        );
-                            
                         sdf.box(
                             1.,
                             1.,
                             self.rect_size.x - 2.0,
                             self.rect_size.y - 2.0,
-                            1.
+                            self.border_radius
                         )
-                        sdf.fill_keep(body)
+
+                        sdf.stroke_keep(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                    self.hover
+                                ),
+                                mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                self.active
+                            ), self.border_size)
+
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                    self.hover
+                                ),
+                                mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                self.active
+                            )
+                        )
                             
-                        sdf.stroke(bot_gradient, THEME_BEVELING * 1.5)
                     }
                 }
                 return sdf.result
@@ -171,24 +174,24 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
 
-            uniform color_top: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_top_hover: (THEME_COLOR_WHITE)
-            uniform color_top_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_WHITE)
+            uniform color_1_active: (THEME_COLOR_TEXT_ACTIVE)
 
-            uniform color_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_bottom_hover: (THEME_COLOR_WHITE)
-            uniform color_bottom_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_WHITE)
+            uniform color_2_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        mix(self.color_top, self.color_bottom, self.pos.y),
-                        mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.y),
                         self.hover
                     ),
                     mix(
-                        mix(self.color_top_active, self.color_bottom_active, self.pos.y),
-                        mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                        mix(self.color_1_active, self.color_2_active, self.pos.y),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.y),
                         self.hover
                     ),
                     self.active
@@ -202,7 +205,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        draw_radio: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                         draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
@@ -210,7 +213,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_radio: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                         draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
@@ -221,7 +224,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_radio: {active: 0.0}
+                        draw_bg: {active: 0.0}
                         draw_icon: {active: 0.0}
                         draw_text: {active: 0.0}
                         draw_icon: {active: 0.0}
@@ -231,7 +234,7 @@ live_design!{
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_radio: {active: 1.0}
+                        draw_bg: {active: 1.0}
                         draw_icon: {active: 1.0}
                         draw_text: {active: 1.0}
                         draw_icon: {active: 1.0}
@@ -243,7 +246,7 @@ live_design!{
         
     pub RadioButtonCustom = <RadioButton> {
         height: Fit,
-        draw_radio: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return sdf.result
@@ -258,37 +261,25 @@ live_design!{
         
     pub RadioButtonTextual = <RadioButton> {
         height: Fit,
-        draw_radio: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return sdf.result
             }
         }
+
         label_walk: {
             margin: 0.,
             width: Fit, height: Fit,
         }
+
         draw_text: {
-            instance hover: 0.0
-            instance active: 0.0
-                
-            uniform color: (THEME_COLOR_U_3)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_SELECTED)
+            color: (THEME_COLOR_U_3)
+            color_hover: (THEME_COLOR_TEXT_HOVER)
+            color_active: (THEME_COLOR_TEXT_SELECTED)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        self.color,
-                        self.color_hover,
-                        self.hover
-                    ),
-                    self.color_active,
-                    self.active
-                )
             }
         }
     }
@@ -297,27 +288,212 @@ live_design!{
         
     pub RadioButtonTab = <RadioButton> {
         height: Fit,
-        draw_radio: { radio_type: Tab }
+
+        label_walk: { margin: { left: 20., right: 5. } }
+
+        draw_bg: {
+            radio_type: Tab
+            border_size: (THEME_BEVELING)
+
+            color_1: (THEME_COLOR_CTRL_DEFAULT)
+            color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+
+            color_2: (THEME_COLOR_CTRL_DEFAULT)
+            color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+        }
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            instance hover: 0.0
-            instance active: 0.0
+            color: (THEME_COLOR_TEXT_DEFAULT)
+            color_hover: (THEME_COLOR_TEXT_HOVER)
+            color_active: (THEME_COLOR_TEXT_ACTIVE)
+        }
+    }
+
+    pub RadioButtonTabGradientX = <RadioButton> {
+        height: Fit,
+
+        label_walk: { margin: { left: 20., right: 5. } }
+
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
+            
+        draw_text: {
+            color: (THEME_COLOR_TEXT_DEFAULT)
+            color_hover: (THEME_COLOR_TEXT_HOVER)
+            color_active: (THEME_COLOR_TEXT_ACTIVE)
+        }
+
+        draw_bg: {
+            // uniform size: 7.0;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.5)
+            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
+            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
+
+            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
+            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
                 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
-                
-            fn get_color(self) -> vec4 {
-                return mix(
+                let body = mix(
                     mix(
-                        self.color,
-                        self.color_hover,
+                        mix(self.color_1, self.color_2, self.pos.x),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.x),
                         self.hover
                     ),
-                    self.color_active,
+                    mix(self.color_1_active, self.color_2_active, self.pos.x),
                     self.active
+                );
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
                 )
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.x + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.x + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.x + dither),
+                        self.active
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                        self.active
+                    )
+                )
+                return sdf.result
+            }
+        }
+    }
+
+    pub RadioButtonTabGradientY = <RadioButton> {
+        height: Fit,
+
+        label_walk: { margin: { left: 20., right: 5. } }
+
+        padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
+            
+        draw_text: {
+            color: (THEME_COLOR_TEXT_DEFAULT)
+            color_hover: (THEME_COLOR_TEXT_HOVER)
+            color_active: (THEME_COLOR_TEXT_ACTIVE)
+        }
+
+        draw_bg: {
+            // uniform size: 7.0;
+
+            // uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.5)
+            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
+            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
+
+            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
+            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
+                
+                let body = mix(
+                    mix(
+                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                        self.hover
+                    ),
+                    mix(self.color_1_active, self.color_2_active, self.pos.y),
+                    self.active
+                );
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                        self.active
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                        self.active
+                    )
+                )
+                return sdf.result
             }
         }
     }
@@ -328,13 +504,13 @@ live_design!{
         flow: Right
         align: { x: 0.0, y: 0.5 }
         draw_bg: {
-            radius: 4.
+            border_radius: 0.
         }
     }
 
     pub RadioButtonGroupTab = <RadioButtonTab> {
         height: Fit,
-        draw_radio: { radio_type: Tab }
+        draw_bg: { radio_type: Tab }
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25), right: (THEME_SPACE_2 * 2.)}
             
     }
@@ -374,7 +550,7 @@ pub struct RadioButtonGroup {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct RadioButton {
-    #[redraw] #[live] draw_radio: DrawRadioButton,
+    #[redraw] #[live] draw_bg: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
     #[live] draw_text: DrawText,
 
@@ -410,7 +586,7 @@ impl RadioButtonGroup {
 
 impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_radio.begin(cx, walk, self.layout);
+        self.draw_bg.begin(cx, walk, self.layout);
         match self.media {
             MediaType::Image => {
                 let image_walk = self.image.walk(cx);
@@ -422,7 +598,7 @@ impl RadioButton {
             MediaType::None => {}
         }
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
-        self.draw_radio.end(cx);
+        self.draw_bg.end(cx);
     }
         
 }
@@ -448,7 +624,7 @@ impl Widget for RadioButton {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
                 
-        match event.hits(cx, self.draw_radio.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
