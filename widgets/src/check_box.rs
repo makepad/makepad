@@ -24,34 +24,39 @@ live_design!{
             margin: <THEME_MSPACE_H_1> { left: 12.5 }
         }
         
-        draw_check: {
+        draw_bg: {
             uniform size: 7.5;
 
-            uniform bevel: (THEME_BEVELING)
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_top: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_top_hover: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_top_active: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_dither: 1.0
 
-            uniform color_bottom: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_bottom_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_bottom_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_active: (THEME_COLOR_INSET_PIT_TOP)
 
-            uniform outline_color_top: (THEME_COLOR_BEVEL_SHADOW)
-            uniform outline_color_top_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform outline_color_top_active: (THEME_COLOR_BEVEL_SHADOW)
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_active: (THEME_COLOR_INSET_PIT_BOTTOM)
 
-            uniform outline_color_bottom: (THEME_COLOR_BEVEL_LIGHT)
-            uniform outline_color_bottom_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform outline_color_bottom_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform mark_color_focus: (THEME_COLOR_TEXT_FOCUSED)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_focus: (#f00)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 match self.check_type {
                     CheckType::Check => {
                         let left = 1;
@@ -60,15 +65,15 @@ live_design!{
                         let offset_y = -1.0;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5 + offset_y);
+                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_top, self.color_bottom, self.pos.y),
-                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                                 self.hover
                             )
                         )
@@ -76,13 +81,13 @@ live_design!{
                         sdf.stroke(
                             mix(
                                 mix(
-                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
-                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                                 self.hover
-                            ), self.bevel
+                            ), self.border_size
                         )
                         
                         let szs = sz * 0.5;
@@ -118,24 +123,24 @@ live_design!{
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_top, self.color_bottom, self.pos.y),
-                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                                 self.hover
                             )
                         )
                         sdf.stroke(
                             mix(
                                 mix(
-                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
-                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                                 self.hover
-                            ), self.bevel
+                            ), self.border_size
                         )
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
@@ -167,15 +172,15 @@ live_design!{
                         let sz = self.size;
                         let left = 0.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
+                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_top, self.color_bottom, self.pos.y),
-                                    mix(self.color_top_active, self.color_bottom_active, self.pos.y),
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.color_top_hover, self.color_bottom_hover, self.pos.y),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                                 self.hover
                             )
                         )
@@ -183,13 +188,13 @@ live_design!{
                         sdf.stroke(
                             mix(
                                 mix(
-                                    mix(self.outline_color_top, self.outline_color_bottom, self.pos.y),
-                                    mix(self.outline_color_top_active, self.outline_color_bottom_active, self.pos.y),
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
                                     self.active
                                 ),
-                                mix(self.outline_color_top_hover, self.outline_color_bottom_hover, self.pos.y),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                                 self.hover
-                            ), self.bevel
+                            ), self.border_size
                         )
                             
                         let isz = sz * 0.65;
@@ -287,7 +292,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        draw_check: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                         draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
@@ -295,7 +300,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                         draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
@@ -306,7 +311,7 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                         draw_text: {focus: 0.0}
                         draw_icon: {focus: 0.0}
                     }
@@ -314,7 +319,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         draw_icon: {focus: 1.0}
                     }
@@ -325,7 +330,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {active: 0.0},
+                        draw_bg: {active: 0.0},
                         draw_text: {active: 0.0},
                         draw_icon: {active: 0.0},
                     }
@@ -333,7 +338,7 @@ live_design!{
                 on = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_check: {active: 1.0}
+                        draw_bg: {active: 1.0}
                         draw_text: {active: 1.0}
                         draw_icon: {active: 1.0},
                     }
@@ -344,7 +349,7 @@ live_design!{
         
     pub CheckBoxToggle = <CheckBox> {
         align: { x: 0., y: 0. }
-        draw_check: {
+        draw_bg: {
             uniform mark_color: (THEME_COLOR_TEXT_DEFAULT)
             check_type: Toggle
         }
@@ -358,7 +363,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.25}}
                     apply: {
-                        draw_check: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                         draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
@@ -366,7 +371,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                         draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
@@ -377,7 +382,7 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                         draw_text: {focus: 0.0}
                         draw_icon: {focus: 0.0}
                     }
@@ -385,7 +390,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         draw_icon: {focus: 1.0}
                     }
@@ -397,7 +402,7 @@ live_design!{
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {active: 0.0},
+                        draw_bg: {active: 0.0},
                         draw_text: {active: 0.0},
                         draw_icon: {active: 0.0},
                     }
@@ -406,7 +411,7 @@ live_design!{
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {active: 1.0}
+                        draw_bg: {active: 1.0}
                         draw_text: {active: 1.0}
                         draw_icon: {active: 1.0},
                     }
@@ -416,7 +421,7 @@ live_design!{
     }
         
     pub CheckBoxCustom = <CheckBox> {
-        draw_check: { check_type: None }
+        draw_bg: { check_type: None }
         align: { x: 0.0, y: 0.5}
         label_walk: { margin: <THEME_MSPACE_H_2> {} }
     }
@@ -453,7 +458,7 @@ pub struct CheckBox {
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     
-    #[redraw] #[live] draw_check: DrawCheckBox,
+    #[redraw] #[live] draw_bg: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     
@@ -479,10 +484,10 @@ struct DrawLabelText {
 impl CheckBox {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_check.begin(cx, walk, self.layout);
+        self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
-        self.draw_check.end(cx);
+        self.draw_bg.end(cx);
     }
 }
 
@@ -510,7 +515,7 @@ impl Widget for CheckBox {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
                 
-        match event.hits(cx, self.draw_check.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
