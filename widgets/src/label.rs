@@ -19,6 +19,30 @@ live_design!{
             wrap: Word
         }
     }
+
+    pub LabelGradientX = <Label> {
+        width: Fit, height: Fit,
+        draw_text: {
+            uniform color_1: #f00,
+            uniform color_2: #ff0
+
+            fn get_color(self) ->vec4{
+                return mix(self.color_1, self.color_2, self.pos.y)
+            }
+        }
+    }
+    
+    pub LabelGradientY = <Label> {
+        width: Fit, height: Fit,
+        draw_text: {
+            uniform color_1: #f00,
+            uniform color_2: #ff0
+
+            fn get_color(self) ->vec4{
+                return mix(self.color_1, self.color_2, self.pos.x)
+            }
+        }
+    }
     
     pub H1 = <Label> {
         width: Fill,
