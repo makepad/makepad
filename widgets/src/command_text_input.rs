@@ -24,6 +24,44 @@ live_design! {
             height: Fit,
             visible: false,
 
+            header_view = <View> {
+                width: Fill,
+                height: Fit,
+                padding: {left: 12., right: 12., top: 12., bottom: 12.}
+                show_bg: true
+                visible: true,
+                draw_bg: {
+                    color: #ff0000,
+                    instance top_radius: 8.0,
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                        sdf.box_all(
+                            0.0,           // x position
+                            0.0,           // y position
+                            self.rect_size.x,  // width
+                            self.rect_size.y,  // height
+                            self.top_radius,   // left top
+                            self.top_radius,   // right top
+                            0.0,              // right bottom
+                            0.0               // left bottom
+                        );
+
+                        sdf.fill(vec4(self.color.rgb * self.color.a, self.color.a));
+                        return sdf.result
+                    }
+                }
+
+                header_label = <Label> {
+                    draw_text: {
+                        color: #495057,
+                        text_style: {
+                            font_size: 13.0,
+                        }
+                    }
+                }
+            }
+
             // Wrapper workaround to hide search input when inline search is enabled
             // as we currently can't hide the search input avoiding events.
             search_input_wrapper = <RoundedView> {
