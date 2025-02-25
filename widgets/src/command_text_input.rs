@@ -84,21 +84,10 @@ live_design! {
                             self.rect_size.y,
                             self.top_radius,
                             self.top_radius,
-                            0.0,
-                            0.0
+                            1.0,
+                            1.0
                         );
                         sdf.fill(self.color);
-                        sdf.box_all(
-                            self.border_width / 2.0,
-                            self.border_width / 2.0,
-                            self.rect_size.x - self.border_width,
-                            self.rect_size.y - self.border_width,
-                            self.top_radius,
-                            self.top_radius,
-                            0.0,
-                            0.0
-                        );
-                        sdf.stroke(self.border_color, self.border_width);
                         return sdf.result
                     }
                 }
