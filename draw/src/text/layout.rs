@@ -10,13 +10,12 @@ use {
         sdfer,
         shape::{self, ShapedText},
         substr::Substr,
-    },
-    std::{
+    }, std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
         ops::Range,
         rc::Rc,
-    },
+    }
 };
 
 #[derive(Debug)]
@@ -63,11 +62,13 @@ impl Layouter {
     }
 
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
+        use super::num::Zero;
+
         LayoutContext {
             loader: &mut self.font_loader,
             text: &params.text,
             options: params.options,
-            current_x_in_lpxs: 0.0,
+            current_point_in_lpxs: Point::ZERO,
             current_row_start: 0,
             current_row_end: 0,
             rows: Vec::new(),
@@ -106,7 +107,7 @@ struct LayoutContext<'a> {
     loader: &'a mut FontLoader,
     text: &'a Substr,
     options: LayoutOptions,
-    current_x_in_lpxs: f32,
+    current_point_in_lpxs: Point<f32>,
     current_row_start: usize,
     current_row_end: usize,
     rows: Vec<LaidoutRow>,
@@ -117,7 +118,7 @@ impl<'a> LayoutContext<'a> {
     fn remaining_width_on_current_row_in_lpxs(&self) -> Option<f32> {
         self.options
             .max_width_in_lpxs
-            .map(|max_width_in_lpxs| max_width_in_lpxs.into_inner() - self.current_x_in_lpxs)
+            .map(|max_width_in_lpxs| max_width_in_lpxs.into_inner() - self.current_point_in_lpxs.x)
     }
 
     fn layout(mut self, spans: &[Span]) -> LaidoutText {
@@ -228,8 +229,11 @@ impl<'a> LayoutContext<'a> {
     }
 
     fn append_text_to_current_row(&mut self, style: &Style, text: &ShapedText) {
+        use super::num::Zero;
+
         for glyph in &text.glyphs {
-            let glyph = LaidoutGlyph {
+            let mut glyph = LaidoutGlyph {
+                origin_in_lpxs: Point::ZERO,
                 font: glyph.font.clone(),
                 font_size_in_lpxs: style.font_size_in_lpxs.into_inner(),
                 color: style.color,
@@ -238,22 +242,22 @@ impl<'a> LayoutContext<'a> {
                 advance_in_ems: glyph.advance_in_ems,
                 offset_in_ems: glyph.offset_in_ems,
             };
-            self.current_x_in_lpxs += glyph.advance_in_lpxs();
+            glyph.origin_in_lpxs.x = self.current_point_in_lpxs.x;
+            self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
             self.glyphs.push(glyph);
         }
         self.current_row_end += text.text.len();
     }
 
     fn finish_current_row(&mut self) {
-        use std::mem;
+        use {std::mem, super::num::Zero};
 
         let glyphs = mem::take(&mut self.glyphs);
-        let row = LaidoutRow {
-            width_in_lpxs: if let Some(max_width_in_lpxs) = self.options.max_width_in_lpxs {
-                max_width_in_lpxs.into_inner()
-            } else {
-                glyphs.iter().map(|glyph| glyph.advance_in_lpxs()).sum()
-            },
+        let used_width_in_lpxs = glyphs.iter().map(|glyph| glyph.advance_in_lpxs()).sum();
+        let width_in_lpxs = self.options.max_width_in_lpxs.map_or(used_width_in_lpxs, NonNanF32::into_inner);
+        let mut row = LaidoutRow {
+            origin_in_lpxs: Point::ZERO,
+            width_in_lpxs,
             ascender_in_lpxs: glyphs
                 .iter()
                 .map(|glyph| glyph.ascender_in_lpxs())
@@ -274,8 +278,12 @@ impl<'a> LayoutContext<'a> {
                 .substr(self.current_row_start..self.current_row_end),
             glyphs,
         };
+        let line_spacing_in_lpxs = self.rows.last().map_or(0.0, |prev_row| prev_row.line_spacing_in_lpxs(&row));
+        self.current_point_in_lpxs.x = 0.0;
+        self.current_point_in_lpxs.y += line_spacing_in_lpxs + row.ascender_in_lpxs;
+        row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
+        self.current_point_in_lpxs.y -= row.descender_in_lpxs;
         self.current_row_start = self.current_row_end;
-        self.current_x_in_lpxs = 0.0;
         self.rows.push(row);
     }
 }
@@ -405,26 +413,9 @@ pub struct LaidoutText {
     pub rows: Vec<LaidoutRow>,
 }
 
-impl LaidoutText {
-    pub fn walk_rows(&self, f: impl FnMut(Point<f32>, &LaidoutRow)) {
-        use super::num::Zero;
-
-        let mut current_point_in_lpxs = Point::ZERO;
-        let mut prev_row: Option<&LaidoutRow> = None;
-        let mut f = f;
-        for row in &self.rows {
-            let line_spacing_in_lpxs =
-                prev_row.map_or(0.0, |prev_row| prev_row.line_spacing_in_lpxs(row));
-            current_point_in_lpxs.y += line_spacing_in_lpxs + row.ascender_in_lpxs;
-            f(current_point_in_lpxs, row);
-            current_point_in_lpxs.y -= row.descender_in_lpxs;
-            prev_row = Some(row);
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct LaidoutRow {
+    pub origin_in_lpxs: Point<f32>,
     pub width_in_lpxs: f32,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
@@ -437,21 +428,11 @@ impl LaidoutRow {
     pub fn line_spacing_in_lpxs(&self, _next_row: &LaidoutRow) -> f32 {
         self.line_gap_in_lpxs
     }
-
-    pub fn walk_glyphs(&self, f: impl FnMut(Point<f32>, &LaidoutGlyph)) {
-        use super::num::Zero;
-
-        let mut current_point_in_lpxs: Point<f32> = Point::ZERO;
-        let mut f = f;
-        for glyph in &self.glyphs {
-            f(current_point_in_lpxs, glyph);
-            current_point_in_lpxs.x += glyph.advance_in_lpxs();
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
 pub struct LaidoutGlyph {
+    pub origin_in_lpxs: Point<f32>,
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
     pub color: Color,
