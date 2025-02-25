@@ -172,14 +172,14 @@ impl DrawText2 {
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         self.draw_depth = 1.0;
-        text.walk_rows(|row_origin_in_lpxs, row| {
+        for row in &text.rows {
             self.draw_laidout_row(
                 cx,
-                origin_in_lpxs + Size::from(row_origin_in_lpxs),
+                origin_in_lpxs + Size::from(row.origin_in_lpxs),
                 row,
                 &mut instances.instances,
             );
-        });
+        }
         let area = cx.end_many_instances(instances);
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, area);
     }
@@ -207,14 +207,14 @@ impl DrawText2 {
         row: &LaidoutRow,
         output: &mut Vec<f32>,
     ) {
-        row.walk_glyphs(|glyph_origin_in_lpxs, glyph| {
+        for glyph in &row.glyphs {
             self.draw_laidout_glyph(
                 cx,
-                origin_in_lpxs + Size::from(glyph_origin_in_lpxs),
+                origin_in_lpxs + Size::from(glyph.origin_in_lpxs),
                 glyph,
                 output,
             );
-        });
+        }
         if self.debug {
             // Ascender
             cx.cx.debug.rect(
