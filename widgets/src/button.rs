@@ -14,6 +14,7 @@ live_design! {
         align: {x: 0.5, y: 0.5},
         padding: <THEME_MSPACE_2> {}
         label_walk: { width: Fit, height: Fit },
+        label_align: { x: 0.5, y: 0.5 },
         
         draw_text: {
             instance hover: 0.0,
@@ -352,6 +353,8 @@ pub struct Button {
     icon_walk: Walk,
     #[live]
     label_walk: Walk,
+    #[live]
+    label_align: Align,
     #[walk]
     walk: Walk,
 
@@ -446,7 +449,7 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, self.text.as_ref());
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         DrawStep::done()
     }
@@ -466,7 +469,7 @@ impl Button {
     pub fn draw_button(&mut self, cx: &mut Cx2d, label:&str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, label);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, label);
         self.draw_bg.end(cx);
     }
     
