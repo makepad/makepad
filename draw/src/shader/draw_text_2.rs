@@ -109,10 +109,7 @@ impl LiveHook for DrawText2 {
 impl DrawText2 {
     pub fn draw_walk(&mut self, cx: &mut Cx2d<'_>, walk: Walk, text: impl Into<Substr>) {
         use crate::{
-            text::{
-                layout::{LayoutOptions, LayoutParams, Span, Style},
-                non_nan::NonNanF32,
-            },
+            text::layout::{LayoutOptions, LayoutParams, Span, Style},
             turtle,
         };
         
@@ -121,12 +118,12 @@ impl DrawText2 {
         let max_width_in_lpxs = if walk.width.is_fit() {
             None
         } else {
-            Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow))
+            Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow) as f32)
         };
         let max_height_in_lpxs = if walk.height.is_fit() {
             None
         } else {
-            Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow))
+            Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow) as f32)
         };
         let text_len = text.len();
         let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
@@ -134,25 +131,24 @@ impl DrawText2 {
             spans: [Span {
                 style: Style {
                     font_family_id: self.text_style.font_family.clone().into(),
-                    font_size_in_lpxs: NonNanF32::new(self.text_style.font_size).unwrap(),
+                    font_size_in_lpxs: self.text_style.font_size,
                     color: Color::BRIGHT_WHITE, // TODO: Get this from DrawText2?
                 },
                 range: 0..text_len,
             }]
             .into(),
             options: LayoutOptions {
-                max_width_in_lpxs: max_width_in_lpxs
-                    .map(|max_width_in_lpxs| NonNanF32::new(max_width_in_lpxs as f32).unwrap()),
+                max_width_in_lpxs,
             },
         });
         let rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
             width: turtle::Size::Fixed(
-                max_width_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.width as f64),
+                max_width_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.width) as f64
             ),
             height: turtle::Size::Fixed(
-                max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height as f64),
+                max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height) as f64
             ),
         });
         self.draw_laidout_text(
