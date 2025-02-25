@@ -9,13 +9,14 @@ use {
         sdfer,
         shape::{self, ShapedText},
         substr::Substr,
-    }, std::{
+    },
+    std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
         hash::{Hash, Hasher},
         ops::Range,
         rc::Rc,
-    }
+    },
 };
 
 #[derive(Debug)]
@@ -159,12 +160,7 @@ impl<'a> LayoutContext<'a> {
 
         let text = self.text.substr(range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(
-            font_family,
-            style.font_size_in_lpxs,
-            text,
-            segment_lens,
-        );
+        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs, text, segment_lens);
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
@@ -191,12 +187,7 @@ impl<'a> LayoutContext<'a> {
 
         let text = self.text.substr(range.clone());
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(
-            font_family,
-            style.font_size_in_lpxs,
-            text,
-            segment_lens,
-        );
+        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs, text, segment_lens);
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
@@ -238,11 +229,12 @@ impl<'a> LayoutContext<'a> {
     }
 
     fn finish_current_row(&mut self) {
-        use {std::mem, super::num::Zero};
+        use {super::num::Zero, std::mem};
 
         let glyphs = mem::take(&mut self.glyphs);
-        let used_width_in_lpxs = glyphs.iter().map(|glyph| glyph.advance_in_lpxs()).sum();
-        let width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(used_width_in_lpxs);
+        let width_in_lpxs = self.current_point_in_lpxs.x;
+        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(width_in_lpxs);
+        let remaining_width_in_lpxs = max_width_in_lpxs - width_in_lpxs;
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             width_in_lpxs,
@@ -266,11 +258,12 @@ impl<'a> LayoutContext<'a> {
                 .substr(self.current_row_start..self.current_row_end),
             glyphs,
         };
-        let line_spacing_in_lpxs = self.rows.last().map_or(0.0, |prev_row| prev_row.line_spacing_in_lpxs(&row));
         self.current_point_in_lpxs.x = 0.0;
-        self.current_point_in_lpxs.y += line_spacing_in_lpxs + row.ascender_in_lpxs;
+        self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
+            prev_row.line_spacing_in_lpxs(&row)
+        });
+        row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
-        self.current_point_in_lpxs.y -= row.descender_in_lpxs;
         self.current_row_start = self.current_row_end;
         self.rows.push(row);
     }
@@ -394,8 +387,8 @@ impl Eq for Style {}
 
 impl Hash for Style {
     fn hash<H>(&self, hasher: &mut H)
-    where 
-        H: Hasher
+    where
+        H: Hasher,
     {
         self.font_family_id.hash(hasher);
         self.font_size_in_lpxs.to_bits().hash(hasher);
@@ -421,22 +414,27 @@ impl PartialEq for Style {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutOptions {
     pub max_width_in_lpxs: Option<f32>,
+    pub align: f32,
 }
 
 impl Eq for LayoutOptions {}
 
 impl Hash for LayoutOptions {
     fn hash<H>(&self, hasher: &mut H)
-    where 
-        H: Hasher
+    where
+        H: Hasher,
     {
         self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
+        self.align.to_bits().hash(hasher);
     }
 }
 
 impl PartialEq for LayoutOptions {
     fn eq(&self, other: &Self) -> bool {
         if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
+            return false;
+        }
+        if self.align != other.align {
             return false;
         }
         true

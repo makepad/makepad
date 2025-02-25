@@ -10,7 +10,7 @@ use crate::{
         layout::{LaidoutGlyph, LaidoutRow, LaidoutText},
         substr::Substr,
     },
-    turtle::Walk,
+    turtle::{Align, Walk},
 };
 
 live_design! {
@@ -107,12 +107,14 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d<'_>, walk: Walk, text: impl Into<Substr>) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d<'_>, walk: Walk, align: Align, text: impl Into<Substr>) {
         use crate::{
             text::layout::{LayoutOptions, LayoutParams, Span, Style},
             turtle,
         };
-        
+
+        // self.debug = true; // TODO: Remove this
+
         let text = text.into();
         let turtle = cx.turtle();
         let max_width_in_lpxs = if walk.width.is_fit() {
@@ -139,18 +141,33 @@ impl DrawText2 {
             .into(),
             options: LayoutOptions {
                 max_width_in_lpxs,
+                align: align.x as f32,
             },
         });
-        let rect = cx.walk_turtle(Walk {
+        let max_width_in_lpxs = max_width_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.width);
+        let max_height_in_lpxs = max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height);
+        let remaining_width_in_lpxs = max_width_in_lpxs - laidout_text.size_in_lpxs.width;
+        let remaining_height_in_lpxs = max_height_in_lpxs - laidout_text.size_in_lpxs.height;
+
+        if self.debug {
+            let mut area = Area::Empty;
+            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
+                cx.turtle().pos().x,
+                cx.turtle().pos().y,
+                max_width_in_lpxs as f64,
+                max_height_in_lpxs as f64,
+            ));
+            cx.cx.debug.area(area, makepad_platform::vec4(1.0, 1.0, 1.0, 1.0));
+        }
+
+        let mut rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
-            width: turtle::Size::Fixed(
-                max_width_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.width) as f64
-            ),
-            height: turtle::Size::Fixed(
-                max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height) as f64
-            ),
+            width: turtle::Size::Fixed(max_width_in_lpxs as f64),
+            height: turtle::Size::Fixed(max_height_in_lpxs as f64),
         });
+        rect.pos.x += align.x * remaining_width_in_lpxs as f64;
+        rect.pos.y += align.y * remaining_height_in_lpxs as f64;
         self.draw_laidout_text(
             cx,
             Point::new(rect.pos.x as f32, rect.pos.y as f32),
@@ -213,37 +230,32 @@ impl DrawText2 {
         }
         if self.debug {
             // Ascender
-            cx.cx.debug.rect(
-                makepad_platform::rect(
-                    origin_in_lpxs.x as f64,
-                    (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
-                    row.width_in_lpxs as f64,
-                    1.0,
-                ),
-                makepad_platform::vec4(1.0, 0.0, 0.0, 1.0),
-            );
+            let mut area = Area::Empty;
+            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
+                origin_in_lpxs.x as f64,
+                (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
+                row.width_in_lpxs as f64,
+                1.0,
+            ));
+            cx.cx.debug.area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
 
             // Baseline
-            cx.cx.debug.rect(
-                makepad_platform::rect(
-                    origin_in_lpxs.x as f64,
-                    origin_in_lpxs.y as f64,
-                    row.width_in_lpxs as f64,
-                    1.0,
-                ),
-                makepad_platform::vec4(0.0, 1.0, 0.0, 1.0),
-            );
+            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
+                origin_in_lpxs.x as f64,
+                origin_in_lpxs.y as f64,
+                row.width_in_lpxs as f64,
+                1.0,
+            ));
+            cx.cx.debug.area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
 
             // Descender
-            cx.cx.debug.rect(
-                makepad_platform::rect(
-                    origin_in_lpxs.x as f64,
-                    (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
-                    row.width_in_lpxs as f64,
-                    1.0,
-                ),
-                makepad_platform::vec4(0.0, 0.0, 1.0, 1.0),
-            );
+            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
+                origin_in_lpxs.x as f64,
+                (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
+                row.width_in_lpxs as f64,
+                1.0,
+            ));
+            cx.cx.debug.area(area, makepad_platform::vec4(0.0, 0.0, 1.0, 1.0));
         }
     }
 
@@ -315,13 +327,15 @@ impl DrawText2 {
         self.t_max = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
         self.color = color_to_vec4(color);
         output.extend_from_slice(self.draw_vars.as_slice());
-        self.draw_depth += 0.001;
+        self.draw_depth += 0.0001;
     }
 }
 
 #[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct TextStyle {
-    #[live()] pub font_family: String,
-    #[live()] pub font_size: f32
+    #[live()]
+    pub font_family: String,
+    #[live()]
+    pub font_size: f32,
 }
