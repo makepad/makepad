@@ -12,7 +12,6 @@ live_design!{
             return sdf.result;
             //return vec4(self.color.xyz * self.color.w, self.color.w)
         }
-        draw_depth: 20.0
     }
     
     DebugView = {{DebugView}} {  
