@@ -5,6 +5,7 @@ live_design! {
     link widgets;
     use link::widgets::*;
     use link::theme::*;
+    use link::shaders::*;
 
     List = {{List}} {
         flow: Down,
@@ -24,6 +25,45 @@ live_design! {
             height: Fit,
             visible: false,
 
+            draw_bg: {
+                color: #fff,
+                border_width: 2.0,
+                border_color: #eaecf0,
+                radius: 8.0,
+
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                    // External outline (entire component including border)
+                    sdf.box_all(
+                        0.0,
+                        0.0,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        self.radius,
+                        self.radius,
+                        self.radius,
+                        self.radius
+                    );
+                    sdf.fill(self.border_color);  // Fill the entire area with border color
+
+                    // Internal outline (content area)
+                    sdf.box_all(
+                        self.border_width,
+                        self.border_width,
+                        self.rect_size.x - self.border_width * 2.0,
+                        self.rect_size.y - self.border_width * 2.0,
+                        self.radius - self.border_width,
+                        self.radius - self.border_width,
+                        self.radius - self.border_width,
+                        self.radius - self.border_width
+                    );
+                    sdf.fill(self.color);  // Fill content area with background color
+
+                    return sdf.result;
+                }
+            }
+
             header_view = <View> {
                 width: Fill,
                 height: Fit,
@@ -31,23 +71,34 @@ live_design! {
                 show_bg: true
                 visible: true,
                 draw_bg: {
-                    color: #ff0000,
+                    color: #f5f5f5,
                     instance top_radius: 8.0,
+                    instance border_color: #f5f5f5,
+                    instance border_width: 2.0,
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-
                         sdf.box_all(
-                            0.0,           // x position
-                            0.0,           // y position
-                            self.rect_size.x,  // width
-                            self.rect_size.y,  // height
-                            self.top_radius,   // left top
-                            self.top_radius,   // right top
-                            0.0,              // right bottom
-                            0.0               // left bottom
+                            0.0,
+                            0.0,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            self.top_radius,
+                            self.top_radius,
+                            0.0,
+                            0.0
                         );
-
-                        sdf.fill(vec4(self.color.rgb * self.color.a, self.color.a));
+                        sdf.fill(self.color);
+                        sdf.box_all(
+                            self.border_width / 2.0,
+                            self.border_width / 2.0,
+                            self.rect_size.x - self.border_width,
+                            self.rect_size.y - self.border_width,
+                            self.top_radius,
+                            self.top_radius,
+                            0.0,
+                            0.0
+                        );
+                        sdf.stroke(self.border_color, self.border_width);
                         return sdf.result
                     }
                 }
@@ -61,6 +112,7 @@ live_design! {
                     }
                 }
             }
+
 
             // Wrapper workaround to hide search input when inline search is enabled
             // as we currently can't hide the search input avoiding events.
