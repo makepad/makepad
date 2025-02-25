@@ -11,7 +11,6 @@ pub mod glyph_outline;
 pub mod glyph_raster_image;
 pub mod image;
 pub mod layout;
-pub mod non_nan;
 pub mod num;
 pub mod sdfer;
 pub mod shape;
@@ -27,7 +26,6 @@ mod tests {
                 color::Color,
                 font_loader::FontDefinitions,
                 layout::{LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
-                non_nan::NonNanF32,
             },
             std::{fs::File, io::BufWriter},
         };
@@ -40,7 +38,7 @@ mod tests {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        font_size_in_lpxs: 16.0,
                         color: Color::RED,
                     },
                     range: 0..10,
@@ -48,7 +46,7 @@ mod tests {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        font_size_in_lpxs: 16.0,
                         color: Color::GREEN,
                     },
                     range: 10..20,
@@ -56,7 +54,7 @@ mod tests {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: NonNanF32::new(16.0).unwrap(),
+                        font_size_in_lpxs: 16.0,
                         color: Color::BLUE,
                     },
                     range: 20..text.len(),
@@ -64,7 +62,7 @@ mod tests {
             ]
             .into(),
             options: LayoutOptions {
-                max_width_in_lpxs: Some(NonNanF32::new(256.0).unwrap()),
+                max_width_in_lpxs: Some(256.0),
             },
         });
         for row in &text.rows {
