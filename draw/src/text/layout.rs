@@ -6,13 +6,13 @@ use {
         font_family::{FontFamily, FontFamilyId},
         font_loader::{self, FontDefinitions, FontLoader},
         geom::{Point, Size},
-        non_nan::NonNanF32,
         sdfer,
         shape::{self, ShapedText},
         substr::Substr,
     }, std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
+        hash::{Hash, Hasher},
         ops::Range,
         rc::Rc,
     }
@@ -118,7 +118,7 @@ impl<'a> LayoutContext<'a> {
     fn remaining_width_on_current_row_in_lpxs(&self) -> Option<f32> {
         self.options
             .max_width_in_lpxs
-            .map(|max_width_in_lpxs| max_width_in_lpxs.into_inner() - self.current_point_in_lpxs.x)
+            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_point_in_lpxs.x)
     }
 
     fn layout(mut self, spans: &[Span]) -> LaidoutText {
@@ -161,7 +161,7 @@ impl<'a> LayoutContext<'a> {
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
         let mut fitter = Fitter::new(
             font_family,
-            style.font_size_in_lpxs.into_inner(),
+            style.font_size_in_lpxs,
             text,
             segment_lens,
         );
@@ -193,7 +193,7 @@ impl<'a> LayoutContext<'a> {
         let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
         let mut fitter = Fitter::new(
             font_family,
-            style.font_size_in_lpxs.into_inner(),
+            style.font_size_in_lpxs,
             text,
             segment_lens,
         );
@@ -223,7 +223,7 @@ impl<'a> LayoutContext<'a> {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
                 font: glyph.font.clone(),
-                font_size_in_lpxs: style.font_size_in_lpxs.into_inner(),
+                font_size_in_lpxs: style.font_size_in_lpxs,
                 color: style.color,
                 id: glyph.id,
                 cluster: self.current_row_end + glyph.cluster,
@@ -242,7 +242,7 @@ impl<'a> LayoutContext<'a> {
 
         let glyphs = mem::take(&mut self.glyphs);
         let used_width_in_lpxs = glyphs.iter().map(|glyph| glyph.advance_in_lpxs()).sum();
-        let width_in_lpxs = self.options.max_width_in_lpxs.map_or(used_width_in_lpxs, NonNanF32::into_inner);
+        let width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(used_width_in_lpxs);
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             width_in_lpxs,
@@ -383,16 +383,64 @@ pub struct Span {
     pub range: Range<usize>,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Style {
     pub font_family_id: FontFamilyId,
-    pub font_size_in_lpxs: NonNanF32,
+    pub font_size_in_lpxs: f32,
     pub color: Color,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+impl Eq for Style {}
+
+impl Hash for Style {
+    fn hash<H>(&self, hasher: &mut H)
+    where 
+        H: Hasher
+    {
+        self.font_family_id.hash(hasher);
+        self.font_size_in_lpxs.to_bits().hash(hasher);
+        self.color.hash(hasher);
+    }
+}
+
+impl PartialEq for Style {
+    fn eq(&self, other: &Self) -> bool {
+        if self.font_family_id != other.font_family_id {
+            return false;
+        }
+        if self.font_size_in_lpxs.to_bits() != other.font_size_in_lpxs.to_bits() {
+            return false;
+        }
+        if self.color != other.color {
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutOptions {
-    pub max_width_in_lpxs: Option<NonNanF32>,
+    pub max_width_in_lpxs: Option<f32>,
+}
+
+impl Eq for LayoutOptions {}
+
+impl Hash for LayoutOptions {
+    fn hash<H>(&self, hasher: &mut H)
+    where 
+        H: Hasher
+    {
+        self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
+    }
+}
+
+impl PartialEq for LayoutOptions {
+    fn eq(&self, other: &Self) -> bool {
+        if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
+            return false;
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug)]
