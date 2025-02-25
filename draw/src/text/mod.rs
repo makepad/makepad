@@ -63,6 +63,7 @@ mod tests {
             .into(),
             options: LayoutOptions {
                 max_width_in_lpxs: Some(256.0),
+                ..LayoutOptions::default()
             },
         });
         for row in &text.rows {
