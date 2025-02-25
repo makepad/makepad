@@ -133,19 +133,7 @@ impl<'a> LayoutContext<'a> {
                     .map(|row| row.width_in_lpxs)
                     .reduce(f32::max)
                     .unwrap_or(0.0),
-                self.rows
-                    .iter()
-                    .scan(None, |state: &mut Option<&LaidoutRow>, row| {
-                        let prev_row = *state;
-                        *state = Some(row);
-                        Some((prev_row, row))
-                    })
-                    .map(|(prev_row, row)| {
-                        let line_spacing_in_lpxs =
-                            prev_row.map_or(0.0, |prev_row| prev_row.line_spacing_in_lpxs(row));
-                        line_spacing_in_lpxs + row.ascender_in_lpxs - row.descender_in_lpxs
-                    })
-                    .sum(),
+                self.current_point_in_lpxs.y - self.rows.last().unwrap().descender_in_lpxs,
             ),
             rows: self.rows,
         }
@@ -425,8 +413,16 @@ pub struct LaidoutRow {
 }
 
 impl LaidoutRow {
-    pub fn line_spacing_in_lpxs(&self, _next_row: &LaidoutRow) -> f32 {
-        self.line_gap_in_lpxs
+    pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
+        self.line_spacing_below_in_lpxs() + next_row.line_spacing_above_in_lpxs()
+    }
+
+    pub fn line_spacing_above_in_lpxs(&self) -> f32 {
+        self.ascender_in_lpxs
+    }
+
+    pub fn line_spacing_below_in_lpxs(&self) -> f32 {
+        -self.descender_in_lpxs + self.line_gap_in_lpxs
     }
 }
 
