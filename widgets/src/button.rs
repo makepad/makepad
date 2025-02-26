@@ -24,9 +24,6 @@ live_design! {
                 font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
         }
         
         icon_walk: {
