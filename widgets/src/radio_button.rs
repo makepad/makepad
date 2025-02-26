@@ -60,7 +60,7 @@ live_design!{
             uniform mark_color: (THEME_COLOR_CTRL_DEFAULT)
             uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
-
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -71,6 +71,8 @@ live_design!{
                         let sz = self.size;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                        // Draw background
                         sdf.circle(left, c.y, sz);
                         sdf.fill_keep(
                             mix(
@@ -94,6 +96,8 @@ live_design!{
                                 self.hover
                             ), self.border_size
                         )
+
+                        // Draw mark
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
@@ -103,7 +107,7 @@ live_design!{
                                     self.mark_color_hover,
                                     self.hover
                                 ),
-                                mix(self.mark_color_active, self.mark_color_active * 1.5, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
                                 self.active
                             )
                         );
