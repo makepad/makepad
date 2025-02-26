@@ -234,8 +234,6 @@ impl<'a> LayoutContext<'a> {
 
         let glyphs = mem::take(&mut self.glyphs);
         let width_in_lpxs = self.current_point_in_lpxs.x;
-        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(width_in_lpxs);
-        let remaining_width_in_lpxs = max_width_in_lpxs - width_in_lpxs;
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             text: self
@@ -264,6 +262,8 @@ impl<'a> LayoutContext<'a> {
         self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
             prev_row.line_spacing_in_lpxs(&row)
         });
+        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(width_in_lpxs);
+        let remaining_width_in_lpxs = max_width_in_lpxs - width_in_lpxs;
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
