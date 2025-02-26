@@ -57,7 +57,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform mark_color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
@@ -102,11 +102,7 @@ live_design!{
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
-                                mix(
-                                    THEME_COLOR_U_HIDDEN,
-                                    self.mark_color_hover,
-                                    self.hover
-                                ),
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
                                 mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
                                 self.active
                             )
@@ -338,8 +334,6 @@ live_design!{
         }
 
         draw_bg: {
-            // uniform size: 7.0;
-
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -364,19 +358,6 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let grad_top = 5.0;
-                let grad_bot = 1.0;
-                
-                let body = mix(
-                    mix(
-                        mix(self.color_1, self.color_2, self.pos.x),
-                        mix(self.color_1_hover, self.color_2_hover, self.pos.x),
-                        self.hover
-                    ),
-                    mix(self.color_1_active, self.color_2_active, self.pos.x),
-                    self.active
-                );
 
                 sdf.box(
                     1.,
@@ -427,9 +408,6 @@ live_design!{
         }
 
         draw_bg: {
-            // uniform size: 7.0;
-
-            // uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color_dither: 1.0
@@ -453,19 +431,6 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let grad_top = 5.0;
-                let grad_bot = 1.0;
-                
-                let body = mix(
-                    mix(
-                        mix(self.color_1, self.color_2, self.pos.y),
-                        mix(self.color_1_hover, self.color_2_hover, self.pos.y),
-                        self.hover
-                    ),
-                    mix(self.color_1_active, self.color_2_active, self.pos.y),
-                    self.active
-                );
 
                 sdf.box(
                     1.,
@@ -507,9 +472,7 @@ live_design!{
         spacing: 0.0,
         flow: Right
         align: { x: 0.0, y: 0.5 }
-        draw_bg: {
-            border_radius: 0.
-        }
+        draw_bg: { border_radius: 0.  }
     }
 
     pub RadioButtonGroupTab = <RadioButtonTab> {
