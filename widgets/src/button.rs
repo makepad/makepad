@@ -255,11 +255,11 @@ live_design! {
 
             uniform color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
             uniform color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
-            uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_down: (#3)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
-            uniform color_2_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_2_down: (#4)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
