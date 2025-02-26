@@ -1,16 +1,19 @@
-use crate::{
-    cx_2d::Cx2d,
-    draw_list_2d::ManyInstances,
-    geometry::GeometryQuad2D,
-    makepad_platform::*,
-    text::{
-        color::Color,
-        font::{AtlasKind, RasterizedGlyph},
-        geom::{Point, Rect, Size, Transform},
-        layout::{LaidoutGlyph, LaidoutRow, LaidoutText},
-        substr::Substr,
+use {
+    crate::{
+        cx_2d::Cx2d,
+        draw_list_2d::ManyInstances,
+        geometry::GeometryQuad2D,
+        makepad_platform::*,
+        text::{
+            color::Color,
+            font::{AtlasKind, RasterizedGlyph},
+            geom::{Point, Rect, Size, Transform},
+            layout::{Cursor, LaidoutGlyph, LaidoutRow, LaidoutText},
+            substr::Substr,
+        },
+        turtle::{Align, Walk},
     },
-    turtle::{Align, Walk},
+    std::rc::Rc,
 };
 
 live_design! {
@@ -117,46 +120,29 @@ impl DrawText2 {
         walk: Walk,
         align: Align,
         text: impl Into<Substr>,
-    ) {
-        use crate::{
-            text::layout::{LayoutOptions, LayoutParams, Span, Style},
-            turtle,
-        };
+    ) -> makepad_platform::Rect {
+        use crate::turtle;
 
-        let text = text.into();
-        let turtle = cx.turtle();
-        let max_width_in_lpxs = if walk.width.is_fit() {
-            None
-        } else {
-            Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow) as f32)
-        };
-        let max_height_in_lpxs = if walk.height.is_fit() {
-            None
-        } else {
-            Some(turtle.eval_width(walk.width, walk.margin, turtle.layout().flow) as f32)
-        };
-        let text_len = text.len();
-        let laidout_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
-            text,
-            spans: [Span {
-                style: Style {
-                    font_family_id: self.text_style.font_family.clone().into(),
-                    font_size_in_lpxs: self.text_style.font_size,
-                    color: None,
-                },
-                range: 0..text_len,
-            }]
-            .into(),
-            options: LayoutOptions {
-                max_width_in_lpxs,
-                align: align.x as f32,
-                line_spacing_scale: self.text_style.line_spacing as f32,
-            },
+        let laidout_text = self.layout_text(cx, walk, align, text);
+
+        let max_width_in_lpxs = cx
+            .turtle()
+            .max_width(walk)
+            .map_or(laidout_text.size_in_lpxs.width, |max_width| {
+                max_width as f32
+            });
+        let max_height_in_lpxs = cx
+            .turtle()
+            .max_height(walk)
+            .map_or(laidout_text.size_in_lpxs.height, |max_height| {
+                max_height as f32
+            });
+        let rect = cx.walk_turtle(Walk {
+            abs_pos: walk.abs_pos,
+            margin: walk.margin,
+            width: turtle::Size::Fixed(max_width_in_lpxs as f64),
+            height: turtle::Size::Fixed(max_height_in_lpxs as f64),
         });
-        let max_width_in_lpxs = max_width_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.width);
-        let max_height_in_lpxs = max_height_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.height);
-        let remaining_width_in_lpxs = max_width_in_lpxs - laidout_text.size_in_lpxs.width;
-        let remaining_height_in_lpxs = max_height_in_lpxs - laidout_text.size_in_lpxs.height;
 
         if self.debug {
             let mut area = Area::Empty;
@@ -174,22 +160,24 @@ impl DrawText2 {
                 .area(area, makepad_platform::vec4(1.0, 1.0, 1.0, 1.0));
         }
 
-        let mut rect = cx.walk_turtle(Walk {
-            abs_pos: walk.abs_pos,
-            margin: walk.margin,
-            width: turtle::Size::Fixed(max_width_in_lpxs as f64),
-            height: turtle::Size::Fixed(max_height_in_lpxs as f64),
-        });
-        rect.pos.x += align.x * remaining_width_in_lpxs as f64;
-        rect.pos.y += align.y * remaining_height_in_lpxs as f64;
-        self.draw_laidout_text(
-            cx,
-            Point::new(rect.pos.x as f32, rect.pos.y as f32),
-            &laidout_text,
+        let remaining_width_in_lpxs = max_width_in_lpxs - laidout_text.size_in_lpxs.width;
+        let remaining_height_in_lpxs = max_height_in_lpxs - laidout_text.size_in_lpxs.height;
+        let origin_in_lpxs = Point::new(
+            rect.pos.x as f32 + align.x as f32 * remaining_width_in_lpxs,
+            rect.pos.y as f32 + align.y as f32 * remaining_height_in_lpxs,
         );
+
+        self.draw_laidout_text(cx, origin_in_lpxs, &laidout_text);
+
+        makepad_platform::rect(
+            origin_in_lpxs.x as f64,
+            origin_in_lpxs.y as f64,
+            laidout_text.size_in_lpxs.width as f64,
+            laidout_text.size_in_lpxs.height as f64,
+        )
     }
 
-    pub fn draw_laidout_text(
+    fn draw_laidout_text(
         &mut self,
         cx: &mut Cx2d<'_>,
         origin_in_lpxs: Point<f32>,
@@ -242,8 +230,8 @@ impl DrawText2 {
                 output,
             );
         }
+
         if self.debug {
-            // Ascender
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -258,7 +246,7 @@ impl DrawText2 {
                 .debug
                 .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
 
-            // Baseline
+            let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
                 makepad_platform::rect(
@@ -272,7 +260,7 @@ impl DrawText2 {
                 .debug
                 .area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
 
-            // Descender
+            let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
                 makepad_platform::rect(
@@ -315,23 +303,6 @@ impl DrawText2 {
         glyph: RasterizedGlyph,
         output: &mut Vec<f32>,
     ) {
-        fn point_to_vec2(point: Point<f32>) -> Vec2 {
-            vec2(point.x, point.y)
-        }
-
-        fn size_to_vec2(point: Size<f32>) -> Vec2 {
-            vec2(point.width, point.height)
-        }
-
-        fn color_to_vec4(color: Color) -> Vec4 {
-            vec4(
-                color.r as f32 / 255.0,
-                color.g as f32 / 255.0,
-                color.b as f32 / 255.0,
-                color.a as f32 / 255.0,
-            )
-        }
-
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
                 (2 * point.x + 1) as f32 / (2 * size.width) as f32,
@@ -358,6 +329,63 @@ impl DrawText2 {
         output.extend_from_slice(self.draw_vars.as_slice());
         self.draw_depth += 0.0001;
     }
+
+    pub fn point_in_lpxs_to_cursor(
+        &self,
+        cx: &mut Cx2d<'_>,
+        walk: Walk,
+        align: Align,
+        text: impl Into<Substr>,
+        point_in_lpxs: DVec2,
+    ) -> Cursor {
+        let laidout_text = self.layout_text(cx, walk, align, text);
+        laidout_text.point_in_lpxs_to_cursor(dvec2_to_point(point_in_lpxs))
+    }
+
+    pub fn cursor_to_point_in_lpxs(
+        &self,
+        cx: &mut Cx2d<'_>,
+        walk: Walk,
+        align: Align,
+        text: impl Into<Substr>,
+        cursor: Cursor,
+    ) -> DVec2 {
+        let laidout_text = self.layout_text(cx, walk, align, text);
+        point_to_dvec2(laidout_text.cursor_to_point_in_lpxs(cursor))
+    }
+
+    fn layout_text(
+        &self,
+        cx: &mut Cx2d<'_>,
+        walk: Walk,
+        align: Align,
+        text: impl Into<Substr>,
+    ) -> Rc<LaidoutText> {
+        use crate::text::layout::{LayoutOptions, LayoutParams, Span, Style};
+
+        let text = text.into();
+        let text_len = text.len();
+        cx.fonts.borrow_mut().get_or_layout(LayoutParams {
+            text,
+            spans: [Span {
+                style: Style {
+                    font_family_id: self.text_style.font_family.clone().into(),
+                    font_size_in_lpxs: self.text_style.font_size,
+                    color: None,
+                },
+                range: 0..text_len,
+            }]
+            .into(),
+            options: LayoutOptions {
+                max_width_in_lpxs: cx
+                    .turtle()
+                    .max_width(walk)
+                    .map(|max_width| max_width as f32),
+                align: align.x as f32,
+                line_spacing_scale: self.text_style.line_spacing as f32,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
@@ -369,4 +397,29 @@ pub struct TextStyle {
     pub font_size: f32,
     #[live]
     pub line_spacing: f32,
+}
+
+fn dvec2_to_point(dvec: DVec2) -> Point<f32> {
+    Point::new(dvec.x as f32, dvec.y as f32)
+}
+
+fn point_to_vec2(point: Point<f32>) -> Vec2 {
+    makepad_platform::vec2(point.x, point.y)
+}
+
+fn point_to_dvec2(point: Point<f32>) -> DVec2 {
+    makepad_platform::dvec2(point.x as f64, point.y as f64)
+}
+
+fn size_to_vec2(size: Size<f32>) -> Vec2 {
+    makepad_platform::vec2(size.width, size.height)
+}
+
+fn color_to_vec4(color: Color) -> Vec4 {
+    makepad_platform::vec4(
+        color.r as f32,
+        color.g as f32,
+        color.b as f32,
+        color.a as f32,
+    ) / 255.0
 }

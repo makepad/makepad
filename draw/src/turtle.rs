@@ -916,9 +916,23 @@ impl Turtle {
     pub fn pos(&self) -> DVec2 {
         self.pos
     }
-    
+
     pub fn scroll(&self) -> DVec2 {
         self.layout.scroll
+    }
+
+    pub fn max_width(&self, walk: Walk) -> Option<f64> {
+        if walk.width.is_fit() {
+            return None;
+        }
+        Some(self.eval_width(walk.width, walk.margin, self.layout().flow) as f64)
+    }
+
+    pub fn max_height(&self, walk: Walk) -> Option<f64> {
+        if walk.height.is_fit() {
+            return None
+        }
+        Some(self.eval_width(walk.height, walk.margin, self.layout().flow) as f64)
     }
     
     pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f64 {
