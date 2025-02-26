@@ -75,9 +75,21 @@ impl Deref for Substr {
     }
 }
 
+impl From<String> for Substr {
+    fn from(string: String) -> Self {
+        string.as_str().into()
+    }
+}
+
+impl From<&String> for Substr {
+    fn from(string: &String) -> Self {
+        string.as_str().into()
+    }
+}
+
 impl From<&str> for Substr {
     fn from(string: &str) -> Self {
-        Substr::from(Rc::from(string))
+        Rc::<str>::from(string).into()
     }
 }
 
