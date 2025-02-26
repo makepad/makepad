@@ -380,7 +380,7 @@ pub struct Span {
 pub struct Style {
     pub font_family_id: FontFamilyId,
     pub font_size_in_lpxs: f32,
-    pub color: Color,
+    pub color: Option<Color>,
 }
 
 impl Eq for Style {}
@@ -477,7 +477,7 @@ pub struct LaidoutGlyph {
     pub origin_in_lpxs: Point<f32>,
     pub font: Rc<Font>,
     pub font_size_in_lpxs: f32,
-    pub color: Color,
+    pub color: Option<Color>,
     pub id: GlyphId,
     pub cluster: usize,
     pub advance_in_ems: f32,
