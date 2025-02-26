@@ -128,6 +128,7 @@ impl<'a> LayoutContext<'a> {
         }
         self.finish_current_row();
         LaidoutText {
+            text: self.text.clone(),
             size_in_lpxs: Size::new(
                 self.rows
                     .iter()
@@ -237,6 +238,9 @@ impl<'a> LayoutContext<'a> {
         let remaining_width_in_lpxs = max_width_in_lpxs - width_in_lpxs;
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
+            text: self
+                .text
+                .substr(self.current_row_start..self.current_row_end),
             width_in_lpxs,
             ascender_in_lpxs: glyphs
                 .iter()
@@ -253,9 +257,7 @@ impl<'a> LayoutContext<'a> {
                 .map(|glyph| glyph.line_gap_in_lpxs())
                 .reduce(f32::max)
                 .unwrap_or(0.0),
-            text: self
-                .text
-                .substr(self.current_row_start..self.current_row_end),
+            line_spacing_scale: self.options.line_spacing_scale,
             glyphs,
         };
         self.current_point_in_lpxs.x = 0.0;
@@ -411,10 +413,21 @@ impl PartialEq for Style {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
     pub max_width_in_lpxs: Option<f32>,
     pub align: f32,
+    pub line_spacing_scale: f32,
+}
+
+impl Default for LayoutOptions {
+    fn default() -> Self {
+        Self {
+            max_width_in_lpxs: None,
+            align: 0.0,
+            line_spacing_scale: 1.0,
+        }
+    }
 }
 
 impl Eq for LayoutOptions {}
@@ -426,6 +439,7 @@ impl Hash for LayoutOptions {
     {
         self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
         self.align.to_bits().hash(hasher);
+        self.line_spacing_scale.to_bits().hash(hasher);
     }
 }
 
@@ -443,6 +457,7 @@ impl PartialEq for LayoutOptions {
 
 #[derive(Clone, Debug)]
 pub struct LaidoutText {
+    pub text: Substr,
     pub size_in_lpxs: Size<f32>,
     pub rows: Vec<LaidoutRow>,
 }
@@ -450,11 +465,12 @@ pub struct LaidoutText {
 #[derive(Clone, Debug)]
 pub struct LaidoutRow {
     pub origin_in_lpxs: Point<f32>,
+    pub text: Substr,
     pub width_in_lpxs: f32,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
-    pub text: Substr,
+    pub line_spacing_scale: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
@@ -464,11 +480,11 @@ impl LaidoutRow {
     }
 
     pub fn line_spacing_above_in_lpxs(&self) -> f32 {
-        self.ascender_in_lpxs
+        self.ascender_in_lpxs * self.line_spacing_scale
     }
 
     pub fn line_spacing_below_in_lpxs(&self) -> f32 {
-        -self.descender_in_lpxs + self.line_gap_in_lpxs
+        (-self.descender_in_lpxs + self.line_gap_in_lpxs) * self.line_spacing_scale
     }
 }
 

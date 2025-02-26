@@ -1,4 +1,4 @@
-use crate::makepad_widgets::{text::{color::Color, geom::Point, layout::{Style, LayoutParams, Span, LayoutOptions}}, *};
+use crate::makepad_widgets::{text::{cgeom::Point, layout::{Style, LayoutParams, Span, LayoutOptions}}, *};
 
 live_design!{
     use link::theme::*;
@@ -85,7 +85,7 @@ impl Widget for MyWidget {
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        let text = "abc def ghi abc d😊f ghi abc def ghi";
+        let text = "abc def ghi Moge je vader je moeder wezen abc d😊f ghi abc def ghi";
         let text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             text: text.into(),
             spans: [
@@ -101,6 +101,7 @@ impl Widget for MyWidget {
             options: LayoutOptions {
                 max_width_in_lpxs: Some(128.0),
                 align: 0.5,
+                line_spacing_scale: 2.0,
             },
         });
         self.draw_text.draw_laidout_text(cx, Point::new(50.0, 50.0), &text);
