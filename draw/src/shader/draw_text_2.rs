@@ -150,6 +150,7 @@ impl DrawText2 {
             options: LayoutOptions {
                 max_width_in_lpxs,
                 align: align.x as f32,
+                line_spacing_scale: self.text_style.line_spacing as f32,
             },
         });
         let max_width_in_lpxs = max_width_in_lpxs.unwrap_or(laidout_text.size_in_lpxs.width);
@@ -362,8 +363,10 @@ impl DrawText2 {
 #[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct TextStyle {
-    #[live()]
+    #[live]
     pub font_family: String,
-    #[live()]
+    #[live]
     pub font_size: f32,
+    #[live]
+    pub line_spacing: f32,
 }
