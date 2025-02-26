@@ -462,6 +462,87 @@ pub struct LaidoutText {
     pub rows: Vec<LaidoutRow>,
 }
 
+impl LaidoutText {
+    pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
+        if point_in_lpxs.y < 0.0 {
+            return Cursor {
+                index: 0,
+                affinity: Affinity::Before,
+            };
+        }
+        let mut current_y_in_lpxs = 0.0;
+        let mut prev_row: Option<&LaidoutRow> = None;
+        let mut row_start = 0;
+        let mut rows = self.rows.iter().peekable();
+        while let Some(row) = rows.next() {
+            current_y_in_lpxs += prev_row.map_or(row.ascender_in_lpxs, |prev_row| {
+                prev_row.line_spacing_in_lpxs(&row)
+            });
+            if point_in_lpxs.y
+                < current_y_in_lpxs
+                    + rows.peek().map_or(row.descender_in_lpxs, |next_row| {
+                        0.5 * row.line_spacing_in_lpxs(next_row)
+                    })
+            {
+                let index = row.x_in_lpxs_to_index(point_in_lpxs.x - row.origin_in_lpxs.x);
+                return Cursor {
+                    index: row_start + index,
+                    affinity: if index == 0 {
+                        Affinity::After
+                    } else {
+                        Affinity::Before
+                    },
+                };
+            }
+            prev_row = Some(row);
+            row_start += row.text.len();
+        }
+        Cursor {
+            index: self.text.len(),
+            affinity: Affinity::After,
+        }
+    }
+
+    pub fn cursor_to_point_in_lpxs(&self, cursor: Cursor) -> Point<f32> {
+        let mut current_y_in_lpxs = 0.0;
+        let mut prev_row: Option<&LaidoutRow> = None;
+        let mut row_start = 0;
+        for row in &self.rows {
+            current_y_in_lpxs += prev_row.map_or(row.ascender_in_lpxs, |prev_row| {
+                prev_row.line_spacing_in_lpxs(&row)
+            });
+            if match cursor.affinity {
+                Affinity::Before => cursor.index <= row_start + row.text.len(),
+                Affinity::After => cursor.index < row_start + row.text.len(),
+            } {
+                return Point::new(
+                    row.origin_in_lpxs.x + row.index_to_x_in_lpxs(cursor.index - row_start),
+                    current_y_in_lpxs,
+                );
+            }
+            prev_row = Some(row);
+            row_start += row.text.len();
+        }
+        let last_row = self.rows.last().unwrap();
+        Point::new(
+            last_row.origin_in_lpxs.x + last_row.width_in_lpxs,
+            current_y_in_lpxs,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Cursor {
+    pub index: usize,
+    pub affinity: Affinity,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Affinity {
+    Before,
+    After,
+}
+
 #[derive(Clone, Debug)]
 pub struct LaidoutRow {
     pub origin_in_lpxs: Point<f32>,
@@ -485,6 +566,71 @@ impl LaidoutRow {
 
     pub fn line_spacing_below_in_lpxs(&self) -> f32 {
         (-self.descender_in_lpxs + self.line_gap_in_lpxs) * self.line_spacing_scale
+    }
+
+    pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
+        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
+
+        let mut glyph_groups = self
+            .glyphs
+            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
+            .peekable();
+        while let Some(glyph_group) = glyph_groups.next() {
+            let start = glyph_group[0].cluster;
+            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
+            let next_glyph_group = glyph_groups.peek();
+            let end = next_glyph_group.map_or(self.text.len(), |next_glyph_group| {
+                next_glyph_group[0].cluster
+            });
+            let end_x_in_lpxs = next_glyph_group.map_or(self.width_in_lpxs, |next_glyph_group| {
+                next_glyph_group[0].origin_in_lpxs.x
+            });
+            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let grapheme_count = self.text[start..end].graphemes(true).count();
+            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
+            let mut current_x_in_lpxs = start_x_in_lpxs;
+            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
+                if x_in_lpxs < current_x_in_lpxs + 0.5 * grapheme_width_in_lpxs {
+                    return start + grapheme_start;
+                }
+                current_x_in_lpxs += grapheme_width_in_lpxs;
+            }
+        }
+        self.text.len()
+    }
+
+    pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
+        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
+
+        let mut glyph_groups = self
+            .glyphs
+            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
+            .peekable();
+        while let Some(glyph_group) = glyph_groups.next() {
+            let start = glyph_group[0].cluster;
+            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
+            let end = glyph_groups
+                .peek()
+                .map_or(self.text.len(), |next_glyph_group| {
+                    next_glyph_group[0].cluster
+                });
+            let end_x_in_lpxs = glyph_groups
+                .peek()
+                .map_or(self.width_in_lpxs, |next_glyph_group| {
+                    next_glyph_group[0].origin_in_lpxs.x
+                });
+            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let grapheme_count = self.text[start..end].graphemes(true).count();
+            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
+            let mut current_x_in_lpxs = start_x_in_lpxs;
+            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
+                if index == grapheme_start {
+                    return current_x_in_lpxs;
+                }
+                current_x_in_lpxs += grapheme_width_in_lpxs;
+            }
+        }
+        self.width_in_lpxs
     }
 }
 

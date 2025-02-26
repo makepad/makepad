@@ -85,11 +85,9 @@ impl Shaper {
                 }) {
                     glyph_groups.next();
                 }
-                let missing_end = if let Some(next_glyph_group) = glyph_groups.peek() {
-                    next_glyph_group[0].cluster
-                } else {
-                    end
-                };
+                let missing_end = glyph_groups
+                    .peek()
+                    .map_or(end, |next_glyph_group| next_glyph_group[0].cluster);
                 self.shape_recursive(text, fonts, missing_start, missing_end, out_glyphs);
             } else {
                 out_glyphs.extend(glyph_group.iter().cloned());
