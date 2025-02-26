@@ -68,6 +68,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             instance enabled: 1.0
+            uniform color_dither: 1.0
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
@@ -85,48 +86,9 @@ live_design! {
             uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
-                let body = mix(
-                    mix(
-                        self.color,
-                        self.color_hover,
-                        self.hover
-                    ),
-                    self.color_down,
-                    self.down
-                );
-                
-                let body_transp = vec4(body.xyz, 0.0);
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                let top_gradient = mix(
-                    body_transp,
-                    mix(
-                        mix(
-                            self.border_color_1,
-                            self.border_color_1_hover,
-                            self.hover
-                        ),
-                        self.border_color_1_down,
-                        self.down
-                    ),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-
-                let bot_gradient = mix(
-                    mix(
-                        mix(
-                            self.border_color_2,
-                            self.border_color_2_hover,
-                            self.hover),
-                            self.border_color_2_down,
-                            self.down
-                        ),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
                 sdf.box(
                     1.,
                     1.,
@@ -135,13 +97,28 @@ live_design! {
                     self.border_radius
                 )
 
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    self.border_size 
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.color,
+                            self.color_hover,
+                            self.hover
+                        ),
+                        self.color_down,
+                        self.down
+                    )
                 )
-                
                 return sdf.result
             }
         }
@@ -209,12 +186,12 @@ live_design! {
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_1_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
+            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
             uniform color_2_down: (THEME_COLOR_CTRL_PRESSED)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
@@ -226,50 +203,9 @@ live_design! {
             uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                let body = mix(
-                    mix(
-                        mix(self.color_1, self.color_2, self.pos.x + dither),
-                        mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
-                        self.hover
-                    ),
-                    mix(self.color_1_down, self.color_2_down, self.pos.x),
-                    self.down
-                );
-                
-                let body_transp = vec4(body.xyz, 0.0);
-
-                let top_gradient = mix(
-                    body_transp,
-                    mix(
-                        mix(
-                            self.border_color_1,
-                            self.border_color_1_hover,
-                            self.hover
-                        ),
-                        self.border_color_1_down,
-                        self.down
-                    ),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-
-                let bot_gradient = mix(
-                    mix(
-                        mix(
-                            self.border_color_2,
-                            self.border_color_2_hover,
-                            self.hover),
-                            self.border_color_2_down,
-                            self.down
-                        ),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
                 sdf.box(
                     1.,
                     1.,
@@ -278,13 +214,28 @@ live_design! {
                     self.border_radius
                 )
 
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    self.border_size 
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_down, self.color_2_down, self.pos.x + dither),
+                        self.down
+                    )
                 )
-                
                 return sdf.result
             }
         }
@@ -302,16 +253,16 @@ live_design! {
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_1_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
+            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
             uniform color_2_down: (THEME_COLOR_CTRL_PRESSED)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
             uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
@@ -319,49 +270,9 @@ live_design! {
             uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                let body = mix(
-                    mix(
-                        mix(self.color_1, self.color_2, self.pos.y + dither),
-                        mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
-                        self.hover
-                    ),
-                    mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
-                    self.down
-                );
-                
-                let body_transp = vec4(body.xyz, 0.0);
 
-                let top_gradient = mix(
-                    body_transp,
-                    mix(
-                        mix(
-                            self.border_color_1,
-                            self.border_color_1_hover,
-                            self.hover
-                        ),
-                        self.border_color_1_down,
-                        self.down
-                    ),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-
-                let bot_gradient = mix(
-                    mix(
-                        mix(
-                            self.border_color_2,
-                            self.border_color_2_hover,
-                            self.hover),
-                            self.border_color_2_down,
-                            self.down
-                        ),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
                 sdf.box(
                     1.,
                     1.,
@@ -370,13 +281,28 @@ live_design! {
                     self.border_radius
                 )
 
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    self.border_size 
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
+                        self.down
+                    )
                 )
-                
                 return sdf.result
             }
         }
