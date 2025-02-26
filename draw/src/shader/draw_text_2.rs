@@ -17,6 +17,8 @@ live_design! {
     use link::shaders::*;
 
     pub DrawText2 = {{DrawText2}} {
+        color: #ffff,
+
         uniform radius: float;
         uniform cutoff: float;
         uniform grayscale_atlas_size: vec2;
