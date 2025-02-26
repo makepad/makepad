@@ -14,15 +14,16 @@ live_design! {
         align: {x: 0.5, y: 0.5},
         padding: <THEME_MSPACE_2> {}
         label_walk: { width: Fit, height: Fit },
-        label_align: { x: 0.5, y: 0.5 },
         
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
             color: (THEME_COLOR_TEXT_DEFAULT)
-            text_style: {
-                font_family: (THEME_FONT_FAMILY_REGULAR),
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return self.color
             }
         }
         
@@ -167,8 +168,7 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: {
-                font_family: (THEME_FONT_FAMILY_REGULAR),
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -245,8 +245,7 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: {
-                font_family: (THEME_FONT_FAMILY_REGULAR),
+            text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -343,15 +342,13 @@ pub struct Button {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText2,
+    draw_text: DrawText,
     #[live]
     draw_icon: DrawIcon,
     #[live]
     icon_walk: Walk,
     #[live]
     label_walk: Walk,
-    #[live]
-    label_align: Align,
     #[walk]
     walk: Walk,
 
@@ -446,7 +443,8 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+        self.draw_text
+            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_bg.end(cx);
         DrawStep::done()
     }
@@ -466,7 +464,8 @@ impl Button {
     pub fn draw_button(&mut self, cx: &mut Cx2d, label:&str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, label);
+        self.draw_text
+            .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_bg.end(cx);
     }
     

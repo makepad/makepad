@@ -6,6 +6,7 @@ pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
 
 pub mod button;
+pub mod button_2;
 pub mod cached_widget;
 pub mod label;
 pub mod image;
@@ -203,6 +204,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::link_label::live_design(cx);
     crate::scroll_shadow::live_design(cx);
     crate::button::live_design(cx);
+    crate::button_2::live_design(cx);
     crate::desktop_button::live_design(cx);
     crate::window::live_design(cx);
     crate::window_menu::live_design(cx);
