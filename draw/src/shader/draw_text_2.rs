@@ -54,7 +54,7 @@ live_design! {
                 // TODO: Support non square atlases?
                 let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
                 let s = self.sdf(scale, self.t.xy);
-                let c = self.color;
+                let c = self.draw_color;
                 return s * c;
             } else {
                 let c = sample2d(self.color_texture, self.t);
@@ -72,6 +72,8 @@ pub struct DrawText2 {
     #[live]
     pub text_style: TextStyle,
     #[live]
+    pub color: Vec4,
+    #[live]
     pub debug: bool,
 
     #[deref]
@@ -85,13 +87,13 @@ pub struct DrawText2 {
     #[calc]
     pub draw_depth: f32,
     #[calc]
+    pub draw_color: Vec4,
+    #[calc]
     pub texture_index: f32,
     #[calc]
     pub t_min: Vec2,
     #[calc]
     pub t_max: Vec2,
-    #[live]
-    pub color: Vec4,
 }
 
 impl LiveHook for DrawText2 {
@@ -107,13 +109,17 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d<'_>, walk: Walk, align: Align, text: impl Into<Substr>) {
+    pub fn draw_walk(
+        &mut self,
+        cx: &mut Cx2d<'_>,
+        walk: Walk,
+        align: Align,
+        text: impl Into<Substr>,
+    ) {
         use crate::{
             text::layout::{LayoutOptions, LayoutParams, Span, Style},
             turtle,
         };
-
-        // self.debug = true; // TODO: Remove this
 
         let text = text.into();
         let turtle = cx.turtle();
@@ -134,7 +140,7 @@ impl DrawText2 {
                 style: Style {
                     font_family_id: self.text_style.font_family.clone().into(),
                     font_size_in_lpxs: self.text_style.font_size,
-                    color: Color::BRIGHT_WHITE, // TODO: Get this from DrawText2?
+                    color: None,
                 },
                 range: 0..text_len,
             }]
@@ -151,13 +157,18 @@ impl DrawText2 {
 
         if self.debug {
             let mut area = Area::Empty;
-            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
-                cx.turtle().pos().x,
-                cx.turtle().pos().y,
-                max_width_in_lpxs as f64,
-                max_height_in_lpxs as f64,
-            ));
-            cx.cx.debug.area(area, makepad_platform::vec4(1.0, 1.0, 1.0, 1.0));
+            cx.add_aligned_rect_area(
+                &mut area,
+                makepad_platform::rect(
+                    cx.turtle().pos().x,
+                    cx.turtle().pos().y,
+                    max_width_in_lpxs as f64,
+                    max_height_in_lpxs as f64,
+                ),
+            );
+            cx.cx
+                .debug
+                .area(area, makepad_platform::vec4(1.0, 1.0, 1.0, 1.0));
         }
 
         let mut rect = cx.walk_turtle(Walk {
@@ -231,31 +242,46 @@ impl DrawText2 {
         if self.debug {
             // Ascender
             let mut area = Area::Empty;
-            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
-                origin_in_lpxs.x as f64,
-                (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
-                row.width_in_lpxs as f64,
-                1.0,
-            ));
-            cx.cx.debug.area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
+            cx.add_aligned_rect_area(
+                &mut area,
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
+                    row.width_in_lpxs as f64,
+                    1.0,
+                ),
+            );
+            cx.cx
+                .debug
+                .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
 
             // Baseline
-            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
-                origin_in_lpxs.x as f64,
-                origin_in_lpxs.y as f64,
-                row.width_in_lpxs as f64,
-                1.0,
-            ));
-            cx.cx.debug.area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
+            cx.add_aligned_rect_area(
+                &mut area,
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    origin_in_lpxs.y as f64,
+                    row.width_in_lpxs as f64,
+                    1.0,
+                ),
+            );
+            cx.cx
+                .debug
+                .area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
 
             // Descender
-            cx.add_aligned_rect_area(&mut area, makepad_platform::rect(
-                origin_in_lpxs.x as f64,
-                (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
-                row.width_in_lpxs as f64,
-                1.0,
-            ));
-            cx.cx.debug.area(area, makepad_platform::vec4(0.0, 0.0, 1.0, 1.0));
+            cx.add_aligned_rect_area(
+                &mut area,
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
+                    row.width_in_lpxs as f64,
+                    1.0,
+                ),
+            );
+            cx.cx
+                .debug
+                .area(area, makepad_platform::vec4(0.0, 0.0, 1.0, 1.0));
         }
     }
 
@@ -282,7 +308,7 @@ impl DrawText2 {
         &mut self,
         point_in_lpxs: Point<f32>,
         font_size_in_lpxs: f32,
-        color: Color,
+        color: Option<Color>,
         glyph: RasterizedGlyph,
         output: &mut Vec<f32>,
     ) {
@@ -319,13 +345,13 @@ impl DrawText2 {
         .apply_transform(transform);
         self.rect_pos = point_to_vec2(bounds_in_lpxs.origin);
         self.rect_size = size_to_vec2(bounds_in_lpxs.size);
+        self.draw_color = color.map_or(self.color, color_to_vec4);
         self.texture_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
         };
         self.t_min = point_to_vec2(tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size));
         self.t_max = point_to_vec2(tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size));
-        self.color = color_to_vec4(color);
         output.extend_from_slice(self.draw_vars.as_slice());
         self.draw_depth += 0.0001;
     }

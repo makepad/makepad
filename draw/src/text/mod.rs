@@ -39,7 +39,7 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: 16.0,
-                        color: Color::RED,
+                        color: Some(Color::RED),
                     },
                     range: 0..10,
                 },
@@ -47,7 +47,7 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: 16.0,
-                        color: Color::GREEN,
+                        color: Some(Color::GREEN),
                     },
                     range: 10..20,
                 },
@@ -55,7 +55,7 @@ mod tests {
                     style: Style {
                         font_family_id: "Sans".into(),
                         font_size_in_lpxs: 16.0,
-                        color: Color::BLUE,
+                        color: Some(Color::BLUE),
                     },
                     range: 20..text.len(),
                 },
