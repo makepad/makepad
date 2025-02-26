@@ -5,8 +5,8 @@ live_design! {
     use link::theme::*;
     use link::shaders::*;
     
-    pub ButtonBase = {{Button}} {}
-    pub Button = <ButtonBase> {
+    pub Button2Base = {{Button2}} {}
+    pub Button2 = <Button2Base> {
         // TODO: NEEDS FOCUS STATE
         
         width: Fit, height: Fit,
@@ -14,16 +14,15 @@ live_design! {
         align: {x: 0.5, y: 0.5},
         padding: <THEME_MSPACE_2> {}
         label_walk: { width: Fit, height: Fit },
+        label_align: { x: 0.5, y: 0.5 },
         
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
             color: (THEME_COLOR_TEXT_DEFAULT)
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return self.color
             }
         }
         
@@ -91,24 +90,6 @@ live_design! {
         }
         
         animator: {
-            time = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.}}
-                    apply: {
-                        //draw_bg: {anim_time: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Loop {duration: 1.0, end:1000000000.0}}
-                    apply: {
-                        draw_bg: {anim_time: [{time: 0.0, value: 0.0},{time:1.0, value:1.0}]}
-                    }
-                }
-            }
-        }
-                
-        animator: {
             hover = {
                 default: off,
                 off = {
@@ -144,14 +125,14 @@ live_design! {
         }
     }
     
-    pub ButtonIcon = <Button> {
+    pub Button2Icon = <Button2> {
         icon_walk: {
             width: 12.
             margin: { left: 0. }
         }
     }
     
-    pub ButtonFlat = <ButtonIcon> {
+    pub Button2Flat = <Button2Icon> {
         height: Fit, width: Fit,
         padding: <THEME_MSPACE_2> {}
         margin: 0.
@@ -168,7 +149,8 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -228,7 +210,7 @@ live_design! {
         
     }
     
-    pub ButtonFlatter = <ButtonIcon> {
+    pub Button2Flatter = <Button2Icon> {
         height: Fit, width: Fit,
         padding: <THEME_MSPACE_2> {},
         margin: <THEME_MSPACE_2> {},
@@ -245,7 +227,8 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance pressed: 0.0,
-            text_style: <THEME_FONT_REGULAR> {
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
@@ -312,19 +295,15 @@ live_design! {
 /// that were active when the action occurred.
 ///
 /// The sequence of actions emitted by a button is as follows:
-/// 1. `ButtonAction::Pressed` when the button is pressed.
-/// 2. `ButtonAction::LongPressed` when the button has been pressed for a long time.
-///    * This only occurs on platforms that support a *native* long press, e.g., mobile.
-/// 3. Then, either one of the following, but not both:
-///    * `ButtonAction::Clicked` when the mouse/finger is lifted up while over the button area.
-///    * `ButtonAction::Released` when the mouse/finger is lifted up while *not* over the button area.
+/// 1. `Button2Action::Pressed` when the button is pressed.
+/// 2. Then, either one of the following, but not both:
+///    * `Button2Action::Clicked` when the mouse/finger is lifted up while over the button area.
+///    * `Button2Action::Released` when the mouse/finger is lifted up while *not* over the button area.
 #[derive(Clone, Debug, DefaultNone)]
-pub enum ButtonAction {
+pub enum Button2Action {
     None,
     /// The button was pressed (a "down" event).
     Pressed(KeyModifiers),
-    /// The button was pressed for a long time (only occurs on mobile platforms).
-    LongPressed,
     /// The button was clicked (an "up" event).
     Clicked(KeyModifiers),
     /// The button was released (an "up" event), but should not be considered clicked
@@ -334,7 +313,7 @@ pub enum ButtonAction {
 
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
 #[derive(Live, LiveHook, Widget)]
-pub struct Button {
+pub struct Button2 {
     #[animator]
     animator: Animator,
 
@@ -342,13 +321,15 @@ pub struct Button {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText,
+    draw_text: DrawText2,
     #[live]
     draw_icon: DrawIcon,
     #[live]
     icon_walk: Walk,
     #[live]
     label_walk: Walk,
+    #[live]
+    label_align: Align,
     #[walk]
     walk: Walk,
 
@@ -376,7 +357,7 @@ pub struct Button {
     #[action_data] #[rust] action_data: WidgetActionData,
 }
 
-impl Widget for Button {
+impl Widget for Button2 {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -399,7 +380,7 @@ impl Widget for Button {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, Button2Action::Pressed(fe.modifiers));
                     self.animator_play(cx, id!(hover.pressed));
                 }
                 Hit::FingerHoverIn(_) => {
@@ -413,12 +394,9 @@ impl Widget for Button {
                 Hit::FingerHoverOut(_) if self.enabled => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerLongPress(_lp) if self.enabled => {
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
-                }
                 Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
-                    if fe.is_over && fe.was_tap() {
-                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                    if fe.is_over {
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, Button2Action::Clicked(fe.modifiers));
                         if self.reset_hover_on_click {
                             self.animator_cut(cx, id!(hover.off));
                         } else if fe.has_hovers() {
@@ -427,7 +405,7 @@ impl Widget for Button {
                             self.animator_play(cx, id!(hover.off));
                         }
                     } else {
-                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, Button2Action::Released(fe.modifiers));
                         self.animator_play(cx, id!(hover.off));
                     }
                 }
@@ -443,8 +421,7 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         DrawStep::done()
     }
@@ -459,53 +436,41 @@ impl Widget for Button {
     }
 }
 
-impl Button {
+impl Button2 {
         
     pub fn draw_button(&mut self, cx: &mut Cx2d, label:&str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), label);
+        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, label);
         self.draw_bg.end(cx);
     }
     
     /// Returns `true` if this button was clicked.
     ///
-    /// See [`ButtonAction`] for more details.
+    /// See [`Button2Action`] for more details.
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.clicked_modifiers(actions).is_some()
     }
 
     /// Returns `true` if this button was pressed down.
     ///
-    /// See [`ButtonAction`] for more details.
+    /// See [`Button2Action`] for more details.
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.pressed_modifiers(actions).is_some()
     }
 
-    /// Returns `true` if this button was long-pressed on.
-    ///
-    /// Note that this does not mean the button has been released yet.
-    /// See [`ButtonAction`] for more details.
-    pub fn long_pressed(&self, actions: &Actions) -> bool {
-        matches!(
-            actions.find_widget_action(self.widget_uid()).cast_ref(),
-            ButtonAction::LongPressed,
-        )
-    }
-
     /// Returns `true` if this button was released, which is *not* considered to be clicked.
     ///
-    /// See [`ButtonAction`] for more details.
+    /// See [`Button2Action`] for more details.
     pub fn released(&self, actions: &Actions) -> bool {
         self.released_modifiers(actions).is_some()
     }
 
     /// Returns `Some` (with active keyboard modifiers) if this button was clicked.
     ///
-    /// See [`ButtonAction`] for more details.
+    /// See [`Button2Action`] for more details.
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+        if let Button2Action::Clicked(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
             Some(*m)
         } else {
             None
@@ -514,9 +479,9 @@ impl Button {
 
     /// Returns `Some` (with active keyboard modifiers) if this button was pressed down.
     ///
-    /// See [`ButtonAction`] for more details.
+    /// See [`Button2Action`] for more details.
     pub fn pressed_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+        if let Button2Action::Pressed(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
             Some(*m)
         } else {
             None
@@ -526,9 +491,9 @@ impl Button {
     /// Returns `Some` (with active keyboard modifiers) if this button was released,
     /// which is *not* considered to be clicked.
     ///
-    /// See [`ButtonAction`] for more details.
+    /// See [`Button2Action`] for more details.
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
-        if let ButtonAction::Released(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
+        if let Button2Action::Released(m) = actions.find_widget_action(self.widget_uid()).cast_ref() {
             Some(*m)
         } else {
             None
@@ -536,38 +501,33 @@ impl Button {
     }
 }
 
-impl ButtonRef {
-    /// See [`Button::clicked()`].
+impl Button2Ref {
+    /// See [`Button2::clicked()`].
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.borrow().is_some_and(|inner| inner.clicked(actions))
     }
 
-    /// See [`Button::pressed()`].
+    /// See [`Button2::pressed()`].
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.borrow().is_some_and(|inner| inner.pressed(actions))
     }
 
-    /// See [`Button::long_pressed()`].
-    pub fn long_pressed(&self, actions: &Actions) -> bool {
-        self.borrow().is_some_and(|inner| inner.long_pressed(actions))
-    }
-
-    /// See [`Button::released()`].
+    /// See [`Button2::released()`].
     pub fn released(&self, actions: &Actions) -> bool {
         self.borrow().is_some_and(|inner| inner.released(actions))
     }
 
-    /// See [`Button::clicked_modifiers()`].
+    /// See [`Button2::clicked_modifiers()`].
     pub fn clicked_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
         self.borrow().and_then(|inner| inner.clicked_modifiers(actions))
     }
 
-    /// See [`Button::pressed_modifiers()`].
+    /// See [`Button2::pressed_modifiers()`].
     pub fn pressed_modifiers(&self, actions: &Actions) ->  Option<KeyModifiers> {
         self.borrow().and_then(|inner| inner.pressed_modifiers(actions))
     }
 
-    /// See [`Button::released_modifiers()`].
+    /// See [`Button2::released_modifiers()`].
     pub fn released_modifiers(&self, actions: &Actions) -> Option<KeyModifiers> {
         self.borrow().and_then(|inner| inner.released_modifiers(actions))
     }
@@ -597,7 +557,7 @@ impl ButtonRef {
     }
 }
 
-impl ButtonSet {
+impl Button2Set {
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.iter().any(|v| v.clicked(actions))
     }

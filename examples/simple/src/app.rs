@@ -28,15 +28,15 @@ live_design!{
                             return mix(color1, color2, radius);
                         }
                     }
-                    b0= <Button> {
+                    b0= <Button2> {
                         text: "😊不对😭不对😊"
                         draw_text:{color:#fff, text_style: { font_size: 24.0 } }
                     }
-                    button1 = <Button> {
+                    button1 = <Button2> {
                         text: "Click me 234"
                         draw_text:{color:#fff}
                     }
-                    button2 = <Button> {
+                    button2 = <Button2> {
                         text: "Click me 345"
                         draw_text:{color:#fff}
                     }
