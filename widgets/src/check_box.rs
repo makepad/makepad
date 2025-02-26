@@ -49,8 +49,9 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             uniform mark_color_focus: (#f00)
 
             fn pixel(self) -> vec4 {
@@ -59,13 +60,14 @@ live_design!{
 
                 match self.check_type {
                     CheckType::Check => {
-                        let left = 1;
+                        let left = 1.;
                         let sz = self.size - 1.0;
-                        let offset_x = 0.0;
-                        let offset_y = -1.0;
+
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        
+
+                        // Draw background                        
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
+
                         sdf.fill_keep(
                             mix(
                                 mix(
@@ -90,31 +92,22 @@ live_design!{
                             ), self.border_size
                         )
                         
+
+                        // Draw mark
                         let szs = sz * 0.5;
-                        let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
                         sdf.stroke(
                             mix(
-                                mix(
-                                    self.mark_color,
-                                    self.mark_color_focus,
-                                    self.focus
-                                ),
-                                mix(
-                                    mix(
-                                        self.mark_color_active,
-                                        self.mark_color_focus,
-                                        self.focus
-                                    ),
-                                    self.mark_color_hover,
-                                    self.hover
-                                ),
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
                                 self.active
                             ), 1.25
                         );
+
                     }
+
                     CheckType::Radio => {
                         let sz = self.size;
                         let left = 0.;
@@ -170,8 +163,10 @@ live_design!{
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
-                        let left = 0.;
+                        let left = 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                        // Draw background                        
                         sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
                         sdf.fill_keep(
                             mix(
@@ -197,6 +192,7 @@ live_design!{
                             ), self.border_size
                         )
                             
+                        // Draw mark
                         let isz = sz * 0.65;
                         sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
                         sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
@@ -205,27 +201,11 @@ live_design!{
                         sdf.blend(self.active)
                         sdf.fill(
                             mix(
-                                mix(
-                                    mix(
-                                        self.mark_color,
-                                        self.mark_color_focus,
-                                        self.focus
-                                    ),
-                                    self.mark_color_hover,
-                                    self.hover
-                                ),
-                                mix(
-                                    mix(
-                                        self.mark_color_active,
-                                        self.mark_color_focus,
-                                        self.focus
-                                    ),
-                                    self.mark_color_hover,
-                                    self.hover
-                                ),
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
                                 self.active
                             )
-                        );
+                        )
                     }
                     CheckType::None => {
                         sdf.fill(THEME_COLOR_D_HIDDEN);
@@ -350,7 +330,34 @@ live_design!{
     pub CheckBoxToggle = <CheckBox> {
         align: { x: 0., y: 0. }
         draw_bg: {
-            uniform mark_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform size: 7.5;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_active: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_focus: (#f00)
             check_type: Toggle
         }
         label_walk: {
