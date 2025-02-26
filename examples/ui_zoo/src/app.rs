@@ -202,7 +202,22 @@
 
                         TabScrollbar = <UIZooTab> {
                             <H1> { text: "Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up."}
-                            scroll_bars: <ScrollBars> {}
+                            scroll_bars: <ScrollBars> {
+
+                                // draw_bg: {
+                                //     bar_width: 6.0
+                                //     border_size: 1.0
+                                //     border_radius: 1.5
+
+                                //     color: #3
+                                //     color_hover: #8
+                                //     color_drag: #0
+
+                                //     border_color: #6
+                                //     border_color_hover: #A
+                                //     border_color_drag: #3
+                                // }
+                            }
                         }
 
                         TabImageBlend = <UIZooTab> {
@@ -1433,6 +1448,8 @@
                                     }
                                     text: "<ButtonIcon>"
                                 }
+
+                                <ButtonGradientX> { text: "<ButtonGradientX>" }
                                 <ButtonGradientX> {
                                     draw_bg: {
                                         border_radius: 1.0,
@@ -1458,6 +1475,7 @@
                                     text: "<ButtonGradientX>"
                                 }
 
+                                <ButtonGradientY> { text: "<ButtonGradientY>" }
                                 <ButtonGradientY> {
                                     draw_bg: {
                                         border_radius: 1.0,
@@ -1480,7 +1498,7 @@
                                         border_color_2_down: #8
 
                                     }
-                                    text: "<ButtonGradientX>"
+                                    text: "<ButtonGradientY>"
                                 }
 
                                 <ButtonFlat> {
