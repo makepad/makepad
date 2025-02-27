@@ -159,9 +159,13 @@ impl<'a> LayoutContext<'a> {
     fn wrap_by_word(&mut self, font_family: &Rc<FontFamily>, style: &Style, range: Range<usize>) {
         use unicode_segmentation::UnicodeSegmentation;
 
-        let text = self.text.substr(range.clone());
-        let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs, text, segment_lens);
+        let mut fitter = Fitter::new(
+            &self.text,
+            font_family,
+            style.font_size_in_lpxs,
+            range.clone(),
+            |text| text.split_word_bounds(),
+        );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
@@ -169,7 +173,7 @@ impl<'a> LayoutContext<'a> {
                 }
                 None => {
                     if self.glyphs.is_empty() {
-                        self.wrap_by_grapheme(font_family, style, 0..fitter.pop_front());
+                        self.wrap_by_grapheme(font_family, style, fitter.pop_front());
                     } else {
                         self.finish_current_row()
                     }
@@ -186,9 +190,13 @@ impl<'a> LayoutContext<'a> {
     ) {
         use unicode_segmentation::UnicodeSegmentation;
 
-        let text = self.text.substr(range.clone());
-        let segment_lens = text.split_word_bounds().map(|word| word.len()).collect();
-        let mut fitter = Fitter::new(font_family, style.font_size_in_lpxs, text, segment_lens);
+        let mut fitter = Fitter::new(
+            &self.text,
+            font_family,
+            style.font_size_in_lpxs,
+            range,
+            |text| text.graphemes(true)
+        );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
@@ -198,7 +206,7 @@ impl<'a> LayoutContext<'a> {
                     if self.glyphs.is_empty() {
                         self.append_text_to_current_row(
                             style,
-                            &font_family.get_or_shape(self.text.substr(0..fitter.pop_front())),
+                            &font_family.get_or_shape(self.text.substr(fitter.pop_front())),
                         );
                     } else {
                         self.finish_current_row();
@@ -273,67 +281,74 @@ impl<'a> LayoutContext<'a> {
 
 #[derive(Debug)]
 struct Fitter<'a> {
+    text: &'a Substr,
     font_family: &'a Rc<FontFamily>,
     font_size_in_lpxs: f32,
-    text: Substr,
+    range: Range<usize>,
     segment_lens: Vec<usize>,
-    text_width_in_lpxs: f32,
     segment_widths_in_lpxs: Vec<f32>,
+    width_in_lpxs: f32,
 }
 
 impl<'a> Fitter<'a> {
-    fn new(
+    fn new<I>(
+        text: &'a Substr,
         font_family: &'a Rc<FontFamily>,
         font_size_in_lpxs: f32,
-        text: Substr,
-        segment_lens: Vec<usize>,
-    ) -> Self {
+        range: Range<usize>,
+        segments: impl FnOnce(&'a str) -> I,
+    ) -> Self
+    where 
+        I: Iterator<Item = &'a str>
+    {
+        let segment_lens: Vec<_> = segments(&text[range.clone()]).map(|segment| segment.len()).collect();
         let segment_widths_in_lpxs: Vec<_> = segment_lens
             .iter()
             .copied()
-            .scan(0, |segment_start, segment_len| {
-                let segment_end = *segment_start + segment_len;
-                let segment = text.substr(*segment_start..segment_end);
+            .scan(0, |state, segment_len| {
+                let segment_start = *state;
+                let segment_end = segment_start + segment_len;
+                let segment = text.substr(segment_start..segment_end);
                 let segment_width_in_ems = font_family.get_or_shape(segment).width_in_ems;
                 let segment_width_in_lpxs = segment_width_in_ems * font_size_in_lpxs;
-                *segment_start = segment_end;
+                *state = segment_end;
                 Some(segment_width_in_lpxs)
-            })
-            .collect();
+            }).collect();
+        let width_in_lpxs = segment_widths_in_lpxs.iter().sum();
         Self {
+            text,
             font_family,
             font_size_in_lpxs,
-            text,
+            range,
+            width_in_lpxs,
             segment_lens,
-            text_width_in_lpxs: segment_widths_in_lpxs.iter().sum(),
             segment_widths_in_lpxs,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.range.is_empty()
     }
 
     fn fit(&mut self, max_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
+        let mut remaining_len = self.range.len();
+        let mut remaining_width_in_lpxs = self.width_in_lpxs;
         let mut remaining_segment_count = self.segment_lens.len();
-        let mut remaining_text_len = self.text.len();
-        let mut remaining_text_width_in_lpxs = self.text_width_in_lpxs;
         while remaining_segment_count > 0 {
-            let remaining_text = self.text.substr(..remaining_text_len);
             if let Some(shaped_text) = self.fit_step(
                 max_width_in_lpxs,
-                remaining_text,
-                remaining_text_width_in_lpxs,
+                remaining_len,
+                remaining_width_in_lpxs,
             ) {
-                self.text = self.text.substr(remaining_text_len..);
-                self.text_width_in_lpxs -= remaining_text_width_in_lpxs;
+                self.range.start += remaining_len;
+                self.width_in_lpxs -= remaining_width_in_lpxs;
                 self.segment_lens.drain(..remaining_segment_count);
                 self.segment_widths_in_lpxs.drain(..remaining_segment_count);
                 return Some(shaped_text);
             }
             remaining_segment_count -= 1;
-            remaining_text_len -= self.segment_lens[remaining_segment_count];
-            remaining_text_width_in_lpxs -= self.segment_widths_in_lpxs[remaining_segment_count];
+            remaining_len -= self.segment_lens[remaining_segment_count];
+            remaining_width_in_lpxs -= self.segment_widths_in_lpxs[remaining_segment_count];
         }
         None
     }
@@ -341,12 +356,13 @@ impl<'a> Fitter<'a> {
     fn fit_step(
         &mut self,
         max_width_in_lpxs: f32,
-        text: Substr,
-        text_width_in_lpxs: f32,
+        len: usize,
+        width_in_lpxs: f32,
     ) -> Option<Rc<ShapedText>> {
-        if 0.5 * text_width_in_lpxs > max_width_in_lpxs {
+        if 0.5 * width_in_lpxs > max_width_in_lpxs {
             return None;
         }
+        let text = self.text.substr(self.range.start..self.range.start + len);
         let shaped_text = self.font_family.get_or_shape(text);
         let shaped_text_width_in_lpxs = shaped_text.width_in_ems * self.font_size_in_lpxs;
         if shaped_text_width_in_lpxs > max_width_in_lpxs {
@@ -355,13 +371,14 @@ impl<'a> Fitter<'a> {
         Some(shaped_text)
     }
 
-    fn pop_front(&mut self) -> usize {
-        let segment_len = self.segment_lens[0];
-        self.text = self.text.substr(self.segment_lens[0]..);
-        self.text_width_in_lpxs -= self.segment_widths_in_lpxs[0];
+    fn pop_front(&mut self) -> Range<usize> {
+        let len = self.segment_lens[0];
+        let range = self.range.start..self.range.start + len;
+        self.range.start += len;
+        self.width_in_lpxs -= self.segment_widths_in_lpxs[0];
         self.segment_lens.remove(0);
         self.segment_widths_in_lpxs.remove(0);
-        segment_len
+        range
     }
 }
 
@@ -463,43 +480,23 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
+    /*
+    pub fn point_in_lpxs_to_row(&self, point_in_lpxs: Point<f32>) -> &LaidoutRow {
         if point_in_lpxs.y < 0.0 {
-            return Cursor {
-                index: 0,
-                affinity: Affinity::Before,
-            };
+            return self.rows.first().unwrap();
         }
-        let mut current_y_in_lpxs = 0.0;
-        let mut prev_row: Option<&LaidoutRow> = None;
-        let mut row_start = 0;
+        if point_in_lpxs.y > self.size_in_lpxs.height {
+            return self.rows.last().unwrap();
+        }
         let mut rows = self.rows.iter().peekable();
         while let Some(row) = rows.next() {
-            current_y_in_lpxs += prev_row.map_or(row.ascender_in_lpxs, |prev_row| {
-                prev_row.line_spacing_in_lpxs(&row)
-            });
-            if point_in_lpxs.y
-                < current_y_in_lpxs
+            if point_in_lpxs.y < row.origin_in_lpxs.y
                     + rows.peek().map_or(row.descender_in_lpxs, |next_row| {
                         0.5 * row.line_spacing_in_lpxs(next_row)
                     })
             {
-                let index = row.x_in_lpxs_to_index(point_in_lpxs.x - row.origin_in_lpxs.x);
-                return Cursor {
-                    index: row_start + index,
-                    affinity: if index == 0 {
-                        Affinity::After
-                    } else {
-                        Affinity::Before
-                    },
-                };
+                return row;
             }
-            prev_row = Some(row);
-            row_start += row.text.len();
-        }
-        Cursor {
-            index: self.text.len(),
-            affinity: Affinity::After,
         }
     }
 
@@ -529,16 +526,18 @@ impl LaidoutText {
             current_y_in_lpxs,
         )
     }
+    */
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Cursor {
     pub index: usize,
     pub affinity: Affinity,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum Affinity {
+    #[default]
     Before,
     After,
 }

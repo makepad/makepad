@@ -28,6 +28,7 @@ live_design!{
                             return mix(color1, color2, radius);
                         }
                     }
+                    /*
                     b0= <Button2> {
                         text: "😊不对😭不对😊"
                         draw_text:{color:#fff, text_style: { font_size: 24.0 } }
@@ -39,6 +40,10 @@ live_design!{
                     button2 = <Button2> {
                         text: "Click me 345"
                         draw_text:{color:#fff}
+                    }
+                    */
+                    text_input = <TextInput2> {
+                        text: "The quick brown fox averylongwortodemonstratedesperatebreaks jumped over the lazy dog"
                     }
                 }
             }
