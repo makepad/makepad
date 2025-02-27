@@ -235,8 +235,72 @@
                         TabDropDown = <UIZooTab> {
                             align: { x: 0.5, y: 0.5 }
                             dropdown = <DropDown> {
-                                labels: ["Value One", "Value Two", "Thrice", "Fourth Value", "Option E", "Hexagons"],
-                                values: [ValueOne, ValueTwo, Thrice, FourthValue, OptionE, Hexagons]
+                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                            }
+                            dropdown_flat = <DropDownFlat> {
+                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                            }
+                            dropdown_gradient_x = <DropDownGradientX> {
+                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                            }
+                            dropdown_gradient_y = <DropDownGradientY> {
+                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                            }
+                            dropdown_custom = <DropDownGradientY> {
+                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+
+                                
+                                draw_text: {
+                                    color: #f00
+                                    color_hover: #0f0
+                                    color_focus: #0ff
+                                }
+
+                            
+                                draw_bg: {
+                                    border_size: (THEME_BEVELING)
+                                    border_radius: (THEME_CORNER_RADIUS)
+
+                                    color_dither: 1.0
+
+                                    color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
+                                    color_1_hover: #0
+                                    color_1_focus: #2
+
+                                    color_2: (THEME_COLOR_CTRL_DEFAULT)
+                                    color_2_hover: #3
+                                    color_2_focus: #4
+
+                                    border_color_1: #8
+                                    border_color_1_hover: #C
+                                    border_color_1_focus: #A
+
+                                    border_color_2: #8
+                                    border_color_2_hover: #C
+                                    border_color_2_focus: #A
+                                }
+
+                                popup_menu: <PopupMenuGradientY> {
+                                    menu_item: <PopupMenuItem> {}
+
+                                    draw_bg: {
+                                        color_dither: 1.0
+                                        border_radius: 4.0
+                                        border_size: (THEME_BEVELING)
+                                        inset: vec4(0.0, 0.0, 0.0, 0.0),
+
+                                        color_1: #4
+                                        color_2: #2
+
+                                        border_color_1: #C
+                                        border_color_2: #C
+                                    }
+                                }
                             }
                         }
 
@@ -2167,7 +2231,7 @@
         #[pick]
         ValueOne,
         ValueTwo,
-        Thrice,
+        Third,
         FourthValue,
         OptionE,
         Hexagons,
@@ -2178,6 +2242,10 @@
         #[live] fnumber: f32,
         #[live] inumber: i32,
         #[live] dropdown: DropDownEnum,
+        #[live] dropdown_flat: DropDownEnum,
+        #[live] dropdown_gradient_x: DropDownEnum,
+        #[live] dropdown_gradient_y: DropDownEnum,
+        #[live] dropdown_custom: DropDownEnum,
     }
     #[derive(Live, LiveHook)]
     pub struct App {
@@ -2289,5 +2357,9 @@ impl AppMain for App {
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
+        db.bind(id!(dropdown_flat), ids!(dropdown_flat));
+        db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
+        db.bind(id!(dropdown_gradient_y), ids!(dropdown_gradient_y));
+        db.bind(id!(dropdown_custom), ids!(dropdown_custom));
     }
 }
