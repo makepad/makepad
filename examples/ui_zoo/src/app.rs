@@ -286,7 +286,7 @@
                                 }
 
                                 popup_menu: <PopupMenuGradientY> {
-                                    menu_item: <PopupMenuItem> {}
+                                    // menu_item: <PopupMenuItem> {}
 
                                     draw_bg: {
                                         color_dither: 1.0
@@ -1794,7 +1794,7 @@
                                         }
                                     }
 
-                                    draw_selection: {
+                                    draw_highlight: {
                                         color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
                                         color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
                                         color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
@@ -1861,7 +1861,7 @@
                                         }
                                     }
 
-                                    draw_selection: {
+                                    draw_highlight: {
                                         color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
                                         color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
                                         color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
