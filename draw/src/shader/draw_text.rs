@@ -191,7 +191,7 @@ impl LiveHook for FontFamily{
         while let Some(index) = node_iter {
             if let LiveValue::Dependency(dep) = &nodes[index].value{
                 let ptr = dep.as_ptr() as *const _ as u64;
-                _family_id.bytes_append(&ptr.to_be_bytes());
+                _family_id = _family_id.xor(ptr);
             }
             node_iter = nodes.next_child(index);
         }
