@@ -480,13 +480,6 @@ pub enum CheckBoxAction {
     Change(bool),
     None
 }
-/*
-#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
-struct DrawLabelText {
-    #[deref] draw_super: DrawText,
-    #[live] hover: f32,
-    #[live] pressed: f32,
-}*/
 
 impl CheckBox {
     
