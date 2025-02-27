@@ -157,14 +157,12 @@ impl<'a> LayoutContext<'a> {
     }
 
     fn wrap_by_word(&mut self, font_family: &Rc<FontFamily>, style: &Style, range: Range<usize>) {
-        use unicode_segmentation::UnicodeSegmentation;
-
         let mut fitter = Fitter::new(
-            &self.text,
+            self.text,
             font_family,
             style.font_size_in_lpxs,
             range.clone(),
-            |text| text.split_word_bounds(),
+            SegmentKind::Word
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
@@ -188,14 +186,12 @@ impl<'a> LayoutContext<'a> {
         style: &Style,
         range: Range<usize>,
     ) {
-        use unicode_segmentation::UnicodeSegmentation;
-
         let mut fitter = Fitter::new(
-            &self.text,
+            self.text,
             font_family,
             style.font_size_in_lpxs,
             range,
-            |text| text.graphemes(true)
+            SegmentKind::Grapheme
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
@@ -282,7 +278,7 @@ impl<'a> LayoutContext<'a> {
 #[derive(Debug)]
 struct Fitter<'a> {
     text: &'a Substr,
-    font_family: &'a Rc<FontFamily>,
+    font_family: &'a FontFamily,
     font_size_in_lpxs: f32,
     range: Range<usize>,
     segment_lens: Vec<usize>,
@@ -291,17 +287,19 @@ struct Fitter<'a> {
 }
 
 impl<'a> Fitter<'a> {
-    fn new<I>(
+    fn new(
         text: &'a Substr,
-        font_family: &'a Rc<FontFamily>,
+        font_family: &'a FontFamily,
         font_size_in_lpxs: f32,
         range: Range<usize>,
-        segments: impl FnOnce(&'a str) -> I,
-    ) -> Self
-    where 
-        I: Iterator<Item = &'a str>
-    {
-        let segment_lens: Vec<_> = segments(&text[range.clone()]).map(|segment| segment.len()).collect();
+        segment_kind: SegmentKind,
+    ) -> Self {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let segment_lens: Vec<_> = match segment_kind {
+            SegmentKind::Word => text.split_word_bounds().map(|segment| segment.len()).collect(),
+            SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
+        };
         let segment_widths_in_lpxs: Vec<_> = segment_lens
             .iter()
             .copied()
@@ -380,6 +378,12 @@ impl<'a> Fitter<'a> {
         self.segment_widths_in_lpxs.remove(0);
         range
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SegmentKind {
+    Word,
+    Grapheme,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
