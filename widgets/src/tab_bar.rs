@@ -34,7 +34,7 @@ live_design!{
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
-                draw_bar: {bar_width: 3.0}
+                draw_bg: {bar_width: 3.0}
                 bar_size: 4
                 use_vertical_finger_scroll: true
             }
@@ -57,7 +57,7 @@ live_design!{
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
-                draw_bar: {bar_width: 3.0}
+                draw_bg: {bar_width: 3.0}
                 bar_size: 4
                 use_vertical_finger_scroll: true
             }
