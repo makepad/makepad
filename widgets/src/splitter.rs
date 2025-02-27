@@ -14,7 +14,7 @@ live_design!{
     pub SplitterBase = {{Splitter}} {}
     pub Splitter = <SplitterBase> {
         draw_splitter: {
-            instance pressed: 0.0
+            instance down: 0.0
             instance hover: 0.0
             
             uniform border_radius: 1.0
@@ -48,7 +48,7 @@ live_design!{
                     mix(
                         THEME_COLOR_CTRL_SCROLLBAR_HOVER,
                         THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
-                        self.pressed
+                        self.down
                     ),
                     self.hover
                 ));
@@ -66,7 +66,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_splitter: {pressed: 0.0, hover: 0.0}
+                        draw_splitter: {down: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -77,17 +77,17 @@ live_design!{
                     }
                     apply: {
                         draw_splitter: {
-                            pressed: 0.0,
+                            down: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                 
-                pressed = {
+                down = {
                     from: { all: Forward { duration: 0.1 }}
                     apply: {
                         draw_splitter: {
-                            pressed: [{time: 0.0, value: 1.0}],
+                            down: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
                     }
@@ -199,7 +199,7 @@ impl Widget for Splitter {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
                 }
-                self.animator_play(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.down));
                 self.drag_start_align = Some(self.align);
             }
             Hit::FingerUp(f) => {
