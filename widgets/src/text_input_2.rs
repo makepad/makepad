@@ -1,16 +1,31 @@
 use crate::{
     makepad_derive_widget::*,
-    makepad_draw::*,
+    makepad_draw::{text::layout::Cursor, *}, *,
     widget::*,
 };
 
 
 live_design! {
+    link widgets;
+
+    use link::theme::*;
+
     pub TextInput2Base = {{TextInput2}} {}
     
     pub TextInput2 = <TextInput2Base> {
         width: 200,
         height: Fit,
+
+        draw_text: {
+            instance hover: 0.0
+            instance focus: 0.0
+            wrap: Word,
+            text_style: {
+                font_family: (THEME_FONT_FAMILY_REGULAR),
+                line_spacing: (THEME_FONT_LINE_SPACING),
+                font_size: 16.0
+            }
+        }
     }
 }
 
@@ -21,11 +36,12 @@ pub struct TextInput2 {
     #[live] draw_cursor: DrawQuad,
 
     #[layout] layout: Layout,
-    #[live] text_walk: Walk,
+    #[walk] text_walk: Walk,
     #[live] text_align: Align,
 
     #[live] pub text: String,
-    #[rust] pub text_area: Area,
+    #[rust] text_area: Area,
+    #[rust] cursor: Cursor,
 }
 
 impl Widget for TextInput2 {
