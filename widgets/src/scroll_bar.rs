@@ -13,9 +13,8 @@ live_design!{
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
-        draw_bar: {
-            //draw_depth: 5.0
-            instance down: 0.0
+        draw_bg: {
+            instance drag: 0.0
             instance hover: 0.0
 
             uniform border_radius: 1.5
@@ -50,7 +49,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bar: {down: 0.0, hover: 0.0}
+                        draw_bg: {drag: 0.0, hover: 0.0}
                     }
                 }
                                                 
@@ -58,22 +57,22 @@ live_design!{
                     cursor: Default,
                     from: {
                         all: Forward {duration: 0.1}
-                        down: Forward {duration: 0.01}
+                        drag: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bar: {
-                            down: 0.0,
+                        draw_bg: {
+                            drag: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                                                 
-                down = {
+                drag = {
                     cursor: Default,
                     from: {all: Snap}
                     apply: {
-                        draw_bar: {
-                            down: 1.0,
+                        draw_bg: {
+                            drag: 1.0,
                             hover: 1.0,
                         }
                     }
@@ -86,13 +85,22 @@ live_design!{
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
-        draw_bar: {
-            //draw_depth: 5.0
-            uniform border_radius: 1.5
-            instance bar_width: 6.0
-            instance down: 0.0
+        draw_bg: {
+            instance drag: 0.0
             instance hover: 0.0
-                        
+
+            uniform bar_width: 6.0
+            uniform border_size: 1.0
+            uniform border_radius: 1.5
+
+            uniform color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform color_drag: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
+
+            uniform border_color: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
@@ -113,24 +121,38 @@ live_design!{
                         self.border_radius
                     );
                 }
-                return sdf.fill( mix(
-                    THEME_COLOR_CTRL_DEFAULT,
+
+                sdf.fill_keep(mix(
+                    self.color,
                     mix(
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
-                        self.down
+                        self.color_hover,
+                        self.color_drag,
+                        self.drag
                     ),
                     self.hover
                 ));
+
+                sdf.stroke(mix(
+                    self.border_color,
+                    mix(
+                        self.border_color_hover,
+                        self.border_color_drag,
+                        self.drag
+                    ),
+                    self.hover
+                ), self.border_size);
+
+                return sdf.result
             }
         }
+
         animator: {
             hover = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bar: {down: 0.0, hover: 0.0}
+                        draw_bg: {drag: 0.0, hover: 0.0}
                     }
                 }
                                 
@@ -138,22 +160,22 @@ live_design!{
                     cursor: Default,
                     from: {
                         all: Forward {duration: 0.1}
-                        down: Forward {duration: 0.01}
+                        drag: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bar: {
-                            down: 0.0,
+                        draw_bg: {
+                            drag: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                                 
-                down = {
+                drag = {
                     cursor: Default,
                     from: {all: Snap}
                     apply: {
-                        draw_bar: {
-                            down: 1.0,
+                        draw_bg: {
+                            drag: 1.0,
                             hover: 1.0,
                         }
                     }
@@ -171,7 +193,7 @@ pub enum ScrollAxis {
 }
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBar {
-    #[live] draw_bar: DrawScrollBar,
+    #[live] draw_bg: DrawScrollBar,
     #[live] pub bar_size: f64,
     #[live] pub min_handle_size: f64, //minimum size of the handle in pixels
     #[live] bar_side_margin: f64,
@@ -247,7 +269,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.draw_bar.apply_over(cx, live!{
+        self.draw_bg.apply_over(cx, live!{
             norm_scroll: (norm_scroll)
         });
         //self.draw_bg.set_norm_scroll(cx, norm_scroll);
@@ -418,7 +440,7 @@ impl ScrollBar {
         }
     }
     pub fn is_area_captured(&self, cx:&Cx)->bool{
-        cx.fingers.is_area_captured(self.draw_bar.area())
+        cx.fingers.is_area_captured(self.draw_bg.area())
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
@@ -431,9 +453,9 @@ impl ScrollBar {
                 return dispatch_action(cx, self.make_scroll_action());
             }
             
-            match event.hits(cx, self.draw_bar.area()) {
+            match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                    self.animator_play(cx, id!(hover.down));
+                    self.animator_play(cx, id!(hover.drag));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         ScrollAxis::Horizontal => rel.x,
@@ -514,11 +536,11 @@ impl ScrollBar {
                 
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.draw_bar.is_vertical = 0.0;
-                    self.draw_bar.norm_scroll = norm_scroll as f32;
-                    self.draw_bar.norm_handle = norm_handle as f32;
+                    self.draw_bg.is_vertical = 0.0;
+                    self.draw_bg.norm_scroll = norm_scroll as f32;
+                    self.draw_bg.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
-                    self.draw_bar.draw_rel(
+                    self.draw_bg.draw_rel(
                         cx,
                         Rect {
                             pos: dvec2(self.bar_side_margin, view_rect.size.y - self.bar_size) + scroll,
@@ -541,11 +563,11 @@ impl ScrollBar {
                 self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.draw_bar.is_vertical = 1.0;
-                    self.draw_bar.norm_scroll = norm_scroll as f32;
-                    self.draw_bar.norm_handle = norm_handle as f32;
+                    self.draw_bg.is_vertical = 1.0;
+                    self.draw_bg.norm_scroll = norm_scroll as f32;
+                    self.draw_bg.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
-                    self.draw_bar.draw_rel(
+                    self.draw_bg.draw_rel(
                         cx,
                         Rect {
                             pos: dvec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,
