@@ -338,7 +338,7 @@ live_design!{
             is_numeric_only: true,
             margin: { right: 7.5, top: (SLIDER_ALT1_DATA_FONT_TOPMARGIN) } 
 
-            draw_selection: {
+            draw_highlight: {
                 instance hover: 0.0
                 instance focus: 0.0
 
@@ -553,7 +553,7 @@ live_design!{
                         draw_slider: { hover: 0.0 },
                         draw_text: { hover: 0.0 },
                         text_input: {
-                            draw_selection: { hover: 0.0},
+                            draw_highlight: { hover: 0.0},
                             draw_bg: { hover: 0.0},
                             draw_text: { hover: 0.0},
                         }
@@ -566,7 +566,7 @@ live_design!{
                         draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 }
                         text_input: {
-                            draw_selection: { hover: 1.0},
+                            draw_highlight: { hover: 1.0},
                             draw_bg: { hover: 1.0},
                             draw_text: { hover: 1.0},
                         }
@@ -662,8 +662,8 @@ live_design!{
                 instance focus: 0.0
 
                 uniform radius: (THEME_CORNER_RADIUS)
-                uniform bodytop: (THEME_COLOR_INSET_DEFAULT)
-                uniform bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+                uniform color: (THEME_COLOR_INSET_DEFAULT)
+                uniform color_down: (THEME_COLOR_CTRL_ACTIVE)
                 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -671,7 +671,7 @@ live_design!{
                 }
             }
 
-            draw_selection: {
+            draw_highlight: {
                 instance hover: 0.0
                 instance focus: 0.0
 
@@ -914,7 +914,7 @@ live_design!{
                         draw_slider: { hover: 0.0 },
                         draw_text: { hover: 0.0 },
                         text_input: {
-                            draw_selection: { hover: 0.0},
+                            draw_highlight: { hover: 0.0},
                             draw_bg: { hover: 0.0},
                             draw_text: { hover: 0.0},
                         }
@@ -926,7 +926,7 @@ live_design!{
                         draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 }
                         text_input: {
-                            draw_selection: { hover: 1.0},
+                            draw_highlight: { hover: 1.0},
                             draw_bg: { hover: 1.0 },
                             draw_text: { hover: 1.0 },
                         }
@@ -1025,8 +1025,8 @@ live_design!{
                 instance focus: 0.0
 
                 uniform radius: (THEME_CORNER_RADIUS)
-                uniform bodytop: (THEME_COLOR_INSET_DEFAULT)
-                uniform bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+                uniform color: (THEME_COLOR_INSET_DEFAULT)
+                uniform color_down: (THEME_COLOR_CTRL_ACTIVE)
                 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1034,7 +1034,7 @@ live_design!{
                 }
             }
 
-            draw_selection: {
+            draw_highlight: {
                 instance hover: 0.0
                 instance focus: 0.0
 
@@ -1221,7 +1221,7 @@ live_design!{
                         draw_slider: { hover: 0.0 },
                         draw_text: { hover: 0.0 },
                         text_input: {
-                            draw_selection: { hover: 0.0},
+                            draw_highlight: { hover: 0.0},
                             draw_bg: { hover: 0.0},
                             draw_text: { hover: 0.0},
                         }
@@ -1234,7 +1234,7 @@ live_design!{
                         draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 }
                         text_input: {
-                            draw_selection: { hover: 1.0},
+                            draw_highlight: { hover: 1.0},
                             draw_bg: { hover: 1.0},
                             draw_text: { hover: 1.0},
                         }
@@ -1329,8 +1329,8 @@ live_design!{
                 instance focus: 0.0
 
                 uniform radius: (THEME_CORNER_RADIUS)
-                uniform bodytop: (THEME_COLOR_INSET_DEFAULT)
-                uniform bodybottom: (THEME_COLOR_CTRL_ACTIVE)
+                uniform color: (THEME_COLOR_INSET_DEFAULT)
+                uniform color_down: (THEME_COLOR_CTRL_ACTIVE)
                 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1338,7 +1338,7 @@ live_design!{
                 }
             }
 
-            draw_selection: {
+            draw_highlight: {
                 instance hover: 0.0
                 instance focus: 0.0
 
@@ -1540,7 +1540,7 @@ live_design!{
                         draw_slider: { hover: 0.0 },
                         draw_text: { hover: 0.0 },
                         text_input: {
-                            draw_selection: { hover: 0.0},
+                            draw_highlight: { hover: 0.0},
                             draw_bg: { hover: 0.0},
                             draw_text: { hover: 0.0},
                         }
@@ -1553,7 +1553,7 @@ live_design!{
                         draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 }
                         text_input: {
-                            draw_selection: { hover: 1.0},
+                            draw_highlight: { hover: 1.0},
                             draw_bg: { hover: 1.0},
                             draw_text: { hover: 1.0},
                         }

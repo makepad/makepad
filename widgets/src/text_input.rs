@@ -144,7 +144,7 @@ live_design!{
             }
         }
         
-        draw_selection: {
+        draw_highlight: {
             instance hover: 0.0
             instance focus: 0.0
 
@@ -182,7 +182,7 @@ live_design!{
                         apply: {
                             draw_bg: { hover: 0.0 }
                             draw_text: { hover: 0.0 },
-                            draw_selection: { hover: 0.0 }
+                            draw_highlight: { hover: 0.0 }
                         }
                     }
                     on = {
@@ -190,7 +190,7 @@ live_design!{
                         apply: {
                             draw_bg: { hover: 1.0 }
                             draw_text: {hover: 1.0},
-                            draw_selection: {hover: 1.0}
+                            draw_highlight: {hover: 1.0}
                         }
                     }
                 }
@@ -202,7 +202,7 @@ live_design!{
                             draw_bg: {focus: 0.0},
                             draw_text: {focus: 0.0},
                             draw_cursor: {focus: 0.0},
-                            draw_selection: {focus: 0.0}
+                            draw_highlight: {focus: 0.0}
                         }
                     }
                     on = {
@@ -211,7 +211,7 @@ live_design!{
                             draw_bg: {focus: 1.0},
                             draw_text: {focus: 1.0}
                             draw_cursor: {focus: 1.0},
-                            draw_selection: {focus: 1.0}
+                            draw_highlight: {focus: 1.0}
                         }
                     }
                 }
@@ -287,7 +287,7 @@ live_design!{
             }
         }
 
-        draw_selection: {
+        draw_highlight: {
             instance hover: 0.0
             instance focus: 0.0
 
@@ -399,7 +399,7 @@ live_design!{
             }
         }
 
-        draw_selection: {
+        draw_highlight: {
             instance hover: 0.0
             instance focus: 0.0
 
@@ -460,7 +460,7 @@ pub struct TextInput {
     
     #[redraw] #[live] draw_bg: DrawColor,
     #[live] pub draw_text: DrawLabel,
-    #[live] draw_selection: DrawQuad,
+    #[live] draw_highlight: DrawQuad,
     #[live] draw_cursor: DrawQuad,
     
     #[layout] layout: Layout,
@@ -944,13 +944,13 @@ impl Widget for TextInput {
                 }
             }
             Hit::TextCopy(event) => {
-                let selection = &self.text[self.cursor.start().index..self.cursor.end().index];
-                *event.response.borrow_mut() = Some(selection.to_string());
+                let highlight = &self.text[self.cursor.start().index..self.cursor.end().index];
+                *event.response.borrow_mut() = Some(highlight.to_string());
             }
             Hit::TextCut(event) => {
-                let selection = &self.text[self.cursor.start().index..self.cursor.end().index];
-                *event.response.borrow_mut() = Some(selection.to_string());
-                if !selection.is_empty() {
+                let highlight = &self.text[self.cursor.start().index..self.cursor.end().index];
+                *event.response.borrow_mut() = Some(highlight.to_string());
+                if !highlight.is_empty() {
                     self.history.create_or_extend_edit_group(EditKind::Other, self.cursor);
                     self.apply_edit(Edit {
                         start: self.cursor.start().index,
@@ -1019,7 +1019,7 @@ impl Widget for TextInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
 
-        self.draw_selection.append_to_draw_call(cx);
+        self.draw_highlight.append_to_draw_call(cx);
 
         let inner_walk = self.inner_walk();
 
@@ -1048,7 +1048,7 @@ impl Widget for TextInput {
 
         let padded_rect = cx.turtle().padded_rect();
 
-        // Draw selection
+        // Draw highlight
         let rects = self.draw_text.selected_rects(
             cx,
             inner_walk,
@@ -1059,7 +1059,7 @@ impl Widget for TextInput {
             self.cursor.head.max(self.cursor.tail)
         );
         for rect in rects {
-            self.draw_selection.draw_abs(cx, Rect {
+            self.draw_highlight.draw_abs(cx, Rect {
                 pos: padded_rect.pos + rect.pos,
                 size: rect.size,
             });
