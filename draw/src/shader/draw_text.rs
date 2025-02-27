@@ -153,6 +153,7 @@ const _: () = assert!(crate::font_atlas::ATLAS_HEIGHT == 4096);
 #[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct TextStyle {
+    #[live()] pub font_family: FontFamily,
     #[live()] pub font: Font,
     #[live()] pub font2: Font,
     #[live(9.0)] pub font_size: f64,
@@ -171,6 +172,41 @@ pub enum TextWrap {
     #[pick] Ellipsis,
     Word,
     Line
+}
+
+// DSL FontFamily struct
+#[derive(Debug, Clone, Live, LiveRegister, PartialEq)]
+pub struct FontFamily {
+    #[rust] id: LiveId,
+}
+
+impl LiveHook for FontFamily{
+    // lets implement apply
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode])->Option<usize>{
+        // alright lets process our structure
+        // lets iterate over the node structure
+        // and collect the deps in a hash
+        let mut node_iter = Some(index+1);
+        let mut _family_id = LiveId::seeded();
+        while let Some(index) = node_iter {
+            if let LiveValue::Dependency(dep) = &nodes[index].value{
+                let ptr = dep.as_ptr() as *const _ as u64;
+                _family_id.bytes_append(&ptr.to_be_bytes());
+            }
+            node_iter = nodes.next_child(index);
+        }
+        // TODO! use the hash to look up the font family
+        self.id = _family_id;
+        // else we build the font family here
+        let mut node_iter = Some(index+1);
+        while let Some(index) = node_iter {
+            if let LiveValue::Dependency(_dep) = &nodes[index].value{
+                // alright we have a dependency here
+            }
+            node_iter = nodes.next_child(index);
+        }
+        return Some(nodes.skip_node(index));
+    }
 }
 
 #[derive(Live, LiveRegister)]
