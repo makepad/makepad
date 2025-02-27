@@ -330,6 +330,7 @@ impl DrawText2 {
         self.draw_depth += 0.0001;
     }
 
+    /*
     pub fn point_in_lpxs_to_cursor(
         &self,
         cx: &mut Cx2d<'_>,
@@ -353,6 +354,7 @@ impl DrawText2 {
         let laidout_text = self.layout_text(cx, walk, align, text);
         point_to_dvec2(laidout_text.cursor_to_point_in_lpxs(cursor))
     }
+    */
 
     fn layout_text(
         &self,
