@@ -1,4 +1,4 @@
-use {
+unimatse {
     crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
@@ -139,46 +139,51 @@ live_design!{
         label_walk: { width: Fill, height: Fit }
             
         text_input: <TextInput> {
-            width: Fit, padding: 0.,
             empty_message: "0",
             is_numeric_only: true,
-                
+            is_read_only: false,
+
+            width: Fit,
+            padding: 0.,
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
+            
             draw_bg: {
-                color: (THEME_COLOR_D_HIDDEN)
+                border_radius: 1.
+                border_size: 0.
 
-                uniform radius: 1.0
-                uniform border_size: 0.0
-                uniform border_color: (#f00) // TODO: This appears not to do anything.
-                uniform inset: vec4(0.0, 0.0, 0.0, 0.0)
-                uniform focus: 0.0,
-                uniform color_focus: (THEME_COLOR_D_HIDDEN)
-                    
-                fn get_color(self) -> vec4 {
-                    return mix(self.color, self.color_focus, self.focus)
-                }
-                    
-                fn get_border_color(self) -> vec4 {
-                    return self.border_color
-                }
-                    
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    sdf.box(
-                        self.inset.x + self.border_size,
-                        self.inset.y + self.border_size,
-                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
-                        max(1.0, self.radius)
-                    )
-                    sdf.fill_keep(self.get_color())
-                    if self.border_size > 0.0 {
-                        sdf.stroke(self.get_border_color(), self.border_size)
-                    }
-                    return sdf.result;
-                }
-            },
+                color_dither: 1.0
+
+                color: (THEME_COLOR_U_HIDDEN)
+                color_hover: (THEME_COLOR_U_HIDDEN)
+                color_focus: (THEME_COLOR_U_HIDDEN)
+
+                border_color_1: (THEME_COLOR_U_HIDDEN)
+                border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+                border_color_1_focus: (THEME_COLOR_U_HIDDEN)
+
+                border_color_2: (THEME_COLOR_U_HIDDEN)
+                border_color_2_hover: (THEME_COLOR_U_HIDDEN)
+                border_color_2_focus: (THEME_COLOR_U_HIDDEN)
+            }
+
+            draw_text: {
+                color: (THEME_COLOR_TEXT_DEFAULT)
+                color_hover: (THEME_COLOR_TEXT_DEFAULT)
+                color_focus: (THEME_COLOR_TEXT_DEFAULT)
+                color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
+                color_empty_focus: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
+            }
+
+            draw_cursor: { color: (THEME_COLOR_TEXT_CURSOR) }
+
+            draw_highlight: {
+                border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
+                color: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+                color_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
+                color_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
+            }
         }
             
         animator: {
@@ -244,15 +249,33 @@ live_design!{
     pub SliderBig = <Slider> {
         height: 36
         text: "CutOff1"
-        text_input: {
-            empty_message: "0",
-            is_numeric_only: true,
-            draw_bg: {
-                color: (THEME_COLOR_D_HIDDEN)
-            },
-        }
+
         draw_slider: {
-            uniform line_color: (THEME_COLOR_AMOUNT_DEFAULT_BIG),
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_focus: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_drag: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_focus: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_drag: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_drag: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_drag: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform val_color: (THEME_COLOR_AMOUNT_DEFAULT)
+            uniform val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
+            uniform val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
+            uniform val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
+
             uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
@@ -262,11 +285,19 @@ live_design!{
                 let top = 20.0;
                     
                 sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
-                sdf.fill_keep(
+                sdf.fill_keep( 
                     mix(
-                        mix((THEME_COLOR_INSET_PIT_TOP), (THEME_COLOR_INSET_PIT_BOTTOM) * 0.1, pow(self.pos.y, 1.0)),
-                        mix((THEME_COLOR_INSET_PIT_TOP_HOVER) * 1.75, (THEME_COLOR_BEVEL_LIGHT) * 0.1, pow(self.pos.y, 1.0)),
-                        self.drag
+                        mix(self.color_1, self.color_2, pow(self.pos.y, 1.0)),
+                        mix(
+                            mix(self.color_1_focus, self.color_2_focus, pow(self.pos.y, 1.0)),
+                            mix(
+                                mix(self.color_1_hover, self.color_2_hover, pow(self.pos.y, 1.0)),
+                                mix(self.color_1_drag, self.color_2_drag, pow(self.pos.y, 1.0)),
+                                self.drag
+                            ),
+                            self.hover
+                        ),
+                        self.focus
                     )
                 ) // Control backdrop gradient
                     
@@ -283,9 +314,9 @@ live_design!{
                 sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
                     
                 sdf.line_to(handle_x + in_side + handle_size * 0.5, top + in_top);
-                sdf.stroke_keep(mix((THEME_COLOR_U_HIDDEN), self.line_color, self.drag), 1.5)
+                sdf.stroke_keep(mix((THEME_COLOR_U_HIDDEN), self.val_color, self.drag), 1.5)
                 sdf.stroke(
-                    mix(mix(self.line_color * 0.85, self.line_color, self.hover), THEME_COLOR_AMOUNT_ACTIVE, self.drag),
+                    mix(mix(self.val_color * 0.85, self.val_color, self.hover), THEME_COLOR_AMOUNT_ACTIVE, self.drag),
                     1.5
                 )
                     
@@ -310,7 +341,6 @@ live_design!{
                     ),
                     1.
                 ); // Nub outline gradient
-                
                 
                 return sdf.result
             }
