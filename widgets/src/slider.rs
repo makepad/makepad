@@ -1,4 +1,4 @@
-unimatse {
+use {
     crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
@@ -286,7 +286,6 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let top = 20.0;
                     
-                // Background fill
                 sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
                 sdf.fill_keep( 
                     mix(
@@ -304,7 +303,6 @@ live_design!{
                     )
                 )
                     
-                // Background fill border
                 sdf.stroke(
                     mix(
                         mix(self.border_color_1, self.border_color_2, pow(self.pos.y, 10.0)),
@@ -319,7 +317,6 @@ live_design!{
                         ),
                         self.focus
                     ), self.border_size) // Control outline
-
 
                 let in_side = 5.0;
                 let in_top = 5.0; // Ridge: vertical position
