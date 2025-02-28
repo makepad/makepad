@@ -150,7 +150,7 @@ live_design!{
             
             draw_bg: {
                 border_radius: 1.
-                border_size: 0.
+                border_size: (THEME_BEVELING)
 
                 color_dither: 1.0
 
@@ -251,6 +251,8 @@ live_design!{
         text: "CutOff1"
 
         draw_slider: {
+            uniform border_size: (THEME_BEVELING)
+
             uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_1_focus: (THEME_COLOR_INSET_PIT_TOP)
@@ -261,15 +263,15 @@ live_design!{
             uniform color_2_focus: (THEME_COLOR_INSET_PIT_BOTTOM)
             uniform color_2_drag: (THEME_COLOR_INSET_PIT_BOTTOM)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_drag: (THEME_COLOR_BEVEL_SHADOW)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_drag: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_drag: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform val_color: (THEME_COLOR_AMOUNT_DEFAULT)
             uniform val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
@@ -284,24 +286,41 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let top = 20.0;
                     
+                // Background fill
                 sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
                 sdf.fill_keep( 
                     mix(
-                        mix(self.color_1, self.color_2, pow(self.pos.y, 1.0)),
+                        mix(self.color_1, self.color_2, self.pos.y),
                         mix(
-                            mix(self.color_1_focus, self.color_2_focus, pow(self.pos.y, 1.0)),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
                             mix(
-                                mix(self.color_1_hover, self.color_2_hover, pow(self.pos.y, 1.0)),
-                                mix(self.color_1_drag, self.color_2_drag, pow(self.pos.y, 1.0)),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                                mix(self.color_1_drag, self.color_2_drag, self.pos.y),
                                 self.drag
                             ),
                             self.hover
                         ),
                         self.focus
                     )
-                ) // Control backdrop gradient
+                )
                     
-                sdf.stroke(mix(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_SHADOW * 1.25, self.drag), THEME_COLOR_BEVEL_LIGHT, pow(self.pos.y, 10.0)), 1.0) // Control outline
+                // Background fill border
+                sdf.stroke(
+                    mix(
+                        mix(self.border_color_1, self.border_color_2, pow(self.pos.y, 10.0)),
+                        mix(
+                            mix(self.border_color_1_focus, self.border_color_2_focus, pow(self.pos.y, 10.0)),
+                            mix(
+                                mix(self.border_color_1_hover, self.border_color_2_hover, pow(self.pos.y, 10.0)),
+                                mix(self.border_color_1_drag, self.border_color_2_drag, pow(self.pos.y, 10.0)),
+                                self.drag
+                            ),
+                            self.hover
+                        ),
+                        self.focus
+                    ), self.border_size) // Control outline
+
+
                 let in_side = 5.0;
                 let in_top = 5.0; // Ridge: vertical position
                 sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
