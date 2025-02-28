@@ -61,27 +61,20 @@ live_design!{
                 // Track shadow
                 sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                 sdf.fill(mix(
-                        mix(
-                            self.border_color_2,
-                            self.border_color_2_hover,
-                            self.hover
-                        ),
-                        self.border_color_2_focus,
-                        self.focus
+                        mix(self.border_color_2, self.border_color_2_focus, self.focus),
+                        mix(self.border_color_2_hover, self.border_color_2_drag, self.drag),
+                        self.hover
                     )
                 );
                     
                 // Track highlight
                 sdf.rect(0, self.rect_size.y - slider_height * 0.5, self.rect_size.x, slider_height)
                 sdf.fill(mix(
-                        mix(
-                            self.border_color_1,
-                            self.border_color_1_hover,
-                            self.hover
-                        ),
-                        self.border_color_1_focus,
-                        self.focus
+                        mix(self.border_color_1, self.border_color_1_focus, self.focus),
+                        mix(self.border_color_1_hover, self.border_color_1_drag, self.drag),
+                        self.hover
                     )
+
                 );
                     
                 // Amount
@@ -92,13 +85,9 @@ live_design!{
                     slider_height
                 )
                 sdf.fill(mix(
-                        mix(
-                            self.val_color,
-                            self.val_color_hover,
-                            self.hover
-                        ),
-                        self.val_color_focus,
-                        self.focus
+                        mix(self.val_color, self.val_color_focus, self.focus),
+                        mix(self.val_color_hover, self.val_color_drag, self.drag),
+                        self.hover
                     )
                 );
                     
@@ -113,12 +102,8 @@ live_design!{
                 )
 
                 sdf.fill(mix(
-                        self.handle_color,
-                        mix(
-                            self.handle_color_hover,
-                            self.handle_color_drag,
-                            self.drag
-                        ),
+                        mix(self.handle_color, self.handle_color_focus, self.focus),
+                        mix(self.handle_color_hover, self.handle_color_drag, self.drag),
                         self.hover
                     )
                 );
@@ -128,10 +113,27 @@ live_design!{
         }
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT),
+            instance hover: 0.0,
+            instance focus: 0.0,
+            instance drag: 0.0,
+
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_drag: (THEME_COLOR_TEXT_HOVER)
+
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(self.color, self.color_focus, self.focus),
+                    mix(self.color_hover, self.color_drag, self.drag),
+                    self.hover
+                )
+            }
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
+
         }
             
         label_walk: { width: Fill, height: Fit }
@@ -187,6 +189,7 @@ live_design!{
                     ease: OutQuad
                     apply: {
                         draw_slider: { hover: 0.0 },
+                        draw_text: { hover: 0.0 },
                     }
                 }
                 on = {
@@ -194,6 +197,7 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         draw_slider: { hover: 1.0 },
+                        draw_text: { hover: 1.0 },
                     }
                 }
             }
@@ -203,12 +207,16 @@ live_design!{
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_slider: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        // draw_text: {focus: 0.0, hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_slider: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        // draw_text: {focus: 1.0, hover: 1.0}
                     }
                 }
             }
@@ -216,12 +224,18 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
-                    apply: {draw_slider: {drag: 0.0}}
+                    apply: {
+                        draw_slider: {drag: 0.0}
+                        draw_text: {drag: 0.0}
+                    }
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Snap}
-                    apply: {draw_slider: {drag: 1.0}}
+                    apply: {
+                        draw_slider: {drag: 1.0}
+                        draw_text: {drag: 1.0}
+                    }
                 }
             }
         }
