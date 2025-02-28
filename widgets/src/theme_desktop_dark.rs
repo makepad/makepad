@@ -10,7 +10,7 @@ live_design! {
     pub THEME_COLOR_TINT_AMOUNT = 0.0
     pub THEME_SPACE_FACTOR = 6. // Increase for a less dense layout
     pub THEME_CORNER_RADIUS = 2.5
-    pub THEME_BEVELING = 0.75
+    pub THEME_BEVELING = 1.
     pub THEME_FONT_SIZE_BASE = 7.5
     pub THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
 
