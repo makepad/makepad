@@ -1945,10 +1945,20 @@
                                 <SliderAlt1> {
                                     text: "Colored",
                                     draw_slider: {
-                                        val_color_1: (#FFCC00),
-                                        val_color_2: #f00,
-                                        handle_color_1: #0,
-                                        handle_color_2: #0,
+                                        val_color_1: #FFCC00
+                                        val_color_1_hover: #FF9944
+                                        val_color_1_focus: #FFCC44
+                                        val_color_1_drag: #FFAA00
+
+                                        val_color_2: #F00
+                                        val_color_2_hover: #F00
+                                        val_color_2_focus: #F00
+                                        val_color_2_drag: #F00
+
+                                        handle_color: #0000
+                                        handle_color_hover: #0008
+                                        handle_color_focus: #000C
+                                        handle_color_drag: #000F
                                     }
                                 }
                                 <SliderAlt1> {
@@ -1957,10 +1967,20 @@
                                         color: #0ff;
                                     }
                                     draw_slider: {
-                                        val_color_1: #f08,
-                                        val_color_2: #f08,
-                                        handle_color_1: #FFFF,
-                                        handle_color_2: #FFF0,
+                                        val_color_1: #F08
+                                        val_color_1_hover: #F4A
+                                        val_color_1_focus: #C04
+                                        val_color_1_drag: #F08
+
+                                        val_color_2: #F08
+                                        val_color_2_hover: #F4A
+                                        val_color_2_focus: #C04
+                                        val_color_2_drag: #F08
+
+                                        handle_color: #F
+                                        handle_color_hover: #F
+                                        handle_color_focus: #F
+                                        handle_color_drag: #F
                                     }
                                 }
                                 <SliderAlt1> {
@@ -1968,8 +1988,7 @@
                                     draw_slider: {
                                         val_color_1: #6,
                                         val_color_2: #6,
-                                        handle_color_1: #0,
-                                        handle_color_2: #C,
+                                        handle_color: #0,
                                     }
                                 }
                                 <SliderAlt1> { text: "min/max", min: 0., max: 100. }
