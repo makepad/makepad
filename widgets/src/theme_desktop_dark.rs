@@ -10,7 +10,7 @@ live_design! {
     pub THEME_COLOR_TINT_AMOUNT = 0.0
     pub THEME_SPACE_FACTOR = 6. // Increase for a less dense layout
     pub THEME_CORNER_RADIUS = 2.5
-    pub THEME_BEVELING = 1.
+    pub THEME_BEVELING = 0.75
     pub THEME_FONT_SIZE_BASE = 7.5
     pub THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
 
@@ -110,9 +110,9 @@ live_design! {
     pub THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.875)
     pub THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.125)
     pub THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1) // Code-blocks and quotes.
-    pub THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_3) // i.e. inline code
+    pub THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_D_3) // i.e. inline code
 
-    pub THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_2)
+    pub THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
     pub THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_3)
 
     // WIDGET COLORS
