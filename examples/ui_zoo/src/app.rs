@@ -2009,8 +2009,8 @@
                                         text: "Colored",
                                         draw_slider: {
                                             gap: 90.,
-                                            width: 20.
-                                            padding: 2.,
+                                            val_width: 20.
+                                            val_padding: 2.,
                                         }
                                     }
                                     <Rotary> {
@@ -2018,8 +2018,8 @@
                                         text: "Colored",
                                         draw_slider: {
                                             gap: 60.,
-                                            width: 10.,
-                                            padding: 4.,
+                                            val_width: 10.,
+                                            val_padding: 4.,
                                         }
                                     }
                                     <Rotary> {
@@ -2027,8 +2027,8 @@
                                         text: "Colored",
                                         draw_slider: {
                                             gap: 75.,
-                                            width: 20.
-                                            padding: 4,
+                                            val_width: 20.
+                                            val_padding: 4,
                                         }
                                     }
                                     <Rotary> {
@@ -2036,8 +2036,8 @@
                                         text: "Colored",
                                         draw_slider: {
                                             gap: 90.,
-                                            width: 20.
-                                            padding: 4.,
+                                            val_width: 20.
+                                            val_padding: 4.,
                                         }
                                     }
                                     <Rotary> {
@@ -2045,8 +2045,8 @@
                                         text: "Colored",
                                         draw_slider: {
                                             gap: 60.,
-                                            width: 20.
-                                            padding: 2.,
+                                            val_width: 20.
+                                            val_padding: 2.,
                                         }
                                     }
                                 }
@@ -2058,8 +2058,8 @@
                                         text: "Colored",
                                         draw_slider: {
                                             gap: 0.,
-                                            width: 20.
-                                            padding: 0.,
+                                            val_width: 20.
+                                            val_padding: 0.,
                                         }
                                     }
                                     <Rotary> {
@@ -2073,8 +2073,8 @@
                                             val_color_2: #f00,
                                             handle_color: #f,
                                             gap: 180.,
-                                            width: 20.,
-                                            padding: 2.,
+                                            val_width: 20.,
+                                            val_padding: 2.,
                                         }
                                     }
                                     <Rotary> {
@@ -2085,8 +2085,8 @@
                                             val_color_2: #ff0,
                                             handle_color: #f,
                                             gap: 90.,
-                                            width: 20.,
-                                            padding: 2.,
+                                            val_width: 20.,
+                                            val_padding: 2.,
                                         }
                                     }
                                     <Rotary> {
@@ -2094,9 +2094,9 @@
                                         text: "Solid",
                                         draw_slider: {
                                             gap: 90.,
-                                            padding: 10.,
-                                            width: 20.,
-                                            padding: 2.
+                                            val_padding: 10.,
+                                            val_width: 20.,
+                                            val_padding: 2.
                                             handle_color: #f0f,
                                         }
                                     }
@@ -2107,8 +2107,8 @@
                                             val_color_1: #0ff,
                                             val_color_2: #0ff,
                                             gap: 180.,
-                                            padding: 4.,
-                                            width: 6.,
+                                            val_padding: 4.,
+                                            val_width: 6.,
                                         }
                                     }
                                     <Rotary> {
@@ -2116,8 +2116,8 @@
                                         text: "Solid",
                                         draw_slider: {
                                             gap: 0.,
-                                            width: 10.0,
-                                            padding: 4.,
+                                            val_width: 10.0,
+                                            val_padding: 4.,
                                         }
                                     }
                                 }
@@ -2131,7 +2131,7 @@
                                         draw_slider: {
                                             gap: 0.,
                                             width: 20.
-                                            padding: 0.,
+                                            val_padding: 0.,
                                         }
                                     }
                                     <RotaryFlat> {
@@ -2146,7 +2146,7 @@
                                             handle_color: #f,
                                             gap: 180.,
                                             width: 20.,
-                                            padding: 2.,
+                                            val_padding: 2.,
                                         }
                                     }
                                     <RotaryFlat> {
@@ -2158,7 +2158,7 @@
                                             handle_color: #f,
                                             gap: 90.,
                                             width: 20.,
-                                            padding: 2.,
+                                            val_padding: 2.,
                                         }
                                     }
                                     <RotaryFlat> {
@@ -2166,7 +2166,7 @@
                                         text: "Solid",
                                         draw_slider: {
                                             gap: 90.,
-                                            padding: 10.,
+                                            val_padding: 10.,
                                             width: 20.,
                                             handle_color: #f0f,
                                         }
@@ -2178,7 +2178,7 @@
                                             val_color_1: #0ff,
                                             val_color_2: #0ff,
                                             gap: 180.,
-                                            padding: 4.,
+                                            val_padding: 4.,
                                             width: 6.,
                                         }
                                     }
@@ -2190,7 +2190,7 @@
                                             val_color_2: #ff0;
                                             gap: 75.,
                                             width: 40.0,
-                                            padding: 4.,
+                                            val_padding: 4.,
                                         }
                                     }
                                 }
