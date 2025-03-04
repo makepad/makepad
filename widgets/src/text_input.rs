@@ -150,7 +150,7 @@ live_design!{
 
             uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
 
-            uniform color: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color: (THEME_COLOR_D_HIDDEN)
             uniform color_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
             uniform color_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
 
