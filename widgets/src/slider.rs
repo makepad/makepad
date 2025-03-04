@@ -480,41 +480,16 @@ live_design!{
         height: 18.,
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
 
-        // Data input
         text_input: <TextInput> {
             width: Fit,
             padding: 0.,
             margin: { right: 7.5, top: (SLIDER_ALT1_DATA_FONT_TOPMARGIN) } 
 
-            draw_bg: {
-                instance focus: 0.0,
-
-                color: (THEME_COLOR_D_HIDDEN)
-                uniform color_focus: (THEME_COLOR_D_HIDDEN)
-                uniform radius: 1.0
-                uniform border_size: 0.0
-                uniform border_color: (#f00) // TODO: This appears not to do anything.
-                uniform inset: vec4(0.0, 0.0, 0.0, 0.0)
-                                        
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    sdf.box(
-                        self.inset.x + self.border_size,
-                        self.inset.y + self.border_size,
-                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
-                        max(1.0, self.radius)
-                    )
-                    sdf.fill_keep(
-                        mix(self.color, self.color_focus, self.focus)
-                    )
-                    if self.border_size > 0.0 {
-                        sdf.stroke(self.border_color, self.border_size)
-                    }
-                    return sdf.result;
+            draw_text: {
+                text_style: <THEME_FONT_REGULAR> {
+                    font_size: (SLIDER_ALT1_DATA_FONTSIZE)
                 }
             }
-
         }
 
         draw_slider: {
@@ -681,64 +656,6 @@ live_design!{
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: OutQuad
-                    apply: {
-                        draw_slider: { hover: 0.0 },
-                        draw_text: { hover: 0.0 },
-                        text_input: {
-                            draw_highlight: { hover: 0.0},
-                            draw_bg: { hover: 0.0},
-                            draw_text: { hover: 0.0},
-                        }
-                    }
-                }
-                on = {
-                    //cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: { hover: 1.0 },
-                        draw_text: { hover: 1.0 }
-                        text_input: {
-                            draw_highlight: { hover: 1.0},
-                            draw_bg: { hover: 1.0},
-                            draw_text: { hover: 1.0},
-                        }
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_slider: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {focus: 1.0}
-                    }
-                }
-            }
-            drag = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_slider: {drag: 0.0}}
-                }
-                on = {
-                    cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {draw_slider: {drag: 1.0}}
-                }
-            }
-        }
     }
 
     pub ROTARY_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
