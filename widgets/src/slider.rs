@@ -708,7 +708,7 @@ live_design!{
                     radius_scaled + label_offset,
                     radius_scaled - radius_width_compensation,
                     start,
-                    bg_end, 
+                    bg_end,
                     bg_width_scaled
                 );
 
