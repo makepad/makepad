@@ -189,7 +189,7 @@ live_design!{
             draw_highlight: {
                 border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
 
-                color: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+                color: (THEME_COLOR_D_HIDDEN)
                 color_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
                 color_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
             }
@@ -548,7 +548,6 @@ live_design!{
                 let min_size = padding_full + handle_size * 2.;
                 let track_length_val = self.rect_size.x - self.label_size - padding_full - min_size;
 
-
                 // Background
                 sdf.box(
                     self.label_size,
@@ -671,113 +670,9 @@ live_design!{
     pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_2_OPAQUE);
     pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
-    pub Rotary = <SliderBase> {
-        axis: Vertical,
-        step: 0.0,
-        precision: 2,
-        min: 0.0, max: 1.0,
-        hover_actions_enabled: false,
-
+    pub Rotary = <Slider> {
         height: 95., width: 65.,
-        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-        text: "Label",
-
-        align: { x: 0., y: 0.0 }
-        label_walk: {
-            margin: <THEME_MSPACE_1> {},
-            width: Fill, height: Fit
-        }
-
-        // Label
-        draw_text: {
-            instance hover: 0.0;
-
-            uniform color: (ROTARY_LABEL_COLOR),
-
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (ROTARY_LABEL_FONTSIZE)
-            }
-
-            fn get_color(self) -> vec4 {
-                return self.color;
-            }
-        }
-
-        // Data input
-        text_input: <TextInput> {
-            empty_message: "0",
-            is_numeric_only: true,
-
-            width: Fit, height: Fit,
-            padding: <THEME_MSPACE_1> {},
-            label_align: {x: 0.0, y: 0.0 },
-
-            draw_bg: {
-                instance hover: 0.0
-                instance focus: 0.0
-
-                uniform radius: (THEME_CORNER_RADIUS)
-                uniform color: (THEME_COLOR_INSET_DEFAULT)
-                uniform color_down: (THEME_COLOR_CTRL_ACTIVE)
-                
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    return sdf.result
-                }
-            }
-
-            draw_highlight: {
-                instance hover: 0.0
-                instance focus: 0.0
-
-                uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(
-                        0.,
-                        0.,
-                        self.rect_size.x,
-                        self.rect_size.y,
-                        self.border_radius
-                    )
-                    sdf.fill(
-                        mix(THEME_COLOR_U_HIDDEN,
-                            THEME_COLOR_D_3,
-                            self.focus)
-                    ); // Pad color
-                    return sdf.result
-                }
-            }
-
-            draw_text: {
-                uniform val_text_color: (ROTARY_DATA_COLOR);
-                fn get_color(self) -> vec4 {
-                    return
-                    mix(
-                        mix(
-                            mix(
-                                self.val_text_color,
-                                mix(self.val_text_color, #f, 0.4),
-                                self.hover
-                            ),
-                            mix(
-                                mix(self.val_text_color, #f, 0.4),
-                                mix(self.val_text_color, #f, 0.8),
-                                self.hover
-                            ),
-                            self.focus
-                        ),
-                        mix(
-                            mix(self.val_text_color, #0, 0.4),
-                            self.val_text_color,
-                            self.hover
-                        ),
-                        self.is_empty
-                    )
-                }
-            }
-        }
+        axis: Vertical,
 
         draw_slider: {
             instance hover: float
@@ -959,68 +854,6 @@ live_design!{
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: OutQuad
-                    apply: {
-                        draw_slider: { hover: 0.0 },
-                        draw_text: { hover: 0.0 },
-                        text_input: {
-                            draw_highlight: { hover: 0.0},
-                            draw_bg: { hover: 0.0},
-                            draw_text: { hover: 0.0},
-                        }
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: { hover: 1.0 },
-                        draw_text: { hover: 1.0 }
-                        text_input: {
-                            draw_highlight: { hover: 1.0},
-                            draw_bg: { hover: 1.0 },
-                            draw_text: { hover: 1.0 },
-                        }
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_slider: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {focus: 1.0}
-                    }
-                }
-            }
-            drag = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply:
-                        {
-                            draw_slider: {drag: 0.0},
-                        }
-                }
-                on = {
-                    cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {drag: 1.0},
-                    }
-                }
-            }
-        }
     }
 
     pub ROTARY_FLAT_LABEL_FONTSIZE = (THEME_FONT_SIZE_P);
@@ -1033,115 +866,7 @@ live_design!{
     pub ROTARY_FLAT_VAL_COLOR_B = (THEME_COLOR_U_4);
     pub ROTARY_FLAT_HANDLE_COLOR = (THEME_COLOR_U_3);
 
-    pub RotaryFlat = <SliderBase> {
-        axis: Vertical,
-        step: 0.0,
-        precision: 2,
-        min: 0.0, max: 1.0,
-        hover_actions_enabled: false,
-
-        height: 95., width: 65.,
-        margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-        text: "Label",
-
-        align: { x: 0., y: 0.0 }
-        label_walk: {
-            margin: <THEME_MSPACE_1> {},
-            width: Fill, height: Fit
-        }
-
-
-        // Label
-        draw_text: {
-            instance hover: 0.0;
-
-            uniform color: (ROTARY_FLAT_LABEL_COLOR),
-
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (ROTARY_FLAT_LABEL_FONTSIZE)
-            }
-
-            fn get_color(self) -> vec4 {
-                return self.color;
-            }
-        }
-
-        // Data input
-        text_input: <TextInput> {
-            empty_message: "0",
-            is_numeric_only: true,
-
-            width: Fit, height: Fit,
-            padding: <THEME_MSPACE_1> {},
-            label_align: {x: 0.0, y: 0.0 },
-
-            draw_bg: {
-                instance hover: 0.0
-                instance focus: 0.0
-
-                uniform radius: (THEME_CORNER_RADIUS)
-                uniform color: (THEME_COLOR_INSET_DEFAULT)
-                uniform color_down: (THEME_COLOR_CTRL_ACTIVE)
-                
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    return sdf.result
-                }
-            }
-
-            draw_highlight: {
-                instance hover: 0.0
-                instance focus: 0.0
-
-                uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(
-                        0.,
-                        0.,
-                        self.rect_size.x,
-                        self.rect_size.y,
-                        self.border_radius
-                    )
-                    sdf.fill(
-                        mix(THEME_COLOR_U_HIDDEN,
-                            THEME_COLOR_D_3,
-                            self.focus)
-                    ); // Pad color
-                    return sdf.result
-                }
-            }
-
-            draw_text: {
-                uniform val_text_color: (ROTARY_FLAT_DATA_COLOR);
-                fn get_color(self) -> vec4 {
-                    return
-                    mix(
-                        mix(
-                            mix(
-                                self.val_text_color,
-                                mix(self.val_text_color, #f, 0.4),
-                                self.hover
-                            ),
-                            mix(
-                                mix(self.val_text_color, #f, 0.4),
-                                mix(self.val_text_color, #f, 0.8),
-                                self.hover
-                            ),
-                            self.focus
-                        ),
-                        mix(
-                            mix(self.val_text_color, #0, 0.4),
-                            self.val_text_color,
-                            self.hover
-                        ),
-                        self.is_empty
-                    )
-                }
-            }
-        }
-
+    pub RotaryFlat = <Rotary> {
         draw_slider: {
             instance hover: float
             instance focus: float
@@ -1263,70 +988,6 @@ live_design!{
                 )
                 
                 return sdf.result
-            }
-        }
-
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.2}}
-                    ease: OutQuad
-                    apply: {
-                        draw_slider: { hover: 0.0 },
-                        draw_text: { hover: 0.0 },
-                        text_input: {
-                            draw_highlight: { hover: 0.0},
-                            draw_bg: { hover: 0.0},
-                            draw_text: { hover: 0.0},
-                        }
-                    }
-                }
-                on = {
-                    //cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: { hover: 1.0 },
-                        draw_text: { hover: 1.0 }
-                        text_input: {
-                            draw_highlight: { hover: 1.0},
-                            draw_bg: { hover: 1.0},
-                            draw_text: { hover: 1.0},
-                        }
-                    }
-                }
-            }
-            focus = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {
-                        draw_slider: {focus: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {focus: 1.0}
-                    }
-                }
-            }
-            drag = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply:
-                        {
-                            draw_slider: {drag: 0.0},
-                        }
-                }
-                on = {
-                    cursor: Arrow,
-                    from: {all: Snap}
-                    apply: {
-                        draw_slider: {drag: 1.0},
-                    }
-                }
             }
         }
     }
