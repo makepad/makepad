@@ -17,6 +17,8 @@ live_design!{
     
     pub SliderBase = {{Slider}} {}
     
+    pub SLIDER_ALT1_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
+
     pub Slider = <SliderBase> {
         min: 0.0, max: 1.0,
         step: 0.0,
@@ -111,7 +113,7 @@ live_design!{
                 return sdf.result
             }
         }
-            
+
         draw_text: {
             instance hover: 0.0,
             instance focus: 0.0,
@@ -136,7 +138,10 @@ live_design!{
 
         }
             
-        label_walk: { width: Fill, height: Fit }
+        label_walk: {
+            width: Fill, height: Fit,
+            margin: {bottom: (THEME_SPACE_1)},
+        }
             
         text_input: <TextInput> {
             empty_message: "0",
@@ -173,6 +178,10 @@ live_design!{
                 color_focus: (THEME_COLOR_TEXT_DEFAULT)
                 color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
                 color_empty_focus: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
+
+                text_style: <THEME_FONT_REGULAR> {
+                    font_size: (THEME_FONT_SIZE_P)
+                }
             }
 
             draw_cursor: { color: (THEME_COLOR_TEXT_CURSOR) }
@@ -450,7 +459,6 @@ live_design!{
     pub SLIDER_ALT1_BG_DRAG_COLOR_B = (THEME_COLOR_D_HIDDEN);
 
     pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 3.0;
-    pub SLIDER_ALT1_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
 
     pub SLIDER_ALT1_DATA_COLOR = (THEME_COLOR_TEXT_DEFAULT);
 
@@ -468,72 +476,15 @@ live_design!{
     pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
     pub SLIDER_ALT1_HANDLE_COLOR_B = (THEME_COLOR_U_1);
 
-    pub SliderAlt1 = <SliderBase> {
+    pub SliderAlt1 = <Slider> {
         height: 18.,
-        width: Fill,
-
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-        label_align: { y: 0.0 }
-
-        min: 0.0, max: 1.0,
-        step: 0.0,
-        precision: 2,
-
-        text: "Label",
-        hover_actions_enabled: false,
-
-        label_walk: {
-            width: Fill,
-            height: Fit
-        }
-
-        // Label
-        draw_text: {
-            instance hover: 0.0;
-
-            uniform color: (SLIDER_ALT1_LABEL_COLOR),
-
-            text_style: <THEME_FONT_BOLD> {
-                font_size: (SLIDER_ALT1_LABEL_FONTSIZE)
-            }
-
-            fn get_color(self) -> vec4 {
-                return self.color;
-            }
-        }
 
         // Data input
         text_input: <TextInput> {
-            width: Fit, padding: 0.,
-            label_align: {y: 0.},
-
-            empty_message: "0",
-            is_numeric_only: true,
+            width: Fit,
+            padding: 0.,
             margin: { right: 7.5, top: (SLIDER_ALT1_DATA_FONT_TOPMARGIN) } 
-
-            draw_highlight: {
-                instance hover: 0.0
-                instance focus: 0.0
-
-                uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
-
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(
-                        0.,
-                        0.,
-                        self.rect_size.x,
-                        self.rect_size.y,
-                        self.border_radius
-                    )
-                    sdf.fill(
-                        mix(THEME_COLOR_U_HIDDEN,
-                            THEME_COLOR_D_3,
-                            self.focus)
-                    ); // Pad color
-                    return sdf.result
-                }
-            }
 
             draw_bg: {
                 instance focus: 0.0,
@@ -564,37 +515,6 @@ live_design!{
                 }
             }
 
-            draw_text: {
-                uniform val_text_color: (SLIDER_ALT1_DATA_COLOR);
-                text_style: <THEME_FONT_REGULAR> {
-                    font_size: (SLIDER_ALT1_DATA_FONTSIZE)
-                }
-
-                fn get_color(self) -> vec4 {
-                    return
-                    mix(
-                        mix(
-                            mix(
-                                self.val_text_color,
-                                mix(self.val_text_color, #f, 0.4),
-                                self.hover
-                            ),
-                            mix(
-                                mix(self.val_text_color, #f, 0.4),
-                                mix(self.val_text_color, #f, 0.8),
-                                self.hover
-                            ),
-                            self.focus
-                        ),
-                        mix(
-                            mix(self.val_text_color, #0, 0.4),
-                            self.val_text_color,
-                            self.hover
-                        ),
-                        self.is_empty
-                    )
-                }
-            }
         }
 
         draw_slider: {
@@ -760,7 +680,6 @@ live_design!{
                 return sdf.result
             }
         }
-
 
         animator: {
             hover = {
