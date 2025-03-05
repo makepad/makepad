@@ -172,10 +172,12 @@ impl Cx {
                 self.os.first_after_resize = true;
                 self.call_event_handler(&Event::ClearAtlasses);
             }
-            FromJavaMessage::LongClick { x, y, uid } => {
+            FromJavaMessage::LongClick { x, y, pointer_id, time } => {
                 let e = Event::LongPress(LongPressEvent {
                     abs: DVec2 { x, y },
-                    uid,
+                    uid: pointer_id,
+                    window_id: CxWindowPool::id_zero(),
+                    time,
                 });
                 self.call_event_handler(&e);
             }
