@@ -298,16 +298,16 @@ impl<'a> Fitter<'a> {
         use unicode_segmentation::UnicodeSegmentation;
 
         let segment_lens: Vec<_> = match segment_kind {
-            SegmentKind::Word => text
+            SegmentKind::Word => text[range.clone()]
                 .split_word_bounds()
                 .map(|segment| segment.len())
                 .collect(),
-            SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
+            SegmentKind::Grapheme => text[range.clone()].graphemes(true).map(|segment| segment.len()).collect(),
         };
         let segment_widths_in_lpxs: Vec<_> = segment_lens
             .iter()
             .copied()
-            .scan(0, |state, segment_len| {
+            .scan(range.start, |state, segment_len| {
                 let segment_start = *state;
                 let segment_end = segment_start + segment_len;
                 let segment = text.substr(segment_start..segment_end);

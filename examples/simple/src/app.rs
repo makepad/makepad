@@ -25,7 +25,7 @@ live_design!{
                             let angle = atan(uv.y, uv.x);
                             let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
                             let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
-                            return mix(color1, color2, radius);
+                            return vec4(0.0, 0.0, 0.0, 1.0); // mix(color1, color2, radius);
                         }
                     }
                     /*
@@ -43,7 +43,7 @@ live_design!{
                     }
                     */
                     text_input = <TextInput2> {
-                        text: "The quick brown fox averylongwortodemonstratedesperatebreaks jumped over the lazy dog"
+                        text: "Averylongwordtodemonstratedesperatebreaks The 😊错误 quick brown fox😊 jumped over the lazy dog"
                     }
                 }
             }
