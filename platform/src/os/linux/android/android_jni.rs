@@ -42,6 +42,11 @@ pub enum FromJavaMessage {
     },
     SurfaceDestroyed,
     RenderLoop,
+    LongClick {
+        x: f64,
+        y: f64,
+        uid: u64,
+    },
     Touch(Vec<TouchPoint>),
     Character {
         character: u32,
@@ -365,6 +370,20 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceChanged(
     });
 }
 
+#[no_mangle]
+pub extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnLongClick(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    x: jni_sys::jfloat,
+    y: jni_sys::jfloat,
+    uid: jni_sys::jint,
+) {
+    send_from_java_message(FromJavaMessage::LongClick {
+        x: x as f64,
+        y: y as f64,
+        uid: uid as u64,
+    });
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(

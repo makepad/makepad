@@ -163,6 +163,11 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead, use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit`].
     TouchUpdate(TouchUpdateEvent),
+    /// The raw event that occurs when the user finishes a long press touch/click.
+    ///
+    /// Do not match upon or handle this event directly; instead, use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::LongPress`].
+    LongPress(LongPressEvent),
     /// The raw event that occurs when the user scrolls, e.g.,
     /// by using the mouse wheel or a touch flick.
     ///
@@ -241,44 +246,45 @@ impl Event{
             20=>"MouseMove",
             21=>"MouseUp",
             22=>"TouchUpdate",
-            23=>"Scroll",
+            23=>"LongPress",
+            24=>"Scroll",
 
-            24=>"Timer",
+            25=>"Timer",
 
-            25=>"Signal",
-            26=>"Trigger",
-            27=>"MacosMenuCommand",
-            28=>"KeyFocus",
-            29=>"KeyFocusLost",
-            30=>"KeyDown",
-            31=>"KeyUp",
-            32=>"TextInput",
-            33=>"TextCopy",
-            34=>"TextCut",
+            26=>"Signal",
+            27=>"Trigger",
+            28=>"MacosMenuCommand",
+            29=>"KeyFocus",
+            30=>"KeyFocusLost",
+            31=>"KeyDown",
+            32=>"KeyUp",
+            33=>"TextInput",
+            34=>"TextCopy",
+            35=>"TextCut",
 
-            35=>"Drag",
-            36=>"Drop",
-            37=>"DragEnd",
+            36=>"Drag",
+            37=>"Drop",
+            38=>"DragEnd",
 
-            38=>"AudioDevices",
-            39=>"MidiPorts",
-            40=>"VideoInputs",
-            41=>"NetworkResponses",
+            39=>"AudioDevices",
+            40=>"MidiPorts",
+            41=>"VideoInputs",
+            42=>"NetworkResponses",
 
-            42=>"VideoPlaybackPrepared",
-            43=>"VideoTextureUpdated",
-            44=>"VideoPlaybackCompleted",
-            45=>"VideoDecodingError",
-            46=>"VideoPlaybackResourcesReleased",
-            47=>"TextureHandleReady",
-            48=>"MouseLeave",
-            49=>"Actions",
-            50=>"BackPressed",
+            43=>"VideoPlaybackPrepared",
+            44=>"VideoTextureUpdated",
+            45=>"VideoPlaybackCompleted",
+            46=>"VideoDecodingError",
+            47=>"VideoPlaybackResourcesReleased",
+            48=>"TextureHandleReady",
+            49=>"MouseLeave",
+            50=>"Actions",
+            51=>"BackPressed",
 
             #[cfg(target_arch = "wasm32")]
-            51=>"ToWasmMsg",
+            52=>"ToWasmMsg",
             
-            52=>"DesignerPick",            
+            53=>"DesignerPick",
             _=>panic!()
         }
     }
@@ -312,44 +318,45 @@ impl Event{
             Self::MouseMove(_)=>20,
             Self::MouseUp(_)=>21,
             Self::TouchUpdate(_)=>22,
-            Self::Scroll(_)=>23,
+            Self::LongPress(_)=>23,
+            Self::Scroll(_)=>24,
 
-            Self::Timer(_)=>24,
+            Self::Timer(_)=>25,
 
-            Self::Signal=>25,
-            Self::Trigger(_)=>26,
-            Self::MacosMenuCommand(_)=>27,
-            Self::KeyFocus(_)=>28,
-            Self::KeyFocusLost(_)=>29,
-            Self::KeyDown(_)=>30,
-            Self::KeyUp(_)=>31,
-            Self::TextInput(_)=>32,
-            Self::TextCopy(_)=>33,
-            Self::TextCut(_)=>34,
+            Self::Signal=>26,
+            Self::Trigger(_)=>27,
+            Self::MacosMenuCommand(_)=>28,
+            Self::KeyFocus(_)=>29,
+            Self::KeyFocusLost(_)=>30,
+            Self::KeyDown(_)=>31,
+            Self::KeyUp(_)=>32,
+            Self::TextInput(_)=>33,
+            Self::TextCopy(_)=>34,
+            Self::TextCut(_)=>35,
 
-            Self::Drag(_)=>35,
-            Self::Drop(_)=>36,
-            Self::DragEnd=>37,
+            Self::Drag(_)=>36,
+            Self::Drop(_)=>37,
+            Self::DragEnd=>38,
 
-            Self::AudioDevices(_)=>38,
-            Self::MidiPorts(_)=>39,
-            Self::VideoInputs(_)=>40,
-            Self::NetworkResponses(_)=>41,
+            Self::AudioDevices(_)=>39,
+            Self::MidiPorts(_)=>40,
+            Self::VideoInputs(_)=>41,
+            Self::NetworkResponses(_)=>42,
 
-            Self::VideoPlaybackPrepared(_)=>42,
-            Self::VideoTextureUpdated(_)=>43,
-            Self::VideoPlaybackCompleted(_)=>44,
-            Self::VideoDecodingError(_)=>45,
-            Self::VideoPlaybackResourcesReleased(_)=>46,
-            Self::TextureHandleReady(_)=>47,
-            Self::MouseLeave(_)=>48,
-            Self::Actions(_)=>49,
-            Self::BackPressed=>50,
+            Self::VideoPlaybackPrepared(_)=>43,
+            Self::VideoTextureUpdated(_)=>44,
+            Self::VideoPlaybackCompleted(_)=>45,
+            Self::VideoDecodingError(_)=>46,
+            Self::VideoPlaybackResourcesReleased(_)=>47,
+            Self::TextureHandleReady(_)=>48,
+            Self::MouseLeave(_)=>49,
+            Self::Actions(_)=>50,
+            Self::BackPressed=>51,
             
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>51,
+            Self::ToWasmMsg(_)=>52,
             
-            Self::DesignerPick(_) =>52,
+            Self::DesignerPick(_) =>53,
         }
     }
 }
@@ -373,6 +380,7 @@ pub enum Hit{
     FingerHoverOver(FingerHoverEvent),
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
+    FingerLongPress(FingerLongPressEvent),
     
     DesignerPick(DesignerPickEvent),
 
