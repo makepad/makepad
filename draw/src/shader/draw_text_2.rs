@@ -170,11 +170,15 @@ impl DrawText2 {
         let max_width_in_lpxs = cx
             .turtle()
             .max_width(walk)
-            .map_or(laidout_text.size_in_lpxs.width, |max_width| max_width as f32);
+            .map_or(laidout_text.size_in_lpxs.width, |max_width| {
+                max_width as f32
+            });
         let max_height_in_lpxs = cx
             .turtle()
             .max_height(walk)
-            .map_or(laidout_text.size_in_lpxs.height, |max_height| max_height as f32);
+            .map_or(laidout_text.size_in_lpxs.height, |max_height| {
+                max_height as f32
+            });
         let turtle_rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
@@ -204,7 +208,12 @@ impl DrawText2 {
         )
     }
 
-    fn draw_laidout_text(&mut self, cx: &mut Cx2d<'_>, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
+    fn draw_laidout_text(
+        &mut self,
+        cx: &mut Cx2d<'_>,
+        origin_in_lpxs: Point<f32>,
+        text: &LaidoutText,
+    ) {
         self.update_draw_vars(cx);
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
