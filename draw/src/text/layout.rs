@@ -147,7 +147,7 @@ impl<'a> LayoutContext<'a> {
             .get_or_load_font_family(&span.style.font_family_id)
             .clone();
         if self.options.max_width_in_lpxs.is_none() {
-            self.append_text_to_current_row(
+            self.append_shaped_text_to_current_row(
                 &span.style,
                 &font_family.get_or_shape(self.text.substr(span.range.clone())),
             );
@@ -167,7 +167,7 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
-                    self.append_text_to_current_row(style, &text);
+                    self.append_shaped_text_to_current_row(style, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
@@ -196,11 +196,11 @@ impl<'a> LayoutContext<'a> {
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
                 Some(text) => {
-                    self.append_text_to_current_row(style, &text);
+                    self.append_shaped_text_to_current_row(style, &text);
                 }
                 None => {
                     if self.glyphs.is_empty() {
-                        self.append_text_to_current_row(
+                        self.append_shaped_text_to_current_row(
                             style,
                             &font_family.get_or_shape(self.text.substr(fitter.pop_front())),
                         );
@@ -212,7 +212,7 @@ impl<'a> LayoutContext<'a> {
         }
     }
 
-    fn append_text_to_current_row(&mut self, style: &Style, text: &ShapedText) {
+    fn append_shaped_text_to_current_row(&mut self, style: &Style, text: &ShapedText) {
         use super::num::Zero;
 
         for glyph in &text.glyphs {
@@ -337,14 +337,14 @@ impl<'a> Fitter<'a> {
         let mut remaining_width_in_lpxs = self.width_in_lpxs;
         let mut remaining_segment_count = self.segment_lens.len();
         while remaining_segment_count > 0 {
-            if let Some(shaped_text) =
+            if let Some(text) =
                 self.fit_step(max_width_in_lpxs, remaining_len, remaining_width_in_lpxs)
             {
                 self.range.start += remaining_len;
                 self.width_in_lpxs -= remaining_width_in_lpxs;
                 self.segment_lens.drain(..remaining_segment_count);
                 self.segment_widths_in_lpxs.drain(..remaining_segment_count);
-                return Some(shaped_text);
+                return Some(text);
             }
             remaining_segment_count -= 1;
             remaining_len -= self.segment_lens[remaining_segment_count];
@@ -492,7 +492,7 @@ impl LaidoutText {
         let x_in_lpxs = row.index_to_x_in_lpxs(cursor.index - row.text.start_in_parent());
         CursorPosition {
             row_index,
-            origin_in_lpxs: Point::new(x_in_lpxs, row.origin_in_lpxs.y),
+            x_in_lpxs,
         }
     }
 
@@ -500,8 +500,8 @@ impl LaidoutText {
         for (row_index, row) in self.rows.iter().enumerate() {
             let row_end = row.text.start_in_parent() + row.text.as_str().len();
             if match cursor.affinity {
-                Affinity::Before => cursor.index <= row_end,
-                Affinity::After => cursor.index < row_end,
+                CursorAffinity::Before => cursor.index <= row_end,
+                CursorAffinity::After => cursor.index < row_end,
             } {
                 return row_index;
             }
@@ -513,7 +513,7 @@ impl LaidoutText {
         let row_index = self.y_in_lpxs_to_row_index(point_in_lpxs.y);
         self.position_to_cursor(CursorPosition {
             row_index,
-            origin_in_lpxs: point_in_lpxs,
+            x_in_lpxs: point_in_lpxs.x,
         })
     }
 
@@ -535,13 +535,13 @@ impl LaidoutText {
 
     pub fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
         let row = &self.rows[position.row_index];
-        let index = row.x_in_lpxs_to_index(position.origin_in_lpxs.x);
+        let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
             index: row.text.start_in_parent() + index,
             affinity: if index == 0 {
-                Affinity::After
+                CursorAffinity::After
             } else {
-                Affinity::Before
+                CursorAffinity::Before
             },
         }
     }
@@ -550,11 +550,11 @@ impl LaidoutText {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Cursor {
     pub index: usize,
-    pub affinity: Affinity,
+    pub affinity: CursorAffinity,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub enum Affinity {
+pub enum CursorAffinity {
     #[default]
     Before,
     After,
@@ -563,7 +563,7 @@ pub enum Affinity {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CursorPosition {
     pub row_index: usize,
-    pub origin_in_lpxs: Point<f32>,
+    pub x_in_lpxs: f32,
 }
 
 #[derive(Clone, Debug)]

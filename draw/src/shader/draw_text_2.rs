@@ -163,18 +163,18 @@ impl DrawText2 {
         cx: &mut Cx2d<'_>,
         walk: Walk,
         align: Align,
-        text: &LaidoutText,
+        laidout_text: &LaidoutText,
     ) -> makepad_platform::Rect {
         use crate::turtle;
 
         let max_width_in_lpxs = cx
             .turtle()
             .max_width(walk)
-            .map_or(text.size_in_lpxs.width, |max_width| max_width as f32);
+            .map_or(laidout_text.size_in_lpxs.width, |max_width| max_width as f32);
         let max_height_in_lpxs = cx
             .turtle()
             .max_height(walk)
-            .map_or(text.size_in_lpxs.height, |max_height| max_height as f32);
+            .map_or(laidout_text.size_in_lpxs.height, |max_height| max_height as f32);
         let turtle_rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
@@ -188,23 +188,23 @@ impl DrawText2 {
             cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
-        let remaining_width_in_lpxs = max_width_in_lpxs - text.size_in_lpxs.width;
-        let remaining_height_in_lpxs = max_height_in_lpxs - text.size_in_lpxs.height;
+        let remaining_width_in_lpxs = max_width_in_lpxs - laidout_text.size_in_lpxs.width;
+        let remaining_height_in_lpxs = max_height_in_lpxs - laidout_text.size_in_lpxs.height;
         let origin_in_lpxs = Point::new(
             turtle_rect.pos.x as f32 + align.x as f32 * remaining_width_in_lpxs,
             turtle_rect.pos.y as f32 + align.y as f32 * remaining_height_in_lpxs,
         );
-        self.draw_laidout(cx, origin_in_lpxs, &text);
+        self.draw_laidout_text(cx, origin_in_lpxs, &laidout_text);
 
         rect(
             origin_in_lpxs.x as f64,
             origin_in_lpxs.y as f64,
-            text.size_in_lpxs.width as f64,
-            text.size_in_lpxs.height as f64,
+            laidout_text.size_in_lpxs.width as f64,
+            laidout_text.size_in_lpxs.height as f64,
         )
     }
 
-    fn draw_laidout(&mut self, cx: &mut Cx2d<'_>, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
+    fn draw_laidout_text(&mut self, cx: &mut Cx2d<'_>, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
         self.update_draw_vars(cx);
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
@@ -242,14 +242,14 @@ impl DrawText2 {
         cx: &mut Cx2d<'_>,
         origin_in_lpxs: Point<f32>,
         row: &LaidoutRow,
-        output: &mut Vec<f32>,
+        out_instances: &mut Vec<f32>,
     ) {
         for glyph in &row.glyphs {
             self.draw_laidout_glyph(
                 cx,
                 origin_in_lpxs + Size::from(glyph.origin_in_lpxs),
                 glyph,
-                output,
+                out_instances,
             );
         }
 
@@ -361,7 +361,7 @@ impl DrawText2 {
         self.t_max = vec2(t_max.x, t_max.y);
 
         output.extend_from_slice(self.draw_vars.as_slice());
-        self.draw_depth += 0.0001;
+        self.draw_depth += 0.000001;
     }
 }
 

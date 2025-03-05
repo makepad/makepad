@@ -1,7 +1,10 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::{text::layout::{Affinity as CursorAffinity, Cursor}, *}, *,
-    widget::*,
+use {
+    crate::{
+        makepad_derive_widget::*,
+        makepad_draw::{text::layout::{Cursor, LaidoutText}, *},
+        widget::*,
+    },
+    std::rc::Rc,
 };
 
 
@@ -58,6 +61,7 @@ pub struct TextInput2 {
     #[live] text_align: Align,
 
     #[live] pub text: String,
+    #[rust] pub laidout_text: Option<Rc<LaidoutText>>,
     #[rust] text_area: Area,
     #[rust] cursor: Cursor,
 }
@@ -68,6 +72,8 @@ impl TextInput2 {
     }
 
     fn move_cursor_left(&mut self) {
+        use makepad_draw::text::layout::CursorAffinity;
+
         self.set_cursor(
             Cursor {
                 index: prev_grapheme_boundary(&self.text, self.cursor.index),
@@ -77,12 +83,44 @@ impl TextInput2 {
     }
 
     fn move_cursor_right(&mut self) {
+        use makepad_draw::text::layout::CursorAffinity;
+        
         self.set_cursor(
             Cursor {
                 index: next_grapheme_boundary(&self.text, self.cursor.index),
                 affinity: CursorAffinity::Before,
             }
         );
+    }
+
+    fn move_cursor_up(&mut self) {
+        use makepad_draw::text::layout::CursorPosition;
+
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let position = laidout_text.cursor_to_position(self.cursor);
+        self.set_cursor(laidout_text.position_to_cursor(CursorPosition {
+            row_index: if position.row_index == 0 {
+                0
+            } else {
+                position.row_index - 1
+            },
+            x_in_lpxs: position.x_in_lpxs,
+        }));
+    }
+
+    fn move_cursor_down(&mut self) {
+        use makepad_draw::text::layout::CursorPosition;
+        
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let position = laidout_text.cursor_to_position(self.cursor);
+        self.set_cursor(laidout_text.position_to_cursor(CursorPosition {
+            row_index: if position.row_index == laidout_text.rows.len() - 1 {
+                laidout_text.rows.len() - 1
+            } else {
+                position.row_index + 1 
+            },
+            x_in_lpxs: position.x_in_lpxs,
+        }));
     }
 
     fn set_cursor(&mut self, cursor: Cursor) {
@@ -93,32 +131,38 @@ impl TextInput2 {
 impl Widget for TextInput2 {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        let text = self.draw_text.layout(cx, self.text_walk, self.text_align, &self.text);
+
+        self.laidout_text = Some(self.draw_text.layout(cx, self.text_walk, self.text_align, &self.text));
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+
         let text_rect = self.draw_text.draw_walk_laidout(
             cx,
             self.text_walk,
             self.text_align,
-            &text,
+            laidout_text,
         );
         cx.add_aligned_rect_area(&mut self.text_area, text_rect);
-        let cursor = text.cursor_to_position(self.cursor);
-        let cursor_row = &text.rows[cursor.row_index];
-        let cursor_ascender_in_lpxs = cursor_row.ascender_in_lpxs;
-        let cursor_descender_in_lpxs = cursor_row.descender_in_lpxs;
+
+        let position = laidout_text.cursor_to_position(self.cursor);
+        let row = &laidout_text.rows[position.row_index];
         self.draw_cursor.draw_abs(
             cx,
             rect(
-                text_rect.pos.x + cursor.origin_in_lpxs.x as f64 - 2.0 / 2.0,
-                text_rect.pos.y + (cursor.origin_in_lpxs.y - cursor_ascender_in_lpxs) as f64,
+                text_rect.pos.x + position.x_in_lpxs as f64 - 2.0 / 2.0,
+                text_rect.pos.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
                 2.0,
-                (cursor_ascender_in_lpxs - cursor_descender_in_lpxs) as f64,
+                (row.ascender_in_lpxs - row.descender_in_lpxs) as f64,
             )
         );
+
         self.draw_bg.end(cx);
+
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        use makepad_draw::text::geom::Point;
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
@@ -146,13 +190,44 @@ impl Widget for TextInput2 {
                 self.move_cursor_right();
                 self.draw_bg.redraw(cx);
             },
-            Hit::FingerDown(FingerDownEvent {
-                device,
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers {
+                    shift,
+                    logo: false,
+                    alt: false,
+                    control: false
+                },
                 ..
             }) => {
-                if device.is_primary_hit() {
-                    self.set_key_focus(cx);
-                }
+                self.move_cursor_up();
+                self.draw_bg.redraw(cx);
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers {
+                    shift,
+                    logo: false,
+                    alt: false,
+                    control: false
+                },
+                ..
+            }) => {
+                self.move_cursor_down();
+                self.draw_bg.redraw(cx);
+            },
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                device,
+                ..
+            }) if device.is_primary_hit() => {
+                let laidout_text = self.laidout_text.as_ref().unwrap();
+                let rel = abs - self.text_area.rect(cx).pos;
+                self.set_cursor(laidout_text.point_in_lpxs_to_cursor(
+                    Point::new(rel.x as f32, rel.y as f32)
+                ));
+                self.set_key_focus(&mut *cx);
+                self.draw_bg.redraw(&mut *cx);
             }
             _ => {}
         }
