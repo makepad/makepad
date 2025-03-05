@@ -185,6 +185,11 @@ pub struct ScrollEvent {
     pub time: f64
 }
 
+#[derive(Clone, Debug)]
+pub struct LongPressEvent {
+    pub abs: DVec2,
+    pub uid: u64,
+}
 
 // Touch events
 
@@ -621,9 +626,9 @@ impl FingerMoveEvent {
 #[derive(Clone, Debug)]
 pub struct FingerUpEvent {
     pub window_id: WindowId,
-    /// The absolute position of the original finger-down event.
-    pub abs: DVec2,
     /// The absolute position of this finger-up event.
+    pub abs: DVec2,
+    /// The absolute position of the original finger-down event.
     pub abs_start: DVec2,
     /// The time at which the original finger-down event occurred.
     pub capture_time: f64,
@@ -656,6 +661,25 @@ impl FingerUpEvent {
         self.time - self.capture_time >= TAP_COUNT_TIME &&
         (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct FingerLongPressEvent {
+    pub abs: DVec2,
+    /*
+     * TODO: add the following fields back in:
+     *
+    pub window_id: WindowId,
+    pub abs: DVec2,
+    pub capture_time: f64,
+    pub time: f64,
+    
+    pub digit_id: DigitId,
+    pub device: DigitDevice,
+    
+    pub tap_count: u32,
+    pub modifiers: KeyModifiers,
+    */
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1197,6 +1221,21 @@ impl Event {
                 };
                 if hover_last == area {
                     return Hit::FingerHoverOut(fhe);
+                }
+            },
+            Event::LongPress(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    log!("Skipping LongPress, sweep_area: {:?}", options.sweep_area);
+                    return Hit::Nothing
+                }
+
+                let rect = area.clipped_rect(&cx);
+                if hit_test(e.abs, &rect, &options.margin) {
+                    let digit_id = live_id_num!(touch, e.uid).into();
+                    cx.fingers.new_hover_area(digit_id, area);
+                    return Hit::FingerLongPress(FingerLongPressEvent {
+                        abs: e.abs,
+                    })
                 }
             },
             Event::DesignerPick(e) => {

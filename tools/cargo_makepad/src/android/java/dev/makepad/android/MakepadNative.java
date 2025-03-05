@@ -24,6 +24,7 @@ public class MakepadNative {
     // belongs to QuadSurface class
     public native static void surfaceOnSurfaceCreated(Surface surface);
     public native static void surfaceOnSurfaceDestroyed(Surface surface);
+    public static native void surfaceOnLongClick(float x, float y, int uid);
     public static native void surfaceOnTouch(MotionEvent event);
     public native static void surfaceOnSurfaceChanged(Surface surface, int width, int height);
     public native static void surfaceOnKeyDown(int keycode, int meta_state);

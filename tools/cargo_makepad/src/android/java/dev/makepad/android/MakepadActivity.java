@@ -98,8 +98,15 @@ class MakepadSurface
     implements
         View.OnTouchListener,
         View.OnKeyListener,
+        View.OnLongClickListener,
         ViewTreeObserver.OnGlobalLayoutListener,
-        SurfaceHolder.Callback {
+        SurfaceHolder.Callback
+{
+
+    // The X,Y coordinates and pointer ID of the most recent touch-down event.
+    private float latestTouchX;
+    private float latestTouchY;
+    private int latestTouchPointerId;
 
     public MakepadSurface(Context context){
         super(context);
@@ -110,6 +117,8 @@ class MakepadSurface
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
+        setOnLongClickListener(this);        
+
         getViewTreeObserver().addOnGlobalLayoutListener(this);
     }
 
@@ -139,13 +148,32 @@ class MakepadSurface
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
+
     @Override
     public boolean onTouch(View view, MotionEvent event) {
+        // Save the X,Y coordinates of a touch-down event,
+        // such that we can use them in the `onLongClick` method.
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            int index = event.getActionIndex();
+            latestTouchX = event.getX(index);
+            latestTouchY = event.getY(index);
+            latestTouchPointerId = event.getPointerId(index);
+            Log.i("SAPP", "onTouch: ACTION_DOWN: (" + latestTouchX + ", " + latestTouchY + ")");
+        }
+
         MakepadNative.surfaceOnTouch(event);
+        // return false so that `onLongClick` will trigger.
+        return false;
+    }
+
+    @Override
+    public boolean onLongClick(View view) {
+        Log.i("SAPP", "Surface::onLongClick: (" + latestTouchX + ", " + latestTouchY + ")");
+        MakepadNative.surfaceOnLongClick(latestTouchX, latestTouchY, latestTouchPointerId);
         return true;
     }
 
-     @Override
+    @Override
     public void onGlobalLayout() {
         WindowInsets insets = this.getRootWindowInsets();
         if (insets == null) {
@@ -241,8 +269,10 @@ class ResizingLayout
     }
 }
 
-public class MakepadActivity extends Activity implements
-MidiManager.OnDeviceOpenedListener{
+public class MakepadActivity
+    extends Activity
+    implements MidiManager.OnDeviceOpenedListener
+{
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
@@ -272,7 +302,7 @@ MidiManager.OnDeviceOpenedListener{
         ResizingLayout layout = new ResizingLayout(this);
         layout.addView(view);
         setContentView(layout);
-  
+
         MakepadNative.activityOnCreate(this);
 
         HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
