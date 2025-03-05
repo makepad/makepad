@@ -656,7 +656,6 @@ live_design!{
             uniform val_padding: 3.0 // TODO: RENAME
 
             uniform val_width: 10.
-            uniform handle_color: (ROTARY_HANDLE_COLOR);
             uniform val_color_1: (ROTARY_VAL_COLOR_A);
             uniform val_color_2: (ROTARY_VAL_COLOR_B);
 
@@ -680,6 +679,10 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_LIGHT)
 
+            uniform handle_color: (ROTARY_HANDLE_COLOR);
+            uniform handle_color_hover: (THEME_COLOR_U_4);
+            uniform handle_color_focus: (THEME_COLOR_U_3);
+            uniform handle_color_drag: (THEME_COLOR_W);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -931,7 +934,7 @@ live_design!{
                     val_end, 
                     val_end, 
                     mix(
-                        0.,
+                        mix(0., val_width_scaled, self.focus),
                         val_width_scaled,
                         self.hover
                     )
@@ -939,9 +942,21 @@ live_design!{
 
                 sdf.fill_keep(
                     mix(
-                        self.handle_color,
-                        mix(self.handle_color, #f, 0.25),
-                        self.drag
+                        mix(
+                            self.handle_color,
+                            self.handle_color_hover,
+                            self.hover
+                        ),
+                        mix(
+                            self.handle_color_focus,
+                            mix(
+                                self.handle_color_hover,
+                                self.handle_color_drag,
+                                self.drag
+                            ),
+                            self.hover
+                        ),
+                        self.focus
                     )
                 )
                 
@@ -951,8 +966,14 @@ live_design!{
     }
 
     pub ROTARY_FLAT_BG_COLOR = (THEME_COLOR_D_HIDDEN);
+    pub ROTARY_FLAT_BG_HOVER_COLOR = (THEME_COLOR_U_1);
+    pub ROTARY_FLAT_BG_FOCUS_COLOR = (THEME_COLOR_D_2);
     pub ROTARY_FLAT_BG_DRAG_COLOR = (THEME_COLOR_D_1);
+
     pub ROTARY_FLAT_BORDER_COLOR = (THEME_COLOR_BEVEL_SHADOW);
+    pub ROTARY_FLAT_BORDER_HOVER_COLOR = (THEME_COLOR_D_3);
+    pub ROTARY_FLAT_BORDER_FOCUS_COLOR = (THEME_COLOR_D_3);
+    pub ROTARY_FLAT_BORDER_DRAG_COLOR = (THEME_COLOR_D_4);
     pub ROTARY_FLAT_VAL_COLOR_A = (THEME_COLOR_U_2);
     pub ROTARY_FLAT_VAL_COLOR_B = (THEME_COLOR_U_4);
     pub ROTARY_FLAT_HANDLE_COLOR = (THEME_COLOR_U_3);
@@ -966,9 +987,31 @@ live_design!{
             uniform gap: 90.
             uniform width: 5.
             uniform padding: 4.0
+            
+            uniform color: (ROTARY_FLAT_BG_COLOR)
+            uniform color_hover: (ROTARY_FLAT_BG_HOVER_COLOR)
+            uniform color_focus: (ROTARY_FLAT_BG_FOCUS_COLOR)
+            uniform color_drag: (ROTARY_FLAT_BG_DRAG_COLOR)
+
+            uniform border_color: (ROTARY_FLAT_BORDER_COLOR)
+            uniform border_color_hover: (ROTARY_FLAT_BORDER_HOVER_COLOR)
+            uniform border_color_focus: (ROTARY_FLAT_BORDER_FOCUS_COLOR)
+            uniform border_color_drag: (ROTARY_FLAT_BORDER_DRAG_COLOR)
+
             uniform handle_color: (ROTARY_FLAT_HANDLE_COLOR);
+            uniform handle_color_hover: (ROTARY_FLAT_HANDLE_COLOR);
+            uniform handle_color_focus: (ROTARY_FLAT_HANDLE_COLOR);
+            uniform handle_color_drag: (THEME_COLOR_W);
+
             uniform val_color_1: (ROTARY_FLAT_VAL_COLOR_A);
+            uniform val_color_1_hover: (ROTARY_FLAT_VAL_COLOR_A);
+            uniform val_color_1_focus: (ROTARY_FLAT_VAL_COLOR_A);
+            uniform val_color_1_drag: (ROTARY_FLAT_VAL_COLOR_A);
+
             uniform val_color_2: (ROTARY_FLAT_VAL_COLOR_B);
+            uniform val_color_2_hover: (ROTARY_FLAT_VAL_COLOR_B);
+            uniform val_color_2_focus: (ROTARY_FLAT_VAL_COLOR_B);
+            uniform val_color_2_drag: (ROTARY_FLAT_VAL_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1010,15 +1053,41 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            ROTARY_FLAT_BG_COLOR,
-                            ROTARY_FLAT_BG_COLOR,
+                            self.color,
+                            self.color_hover,
                             self.hover
                         ),
-                        ROTARY_FLAT_BG_DRAG_COLOR,
-                        self.drag
+                        mix(
+                            self.color_focus,
+                            mix(
+                                self.color_hover,
+                                self.color_drag,
+                                self.drag
+                            ),
+                            self.hover
+                        ),
+                        self.focus
                     )
                 )
-                sdf.stroke(ROTARY_FLAT_BORDER_COLOR, outline_width);
+                sdf.stroke(
+                    mix(
+                        mix(
+                            self.border_color,
+                            self.border_color_hover,
+                            self.hover
+                        ),
+                        mix(
+                            self.border_color_focus,
+                            mix(
+                                self.border_color_hover,
+                                self.border_color_drag,
+                                self.drag
+                            ),
+                            self.hover
+                        ),
+                        self.focus
+                    )
+                    , outline_width);
 
                 let val_width = (self.width - self.padding) * width_fix;
                 let val_width_scaled = min(
@@ -1040,19 +1109,19 @@ live_design!{
                     mix(
                         mix(
                             mix(self.val_color_1, self.val_color_2, self.slide_pos),
-                            mix(
-                                mix(self.val_color_1, #f, 0.1),
-                                mix(self.val_color_2, #f, 0.1),
-                                self.slide_pos
-                            ),
+                            mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
                             self.hover
                         ),
                         mix(
-                            mix(self.val_color_1, #0, 0.1),
-                            mix(self.val_color_2, #0, 0.1),
-                            self.slide_pos
+                            mix(self.val_color_1_focus, self.val_color_2_focus, self.slide_pos),
+                            mix(
+                                mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
+                                mix(self.val_color_1_drag, self.val_color_2_drag, self.slide_pos),
+                                self.drag
+                            ),
+                            self.hover
                         ),
-                        self.drag
+                        self.focus
                     )
                 )
 
@@ -1064,7 +1133,7 @@ live_design!{
                     val_end, 
                     val_end, 
                     mix(
-                        0.,
+                        mix(0., val_width_scaled, self.focus),
                         val_width_scaled,
                         self.hover
                     )
@@ -1072,9 +1141,21 @@ live_design!{
 
                 sdf.fill_keep(
                     mix(
-                        self.handle_color,
-                        mix(self.handle_color, #f, 0.25),
-                        self.drag
+                        mix(
+                            self.handle_color,
+                            self.handle_color_hover,
+                            self.hover
+                        ),
+                        mix(
+                            self.handle_color_focus,
+                            mix(
+                                self.handle_color_hover,
+                                self.handle_color_drag,
+                                self.drag
+                            ),
+                            self.hover
+                        ),
+                        self.focus
                     )
                 )
                 
