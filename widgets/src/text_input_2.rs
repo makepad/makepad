@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
-    makepad_draw::{text::layout::Cursor, *}, *,
+    makepad_draw::{text::layout::{Affinity as CursorAffinity, Cursor}, *}, *,
     widget::*,
 };
 
@@ -62,6 +62,34 @@ pub struct TextInput2 {
     #[rust] cursor: Cursor,
 }
 
+impl TextInput2 {
+    fn set_key_focus(&self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
+    }
+
+    fn move_cursor_left(&mut self) {
+        self.set_cursor(
+            Cursor {
+                index: prev_grapheme_boundary(&self.text, self.cursor.index),
+                affinity: CursorAffinity::After,
+            }
+        );
+    }
+
+    fn move_cursor_right(&mut self) {
+        self.set_cursor(
+            Cursor {
+                index: next_grapheme_boundary(&self.text, self.cursor.index),
+                affinity: CursorAffinity::Before,
+            }
+        );
+    }
+
+    fn set_cursor(&mut self, cursor: Cursor) {
+        self.cursor = cursor;
+    }
+}
+
 impl Widget for TextInput2 {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
@@ -90,7 +118,57 @@ impl Widget for TextInput2 {
         DrawStep::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // TODO
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                modifiers: KeyModifiers {
+                    shift,
+                    logo: false,
+                    alt: false,
+                    control: false
+                },
+                ..
+            }) => {
+                self.move_cursor_left();
+                self.draw_bg.redraw(cx);
+            },
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                modifiers: KeyModifiers {
+                    shift,
+                    logo: false,
+                    alt: false,
+                    control: false
+                },
+                ..
+            }) => {
+                self.move_cursor_right();
+                self.draw_bg.redraw(cx);
+            },
+            Hit::FingerDown(FingerDownEvent {
+                device,
+                ..
+            }) => {
+                if device.is_primary_hit() {
+                    self.set_key_focus(cx);
+                }
+            }
+            _ => {}
+        }
     }
+}
+
+fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
+    use unicode_segmentation::GraphemeCursor;
+
+    let mut cursor = GraphemeCursor::new(index, text.len(), true);
+    cursor.prev_boundary(text, 0).unwrap().unwrap_or(0)
+}
+
+fn next_grapheme_boundary(text: &str, index: usize) -> usize {
+    use unicode_segmentation::GraphemeCursor;
+
+    let mut cursor = GraphemeCursor::new(index, text.len(), true);
+    cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
 }

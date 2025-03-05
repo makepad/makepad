@@ -170,15 +170,11 @@ impl DrawText2 {
         let max_width_in_lpxs = cx
             .turtle()
             .max_width(walk)
-            .map_or(text.size_in_lpxs.width, |max_width| {
-                max_width as f32
-            });
+            .map_or(text.size_in_lpxs.width, |max_width| max_width as f32);
         let max_height_in_lpxs = cx
             .turtle()
             .max_height(walk)
-            .map_or(text.size_in_lpxs.height, |max_height| {
-                max_height as f32
-            });
+            .map_or(text.size_in_lpxs.height, |max_height| max_height as f32);
         let turtle_rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
@@ -189,9 +185,7 @@ impl DrawText2 {
         if self.debug {
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(&mut area, turtle_rect);
-            cx.cx
-                .debug
-                .area(area, vec4(1.0, 1.0, 1.0, 1.0));
+            cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
         let remaining_width_in_lpxs = max_width_in_lpxs - text.size_in_lpxs.width;
@@ -201,7 +195,7 @@ impl DrawText2 {
             turtle_rect.pos.y as f32 + align.y as f32 * remaining_height_in_lpxs,
         );
         self.draw_laidout(cx, origin_in_lpxs, &text);
-        
+
         rect(
             origin_in_lpxs.x as f64,
             origin_in_lpxs.y as f64,
@@ -210,12 +204,7 @@ impl DrawText2 {
         )
     }
 
-    fn draw_laidout(
-        &mut self,
-        cx: &mut Cx2d<'_>,
-        origin_in_lpxs: Point<f32>,
-        text: &LaidoutText,
-    ) {
+    fn draw_laidout(&mut self, cx: &mut Cx2d<'_>, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
         self.update_draw_vars(cx);
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
@@ -359,12 +348,14 @@ impl DrawText2 {
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
-        self.draw_color = color.map_or(self.color, |color| vec4(
-            color.r as f32,
-            color.g as f32,
-            color.b as f32,
-            color.a as f32,
-        ) / 255.0);
+        self.draw_color = color.map_or(self.color, |color| {
+            vec4(
+                color.r as f32,
+                color.g as f32,
+                color.b as f32,
+                color.a as f32,
+            ) / 255.0
+        });
         self.texture_index = texture_index;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);
