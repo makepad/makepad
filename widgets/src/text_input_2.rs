@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        makepad_draw::{text::layout::{Cursor, LaidoutText}, *},
+        makepad_draw::{text::{selection::{Cursor, Selection}, layout::LaidoutText}, *},
         widget::*,
     },
     std::rc::Rc,
@@ -31,9 +31,11 @@ live_design! {
             }
         }
 
-        draw_cursor: {
+        draw_selection: {
+            instance hover: 0.0
             instance focus: 1.0 // TODO: Animate this
-            uniform border_radius: 0.5
+            
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -42,7 +44,25 @@ live_design! {
                     self.rect_size.x,
                     self.rect_size.y,
                     self.border_radius
-                )
+                );
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BG_HIGHLIGHT_INLINE, self.focus));
+                return sdf.result
+            }
+        }
+
+        draw_cursor: {
+            instance focus: 1.0 // TODO: Animate this
+            uniform border_radius: 0.5
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                );
                 sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
                 return sdf.result
             }
@@ -54,6 +74,7 @@ live_design! {
 pub struct TextInput2 {
     #[redraw] #[live] draw_bg: DrawColor,
     #[live] draw_text: DrawText2,
+    #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
 
     #[layout] layout: Layout,
@@ -61,9 +82,9 @@ pub struct TextInput2 {
     #[live] text_align: Align,
 
     #[live] pub text: String,
-    #[rust] pub laidout_text: Option<Rc<LaidoutText>>,
+    #[rust] laidout_text: Option<Rc<LaidoutText>>,
     #[rust] text_area: Area,
-    #[rust] cursor: Cursor,
+    #[rust] selection: Selection,
 }
 
 impl TextInput2 {
@@ -72,33 +93,33 @@ impl TextInput2 {
     }
 
     fn move_cursor_left(&mut self) {
-        use makepad_draw::text::layout::CursorAffinity;
+        use makepad_draw::text::selection::Affinity;
 
         self.set_cursor(
             Cursor {
-                index: prev_grapheme_boundary(&self.text, self.cursor.index),
-                affinity: CursorAffinity::After,
+                index: prev_grapheme_boundary(&self.text, self.selection.cursor.index),
+                affinity: Affinity::After,
             }
         );
     }
 
     fn move_cursor_right(&mut self) {
-        use makepad_draw::text::layout::CursorAffinity;
+        use makepad_draw::text::selection::Affinity;
         
         self.set_cursor(
             Cursor {
-                index: next_grapheme_boundary(&self.text, self.cursor.index),
-                affinity: CursorAffinity::Before,
+                index: next_grapheme_boundary(&self.text, self.selection.cursor.index),
+                affinity: Affinity::Before,
             }
         );
     }
 
     fn move_cursor_up(&mut self) {
-        use makepad_draw::text::layout::CursorPosition;
+        use makepad_draw::text::selection::Position;
 
         let laidout_text = self.laidout_text.as_ref().unwrap();
-        let position = laidout_text.cursor_to_position(self.cursor);
-        self.set_cursor(laidout_text.position_to_cursor(CursorPosition {
+        let position = laidout_text.cursor_to_position(self.selection.cursor);
+        self.set_cursor(laidout_text.position_to_cursor(Position {
             row_index: if position.row_index == 0 {
                 0
             } else {
@@ -109,11 +130,11 @@ impl TextInput2 {
     }
 
     fn move_cursor_down(&mut self) {
-        use makepad_draw::text::layout::CursorPosition;
+        use makepad_draw::text::selection::Position;
         
         let laidout_text = self.laidout_text.as_ref().unwrap();
-        let position = laidout_text.cursor_to_position(self.cursor);
-        self.set_cursor(laidout_text.position_to_cursor(CursorPosition {
+        let position = laidout_text.cursor_to_position(self.selection.cursor);
+        self.set_cursor(laidout_text.position_to_cursor(Position {
             row_index: if position.row_index == laidout_text.rows.len() - 1 {
                 laidout_text.rows.len() - 1
             } else {
@@ -124,12 +145,14 @@ impl TextInput2 {
     }
 
     fn set_cursor(&mut self, cursor: Cursor) {
-        self.cursor = cursor;
+        self.selection.cursor = cursor;
     }
 }
 
 impl Widget for TextInput2 {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        use makepad_draw::text::selection::Position;
+        
         self.draw_bg.begin(cx, walk, self.layout);
 
         self.laidout_text = Some(self.draw_text.layout(cx, self.text_walk, self.text_align, &self.text));
@@ -143,17 +166,32 @@ impl Widget for TextInput2 {
         );
         cx.add_aligned_rect_area(&mut self.text_area, text_rect);
 
-        let position = laidout_text.cursor_to_position(self.cursor);
-        let row = &laidout_text.rows[position.row_index];
+        let Position {
+            row_index,
+            x_in_lpxs,
+        } = laidout_text.cursor_to_position(self.selection.cursor);
+        let row = &laidout_text.rows[row_index];
         self.draw_cursor.draw_abs(
             cx,
             rect(
-                text_rect.pos.x + position.x_in_lpxs as f64 - 2.0 / 2.0,
+                text_rect.pos.x + x_in_lpxs as f64 - 2.0 / 2.0,
                 text_rect.pos.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
                 2.0,
                 (row.ascender_in_lpxs - row.descender_in_lpxs) as f64,
             )
         );
+
+        for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(self.selection) {
+            self.draw_selection.draw_abs(
+                cx,
+                rect(
+                    text_rect.pos.x + rect_in_lpxs.origin.x as f64,
+                    text_rect.pos.y + rect_in_lpxs.origin.y as f64,
+                    rect_in_lpxs.size.width as f64,
+                    rect_in_lpxs.size.height as f64,
+                )
+            );
+        }
 
         self.draw_bg.end(cx);
 
@@ -221,13 +259,13 @@ impl Widget for TextInput2 {
                 device,
                 ..
             }) if device.is_primary_hit() => {
+                self.set_key_focus(cx);
                 let laidout_text = self.laidout_text.as_ref().unwrap();
                 let rel = abs - self.text_area.rect(cx).pos;
                 self.set_cursor(laidout_text.point_in_lpxs_to_cursor(
                     Point::new(rel.x as f32, rel.y as f32)
                 ));
-                self.set_key_focus(&mut *cx);
-                self.draw_bg.redraw(&mut *cx);
+                self.draw_bg.redraw(cx);
             }
             _ => {}
         }

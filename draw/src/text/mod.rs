@@ -1,4 +1,5 @@
 pub mod color;
+pub mod selection;
 pub mod font;
 pub mod font_atlas;
 pub mod font_data;
