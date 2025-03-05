@@ -166,7 +166,7 @@ pub enum Event {
     /// The raw event that occurs when the user finishes a long press touch/click.
     ///
     /// Do not match upon or handle this event directly; instead, use the family of
-    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::LongPress`].
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerLongPress`].
     LongPress(LongPressEvent),
     /// The raw event that occurs when the user scrolls, e.g.,
     /// by using the mouse wheel or a touch flick.

@@ -187,8 +187,10 @@ pub struct ScrollEvent {
 
 #[derive(Clone, Debug)]
 pub struct LongPressEvent {
+    pub window_id: WindowId,
     pub abs: DVec2,
     pub uid: u64,
+    pub time: f64,
 }
 
 // Touch events
@@ -279,8 +281,10 @@ impl Margin {
     }
 }
 
+// TODO: query the platform for its long-press timeout.
+//       See Android's ViewConfiguration.getLongPressTimeout().
 pub const TAP_COUNT_TIME: f64 = 0.5;
-pub const TAP_COUNT_DISTANCE: f64 = 10.0;
+pub const TAP_COUNT_DISTANCE: f64 = 5.0;
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct DigitId(pub LiveId);
@@ -288,6 +292,7 @@ pub struct DigitId(pub LiveId);
 #[derive(Default, Clone)]
 pub struct CxDigitCapture {
     digit_id: DigitId,
+    has_long_press_occurred: bool,
     pub area: Area,
     pub sweep_area: Area,
     pub switch_capture: Option<Area>,
@@ -409,6 +414,7 @@ impl CxFingers {
             area,
             time,
             abs_start,
+            has_long_press_occurred: false,
             switch_capture: None
         })
         /*}*/
@@ -448,8 +454,11 @@ impl CxFingers {
     }
     
     pub (crate) fn process_tap_count(&mut self, pos: DVec2, time: f64) -> u32 {
+        // TODO: query the platform for its multi-press / double-click timeout.
+        //       e.g., see Android's ViewConfiguration.getMultiPressTimeout().
         if (time - self.tap.last_time) < TAP_COUNT_TIME
-            && pos.distance(&self.tap.last_pos) < TAP_COUNT_DISTANCE {
+            && pos.distance(&self.tap.last_pos) < TAP_COUNT_DISTANCE
+        {
             self.tap.count += 1;
         }
         else {
@@ -546,19 +555,29 @@ pub enum DigitDevice {
 
 impl DigitDevice {
     /// Returns true if this device is a touch device.
-    pub fn is_touch(&self) -> bool {if let DigitDevice::Touch {..} = self {true}else {false}}
+    pub fn is_touch(&self) -> bool { matches!(self, Self::Touch {..}) }
     /// Returns true if this device is a mouse.
-    pub fn is_mouse(&self) -> bool {if let DigitDevice::Mouse {..} = self {true}else {false}}
+    pub fn is_mouse(&self) -> bool { matches!(self, Self::Mouse {..}) }
     /// Returns true if this device is an XR device.
-    pub fn is_xr(&self) -> bool {if let DigitDevice::XR {..} = self {true}else {false}}
-
+    pub fn is_xr(&self) -> bool { matches!(self, Self::XR {..}) }
     /// Returns true if this device can hover: either a mouse or an XR device.
-    pub fn has_hovers(&self) -> bool {self.is_mouse() || self.is_xr()}
+    pub fn has_hovers(&self) -> bool { matches!(self, Self::Mouse {..} | Self::XR {..}) }
     /// Returns the `MouseButton` if this device is a mouse; otherwise `None`.
-    pub fn mouse_button(&self) -> Option<MouseButton> {if let DigitDevice::Mouse {button} = self {Some(*button)}else {None}}
+    pub fn mouse_button(&self) -> Option<MouseButton> {
+        if let Self::Mouse {button} = self {
+            Some(*button)
+        } else {
+            None
+        }
+    }
     /// Returns the `uid` of the touch device if this device is a touch device; otherwise `None`.
-    pub fn touch_uid(&self) -> Option<u64> {if let DigitDevice::Touch {uid} = self {Some(*uid)}else {None}}
-
+    pub fn touch_uid(&self) -> Option<u64> {
+        if let Self::Touch {uid} = self {
+            Some(*uid)
+        } else {
+            None
+        }
+    }
     /// Returns true if this is a *primary* mouse button hit *or* any touch hit.
     pub fn is_primary_hit(&self) -> bool {
         match self {
@@ -634,16 +653,19 @@ pub struct FingerUpEvent {
     pub capture_time: f64,
     /// The time at which this finger-up event occurred.
     pub time: f64,
-    
+
     pub digit_id: DigitId,
     pub device: DigitDevice,
-    
+    /// Whether a platform-native long press has occurred between
+    /// the original finger-down event and this finger-up event.
+    pub has_long_press_occurred: bool,
+
     pub tap_count: u32,
     pub modifiers: KeyModifiers,
     pub rect: Rect,
     /// Whether this finger-up event (`abs`) occurred within the hits area.
     pub is_over: bool,
-    pub is_sweep: bool
+    pub is_sweep: bool,
 }
 impl Deref for FingerUpEvent {
     type Target = DigitDevice;
@@ -652,34 +674,29 @@ impl Deref for FingerUpEvent {
     }
 }
 impl FingerUpEvent {
+    /// Returns `true` if this FingerUp event was a regular tap/click (not a long press).
     pub fn was_tap(&self) -> bool {
-        self.time - self.capture_time < TAP_COUNT_TIME &&
-        (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
-    }
-    
-    pub fn was_long_press(&self) -> bool {
-        self.time - self.capture_time >= TAP_COUNT_TIME &&
-        (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
+        if self.has_long_press_occurred {
+            return false;
+        }
+        self.time - self.capture_time < TAP_COUNT_TIME
+        && (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct FingerLongPressEvent {
-    pub abs: DVec2,
-    /*
-     * TODO: add the following fields back in:
-     *
     pub window_id: WindowId,
+    /// The absolute position of this long-press event.
     pub abs: DVec2,
+    /// The time at which the original finger-down event occurred.
     pub capture_time: f64,
+    /// The time at which this long-press event occurred.
     pub time: f64,
     
     pub digit_id: DigitId,
     pub device: DigitDevice,
-    
-    pub tap_count: u32,
-    pub modifiers: KeyModifiers,
-    */
+    pub rect: Rect,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -839,7 +856,7 @@ impl Event {
                         window_id: e.window_id,
                         digit_id,
                         device,
-                        modifiers: e.modifiers.clone(),
+                        modifiers: e.modifiers,
                         time: e.time,
                         scroll: e.scroll
                     })
@@ -852,10 +869,8 @@ impl Event {
                 }
                 for t in &e.touches {
                     let digit_id = live_id_num!(touch, t.uid).into();
-                    let device = DigitDevice::Touch {
-                        uid: t.uid,
-                    };
-                    
+                    let device = DigitDevice::Touch { uid: t.uid };
+
                     match t.state {
                         TouchState::Start => {
                             
@@ -881,10 +896,10 @@ impl Event {
                                 digit_id,
                                 device,
                                 tap_count: cx.fingers.tap_count(),
-                                modifiers: e.modifiers.clone(),
+                                modifiers: e.modifiers,
                                 time: e.time,
                                 rect,
-                            })
+                            });
                         }
                         TouchState::Stop => {
                             let tap_count = cx.fingers.tap_count();
@@ -892,18 +907,19 @@ impl Event {
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
-                                    rect: rect,
+                                    rect,
                                     window_id: e.window_id,
                                     abs: t.abs,
                                     digit_id,
                                     device,
+                                    has_long_press_occurred: capture.has_long_press_occurred,
                                     tap_count,
                                     capture_time: capture.time,
-                                    modifiers: e.modifiers.clone(),
+                                    modifiers: e.modifiers,
                                     time: e.time,
                                     is_over: rect.contains(t.abs),
                                     is_sweep: false,
-                                })
+                                });
                             }
                         }
                         TouchState::Move => {
@@ -915,7 +931,8 @@ impl Event {
                             if !options.sweep_area.is_empty() {
                                 if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
                                     if capture.switch_capture.is_none()
-                                        && hit_test(t.abs, &rect, &options.margin) {
+                                        && hit_test(t.abs, &rect, &options.margin)
+                                    {
                                         if t.handled.get().is_empty() {
                                             t.handled.set(area);
                                             if capture.area == area {
@@ -925,12 +942,12 @@ impl Event {
                                                     digit_id,
                                                     device,
                                                     tap_count,
-                                                    modifiers: e.modifiers.clone(),
+                                                    modifiers: e.modifiers,
                                                     time: e.time,
                                                     abs_start: capture.abs_start,
                                                     rect,
                                                     is_over: true,
-                                                })
+                                                });
                                             }
                                             else if capture.sweep_area == options.sweep_area { // take over the capture
                                                 capture.switch_capture = Some(area);
@@ -940,10 +957,10 @@ impl Event {
                                                     digit_id,
                                                     device,
                                                     tap_count: cx.fingers.tap_count(),
-                                                    modifiers: e.modifiers.clone(),
+                                                    modifiers: e.modifiers,
                                                     time: e.time,
-                                                    rect: rect,
-                                                })
+                                                    rect,
+                                                });
                                             }
                                         }
                                     }
@@ -953,14 +970,15 @@ impl Event {
                                         }
                                         return Hit::FingerUp(FingerUpEvent {
                                             abs_start: capture.abs_start,
-                                            rect: rect,
+                                            rect,
                                             window_id: e.window_id,
                                             abs: t.abs,
                                             digit_id,
                                             device,
+                                            has_long_press_occurred: capture.has_long_press_occurred,
                                             tap_count,
                                             capture_time: capture.time,
-                                            modifiers: e.modifiers.clone(),
+                                            modifiers: e.modifiers,
                                             time: e.time,
                                             is_sweep: true,
                                             is_over: false,
@@ -975,7 +993,7 @@ impl Event {
                                     digit_id,
                                     device,
                                     tap_count,
-                                    modifiers: e.modifiers.clone(),
+                                    modifiers: e.modifiers,
                                     time: e.time,
                                     abs_start: capture.abs_start,
                                     rect,
@@ -1017,7 +1035,7 @@ impl Event {
                                             digit_id,
                                             device,
                                             tap_count,
-                                            modifiers: e.modifiers.clone(),
+                                            modifiers: e.modifiers,
                                             time: e.time,
                                             abs_start: capture.abs_start,
                                             rect,
@@ -1033,7 +1051,7 @@ impl Event {
                                             digit_id,
                                             device,
                                             tap_count: cx.fingers.tap_count(),
-                                            modifiers: e.modifiers.clone(),
+                                            modifiers: e.modifiers,
                                             time: e.time,
                                             rect,
                                         })
@@ -1051,9 +1069,10 @@ impl Event {
                                     abs: e.abs,
                                     digit_id,
                                     device,
+                                    has_long_press_occurred: capture.has_long_press_occurred,
                                     tap_count,
                                     capture_time: capture.time,
-                                    modifiers: e.modifiers.clone(),
+                                    modifiers: e.modifiers,
                                     time: e.time,
                                     is_sweep: true,
                                     is_over: false,
@@ -1069,7 +1088,7 @@ impl Event {
                             digit_id,
                             device,
                             tap_count,
-                            modifiers: e.modifiers.clone(),
+                            modifiers: e.modifiers,
                             time: e.time,
                             abs_start: capture.abs_start,
                             rect,
@@ -1091,7 +1110,7 @@ impl Event {
                         abs: e.abs,
                         digit_id,
                         device,
-                        modifiers: e.modifiers.clone(),
+                        modifiers: e.modifiers,
                         time: e.time,
                         rect,
                     };
@@ -1154,9 +1173,9 @@ impl Event {
                     digit_id,
                     device,
                     tap_count: cx.fingers.tap_count(),
-                    modifiers: e.modifiers.clone(),
+                    modifiers: e.modifiers,
                     time: e.time,
-                    rect: rect,
+                    rect,
                 })
             },
             Event::MouseUp(e) => {
@@ -1181,14 +1200,15 @@ impl Event {
                     let is_over = hit_test(e.abs, &rect, &options.margin);
                     let event = Hit::FingerUp(FingerUpEvent {
                         abs_start: capture.abs_start,
-                        rect: rect,
+                        rect,
                         window_id: e.window_id,
                         abs: e.abs,
                         digit_id,
                         device,
+                        has_long_press_occurred: capture.has_long_press_occurred,
                         tap_count,
                         capture_time: capture.time,
-                        modifiers: e.modifiers.clone(),
+                        modifiers: e.modifiers,
                         time: e.time,
                         is_over,
                         is_sweep: false,
@@ -1215,7 +1235,7 @@ impl Event {
                     abs: e.abs,
                     digit_id,
                     device,
-                    modifiers: e.modifiers.clone(),
+                    modifiers: e.modifiers,
                     time: e.time,
                     rect,
                 };
@@ -1225,17 +1245,30 @@ impl Event {
             },
             Event::LongPress(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    log!("Skipping LongPress, sweep_area: {:?}", options.sweep_area);
+                    log!("Skipping LongPress Hit, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
 
                 let rect = area.clipped_rect(&cx);
-                if hit_test(e.abs, &rect, &options.margin) {
+                if let Some(capture) = cx.fingers.find_area_capture(area) {
+                    capture.has_long_press_occurred = true;
+                    // No hit test is needed because we already did that in the previous
+                    // FingerDown `capture` event that started the long press.
+                    // Also, there is no need to include the starting position (`abs_start`)
+                    // since it will always be identical to the `abs` position of the original capture.
                     let digit_id = live_id_num!(touch, e.uid).into();
-                    cx.fingers.new_hover_area(digit_id, area);
+                    let device = DigitDevice::Touch {
+                        uid: e.uid,
+                    };
                     return Hit::FingerLongPress(FingerLongPressEvent {
+                        window_id: e.window_id,
                         abs: e.abs,
-                    })
+                        capture_time: capture.time,
+                        time: e.time,
+                        digit_id,
+                        device,
+                        rect,
+                    });
                 }
             },
             Event::DesignerPick(e) => {
