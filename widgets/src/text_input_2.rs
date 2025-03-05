@@ -92,60 +92,71 @@ impl TextInput2 {
         cx.set_key_focus(self.draw_bg.area());
     }
 
-    fn move_cursor_left(&mut self) {
+    fn move_cursor_left(&mut self, keep_selection: bool) {
         use makepad_draw::text::selection::Affinity;
 
         self.set_cursor(
             Cursor {
                 index: prev_grapheme_boundary(&self.text, self.selection.cursor.index),
                 affinity: Affinity::After,
-            }
+            },
+            keep_selection
         );
     }
 
-    fn move_cursor_right(&mut self) {
+    fn move_cursor_right(&mut self, keep_selection: bool) {
         use makepad_draw::text::selection::Affinity;
         
         self.set_cursor(
             Cursor {
                 index: next_grapheme_boundary(&self.text, self.selection.cursor.index),
                 affinity: Affinity::Before,
-            }
+            },
+            keep_selection,
         );
     }
 
-    fn move_cursor_up(&mut self) {
+    fn move_cursor_up(&mut self, keep_selection: bool) {
         use makepad_draw::text::selection::Position;
 
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let position = laidout_text.cursor_to_position(self.selection.cursor);
-        self.set_cursor(laidout_text.position_to_cursor(Position {
-            row_index: if position.row_index == 0 {
-                0
-            } else {
-                position.row_index - 1
-            },
-            x_in_lpxs: position.x_in_lpxs,
-        }));
+        self.set_cursor(
+            laidout_text.position_to_cursor(Position {
+                row_index: if position.row_index == 0 {
+                    0
+                } else {
+                    position.row_index - 1
+                },
+                x_in_lpxs: position.x_in_lpxs,
+            }),
+            keep_selection
+        );
     }
 
-    fn move_cursor_down(&mut self) {
+    fn move_cursor_down(&mut self, keep_selection: bool) {
         use makepad_draw::text::selection::Position;
         
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let position = laidout_text.cursor_to_position(self.selection.cursor);
-        self.set_cursor(laidout_text.position_to_cursor(Position {
-            row_index: if position.row_index == laidout_text.rows.len() - 1 {
-                laidout_text.rows.len() - 1
-            } else {
-                position.row_index + 1 
-            },
-            x_in_lpxs: position.x_in_lpxs,
-        }));
+        self.set_cursor(
+            laidout_text.position_to_cursor(Position {
+                row_index: if position.row_index == laidout_text.rows.len() - 1 {
+                    laidout_text.rows.len() - 1
+                } else {
+                    position.row_index + 1 
+                },
+                x_in_lpxs: position.x_in_lpxs,
+            }),
+            keep_selection
+        );
     }
 
-    fn set_cursor(&mut self, cursor: Cursor) {
+    fn set_cursor(&mut self, cursor: Cursor, keep_selection: bool) {
         self.selection.cursor = cursor;
+        if !keep_selection {
+            self.selection.anchor = cursor;
+        }
     }
 }
 
@@ -205,53 +216,53 @@ impl Widget for TextInput2 {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers {
-                    shift,
+                    shift: keep_selection,
                     logo: false,
                     alt: false,
                     control: false
                 },
                 ..
             }) => {
-                self.move_cursor_left();
+                self.move_cursor_left(keep_selection);
                 self.draw_bg.redraw(cx);
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {
-                    shift,
+                    shift: keep_selection,
                     logo: false,
                     alt: false,
                     control: false
                 },
                 ..
             }) => {
-                self.move_cursor_right();
+                self.move_cursor_right(keep_selection);
                 self.draw_bg.redraw(cx);
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {
-                    shift,
+                    shift: keep_selection,
                     logo: false,
                     alt: false,
                     control: false
                 },
                 ..
             }) => {
-                self.move_cursor_up();
+                self.move_cursor_up(keep_selection);
                 self.draw_bg.redraw(cx);
             },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {
-                    shift,
+                    shift: keep_selection,
                     logo: false,
                     alt: false,
                     control: false
                 },
                 ..
             }) => {
-                self.move_cursor_down();
+                self.move_cursor_down(keep_selection);
                 self.draw_bg.redraw(cx);
             },
             Hit::FingerDown(FingerDownEvent {
@@ -264,7 +275,20 @@ impl Widget for TextInput2 {
                 let rel = abs - self.text_area.rect(cx).pos;
                 self.set_cursor(laidout_text.point_in_lpxs_to_cursor(
                     Point::new(rel.x as f32, rel.y as f32)
-                ));
+                ), false);
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerMove(FingerMoveEvent {
+                abs,
+                device,
+                ..
+            }) if device.is_primary_hit() => {
+                self.set_key_focus(cx);
+                let laidout_text = self.laidout_text.as_ref().unwrap();
+                let rel = abs - self.text_area.rect(cx).pos;
+                self.set_cursor(laidout_text.point_in_lpxs_to_cursor(
+                    Point::new(rel.x as f32, rel.y as f32)
+                ), true);
                 self.draw_bg.redraw(cx);
             }
             _ => {}
