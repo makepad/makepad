@@ -1,11 +1,12 @@
 use {
     super::{
         color::Color,
+        selection::{Cursor, Affinity, Position, Selection},
         font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
         font_loader::{self, FontDefinitions, FontLoader},
-        geom::{Point, Size},
+        geom::{Point, Rect, Size},
         sdfer,
         shape::{self, ShapedText},
         substr::Substr,
@@ -486,11 +487,11 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    pub fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
+    pub fn cursor_to_position(&self, cursor: Cursor) -> Position {
         let row_index = self.cursor_to_row_index(cursor);
         let row = &self.rows[row_index];
         let x_in_lpxs = row.index_to_x_in_lpxs(cursor.index - row.text.start_in_parent());
-        CursorPosition {
+        Position {
             row_index,
             x_in_lpxs,
         }
@@ -500,8 +501,8 @@ impl LaidoutText {
         for (row_index, row) in self.rows.iter().enumerate() {
             let row_end = row.text.start_in_parent() + row.text.as_str().len();
             if match cursor.affinity {
-                CursorAffinity::Before => cursor.index <= row_end,
-                CursorAffinity::After => cursor.index < row_end,
+                Affinity::Before => cursor.index <= row_end,
+                Affinity::After => cursor.index < row_end,
             } {
                 return row_index;
             }
@@ -511,7 +512,7 @@ impl LaidoutText {
 
     pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
         let row_index = self.y_in_lpxs_to_row_index(point_in_lpxs.y);
-        self.position_to_cursor(CursorPosition {
+        self.position_to_cursor(Position {
             row_index,
             x_in_lpxs: point_in_lpxs.x,
         })
@@ -533,37 +534,74 @@ impl LaidoutText {
         self.rows.len() - 1
     }
 
-    pub fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
+    pub fn position_to_cursor(&self, position: Position) -> Cursor {
         let row = &self.rows[position.row_index];
         let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
             index: row.text.start_in_parent() + index,
             affinity: if index == 0 {
-                CursorAffinity::After
+                Affinity::After
             } else {
-                CursorAffinity::Before
+                Affinity::Before
             },
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Cursor {
-    pub index: usize,
-    pub affinity: CursorAffinity,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub enum CursorAffinity {
-    #[default]
-    Before,
-    After,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CursorPosition {
-    pub row_index: usize,
-    pub x_in_lpxs: f32,
+    pub fn selection_rects_in_lpxs(&self, selection: Selection) -> Vec<Rect<f32>> {
+        let Position {
+            row_index: start_row_index,
+            x_in_lpxs: start_x_in_lpxs,
+        } = self.cursor_to_position(selection.start());
+        let Position {
+            row_index: end_row_index,
+            x_in_lpxs: end_x_in_lpxs,
+        } = self.cursor_to_position(selection.end());
+        let mut rects_in_lpxs = Vec::new();
+        if start_row_index == end_row_index {
+            let row = &self.rows[start_row_index];
+            rects_in_lpxs.push(Rect::new(
+                Point::new(
+                    start_x_in_lpxs,
+                    row.origin_in_lpxs.y - row.ascender_in_lpxs,
+                ),
+                Size::new(
+                    end_x_in_lpxs - start_x_in_lpxs,
+                    row.ascender_in_lpxs - row.descender_in_lpxs,
+                )
+            ));
+        } else {
+            let start_row = &self.rows[start_row_index];
+            let end_row = &self.rows[end_row_index];
+            rects_in_lpxs.push(Rect::new(
+                Point::new(
+                    start_x_in_lpxs,
+                    start_row.origin_in_lpxs.y - start_row.ascender_in_lpxs,
+                ),
+                Size::new(
+                    start_row.width_in_lpxs - start_x_in_lpxs,
+                    start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
+                )
+            ));
+            for row_index in start_row_index + 1..end_row_index {
+                let row = &self.rows[row_index];
+                rects_in_lpxs.push(Rect::new(
+                    Point::new(row.origin_in_lpxs.x, row.origin_in_lpxs.y - row.ascender_in_lpxs),
+                    Size::new(row.width_in_lpxs, row.ascender_in_lpxs - row.descender_in_lpxs),
+                ));
+            }
+            rects_in_lpxs.push(Rect::new(
+                Point::new(
+                    0.0,
+                    end_row.origin_in_lpxs.y - end_row.ascender_in_lpxs,
+                ),
+                Size::new(
+                    end_x_in_lpxs,
+                    end_row.ascender_in_lpxs - end_row.descender_in_lpxs,
+                )
+            ));
+        }
+        rects_in_lpxs
+    }
 }
 
 #[derive(Clone, Debug)]
