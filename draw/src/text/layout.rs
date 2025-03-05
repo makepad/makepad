@@ -162,7 +162,7 @@ impl<'a> LayoutContext<'a> {
             font_family,
             style.font_size_in_lpxs,
             range.clone(),
-            SegmentKind::Word
+            SegmentKind::Word,
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
@@ -191,7 +191,7 @@ impl<'a> LayoutContext<'a> {
             font_family,
             style.font_size_in_lpxs,
             range,
-            SegmentKind::Grapheme
+            SegmentKind::Grapheme,
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_on_current_row_in_lpxs().unwrap()) {
@@ -297,7 +297,10 @@ impl<'a> Fitter<'a> {
         use unicode_segmentation::UnicodeSegmentation;
 
         let segment_lens: Vec<_> = match segment_kind {
-            SegmentKind::Word => text.split_word_bounds().map(|segment| segment.len()).collect(),
+            SegmentKind::Word => text
+                .split_word_bounds()
+                .map(|segment| segment.len())
+                .collect(),
             SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
         };
         let segment_widths_in_lpxs: Vec<_> = segment_lens
@@ -311,7 +314,8 @@ impl<'a> Fitter<'a> {
                 let segment_width_in_lpxs = segment_width_in_ems * font_size_in_lpxs;
                 *state = segment_end;
                 Some(segment_width_in_lpxs)
-            }).collect();
+            })
+            .collect();
         let width_in_lpxs = segment_widths_in_lpxs.iter().sum();
         Self {
             text,
@@ -333,11 +337,9 @@ impl<'a> Fitter<'a> {
         let mut remaining_width_in_lpxs = self.width_in_lpxs;
         let mut remaining_segment_count = self.segment_lens.len();
         while remaining_segment_count > 0 {
-            if let Some(shaped_text) = self.fit_step(
-                max_width_in_lpxs,
-                remaining_len,
-                remaining_width_in_lpxs,
-            ) {
+            if let Some(shaped_text) =
+                self.fit_step(max_width_in_lpxs, remaining_len, remaining_width_in_lpxs)
+            {
                 self.range.start += remaining_len;
                 self.width_in_lpxs -= remaining_width_in_lpxs;
                 self.segment_lens.drain(..remaining_segment_count);
@@ -484,53 +486,65 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    /*
-    pub fn point_in_lpxs_to_row(&self, point_in_lpxs: Point<f32>) -> &LaidoutRow {
-        if point_in_lpxs.y < 0.0 {
-            return self.rows.first().unwrap();
-        }
-        if point_in_lpxs.y > self.size_in_lpxs.height {
-            return self.rows.last().unwrap();
-        }
-        let mut rows = self.rows.iter().peekable();
-        while let Some(row) = rows.next() {
-            if point_in_lpxs.y < row.origin_in_lpxs.y
-                    + rows.peek().map_or(row.descender_in_lpxs, |next_row| {
-                        0.5 * row.line_spacing_in_lpxs(next_row)
-                    })
-            {
-                return row;
-            }
+    pub fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
+        let row_index = self.cursor_to_row_index(cursor);
+        let row = &self.rows[row_index];
+        let x_in_lpxs = row.index_to_x_in_lpxs(cursor.index - row.text.start_in_parent());
+        CursorPosition {
+            row_index,
+            origin_in_lpxs: Point::new(x_in_lpxs, row.origin_in_lpxs.y),
         }
     }
 
-    pub fn cursor_to_point_in_lpxs(&self, cursor: Cursor) -> Point<f32> {
-        let mut current_y_in_lpxs = 0.0;
-        let mut prev_row: Option<&LaidoutRow> = None;
-        let mut row_start = 0;
-        for row in &self.rows {
-            current_y_in_lpxs += prev_row.map_or(row.ascender_in_lpxs, |prev_row| {
-                prev_row.line_spacing_in_lpxs(&row)
-            });
+    fn cursor_to_row_index(&self, cursor: Cursor) -> usize {
+        for (row_index, row) in self.rows.iter().enumerate() {
+            let row_end = row.text.start_in_parent() + row.text.as_str().len();
             if match cursor.affinity {
-                Affinity::Before => cursor.index <= row_start + row.text.len(),
-                Affinity::After => cursor.index < row_start + row.text.len(),
+                Affinity::Before => cursor.index <= row_end,
+                Affinity::After => cursor.index < row_end,
             } {
-                return Point::new(
-                    row.origin_in_lpxs.x + row.index_to_x_in_lpxs(cursor.index - row_start),
-                    current_y_in_lpxs,
-                );
+                return row_index;
             }
-            prev_row = Some(row);
-            row_start += row.text.len();
         }
-        let last_row = self.rows.last().unwrap();
-        Point::new(
-            last_row.origin_in_lpxs.x + last_row.width_in_lpxs,
-            current_y_in_lpxs,
-        )
+        self.rows.len() - 1
     }
-    */
+
+    pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
+        let row_index = self.y_in_lpxs_to_row_index(point_in_lpxs.y);
+        self.position_to_cursor(CursorPosition {
+            row_index,
+            origin_in_lpxs: point_in_lpxs,
+        })
+    }
+
+    fn y_in_lpxs_to_row_index(&self, y_in_lpxs: f32) -> usize {
+        if y_in_lpxs < 0.0 {
+            return 0;
+        }
+        for (row_index, row) in self.rows.iter().enumerate() {
+            let line_spacing_in_lpxs = self
+                .rows
+                .get(row_index + 1)
+                .map_or(0.0, |next_row| row.line_spacing_in_lpxs(next_row));
+            if y_in_lpxs < row.origin_in_lpxs.y + 0.5 * line_spacing_in_lpxs {
+                return row_index;
+            }
+        }
+        self.rows.len() - 1
+    }
+
+    pub fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
+        let row = &self.rows[position.row_index];
+        let index = row.x_in_lpxs_to_index(position.origin_in_lpxs.x);
+        Cursor {
+            index: row.text.start_in_parent() + index,
+            affinity: if index == 0 {
+                Affinity::After
+            } else {
+                Affinity::Before
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -544,6 +558,12 @@ pub enum Affinity {
     #[default]
     Before,
     After,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CursorPosition {
+    pub row_index: usize,
+    pub origin_in_lpxs: Point<f32>,
 }
 
 #[derive(Clone, Debug)]

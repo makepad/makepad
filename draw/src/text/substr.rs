@@ -6,7 +6,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Substr {
-    string: Rc<str>,
+    parent: Rc<str>,
     start: usize,
     end: usize,
 }
@@ -15,24 +15,32 @@ impl Substr {
     pub fn split_at(self, index: usize) -> (Substr, Substr) {
         (
             Self {
-                string: self.string.clone(),
+                parent: self.parent.clone(),
                 start: self.start,
                 end: index,
             },
             Self {
-                string: self.string,
+                parent: self.parent,
                 start: index,
                 end: self.end,
             },
         )
     }
 
+    pub fn parent(&self) -> &Rc<str> {
+        &self.parent
+    }
+
+    pub fn start_in_parent(&self) -> usize {
+        self.start
+    }
+
     pub fn as_str(&self) -> &str {
-        &self.string[self.start..self.end]
+        &self.parent[self.start..self.end]
     }
 
     pub fn shallow_eq(&self, other: &Self) -> bool {
-        if !Rc::ptr_eq(&self.string, &other.string) {
+        if !Rc::ptr_eq(&self.parent, &other.parent) {
             return false;
         }
         if self.start != other.start {
@@ -60,7 +68,7 @@ impl Substr {
         assert!(start <= end);
         assert!(end <= self.len());
         Substr {
-            string: self.string.clone(),
+            parent: self.parent.clone(),
             start: self.start + start,
             end: self.start + end,
         }
@@ -97,7 +105,7 @@ impl From<Rc<str>> for Substr {
     fn from(string: Rc<str>) -> Self {
         let len = string.len();
         Self {
-            string,
+            parent: string,
             start: 0,
             end: len,
         }
