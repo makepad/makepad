@@ -1,5 +1,4 @@
 pub mod color;
-pub mod selection;
 pub mod font;
 pub mod font_atlas;
 pub mod font_data;
@@ -14,6 +13,7 @@ pub mod image;
 pub mod layout;
 pub mod num;
 pub mod sdfer;
+pub mod selection;
 pub mod shape;
 pub mod slice;
 pub mod substr;
