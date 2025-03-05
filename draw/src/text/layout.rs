@@ -222,7 +222,7 @@ impl<'a> LayoutContext<'a> {
                 font_size_in_lpxs: style.font_size_in_lpxs,
                 color: style.color,
                 id: glyph.id,
-                cluster: self.current_row_end + glyph.cluster,
+                cluster: self.current_row_end - self.current_row_start + glyph.cluster,
                 advance_in_ems: glyph.advance_in_ems,
                 offset_in_ems: glyph.offset_in_ems,
             };
@@ -542,7 +542,7 @@ impl LaidoutText {
                 Affinity::After
             } else {
                 Affinity::Before
-            }
+            },
         }
     }
 }
@@ -647,6 +647,7 @@ impl LaidoutRow {
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut current_x_in_lpxs = start_x_in_lpxs;
             for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
+                let grapheme_start = start + grapheme_start;
                 if index == grapheme_start {
                     return current_x_in_lpxs;
                 }
