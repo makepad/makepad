@@ -378,7 +378,12 @@ pub enum VideoAction {
     PlaybackBegan,
     TextureUpdated,
     PlaybackCompleted,
-    PlayerReset
+    PlayerReset,
+    // The video view was secondary clicked (right-clicked) or long-pressed.
+    SecondaryClicked {
+        abs: DVec2,
+        modifiers: KeyModifiers,
+    }
 }
 
 impl Widget for Video {
@@ -392,7 +397,7 @@ impl Widget for Video {
         DrawStep::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let uid = self.widget_uid();
         match event{
             Event::VideoPlaybackPrepared(event)=> if event.video_id == self.id {
@@ -430,7 +435,7 @@ impl Widget for Video {
             _=>()
         }
         
-        self.handle_gestures(cx, event);
+        self.handle_gestures(cx, event, scope);
         self.handle_activity_events(cx, event);
         self.handle_errors(event);
     }
@@ -497,12 +502,20 @@ impl Video {
         }
     }
 
-    fn handle_gestures(&mut self, cx: &mut Cx, event: &Event) {
+    fn handle_gestures(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.hold_to_pause {
                     self.pause_playback(cx);
                 }
+            }
+            Hit::FingerDown(fe) if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) => {
+                self.handle_secondary_click(cx, scope, fe.abs, fe.modifiers);
+            }
+            Hit::FingerLongPress(lp) => {
+                // TODO: here we could offer some customization, e.g., setting playback speed to 2x.
+                // For now, we treat a long press just like a secondary click.
+                self.handle_secondary_click(cx, scope, lp.abs, Default::default());
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if self.hold_to_pause {
@@ -547,6 +560,23 @@ impl Video {
         } else if self.playback_state == PlaybackState::Prepared {
             cx.begin_video_playback(self.id);
         }
+    }
+
+    fn handle_secondary_click(
+        &mut self,
+        cx: &mut Cx,
+        scope: &mut Scope,
+        abs: DVec2,
+        modifiers: KeyModifiers,
+    ) {
+        cx.widget_action(
+            self.widget_uid(),
+            &scope.path,
+            VideoAction::SecondaryClicked {
+                abs,
+                modifiers,
+            }
+        );
     }
 
     fn pause_playback(&mut self, cx: &mut Cx) {
