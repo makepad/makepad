@@ -13,7 +13,7 @@ live_design! {
     pub View = <ViewBase> {}
     
     pub Hr = <View> {
-        width: Fill, height: 4.,
+        width: Fill, height: 5.,
         flow: Down,
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
@@ -30,7 +30,7 @@ live_design! {
                 let stroke_width = self.border_size
                 sdf.move_to(1., 0.);
                 sdf.line_to(self.rect_size.x, 0.0);
-                sdf.stroke(self.color_1, stroke_width);
+                sdf.stroke(self.color_1, stroke_width * 2.);
 
                 let offset = stroke_width * 2.0;
                 sdf.move_to(0., 1. + stroke_width);
@@ -43,7 +43,7 @@ live_design! {
     }
     
     pub Vr = <View> {
-        width: 4., height: Fill,
+        width: 5., height: Fill,
         flow: Right,
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
@@ -60,7 +60,7 @@ live_design! {
                 let stroke_width = self.border_size;
                 sdf.move_to(1., 0.);
                 sdf.line_to(0.0, self.rect_size.y);
-                sdf.stroke(self.color_1, stroke_width);
+                sdf.stroke(self.color_1, stroke_width * 2.);
 
                 let offset = stroke_width * 2.0;
                 sdf.move_to(1. + stroke_width, 0.);
