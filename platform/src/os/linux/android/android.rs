@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 #[allow(unused)]
 use makepad_jni_sys as jni_sys;
 use crate::event::LongPressEvent;
@@ -125,7 +127,7 @@ impl Cx {
                 // This should not happen here, as it's handled in the main loop
             },
             FromJavaMessage::BackPressed => {
-                self.call_event_handler(&Event::BackPressed);
+                self.call_event_handler(&Event::BackPressed { handled: Cell::new(false)});
             }
             FromJavaMessage::SurfaceCreated {window} => unsafe {
                 self.os.display.as_mut().unwrap().update_surface(window);
@@ -251,7 +253,7 @@ impl Cx {
                         }
                     } else {
                         if makepad_keycode == KeyCode::Back {
-                            self.call_event_handler(&Event::BackPressed);
+                            self.call_event_handler(&Event::BackPressed { handled: Cell::new(false)});
                         }
 
                         e = Event::KeyDown(
