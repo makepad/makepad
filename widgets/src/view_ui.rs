@@ -22,11 +22,12 @@ live_design! {
         draw_bg: {
             uniform color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_size: (THEME_BEVELING)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let stroke_width = 1.
+                let stroke_width = self.border_size
                 sdf.move_to(1., 0.);
                 sdf.line_to(self.rect_size.x, 0.0);
                 sdf.stroke(self.color_1, stroke_width);
@@ -51,11 +52,12 @@ live_design! {
         draw_bg: {
             uniform color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_size: (THEME_BEVELING)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
-                let stroke_width = 1.
+                let stroke_width = self.border_size;
                 sdf.move_to(1., 0.);
                 sdf.line_to(0.0, self.rect_size.y);
                 sdf.stroke(self.color_1, stroke_width);
