@@ -522,7 +522,7 @@ live_design!{
             uniform handle_color: (SLIDER_ALT1_HANDLE_COLOR_A);
             uniform handle_color_hover: (SLIDER_ALT1_HANDLE_COLOR_A);
             uniform handle_color_focus: (SLIDER_ALT1_HANDLE_COLOR_A);
-            uniform handle_color_drag: (SLIDER_ALT1_HANDLE_COLOR_A);
+            uniform handle_color_drag: (THEME_COLOR_W);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
