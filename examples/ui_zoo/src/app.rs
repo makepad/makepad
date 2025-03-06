@@ -16,15 +16,6 @@
         DEMO_COLOR_2 = #0f8
         DEMO_COLOR_3 = #80f
 
-        ZooHeader = <View> {
-            width: Fill, height: Fit,
-            flow: Down,
-            spacing: (THEME_SPACE_1),
-            margin: <THEME_MSPACE_H_3> {}
-            divider = <Hr> { }
-            title = <H3> { text: "Header" }
-        }
-
         ZooGroup = <RoundedView> {
             height: Fit, width: Fill,
             flow: Right,
@@ -34,29 +25,13 @@
             draw_bg: { color: (COLOR_CONTAINER) }
         }
 
-        ZooDesc = <P> { text: "" }
-
-        ZooBlock = <RoundedView> {
-            width: 50., height: 50.
-            margin: 0.,
-            spacing: 0.,
-
-            show_bg: true;
-            draw_bg: {
-                fn get_color(self) -> vec4 {
-                    return mix(self.color, self.color*0.5, self.pos.y);
-                }
-                border_radius: (THEME_CONTAINER_CORNER_RADIUS)
-            }
-        }
-
         UIZooTab = <RectView> {
             height: Fill, width: Fill
             padding: 10.,
             flow: Down,
             spacing: 10.,
             scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
-        }        
+        }
                             
         App = {{App}} {
             ui: <Window> {
@@ -77,8 +52,33 @@
                 body = <View> {
                     width: Fill, height: Fill,
                     flow: Down,
-                    spacing: 10.,
+                    spacing: 0.,
                     margin: 0.,
+
+                    <View> {
+                        width: Fill,
+                        height: 40.
+                        spacing: (THEME_SPACE_2)
+                        flow: Right,
+
+                        padding: <THEME_MSPACE_2> {}
+                        margin: 0.
+                        show_bg: true,
+                        draw_bg: { color: (THEME_COLOR_U_1) }
+
+                        <CheckBoxToggle> { text: "TestButton"}
+                        <CheckBox> { text: "TestButton"}
+                        <SliderAlt1> { text: "Spacing"}
+                        <Vr> {}
+                        <Pbold> { width: Fit, text: "Color", padding: { top: 1.5}}
+                        <SliderAlt1> { text: "Contrast" }
+                        <SliderAlt1> { text: "Tint Factor" }
+                        <Vr> {}
+                        <Pbold> { width: Fit, text: "Font", padding: { top: 1.5}}
+                        <SliderAlt1> { text: "Scale" }
+                        <SliderAlt1> { text: "Scale Contrast"}
+
+                    }
 
                     <Dock> {
                         height: Fill, width: Fill
@@ -675,195 +675,244 @@
 
 
                         TabCheckbox = <UIZooTab> {
-                            <H4> { text: "Output demo"}
-                            <View> {
-                                height: Fit
-                                flow: Right
-                                align: { x: 0.0, y: 0.5}
-                                simplecheckbox = <CheckBox> {text:"Check me out!"}
-                                simplecheckbox_output = <Label> { text:"hmm" }
-                            }
-                            <H4> { text: "Standard Mode"}
-                            <View> {
-                                height: Fit
-                                flow: Right
-                                spacing: (THEME_SPACE_1)
-                                align: { x: 0.0, y: 0.5}
-                                <CheckBox> {
-                                    text:"Check me out!"
+                            flow: Right,
+                            padding: 0
+                            spacing: 0.
 
-                                    label_walk: {
-                                        width: Fit, height: Fit,
-                                        margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                            <View> {
+                                width: 300.,
+                                height: Fill,
+                                padding: <THEME_MSPACE_3> {}
+                                flow: Down,
+
+                                show_bg: false,
+                                draw_bg: { color: (THEME_COLOR_U_1) }
+                            
+                                <H3> { text: "Checkbox"}
+                                <P> {
+                                    text: "The `CheckBox` widget provides a control for user input in the form of a checkbox. It allows users to select or deselect options."
+                                }
+
+                                <H4> { text: "Layouting"}
+                                <P> {
+                                    text: "Complete layouting feature set support."
+                                }
+
+                                <H4> { text: "Draw Shaders"}
+                                <P> {
+                                    text: "Complete layouting feature set support."
+                                }
+
+
+                            }                            
+
+                            <Vr> {}
+
+                            <View> {
+                                width: Fill,
+                                height: Fill,
+                                flow: Down,
+                                padding: <THEME_MSPACE_3> {}
+
+                                <H3> { text: "Demos"}
+                                <H4> { text: "Output demo"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5}
+                                    simplecheckbox = <CheckBox> {text:"Check me out!"}
+                                    simplecheckbox_output = <Label> { text:"hmm" }
+                                }
+                                <Hr> {}
+                                <H4> { text: "Standard Mode"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    spacing: (THEME_SPACE_1)
+                                    align: { x: 0.0, y: 0.5}
+                                    <CheckBox> {
+                                        text:"Check me out!"
+
+                                        label_walk: {
+                                            width: Fit, height: Fit,
+                                            margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                                        }
+
+                                        draw_bg: {
+                                            border_size: 1.0
+
+                                            color_1: #F40
+                                            color_1_hover: #F44
+                                            color_1_active: #F00
+
+                                            color_2: #F80
+                                            color_2_hover: #FA4
+                                            color_2_active: #F80
+
+                                            border_color_1: #0
+                                            border_color_1_hover: #F
+                                            border_color_1_active: #8
+
+                                            border_color_2: #0
+                                            border_color_2_hover: #F
+                                            border_color_2_active: #8
+
+                                            mark_color: #FFF0
+                                            mark_color_hover: #FFF0
+                                            mark_color_active: #FFFC
+                                        }  
+                                    
+                                        draw_text: {
+                                            color: #A
+                                            color_hover: #F
+                                            color_active: #C
+
+                                            text_style: <THEME_FONT_REGULAR> {
+                                                font_size: (THEME_FONT_SIZE_P)
+                                            }
+                                        }
+
+                                        draw_icon: {
+                                            color: #F00
+                                            color_hover: #F44
+                                            color_active: #F00
+                                        }
+
+                                        icon_walk: { width: 13.0, height: Fit }
                                     }
+                                    <CheckBox> {text:"Check me out!"}
+                                    <CheckBox> {text:"Check me out!"}
+                                }
 
-                                    draw_bg: {
-                                        border_size: 1.0
+                                <Hr> {}
 
-                                        color_1: #F00
-                                        color_1_hover: #F44
-                                        color_1_active: #F00
+                                <H4> { text: "Toggle Mode"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    spacing: (THEME_SPACE_1)
+                                    align: { x: 0.0, y: 0.5}
+                                    <CheckBoxToggle> {
+                                        text:"Check me out!"
 
-                                        color_2: #F80
-                                        color_2_hover: #FA4
-                                        color_2_active: #F80
+                                        draw_bg: {
+                                            border_size: 1.0
 
-                                        border_color_1: #0
-                                        border_color_1_hover: #F
-                                        border_color_1_active: #8
+                                            color_1: #F00
+                                            color_1_hover: #F44
+                                            color_1_active: #F00
 
-                                        border_color_2: #0
-                                        border_color_2_hover: #F
-                                        border_color_2_active: #8
+                                            color_2: #F80
+                                            color_2_hover: #FA4
+                                            color_2_active: #F80
 
-                                        mark_color: #FFF0
-                                        mark_color_hover: #FFFF
-                                        mark_color_active: #FFFC
-                                    }  
-                                
-                                    draw_text: {
-                                        color: #A
-                                        color_hover: #F
-                                        color_active: #C
+                                            border_color_1: #0
+                                            border_color_1_hover: #F
+                                            border_color_1_active: #8
 
-                                        text_style: <THEME_FONT_REGULAR> {
-                                            font_size: (THEME_FONT_SIZE_P)
+                                            border_color_2: #0
+                                            border_color_2_hover: #F
+                                            border_color_2_active: #8
+
+                                            mark_color: #FFFF
+                                            mark_color_hover: #FFFF
+                                            mark_color_active: #FFFC
+                                        }  
+                                    
+                                        draw_text: {
+                                            color: #A
+                                            color_hover: #F
+                                            color_active: #C
+
+                                            text_style: <THEME_FONT_REGULAR> {
+                                                font_size: (THEME_FONT_SIZE_P)
+                                            }
+                                        }
+
+                                        draw_icon: {
+                                            color: #F00
+                                            color_hover: #F44
+                                            color_active: #F00
+                                        }
+
+                                        icon_walk: { width: 13.0, height: Fit }
+
+                                    }
+                                    <CheckBoxToggle> {text:"Check me out!" }
+                                    <CheckBoxToggle> {text:"Check me out!" }
+                                }
+
+                                <Hr> {}
+
+                                <H4> { text: "Custom Icon Mode"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    spacing: (THEME_SPACE_1)
+                                    align: { x: 0.0, y: 0.5}
+                                    <CheckBoxCustom> {
+                                        text:"Check me out!"
+                                        draw_bg: { check_type: None }
+                                        draw_icon: {
+                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                        }
+
+                                        label_walk: {
+                                            width: Fit, height: Fit,
+                                            margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                                        }
+
+                                        draw_bg: {
+                                            border_size: 1.0
+
+                                            color_1: #F00
+                                            color_1_hover: #F44
+                                            color_1_active: #F00
+
+                                            color_2: #F80
+                                            color_2_hover: #FA4
+                                            color_2_active: #F80
+
+                                            border_color_1: #0
+                                            border_color_1_hover: #F
+                                            border_color_1_active: #8
+
+                                            border_color_2: #0
+                                            border_color_2_hover: #F
+                                            border_color_2_active: #8
+
+                                            mark_color: #FFF0
+                                            mark_color_hover: #FFFF
+                                            mark_color_active: #FFFC
+                                        }  
+                                    
+                                        draw_text: {
+                                            color: #330
+                                            color_hover: #8
+                                            color_active: #F80
+
+                                            text_style: <THEME_FONT_REGULAR> {
+                                                font_size: (THEME_FONT_SIZE_P)
+                                            }
+                                        }
+
+                                        draw_icon: {
+                                            color: #300
+                                            color_hover: #800
+                                            color_active: #F00
+                                        }
+
+                                        icon_walk: { width: 13.0, height: Fit }
+                                    }
+                                    <CheckBoxCustom> {
+                                        text:"Check me out!"
+                                        draw_bg: { check_type: None }
+                                        draw_icon: {
+                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                                         }
                                     }
-
-                                    draw_icon: {
-                                        color: #F00
-                                        color_hover: #F44
-                                        color_active: #F00
-                                    }
-
-                                    icon_walk: { width: 13.0, height: Fit }
                                 }
-                                <CheckBox> {text:"Check me out!"}
-                                <CheckBox> {text:"Check me out!"}
-                            }
-                            <H4> { text: "Toggle Mode"}
-                            <View> {
-                                height: Fit
-                                flow: Right
-                                spacing: (THEME_SPACE_1)
-                                align: { x: 0.0, y: 0.5}
-                                <CheckBoxToggle> {
-                                    text:"Check me out!"
-
-                                    draw_bg: {
-                                        border_size: 1.0
-
-                                        color_1: #F00
-                                        color_1_hover: #F44
-                                        color_1_active: #F00
-
-                                        color_2: #F80
-                                        color_2_hover: #FA4
-                                        color_2_active: #F80
-
-                                        border_color_1: #0
-                                        border_color_1_hover: #F
-                                        border_color_1_active: #8
-
-                                        border_color_2: #0
-                                        border_color_2_hover: #F
-                                        border_color_2_active: #8
-
-                                        mark_color: #FFFF
-                                        mark_color_hover: #FFFF
-                                        mark_color_active: #FFFC
-                                    }  
                                 
-                                    draw_text: {
-                                        color: #A
-                                        color_hover: #F
-                                        color_active: #C
-
-                                        text_style: <THEME_FONT_REGULAR> {
-                                            font_size: (THEME_FONT_SIZE_P)
-                                        }
-                                    }
-
-                                    draw_icon: {
-                                        color: #F00
-                                        color_hover: #F44
-                                        color_active: #F00
-                                    }
-
-                                    icon_walk: { width: 13.0, height: Fit }
-
-                                }
-                                <CheckBoxToggle> {text:"Check me out!" }
-                                <CheckBoxToggle> {text:"Check me out!" }
-                            }
-                            <H4> { text: "Custom Icon Mode"}
-                            <View> {
-                                height: Fit
-                                flow: Right
-                                spacing: (THEME_SPACE_1)
-                                align: { x: 0.0, y: 0.5}
-                                <CheckBoxCustom> {
-                                    text:"Check me out!"
-                                    draw_bg: { check_type: None }
-                                    draw_icon: {
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-
-                                    label_walk: {
-                                        width: Fit, height: Fit,
-                                        margin: <THEME_MSPACE_H_1> { left: 12.5 }
-                                    }
-
-                                    draw_bg: {
-                                        border_size: 1.0
-
-                                        color_1: #F00
-                                        color_1_hover: #F44
-                                        color_1_active: #F00
-
-                                        color_2: #F80
-                                        color_2_hover: #FA4
-                                        color_2_active: #F80
-
-                                        border_color_1: #0
-                                        border_color_1_hover: #F
-                                        border_color_1_active: #8
-
-                                        border_color_2: #0
-                                        border_color_2_hover: #F
-                                        border_color_2_active: #8
-
-                                        mark_color: #FFF0
-                                        mark_color_hover: #FFFF
-                                        mark_color_active: #FFFC
-                                    }  
-                                
-                                    draw_text: {
-                                        color: #330
-                                        color_hover: #8
-                                        color_active: #F80
-
-                                        text_style: <THEME_FONT_REGULAR> {
-                                            font_size: (THEME_FONT_SIZE_P)
-                                        }
-                                    }
-
-                                    draw_icon: {
-                                        color: #300
-                                        color_hover: #800
-                                        color_active: #F00
-                                    }
-
-                                    icon_walk: { width: 13.0, height: Fit }
-                                }
-                                <CheckBoxCustom> {
-                                    text:"Check me out!"
-                                    draw_bg: { check_type: None }
-                                    draw_icon: {
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                }
                             }
                         }
 
