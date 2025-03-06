@@ -12,10 +12,6 @@
         COLOR_CONTAINER = (THEME_COLOR_D_1)
         COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
 
-        DEMO_COLOR_1 = #8f0
-        DEMO_COLOR_2 = #0f8
-        DEMO_COLOR_3 = #80f
-
         ZooGroup = <RoundedView> {
             height: Fit, width: Fill,
             flow: Right,
@@ -66,8 +62,6 @@
                         show_bg: true,
                         draw_bg: { color: (THEME_COLOR_U_1) }
 
-                        <CheckBoxToggle> { text: "TestButton"}
-                        <CheckBox> { text: "TestButton"}
                         <SliderAlt1> { text: "Spacing"}
                         <Vr> {}
                         <Pbold> { width: Fit, text: "Color", padding: { top: 1.5}}
@@ -76,8 +70,9 @@
                         <Vr> {}
                         <Pbold> { width: Fit, text: "Font", padding: { top: 1.5}}
                         <SliderAlt1> { text: "Scale" }
-                        <SliderAlt1> { text: "Scale Contrast"}
-
+                        <SliderAlt1> { text: "Contrast"}
+                        <Vr> {}
+                        <CheckBoxToggle> { text: "Label Hover"}
                     }
 
                     <Dock> {
@@ -715,14 +710,6 @@
                                 padding: <THEME_MSPACE_3> {}
 
                                 <H3> { text: "Demos"}
-                                <H4> { text: "Output demo"}
-                                <View> {
-                                    height: Fit
-                                    flow: Right
-                                    align: { x: 0.0, y: 0.5}
-                                    simplecheckbox = <CheckBox> {text:"Check me out!"}
-                                    simplecheckbox_output = <Label> { text:"hmm" }
-                                }
                                 <Hr> {}
                                 <H4> { text: "Standard Mode"}
                                 <View> {
@@ -730,7 +717,15 @@
                                     flow: Right
                                     spacing: (THEME_SPACE_1)
                                     align: { x: 0.0, y: 0.5}
-                                    <CheckBox> {
+                                    <CheckBox> {text:"Check me out!"}
+                                }
+                                <H4> { text: "Customized"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    spacing: (THEME_SPACE_1)
+                                    align: { x: 0.0, y: 0.5}
+                                    CheckBoxCustomized = <CheckBox> {
                                         text:"Check me out!"
 
                                         label_walk: {
@@ -780,8 +775,7 @@
 
                                         icon_walk: { width: 13.0, height: Fit }
                                     }
-                                    <CheckBox> {text:"Check me out!"}
-                                    <CheckBox> {text:"Check me out!"}
+
                                 }
 
                                 <Hr> {}
@@ -792,56 +786,56 @@
                                     flow: Right
                                     spacing: (THEME_SPACE_1)
                                     align: { x: 0.0, y: 0.5}
-                                    <CheckBoxToggle> {
-                                        text:"Check me out!"
-
-                                        draw_bg: {
-                                            border_size: 1.0
-
-                                            color_1: #F00
-                                            color_1_hover: #F44
-                                            color_1_active: #F00
-
-                                            color_2: #F80
-                                            color_2_hover: #FA4
-                                            color_2_active: #F80
-
-                                            border_color_1: #0
-                                            border_color_1_hover: #F
-                                            border_color_1_active: #8
-
-                                            border_color_2: #0
-                                            border_color_2_hover: #F
-                                            border_color_2_active: #8
-
-                                            mark_color: #FFFF
-                                            mark_color_hover: #FFFF
-                                            mark_color_active: #FFFC
-                                        }  
-                                    
-                                        draw_text: {
-                                            color: #A
-                                            color_hover: #F
-                                            color_active: #C
-
-                                            text_style: <THEME_FONT_REGULAR> {
-                                                font_size: (THEME_FONT_SIZE_P)
-                                            }
-                                        }
-
-                                        draw_icon: {
-                                            color: #F00
-                                            color_hover: #F44
-                                            color_active: #F00
-                                        }
-
-                                        icon_walk: { width: 13.0, height: Fit }
-
-                                    }
                                     <CheckBoxToggle> {text:"Check me out!" }
                                     <CheckBoxToggle> {text:"Check me out!" }
                                 }
+                                <H4> { text: "Toggle Customized"}
+                                <CheckBoxToggle> {
+                                    text:"Check me out!"
 
+                                    draw_bg: {
+                                        border_size: 1.0
+
+                                        color_1: #F00
+                                        color_1_hover: #F44
+                                        color_1_active: #F00
+
+                                        color_2: #F80
+                                        color_2_hover: #FA4
+                                        color_2_active: #F80
+
+                                        border_color_1: #0
+                                        border_color_1_hover: #F
+                                        border_color_1_active: #8
+
+                                        border_color_2: #0
+                                        border_color_2_hover: #F
+                                        border_color_2_active: #8
+
+                                        mark_color: #FFFF
+                                        mark_color_hover: #FFFF
+                                        mark_color_active: #FFFC
+                                    }  
+                                
+                                    draw_text: {
+                                        color: #A
+                                        color_hover: #F
+                                        color_active: #C
+
+                                        text_style: <THEME_FONT_REGULAR> {
+                                            font_size: (THEME_FONT_SIZE_P)
+                                        }
+                                    }
+
+                                    draw_icon: {
+                                        color: #F00
+                                        color_hover: #F44
+                                        color_active: #F00
+                                    }
+
+                                    icon_walk: { width: 13.0, height: Fit }
+
+                                }
                                 <Hr> {}
 
                                 <H4> { text: "Custom Icon Mode"}
@@ -912,7 +906,15 @@
                                         }
                                     }
                                 }
-                                
+                                <Hr> {} 
+                                <H4> { text: "Output demo"}
+                                <View> {
+                                    height: Fit
+                                    flow: Right
+                                    align: { x: 0.0, y: 0.5}
+                                    simplecheckbox = <CheckBox> {text:"Check me out!"}
+                                    simplecheckbox_output = <Label> { text:"hmm" }
+                                }
                             }
                         }
 
@@ -1372,7 +1374,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250, flow: Down,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250, flow: Down,
                                         <Image> { source: dep("crate://self/resources/ducky.png" ) }
                                     }
                                     <P> { text: "Default" }
@@ -1380,7 +1382,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { height: Fill, source: dep("crate://self/resources/ducky.png" ), min_height: 100 }
                                     }
                                     <P> { text: "min_height: 100" } // TODO: get this to work correctly
@@ -1388,7 +1390,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { width: Fill, source: dep("crate://self/resources/ducky.png" ), width_scale: 1.1 }
                                     }
                                     <P> { text: "width_scale: 1.5" } // TODO: get this to work correctly
@@ -1396,7 +1398,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png"), fit: Stretch }
                                     }
                                     <P> { text: "fit: Stretch" }
@@ -1404,7 +1406,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Horizontal }
                                     }
                                     <P> { text: "fit: Horizontal" }
@@ -1412,7 +1414,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Vertical }
                                     }
                                     <P> { text: "fit: Vertical" }
@@ -1420,7 +1422,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Smallest }
                                     }
                                     <P> { text: "fit: Smallest" }
@@ -1428,7 +1430,7 @@
                                 <View> {
                                     width: Fit, height: Fit, flow: Down,
                                     <View> {
-                                        show_bg: true, draw_bg: { color: (THEME_COLOR_BG_CONTAINER)}, width: 125, height: 250,
+                                        show_bg: true, draw_bg: { color: (THEME_COLOR_D_1)}, width: 125, height: 250,
                                         <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
                                     }
                                     <P> { text: "fit: Biggest" }
