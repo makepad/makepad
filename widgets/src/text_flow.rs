@@ -746,6 +746,9 @@ pub enum TextFlowLinkAction {
     Clicked {
         key_modifiers: KeyModifiers,
     },
+    SecondaryClicked {
+        key_modifiers: KeyModifiers,
+    },
     None,
 }
 
@@ -792,17 +795,27 @@ impl Widget for TextFlowLink {
         
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                Hit::FingerDown(fe) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
                     self.animator_play(cx, id!(hover.pressed));
-                    if self.click_on_down{
+                    if self.click_on_down && fe.is_primary_hit() {
                         cx.widget_action_with_data(
                             &self.action_data,
                             self.widget_uid(),
                             &scope.path,
                             TextFlowLinkAction::Clicked {
+                                key_modifiers: fe.modifiers,
+                            },
+                        );
+                    }
+                    if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
+                        cx.widget_action_with_data(
+                            &self.action_data,
+                            self.widget_uid(),
+                            &scope.path,
+                            TextFlowLinkAction::SecondaryClicked {
                                 key_modifiers: fe.modifiers,
                             },
                         );
@@ -815,26 +828,36 @@ impl Widget for TextFlowLink {
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                    if fe.is_over {
-                        if !self.click_on_down{
-                            cx.widget_action_with_data(
-                                &self.action_data,
-                                self.widget_uid(),
-                                &scope.path,
-                                TextFlowLinkAction::Clicked {
-                                    key_modifiers: fe.modifiers,
-                                },
-                            );
-                        }
-                        
-                        if fe.device.has_hovers() {
-                            self.animator_play(cx, id!(hover.on));
-                        } else {
-                            self.animator_play(cx, id!(hover.off));
-                        }
+                Hit::FingerLongPress(_) => {
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        self.widget_uid(),
+                        &scope.path,
+                        TextFlowLinkAction::Clicked {
+                            key_modifiers: Default::default(),
+                        },
+                    );
+                }
+                Hit::FingerUp(fu) if fu.is_primary_hit() => {
+                    if fu.is_over {
+                        self.animator_play(cx, id!(hover.on));
                     } else {
                         self.animator_play(cx, id!(hover.off));
+                    }
+
+                    if !self.click_on_down
+                        && fu.is_over
+                        && fu.is_primary_hit()
+                        && fu.was_tap()
+                    {
+                        cx.widget_action_with_data(
+                            &self.action_data,
+                            self.widget_uid(),
+                            &scope.path,
+                            TextFlowLinkAction::Clicked {
+                                key_modifiers: fu.modifiers,
+                            },
+                        );
                     }
                 }
                 _ => (),

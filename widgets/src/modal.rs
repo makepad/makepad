@@ -102,7 +102,7 @@ impl Widget for Modal {
         // * If the back navigational action/gesture was triggered (e.g., on Android)
         // * If the Escape key was pressed
         // * If there was a click/press in the background area, outside of the inner `content` view
-        let should_close = matches!(event, Event::BackPressed)
+        let should_close = event.back_pressed()
             || matches!(event, Event::KeyUp(KeyEvent { key_code: KeyCode::Escape, .. }))
             || match consumed_hit {
                 Hit::FingerUp(fe) => !self.content.area().rect(cx).contains(fe.abs),

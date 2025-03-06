@@ -1,90 +1,55 @@
 package dev.makepad.android;
 
-import javax.microedition.khronos.egl.EGLConfig;
-import javax.microedition.khronos.opengles.GL10;
-
 import android.app.Activity;
-import android.view.View;
-import android.view.Choreographer;
-import android.view.ViewGroup;
-import android.view.inputmethod.InputMethodManager;
-import android.view.Display;
-import android.view.WindowManager;
-import android.view.Window;
-import android.content.Context;
-
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.pm.ApplicationInfo;
-
-import java.util.HashMap;
-import java.util.ArrayList;
-import java.io.OutputStream;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.LinkedList;
-
-import android.os.Bundle;
-import android.os.Build;
-import android.util.Log;
-
-import android.view.View;
-import android.view.Surface;
-import android.view.Window;
-import android.view.WindowInsets;
-import android.view.WindowManager.LayoutParams;
-import android.view.SurfaceView;
-import android.view.SurfaceHolder;
-import android.view.MotionEvent;
-import android.view.KeyEvent;
-import android.view.inputmethod.InputMethodManager;
-
-import android.media.midi.MidiManager;
-import android.media.midi.MidiDeviceInfo;
-import android.media.midi.MidiDevice;
-import android.media.midi.MidiReceiver;
-import android.media.AudioManager;
-import android.media.midi.MidiOutputPort;
-import android.media.AudioDeviceInfo;
-
-import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-
+import android.bluetooth.BluetoothManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.graphics.Color;
+import android.graphics.Insets;
+import android.graphics.Rect;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
+import android.media.midi.MidiDevice;
+import android.media.midi.MidiDeviceInfo;
+import android.media.midi.MidiManager;
+import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
-
-import android.graphics.Color;
-import android.graphics.Insets;
-import android.view.inputmethod.InputConnection;
+import android.os.SystemClock;
+import android.util.Log;
+import android.view.Display;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.View;
+import android.view.ViewTreeObserver;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowManager;
+import android.view.WindowManager.LayoutParams;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.LinearLayout;
 
-import android.view.ViewTreeObserver;
-import android.view.WindowInsets;
-import android.graphics.Rect;
-
-import java.util.concurrent.CompletableFuture;
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.Iterator;
-
-import android.media.MediaCodec;
-import android.media.MediaCodecInfo;
-import android.media.MediaExtractor;
-import android.media.MediaFormat;
-
-import java.nio.ByteBuffer;
-import android.media.MediaDataSource;
-
-import java.io.IOException;
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
-import dev.makepad.android.MakepadNative;
+// import dev.makepad.android.MakepadNative;
 
 // note: //% is a special miniquad's pre-processor for plugins
 // when there are no plugins - //% whatever will be replaced to an empty string
@@ -98,8 +63,15 @@ class MakepadSurface
     implements
         View.OnTouchListener,
         View.OnKeyListener,
+        View.OnLongClickListener,
         ViewTreeObserver.OnGlobalLayoutListener,
-        SurfaceHolder.Callback {
+        SurfaceHolder.Callback
+{
+
+    // The X,Y coordinates and pointer ID of the most recent touch-down event.
+    private float latestTouchX;
+    private float latestTouchY;
+    private int latestTouchPointerId;
 
     public MakepadSurface(Context context){
         super(context);
@@ -110,6 +82,8 @@ class MakepadSurface
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
+        setOnLongClickListener(this);        
+
         getViewTreeObserver().addOnGlobalLayoutListener(this);
     }
 
@@ -139,13 +113,31 @@ class MakepadSurface
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
+
     @Override
     public boolean onTouch(View view, MotionEvent event) {
+        // Save the details of the latest touch-down event,
+        // such that we can use them in the `onLongClick` method.
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            int index = event.getActionIndex();
+            latestTouchX = event.getX(index);
+            latestTouchY = event.getY(index);
+            latestTouchPointerId = event.getPointerId(index);
+        }
+
         MakepadNative.surfaceOnTouch(event);
+        // return false so that `onLongClick` will trigger.
+        return false;
+    }
+
+    @Override
+    public boolean onLongClick(View view) {
+        long timeMillis = SystemClock.uptimeMillis();
+        MakepadNative.surfaceOnLongClick(latestTouchX, latestTouchY, latestTouchPointerId, timeMillis);
         return true;
     }
 
-     @Override
+    @Override
     public void onGlobalLayout() {
         WindowInsets insets = this.getRootWindowInsets();
         if (insets == null) {
@@ -241,8 +233,10 @@ class ResizingLayout
     }
 }
 
-public class MakepadActivity extends Activity implements
-MidiManager.OnDeviceOpenedListener{
+public class MakepadActivity
+    extends Activity
+    implements MidiManager.OnDeviceOpenedListener
+{
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
@@ -272,7 +266,7 @@ MidiManager.OnDeviceOpenedListener{
         ResizingLayout layout = new ResizingLayout(this);
         layout.addView(view);
         setContentView(layout);
-  
+
         MakepadNative.activityOnCreate(this);
 
         HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
@@ -354,9 +348,7 @@ MidiManager.OnDeviceOpenedListener{
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        Log.w("SAPP", "onBackPressed");
         super.onBackPressed();
-        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
         MakepadNative.onBackPressed();
     }
 
