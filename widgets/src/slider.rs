@@ -483,7 +483,6 @@ live_design!{
             label_size: (SLIDER_ALT1_LABEL_SIZE);
 
             uniform val_heat: 10.
-            uniform val_size: 5.
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS * 2.)
@@ -669,8 +668,6 @@ live_design!{
 
             uniform border_size: (THEME_BEVELING)
             uniform val_size: 10.
-            uniform val_color_1: (ROTARY_VAL_COLOR_A);
-            uniform val_color_2: (ROTARY_VAL_COLOR_B);
 
             uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
@@ -696,6 +693,16 @@ live_design!{
             uniform handle_color_hover: (THEME_COLOR_U_4);
             uniform handle_color_focus: (THEME_COLOR_U_3);
             uniform handle_color_drag: (THEME_COLOR_W);
+
+            uniform val_color_1: (ROTARY_VAL_COLOR_A);
+            uniform val_color_1_hover: (ROTARY_VAL_COLOR_A);
+            uniform val_color_1_focus: (ROTARY_VAL_COLOR_A);
+            uniform val_color_1_drag: (ROTARY_VAL_COLOR_A);
+
+            uniform val_color_2: (ROTARY_VAL_COLOR_B);
+            uniform val_color_2_hover: (ROTARY_VAL_COLOR_B);
+            uniform val_color_2_focus: (ROTARY_VAL_COLOR_B);
+            uniform val_color_2_drag: (ROTARY_VAL_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -924,19 +931,19 @@ live_design!{
                     mix(
                         mix(
                             mix(self.val_color_1, self.val_color_2, self.slide_pos),
-                            mix(
-                                mix(self.val_color_1, #f, 0.1),
-                                mix(self.val_color_2, #f, 0.1),
-                                self.slide_pos
-                            ),
+                            mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
                             self.hover
                         ),
                         mix(
-                            mix(self.val_color_1, #0, 0.1),
-                            mix(self.val_color_2, #0, 0.1),
-                            self.slide_pos
+                            mix(self.val_color_1_focus, self.val_color_2_focus, self.slide_pos),
+                            mix(
+                            mix(self.val_color_1_focus, self.val_color_2_hover, self.slide_pos),
+                            mix(self.val_color_1_drag, self.val_color_2_drag, self.slide_pos),
+                                self.drag
+                            ),
+                            self.hover
                         ),
-                        self.drag
+                        self.focus
                     )
                 )
 
