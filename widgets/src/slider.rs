@@ -577,7 +577,7 @@ live_design!{
                             self.hover
                         ),
                         self.focus
-                    ), self.border_size
+                    ), self.border_size * 1.5
                 )
 
                 // Amount bar
