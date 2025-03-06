@@ -348,9 +348,7 @@ public class MakepadActivity
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        Log.w("SAPP", "onBackPressed");
         super.onBackPressed();
-        // TODO: here is the place to handle request_quit/order_quit/cancel_quit
         MakepadNative.onBackPressed();
     }
 
