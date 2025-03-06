@@ -636,7 +636,7 @@ pub enum HtmlLinkAction {
 }
 
 #[derive(Live, Widget)]
-struct HtmlLink {
+pub struct HtmlLink {
     #[animator] animator: Animator,
 
     // TODO: this is unusued; just here to invalidly satisfy the area provider.
