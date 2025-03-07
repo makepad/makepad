@@ -112,6 +112,7 @@
                                 tSlider,
                                 tSlidesView,
                                 tTextInput,
+                                tTooltip,
                                 tTypography,
                                 tView,
 
@@ -126,6 +127,7 @@
                         tTypography = Tab { name: "Typography", template: PermanentTab, kind: TabTypography }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tTextInput = Tab { name: "TextInput", template: PermanentTab, kind: TabTextInput }
+                        tTooltip = Tab { name: "Tooltip", template: PermanentTab, kind: TabTooltip }
                         tLabel = Tab { name: "Label", template: PermanentTab, kind: TabLabel }
                         tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
@@ -1928,6 +1930,19 @@
                                 }
                             }
                         }
+
+
+                        TabTooltip = <UIZooTab> {
+                            flow: Down,
+                            spacing: (THEME_SPACE_1)
+                            <View> {
+                                height: Fit, width: Fill,
+                                spacing: (THEME_SPACE_2),
+                                <H4> { text: "Default", width: 175.}
+                                <TextInput> { }
+                            }
+                        }
+
 
                         TabLabel = <UIZooTab> {
                             <Label> { text:"Default single line textbox" }
