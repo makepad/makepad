@@ -668,7 +668,7 @@ live_design!{
             uniform val_padding: 3.0 // TODO: RENAME
 
             uniform border_size: (THEME_BEVELING)
-            uniform val_size: 10.
+            uniform val_size: 20.
 
             uniform color_dither: 1.,
             
