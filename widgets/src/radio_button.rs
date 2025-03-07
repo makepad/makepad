@@ -420,12 +420,12 @@ live_design!{
             uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
