@@ -12,20 +12,16 @@ live_design!{
     pub FoldButtonBase = {{FoldButton}} {}
     
     pub FoldButton = <FoldButtonBase> {
-        width: 12., height: 12.,
-
         height: 25, width: 15,
         margin: { left: (THEME_SPACE_2) }
-        animator: { active = { default: off } },
         
         draw_bg: {
+            instance active: 0.0
+            instance hover: 0.0
+
             uniform color: (THEME_COLOR_CTRL_DEFAULT)
             uniform color_hover: (THEME_COLOR_CTRL_HOVER)
             uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
-            uniform color_active_hover: (THEME_COLOR_CTRL_HOVER)
-
-            instance active: 0.0
-            instance hover: 0.0
 
             uniform fade: 1.0
             
@@ -43,16 +39,8 @@ live_design!{
                 sdf.close_path();
                 sdf.fill(
                     mix(
-                        mix(
-                            self.color,
-                            self.color_hover,
-                            self.hover
-                        ),
-                        mix(
-                            self.color_active,
-                            self.color_active_hover,
-                            self.hover
-                        ),
+                        mix( self.color, self.color_hover, self.hover),
+                        mix( self.color_active, self.color_hover, self.hover),
                         self.active
                     )
                 );
