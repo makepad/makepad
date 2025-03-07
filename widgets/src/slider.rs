@@ -527,6 +527,7 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 let handle_size = (SLIDER_ALT1_HANDLE_SIZE);
                 let padding = (SLIDER_ALT1_VAL_PADDING);
 
@@ -669,6 +670,8 @@ live_design!{
             uniform border_size: (THEME_BEVELING)
             uniform val_size: 10.
 
+            uniform color_dither: 1.,
+            
             uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
             uniform color_1_focus: (THEME_COLOR_INSET_PIT_TOP)
@@ -706,6 +709,7 @@ live_design!{
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let label_offset = 20.;
                 
@@ -743,15 +747,15 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.y),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                             self.hover
                         ),
                         mix(
-                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
                             mix(
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y),
-                                mix(self.color_1_drag, self.color_2_drag, self.pos.y),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                mix(self.color_1_drag, self.color_2_drag, self.pos.y + dither),
                                 self.drag
                             ),
                             self.hover
@@ -1006,9 +1010,8 @@ live_design!{
             instance focus: float
             instance drag: float
 
-            uniform gap: 90.
-            uniform width: 5.
-            uniform padding: 4.0
+            uniform width: 5. // TODO: REMOVE / CHANGE?
+            uniform padding: 4.0 // TODO: REMOVE / CHANGE?
             
             uniform color: (ROTARY_FLAT_BG_COLOR)
             uniform color_hover: (ROTARY_FLAT_BG_HOVER_COLOR)
@@ -1019,21 +1022,6 @@ live_design!{
             uniform border_color_hover: (ROTARY_FLAT_BORDER_HOVER_COLOR)
             uniform border_color_focus: (ROTARY_FLAT_BORDER_FOCUS_COLOR)
             uniform border_color_drag: (ROTARY_FLAT_BORDER_DRAG_COLOR)
-
-            uniform handle_color: (ROTARY_FLAT_HANDLE_COLOR);
-            uniform handle_color_hover: (ROTARY_FLAT_HANDLE_COLOR);
-            uniform handle_color_focus: (ROTARY_FLAT_HANDLE_COLOR);
-            uniform handle_color_drag: (THEME_COLOR_W);
-
-            uniform val_color_1: (ROTARY_FLAT_VAL_COLOR_A);
-            uniform val_color_1_hover: (ROTARY_FLAT_VAL_COLOR_A);
-            uniform val_color_1_focus: (ROTARY_FLAT_VAL_COLOR_A);
-            uniform val_color_1_drag: (ROTARY_FLAT_VAL_COLOR_A);
-
-            uniform val_color_2: (ROTARY_FLAT_VAL_COLOR_B);
-            uniform val_color_2_hover: (ROTARY_FLAT_VAL_COLOR_B);
-            uniform val_color_2_focus: (ROTARY_FLAT_VAL_COLOR_B);
-            uniform val_color_2_drag: (ROTARY_FLAT_VAL_COLOR_B);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1201,6 +1189,8 @@ live_design!{
             uniform gap: 90.
             uniform width: 10.
 
+            uniform color_dither: 1.0
+
             uniform color_1: (ROTARY_SOLID_BG_COLOR_A)
             uniform color_1_hover: (ROTARY_SOLID_BG_COLOR_A)
             uniform color_1_focus: (ROTARY_SOLID_BG_COLOR_A)
@@ -1228,6 +1218,7 @@ live_design!{
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let label_offset = 20.;
                 let gloss_width = 1.;
@@ -1265,15 +1256,15 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.color_1 * texture, self.color_2 * texture, self.pos.y),
-                            mix(self.color_1_hover * texture, self.color_2_hover * texture, self.pos.y),
+                            mix(self.color_1 * texture, self.color_2 * texture, self.pos.y + dither),
+                            mix(self.color_1_hover * texture, self.color_2_hover * texture, self.pos.y + dither),
                             self.hover
                         ),
                         mix(
-                            mix(self.color_1_focus * texture, self.color_2_focus * texture, self.pos.y),
+                            mix(self.color_1_focus * texture, self.color_2_focus * texture, self.pos.y + dither),
                             mix(
-                                mix(self.color_1_hover * texture, self.color_2_hover * texture, self.pos.y),
-                                mix(self.color_1_drag * texture, self.color_2_drag * texture, self.pos.y),
+                                mix(self.color_1_hover * texture, self.color_2_hover * texture, self.pos.y + dither),
+                                mix(self.color_1_drag * texture, self.color_2_drag * texture, self.pos.y + dither),
                                 self.drag
                             ),
                             self.hover
@@ -1291,12 +1282,12 @@ live_design!{
 
                 sdf.stroke(
                     mix(
-                        mix(self.border_color_1, self.border_color_2, self.pos.y),
+                        mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
                         mix(
-                            mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y),
+                            mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
                             mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y),
-                                mix(self.border_color_1_drag, self.border_color_2_drag, self.pos.y),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                mix(self.border_color_1_drag, self.border_color_2_drag, self.pos.y + dither),
                                 self.drag
                             ),
                             self.hover
@@ -1315,15 +1306,15 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.y),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                             self.hover
                         ),
                         mix(
-                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
                             mix(
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y),
-                                mix(self.color_2_drag, self.color_1_drag, self.pos.y),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                mix(self.color_2_drag, self.color_1_drag, self.pos.y + dither),
                                 self.drag
                             ),
                             self.hover
@@ -1334,12 +1325,12 @@ live_design!{
 
                 sdf.stroke(
                     mix(
-                        mix(self.border_color_1, self.border_color_2, self.pos.y),
+                        mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
                         mix(
-                            mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y),
+                            mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
                             mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y),
-                                mix(self.border_color_1_drag, self.border_color_2_drag, pow(self.pos.y, 2.)),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                mix(self.border_color_1_drag, self.border_color_2_drag, pow(self.pos.y, 2.) + dither),
                                 self.drag
                             ),
                             self.hover
