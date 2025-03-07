@@ -7,6 +7,7 @@ use crate::{
 live_design! {
     link widgets
     pub IconBase = {{Icon}} {}
+
     pub Icon = <IconBase> {
         width: Fit,
         height: Fit,
@@ -23,7 +24,35 @@ live_design! {
                 return self.color;
             }
         }
+
+        draw_icon: {
+            uniform color: (#f00)
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+        }
     }
+
+    pub IconGradientX = <Icon> {
+        draw_icon: {
+            uniform color_1: (#f00)
+            uniform color_2: (#00f)
+            fn get_color(self) -> vec4 {
+                return mix(self.color_1, self.color_2, self.pos.x);
+            }
+        }
+    }
+
+    pub IconGradientY = <Icon> {
+        draw_icon: {
+            uniform color_1: (#f00)
+            uniform color_2: (#00f)
+            fn get_color(self) -> vec4 {
+                return mix(self.color_1, self.color_2, self.pos.y);
+            }
+        }
+    }
+
 }
 
 #[derive(Live, LiveHook, Widget)]
