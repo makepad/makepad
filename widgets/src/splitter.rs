@@ -14,12 +14,17 @@ live_design!{
     pub SplitterBase = {{Splitter}} {}
     pub Splitter = <SplitterBase> {
         draw_splitter: {
-            instance down: 0.0
+            instance drag: 0.0
             instance hover: 0.0
+            
+            uniform size: 110.0
+
+            uniform color: (THEME_COLOR_D_HIDDEN),
+            uniform color_hover: (THEME_COLOR_CTRL_SCROLLBAR_HOVER),
+            uniform color_drag: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
             
             uniform border_radius: 1.0
             uniform splitter_pad: 1.0
-            uniform splitter_grabber: 110.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -28,32 +33,36 @@ live_design!{
                 if self.is_vertical > 0.5 {
                     sdf.box(
                         self.splitter_pad,
-                        self.rect_size.y * 0.5 - self.splitter_grabber * 0.5,
+                        self.rect_size.y * 0.5 - self.size * 0.5,
                         self.rect_size.x - 2.0 * self.splitter_pad,
-                        self.splitter_grabber,
+                        self.size,
                         self.border_radius
                     );
                 }
                 else {
                     sdf.box(
-                        self.rect_size.x * 0.5 - self.splitter_grabber * 0.5,
+                        self.rect_size.x * 0.5 - self.size * 0.5,
                         self.splitter_pad,
-                        self.splitter_grabber,
+                        self.size,
                         self.rect_size.y - 2.0 * self.splitter_pad,
                         self.border_radius
                     );
                 }
-                return sdf.fill_keep(mix(
-                    THEME_COLOR_D_HIDDEN,
+
+                return sdf.fill_keep(
                     mix(
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER,
-                        THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2,
-                        self.down
-                    ),
-                    self.hover
-                ));
+                        self.color,
+                        mix(
+                            self.color_hover,
+                            self.color_drag,
+                            self.drag
+                        ),
+                        self.hover
+                    )
+                );
             }
         }
+
         split_bar_size: (THEME_SPLITTER_SIZE)
         min_horizontal: (THEME_SPLITTER_MIN_HORIZONTAL)
         max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
@@ -66,28 +75,28 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_splitter: {down: 0.0, hover: 0.0}
+                        draw_splitter: {drag: 0.0, hover: 0.0}
                     }
                 }
                 
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
-                        state_down: Forward {duration: 0.01}
+                        state_drag: Forward {duration: 0.01}
                     }
                     apply: {
                         draw_splitter: {
-                            down: 0.0,
+                            drag: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                 
-                down = {
+                drag = {
                     from: { all: Forward { duration: 0.1 }}
                     apply: {
                         draw_splitter: {
-                            down: [{time: 0.0, value: 1.0}],
+                            drag: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
                     }
@@ -199,7 +208,7 @@ impl Widget for Splitter {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
                 }
-                self.animator_play(cx, id!(hover.down));
+                self.animator_play(cx, id!(hover.drag));
                 self.drag_start_align = Some(self.align);
             }
             Hit::FingerUp(f) => {
