@@ -44,6 +44,7 @@ pub mod multi_image;
 pub mod modal;
 pub mod tooltip;
 pub mod popup_notification;
+pub mod spinner;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -168,7 +169,7 @@ pub fn live_design(cx: &mut Cx) {
     else{
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
-    
+
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
@@ -233,7 +234,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::toggle_panel::live_design(cx);
     crate::cached_widget::live_design(cx);
     crate::command_text_input::live_design(cx);
-    
+    crate::spinner::live_design(cx);
+
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);
