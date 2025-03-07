@@ -37,7 +37,7 @@ workspace.members = [
     "examples/genai",
     "examples/slides",
     #"examples/graph",
-    #"examples/image_viewer",
+    "examples/imgviewer",
     "studio",
     # "makepad_wonderous",
     # "complex_layout",
