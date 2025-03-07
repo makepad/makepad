@@ -406,17 +406,17 @@ live_design!{
                     Desktop = {
                         flow: Down,
 
-                        <MenuDesktop> {}
-                        <ImgBrowserDesktop> {}
-                        // <Slideshow> {}
+                        // <MenuDesktop> {}
+                        // <ImgBrowserDesktop> {}
+                        <Slideshow> {}
                     } 
 
                     Mobile = {
                         flow: Down,
 
-                        <MenuMobile> {}
-                        <ImgBrowserMobile> {}
-                        // <Slideshow> {}
+                        // <MenuMobile> {}
+                        // <ImgBrowserMobile> {}
+                        <Slideshow> {}
                     } 
 
                 }
