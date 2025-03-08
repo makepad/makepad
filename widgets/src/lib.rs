@@ -44,7 +44,7 @@ pub mod multi_image;
 pub mod modal;
 pub mod tooltip;
 pub mod popup_notification;
-pub mod spinner;
+pub mod loading_spinner;
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;

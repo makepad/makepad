@@ -5,7 +5,7 @@ live_design!{
     use makepad_draw::shader::std::*;
     use link::widgets::View;
 
-    pub Spinner = <View> {
+    pub LoadingSpinner = <View> {
         width: Fill, height: Fill
         show_bg: true,
         draw_bg: {
