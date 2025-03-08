@@ -240,13 +240,13 @@ impl PopupMenuItem {
             self.draw_bg.area(),
             HitOptions::new().with_sweep_area(sweep_area)
         ) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe, _) if fe.is_primary_hit() => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
                 self.animator_play(cx, id!(hover.on));
                 self.animator_play(cx, id!(select.on));

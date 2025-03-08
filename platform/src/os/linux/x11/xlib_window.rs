@@ -460,7 +460,7 @@ impl XlibWindow {
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
     }
     
@@ -481,7 +481,7 @@ impl XlibWindow {
             abs: pos,
             modifiers,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
         
     }

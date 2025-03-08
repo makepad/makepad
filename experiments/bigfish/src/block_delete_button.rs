@@ -154,8 +154,8 @@ impl Widget for BlockDeleteButton {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerMove(_fe) => if self.dragging {},
-            Hit::FingerDown(_fe) => {
+            Hit::FingerMove(..) => if self.dragging {},
+            Hit::FingerDown(..) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
@@ -164,7 +164,7 @@ impl Widget for BlockDeleteButton {
                 cx.widget_action(uid, &scope.path, BlockDeleteButtonAction::Pressed);
                 self.animator_play(cx, id!(hover.pressed));
             }
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }

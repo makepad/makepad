@@ -184,7 +184,7 @@ impl Widget for Splitter {
         
         self.animator_handle_event(cx, event);
         match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
@@ -194,7 +194,7 @@ impl Widget for Splitter {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(..) => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
@@ -211,7 +211,7 @@ impl Widget for Splitter {
                     self.animator_play(cx, id!(hover.off));
                 }
             }
-            Hit::FingerMove(f) => {
+            Hit::FingerMove(f, _) => {
                 if let Some(drag_start_align) = self.drag_start_align {
                     let delta = match self.axis {
                         SplitterAxis::Horizontal => f.abs.x - f.abs_start.x,

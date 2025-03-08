@@ -677,10 +677,13 @@ impl Widget for View {
             }
             _=>()
         }
-        
+
+        // In the Hit-handling block below, don't mark events as handled,
+        // in order to allow other widgets to also handle them.
         if self.visible && self.cursor.is_some() || self.animator.live_ptr.is_some() {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
-                Hit::FingerDown(e) => {
+                Hit::FingerDown(e, event_handled) => {
+                    event_handled.set_handled(false);
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
@@ -689,7 +692,10 @@ impl Widget for View {
                         self.animator_play(cx, id!(down.on));
                     }
                 }
-                Hit::FingerMove(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e)),
+                Hit::FingerMove(e, event_handled) => {
+                    event_handled.set_handled(false);
+                    cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e));
+                }
                 Hit::FingerLongPress(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerLongPress(e)), 
                 Hit::FingerUp(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
@@ -697,7 +703,8 @@ impl Widget for View {
                         self.animator_play(cx, id!(down.off));
                     }
                 }
-                Hit::FingerHoverIn(e) => {
+                Hit::FingerHoverIn(e, event_handled) => {
+                    event_handled.set_handled(false);
                     cx.widget_action(uid, &scope.path, ViewAction::FingerHoverIn(e));
                     if let Some(cursor) = &self.cursor {
                         cx.set_cursor(*cursor);
@@ -705,6 +712,9 @@ impl Widget for View {
                     if self.animator.live_ptr.is_some() {
                         self.animator_play(cx, id!(hover.on));
                     }
+                }
+                Hit::FingerHoverOver(_, event_handled) => {
+                    event_handled.set_handled(false);
                 }
                 Hit::FingerHoverOut(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerHoverOut(e));

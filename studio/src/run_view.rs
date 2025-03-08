@@ -327,7 +327,7 @@ impl Widget for RunView {
         self.animator_handle_event(cx, event);
         // lets send mouse events
         match event.hits(cx, self.draw_app.area()) {
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(..) => {
                 cx.set_key_focus(self.draw_app.area());
             }
             Hit::TextInput(e) => {

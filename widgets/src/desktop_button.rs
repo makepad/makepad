@@ -143,11 +143,11 @@ impl Widget for DesktopButton{
         self.animator_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(fe) => {
+            Hit::FingerDown(fe, _) => {
                 cx.widget_action(uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, id!(hover.pressed));
             },
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }

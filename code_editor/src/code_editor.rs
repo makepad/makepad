@@ -928,17 +928,20 @@ impl CodeEditor {
                     keyboard_moved_cursor = true;
                 }
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                tap_count,
-                modifiers:
-                    KeyModifiers {
-                        alt: false,
-                        shift: false,
-                        ..
-                    },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    tap_count,
+                    modifiers:
+                        KeyModifiers {
+                            alt: false,
+                            shift: false,
+                            ..
+                        },
+                    ..
+                },
+                _,
+            ) => {
                 self.animator_play(cx, id!(focus.on));
                 cx.set_key_focus(self.scroll_bars.area());
                 let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
@@ -961,17 +964,20 @@ impl CodeEditor {
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
                 self.redraw(cx);
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                tap_count,
-                modifiers:
-                    KeyModifiers {
-                        alt: true,
-                        shift: false,
-                        ..
-                    },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    tap_count,
+                    modifiers:
+                        KeyModifiers {
+                            alt: true,
+                            shift: false,
+                            ..
+                        },
+                    ..
+                },
+                _,
+            ) => {
                 self.animator_play(cx, id!(focus.on));
                 cx.set_key_focus(self.scroll_bars.area());
                 let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
@@ -997,15 +1003,18 @@ impl CodeEditor {
                 self.reset_cursor_blinker(cx);
                 self.keep_cursor_in_view = KeepCursorInView::Off;
             }
-            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
+            Hit::FingerHoverIn(..) | Hit::FingerHoverOver(..) => {
                 cx.set_cursor(MouseCursor::Text);
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                modifiers: KeyModifiers { shift: true, .. },
-                ..
-            })
-            | Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    modifiers: KeyModifiers { shift: true, .. },
+                    ..
+                },
+                _,
+            ) 
+            | Hit::FingerMove(FingerMoveEvent { abs, .. }, _) => {
                 self.reset_cursor_blinker(cx);
                 if let KeepCursorInView::Always(old_abs, _) = &mut self.keep_cursor_in_view {
                     *old_abs = abs;

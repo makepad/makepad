@@ -12,6 +12,7 @@ use ohos_sys::xcomponent::{
 use std::cell::{Cell, RefCell};
 use std::mem::MaybeUninit;
 use std::os::raw::c_void;
+use std::rc::Rc;
 use std::sync::mpsc;
 
 use super::raw_file::RawFileMgr;
@@ -142,7 +143,7 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
             rotation_angle: 0.0,
             force: point.force as f64,
             radius: dvec2(1.0, 1.0),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
             sweep_lock: Cell::new(Area::Empty),
         })
 

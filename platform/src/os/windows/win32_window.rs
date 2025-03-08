@@ -1026,7 +1026,7 @@ impl Win32Window {
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
     }
     
@@ -1052,9 +1052,9 @@ impl Win32Window {
         self.do_callback(Win32Event::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
-            modifiers: modifiers,
+            modifiers,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
     }
 
@@ -1063,9 +1063,9 @@ impl Win32Window {
         self.do_callback(Win32Event::MouseLeave(MouseLeaveEvent {
             window_id: self.window_id,
             abs: pos,
-            modifiers: modifiers,
+            modifiers,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
     }
     

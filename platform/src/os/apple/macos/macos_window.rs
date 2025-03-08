@@ -357,7 +357,7 @@ impl MacosWindow {
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
     }
     
@@ -379,9 +379,9 @@ impl MacosWindow {
         self.do_callback(MacosEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
-            modifiers: modifiers,
+            modifiers,
             time: self.time_now(),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }));
         
         //get_macos_app_global().ns_event = ptr::null_mut();

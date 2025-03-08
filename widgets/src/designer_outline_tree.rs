@@ -466,18 +466,18 @@ impl DesignerOutlineTreeNode {
         }
         
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerMove(f) => {
+            Hit::FingerMove(f, _) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
                     actions_out.push((node_id, OutlineTreeNodeAction::ShouldStartDrag));
                 }
             }
-            Hit::FingerDown(e) => {
+            Hit::FingerDown(e, _) => {
                 self.animator_play(cx, id!(select.on));
                 actions_out.push((node_id, OutlineTreeNodeAction::Selected(e.modifiers)));
                 /*

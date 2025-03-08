@@ -477,12 +477,12 @@ impl Widget for DropDown {
                 },
                 _ => ()
             }
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe, _) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.set_open(cx);
                 self.animator_play(cx, id!(hover.pressed));
             },
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }

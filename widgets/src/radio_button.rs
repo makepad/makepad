@@ -409,7 +409,7 @@ impl Widget for RadioButton {
         self.animator_handle_event(cx, event);
                 
         match event.hits(cx, self.draw_radio.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
@@ -417,7 +417,7 @@ impl Widget for RadioButton {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe, _) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, id!(selected.off)) {
                     self.animator_play(cx, id!(selected.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
@@ -426,7 +426,7 @@ impl Widget for RadioButton {
             Hit::FingerUp(_fe) => {
                                 
             }
-            Hit::FingerMove(_fe) => {
+            Hit::FingerMove(_fe, _) => {
                                 
             }
             _ => ()

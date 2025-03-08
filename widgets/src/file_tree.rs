@@ -417,18 +417,18 @@ impl FileTreeNode {
             self.draw_bg.redraw(cx);
         }
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerMove(f) => {
+            Hit::FingerMove(f, _) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
                     actions.push((node_id, FileTreeNodeAction::ShouldStartDrag));
                 }
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(..) => {
                 self.animator_play(cx, id!(select.on));
                 if self.is_folder {
                     if self.animator_in_state(cx, id!(open.on)) {

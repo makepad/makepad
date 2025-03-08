@@ -3,7 +3,7 @@ use crate::module_loader::ModuleLoader;
 
 use {
     std::sync::Mutex,
-    std::{cell::Cell, ffi::CString, sync::mpsc::{self, Sender}},
+    std::{cell::Cell, ffi::CString, rc::Rc, sync::mpsc::{self, Sender}},
     self::super::{
         ndk_sys,
         ndk_utils,
@@ -427,7 +427,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             rotation_angle,
             force,
             radius: dvec2(1.0, 1.0),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
             time: time as f64 / 1000.0,

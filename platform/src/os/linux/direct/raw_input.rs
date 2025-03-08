@@ -15,6 +15,7 @@ use {
         cell::Cell,
         fs::File,
         io::Read,
+        rc::Rc,
         sync::mpsc, 
     }
 };
@@ -752,7 +753,7 @@ impl RawInput {
             window_id,
             modifiers: self.modifiers,
             time,
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }))
     }
 
@@ -778,7 +779,7 @@ impl RawInput {
             window_id,
             modifiers: self.modifiers,
             time,
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }))
     }
 
@@ -910,7 +911,7 @@ impl RawInput {
                             window_id,
                             modifiers: self.modifiers,
                             time,
-                            handled: Cell::new(Area::Empty),
+                            handled: Rc::new(Cell::new(Area::Empty)),
                         }))
                     },
                     EvKeyCodes::BTN_TOUCH => {
@@ -920,7 +921,7 @@ impl RawInput {
                             window_id,
                             modifiers: self.modifiers,
                             time,
-                            handled: Cell::new(Area::Empty),
+                            handled: Rc::new(Cell::new(Area::Empty)),
                         }))
                     },
                     _ => {

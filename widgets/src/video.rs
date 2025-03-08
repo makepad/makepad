@@ -504,12 +504,12 @@ impl Video {
 
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe, _) if fe.is_primary_hit() => {
                 if self.hold_to_pause {
                     self.pause_playback(cx);
                 }
             }
-            Hit::FingerDown(fe) if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) => {
+            Hit::FingerDown(fe, _) if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) => {
                 self.handle_secondary_click(cx, scope, fe.abs, fe.modifiers);
             }
             Hit::FingerLongPress(lp) => {

@@ -383,7 +383,7 @@ impl WidgetRef {
     ///         self.draw_button.redraw(cx);
     ///     }
     ///     match event.hits_with_options(cx, self.draw_button.area(), HitOptions::new().with_sweep_area(sweep_area) ) {
-    ///         Hit::FingerDown(f_down) => {
+    ///         Hit::FingerDown(f_down, _) => {
     ///             if self.grab_key_focus {
     ///                  cx.set_key_focus(self.sweep_area);
     ///             }

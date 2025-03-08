@@ -435,11 +435,14 @@ impl CodeEditor {
                 session.redo();
                 cx.redraw_all();
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                modifiers: KeyModifiers { alt, .. },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    modifiers: KeyModifiers { alt, .. },
+                    ..
+                },
+                _,
+            ) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
@@ -450,7 +453,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }, _) => {
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
@@ -4453,11 +4456,14 @@ impl CodeEditor {
                 session.redo();
                 cx.redraw_all();
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                modifiers: KeyModifiers { alt, .. },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    modifiers: KeyModifiers { alt, .. },
+                    ..
+                },
+                _,
+            ) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
@@ -4468,7 +4474,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }, _) => {
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
@@ -8471,11 +8477,14 @@ impl CodeEditor {
                 session.redo();
                 cx.redraw_all();
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                modifiers: KeyModifiers { alt, .. },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    modifiers: KeyModifiers { alt, .. },
+                    ..
+                },
+                _,
+            ) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
@@ -8486,7 +8495,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }, _) => {
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
@@ -12489,11 +12498,14 @@ impl CodeEditor {
                 session.redo();
                 cx.redraw_all();
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                modifiers: KeyModifiers { alt, .. },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    modifiers: KeyModifiers { alt, .. },
+                    ..
+                },
+                _,
+            ) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
@@ -12504,7 +12516,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }, _) => {
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
@@ -16507,11 +16519,14 @@ impl CodeEditor {
                 session.redo();
                 cx.redraw_all();
             }
-            Hit::FingerDown(FingerDownEvent {
-                abs,
-                modifiers: KeyModifiers { alt, .. },
-                ..
-            }) => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    abs,
+                    modifiers: KeyModifiers { alt, .. },
+                    ..
+                },
+                _,
+            ) => {
                 cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
@@ -16522,7 +16537,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }, _) => {
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();

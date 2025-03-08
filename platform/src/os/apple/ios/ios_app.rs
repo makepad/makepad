@@ -1,6 +1,7 @@
 use {
     std::{
         cell::{Cell,RefCell},
+        rc::Rc,
         time::Instant,
     },
     crate::{
@@ -258,7 +259,7 @@ impl IosApp {
                 rotation_angle: 0.0,
                 force: 0.0,
                 radius: dvec2(0.0, 0.0),
-                handled: Cell::new(Area::Empty),
+                handled: Rc::new(Cell::new(Area::Empty)),
                 sweep_lock: Cell::new(Area::Empty)
             })
         }

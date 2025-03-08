@@ -156,14 +156,14 @@ impl SeqButton {
             self.draw_button.area(),
             HitOptions::new().with_sweep_area(sweep_area)
         ) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(..) => {
                 self.animator_play(cx, id!(hover.on));
                 if self.animator_in_state(cx, id!(active.on)) {
                     self.animator_play(cx, id!(active.off));

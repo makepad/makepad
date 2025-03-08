@@ -80,7 +80,7 @@ impl TabCloseButton {
     ) -> TabCloseButtonAction {
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_button.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 self.animator_play(cx, id!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }
@@ -90,7 +90,7 @@ impl TabCloseButton {
             }
             // Pressing the tab close button with a primary button/touch
             // or the middle mouse button are both recognized as a close tab action.
-            Hit::FingerDown(fe) 
+            Hit::FingerDown(fe, _)
                 if fe.is_primary_hit() || fe.mouse_button().is_some_and(|b| b.is_middle()) =>
             {
                 return TabCloseButtonAction::WasPressed;

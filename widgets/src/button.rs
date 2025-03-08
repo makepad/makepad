@@ -377,14 +377,14 @@ impl Widget for Button {
             // If it's not enabled, we still show the button, but we set
             // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
             match event.hits(cx, self.draw_bg.area()) {
-                Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
+                Hit::FingerDown(fe, _) if self.enabled && fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
                     self.animator_play(cx, id!(hover.pressed));
                 }
-                Hit::FingerHoverIn(_) => {
+                Hit::FingerHoverIn(..) => {
                     if self.enabled {
                         cx.set_cursor(MouseCursor::Hand);
                         self.animator_play(cx, id!(hover.on));

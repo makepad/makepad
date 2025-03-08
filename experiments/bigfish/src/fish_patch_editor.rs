@@ -198,7 +198,7 @@ impl Widget for FishPatchEditor {
 
         match event.hits(cx, self.draw_bg.area()) {
             
-            Hit::FingerDown(fe) => {
+            Hit::FingerDown(fe, _) => {
 //                if  fe.digit_id == live_id!(0).into() {
                     self.selecting = true;              
                     let patch = &mut scope.data.get_mut::<FishDoc>().unwrap().patches[0];
@@ -212,7 +212,7 @@ impl Widget for FishPatchEditor {
                 self.animator_play(cx, id!(hover.pressed));
             }
             
-            Hit::FingerMove(fe) =>{
+            Hit::FingerMove(fe, _) =>{
                 if 
                 //fe.digit_id == live_id!(0).into() &&
                  self.selecting
@@ -224,13 +224,11 @@ impl Widget for FishPatchEditor {
                 }
                 
             }
-            Hit::FingerHoverIn(_) => {
-
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => {

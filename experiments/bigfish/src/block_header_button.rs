@@ -160,7 +160,7 @@ impl Widget for BlockHeaderButton {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerMove(fe) => {
+            Hit::FingerMove(fe, _) => {
                 if self.dragging {
                     cx.widget_action(
                         uid,
@@ -174,7 +174,7 @@ impl Widget for BlockHeaderButton {
                     self.draglast = fe.abs;
                 }
             }
-            Hit::FingerDown(fe) => {
+            Hit::FingerDown(fe, _) => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
@@ -189,7 +189,7 @@ impl Widget for BlockHeaderButton {
                 );
                 self.animator_play(cx, id!(hover.pressed));
             }
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }

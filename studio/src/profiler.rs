@@ -184,12 +184,12 @@ impl Widget for ProfilerEventChart {
         
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope){
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(..) => {
                 // ok so we get multiple finger downs
                 cx.set_key_focus(self.draw_bg.area());
                 self.time_drag = Some(self.time_range.clone());
             },
-            Hit::FingerMove(fe) => {
+            Hit::FingerMove(fe, _) => {
                 if let Some(start) = &self.time_drag{
                     // ok so how much did we move?
                     let moved = fe.abs_start.x - fe.abs.x;

@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 use {
-    std::cell::Cell,
-    std::collections::HashMap,
+    std::{cell::Cell, collections::HashMap, rc::Rc},
     crate::{
         cx::Cx,
         cursor::MouseCursor,
@@ -353,7 +352,7 @@ impl StdinMouseDown {
             window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }
     }
 }
@@ -368,12 +367,12 @@ pub struct StdinMouseMove{
 
 impl StdinMouseMove {
     pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseMoveEvent {
-        MouseMoveEvent{
+        MouseMoveEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             window_id,
             modifiers: self.modifiers.into_key_modifiers(),
             time: self.time,
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }
     }
 }

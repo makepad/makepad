@@ -194,7 +194,7 @@ impl Widget for SlidesView {
                 let uid = self.widget_uid();
                 cx.widget_action(uid, &scope.path, SlidesViewAction::Flipped(self.goal_slide as usize));
             }
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(..) => {
                 cx.set_key_focus(self.area);
             },
             _ => ()

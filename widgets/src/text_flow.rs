@@ -795,7 +795,7 @@ impl Widget for TextFlowLink {
         
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe, _) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
@@ -821,7 +821,7 @@ impl Widget for TextFlowLink {
                         );
                     }
                 }
-                Hit::FingerHoverIn(_) => {
+                Hit::FingerHoverIn(..) => {
                     cx.set_cursor(MouseCursor::Hand);
                     self.animator_play(cx, id!(hover.on));
                 }

@@ -431,7 +431,7 @@ impl ScrollBar {
             }
             
             match event.hits(cx, self.draw_bar.area()) {
-                Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                Hit::FingerDown(fe, _) if fe.is_primary_hit() => {
                     self.animator_play(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
@@ -451,7 +451,7 @@ impl ScrollBar {
                         self.drag_point = Some(rel - bar_start); // store the drag delta
                     }
                 },
-                Hit::FingerHoverIn(_) => {
+                Hit::FingerHoverIn(..) => {
                     self.animator_play(cx, id!(hover.on));
                 },
                 Hit::FingerHoverOut(_) => {
@@ -467,7 +467,7 @@ impl ScrollBar {
                     }
                     return;
                 },
-                Hit::FingerMove(fe) => {
+                Hit::FingerMove(fe, _) => {
                     let rel = fe.abs - fe.rect.pos;
                     // helper called by event code to scroll from a finger
                     if self.drag_point.is_none() {

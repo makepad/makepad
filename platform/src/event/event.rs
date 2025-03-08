@@ -387,7 +387,7 @@ impl Event{
 
 
 #[derive(Debug)]
-pub enum Hit{
+pub enum Hit {
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
@@ -398,10 +398,10 @@ pub enum Hit{
     TextCut(TextClipboardEvent),
 
     FingerScroll(FingerScrollEvent),
-    FingerDown(FingerDownEvent),
-    FingerMove(FingerMoveEvent),
-    FingerHoverIn(FingerHoverEvent),
-    FingerHoverOver(FingerHoverEvent),
+    FingerDown(FingerDownEvent, EventHandled),
+    FingerMove(FingerMoveEvent, EventHandled),
+    FingerHoverIn(FingerHoverEvent, EventHandled),
+    FingerHoverOver(FingerHoverEvent, EventHandled),
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
     FingerLongPress(FingerLongPressEvent),

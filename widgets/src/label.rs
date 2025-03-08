@@ -244,7 +244,7 @@ impl Widget for Label {
         if self.hover_actions_enabled {
             
             match event.hits_with_capture_overload(cx, self.area, true) {
-                Hit::FingerHoverIn(fh) => {
+                Hit::FingerHoverIn(fh, _) => {
                     cx.widget_action(uid, &scope.path, LabelAction::HoverIn(fh.rect));
                 }
                 Hit::FingerHoverOut(_) => {

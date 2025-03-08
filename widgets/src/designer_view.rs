@@ -451,7 +451,7 @@ impl Widget for DesignerView {
         // 
         let data = scope.data.get_mut::<DesignerData>().unwrap();
         match event.hits(cx, self.area) {
-            Hit::FingerHoverOver(fe) =>{
+            Hit::FingerHoverOver(fe, _) =>{
                 // lets poll our widget structure with a special event
                 // alright so we hover over. lets determine the mouse cursor
                 //let corner_inner:f64  = 10.0 * self.zoom;
@@ -541,7 +541,7 @@ impl Widget for DesignerView {
             }
             Hit::FingerHoverOut(_fh)=>{
             }
-            Hit::FingerDown(fe) => {
+            Hit::FingerDown(fe, _) => {
                 self.undo_group += 1;
                 if !fe.modifiers.shift{
                     if fe.modifiers.control && fe.modifiers.alt{
@@ -614,7 +614,7 @@ impl Widget for DesignerView {
                 self.sync_zoom_pan(cx);
                 self.redraw(cx);
             }
-            Hit::FingerMove(fe) => {
+            Hit::FingerMove(fe, _) => {
                 match self.finger_move.as_ref().unwrap(){
                     FingerMove::DragSubComponentOrder(cs)=>{
                         // ok how do we do this.

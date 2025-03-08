@@ -273,13 +273,13 @@ impl Tab {
         };
         
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => if !block_hover_out {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerMove(e) => {
+            Hit::FingerMove(e, _) => {
                 if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
                     self.is_dragging = true;
                     dispatch_action(cx, TabAction::ShouldTabStartDrag);
@@ -291,7 +291,7 @@ impl Tab {
                     self.is_dragging = false;
                 }
             }
-            Hit::FingerDown(fde) => {
+            Hit::FingerDown(fde, _) => {
                 // A primary click/touch selects the tab, but a middle click closes it.
                 if fde.is_primary_hit() {
                     dispatch_action(cx, TabAction::WasPressed);

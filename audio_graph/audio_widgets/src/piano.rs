@@ -209,14 +209,14 @@ impl PianoKey {
             self.draw_key.area().redraw(cx);
         }
         match event.hits_with_sweep_area(cx, self.draw_key.area(), sweep_area) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(..) => {
                 self.animator_play(cx, id!(hover.on));
                 self.animator_play(cx, id!(pressed.on));
                 actions.push((key_id, PianoKeyAction::Pressed(127)));

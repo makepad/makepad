@@ -1,32 +1,11 @@
 #![allow(unused)]
 #![allow(dead_code)]
 use {
-    std::{cell::Cell, ops::Deref},
     crate::{
-        makepad_micro_serde::*,
-        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
-        makepad_live_compiler::{
-            LivePropType,
-            LiveType,
-            LiveTypeField,
-            LiveFieldKind,
-            LiveNode,
-            LiveId,
-            LiveModuleId,
-            LiveTypeInfo,
-            LiveNodeSliceApi
-        },
-        live_traits::{LiveNew, LiveHook, LiveRegister, LiveHookDeref, LiveApplyValue, LiveApply,LiveApplyReset, Apply},
-        makepad_derive_live::*,
-        makepad_math::*,
-        makepad_live_id::{FromLiveId, live_id, live_id_num},
-        event::{
-            event::{Event, Hit}
-        },
-        window::WindowId,
-        cx::Cx,
-        area::Area,
-    },
+        area::Area, cx::Cx, event::event::{Event, Hit}, live_traits::{Apply, LiveApply, LiveApplyReset, LiveApplyValue, LiveHook, LiveHookDeref, LiveNew, LiveRegister}, makepad_derive_live::*, makepad_live_compiler::{
+            LiveFieldKind, LiveId, LiveModuleId, LiveNode, LiveNodeSliceApi, LivePropType, LiveType, LiveTypeField, LiveTypeInfo
+        }, makepad_live_id::{live_id, live_id_num, FromLiveId}, makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin}, makepad_math::*, makepad_micro_serde::*, window::WindowId
+    }, std::{cell::Cell, ops::Deref, rc::Rc}
 };
 
 // Mouse events
@@ -141,7 +120,7 @@ pub struct MouseDownEvent {
     pub button: MouseButton,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
-    pub handled: Cell<Area>,
+    pub handled: Rc<Cell<Area>>,
     pub time: f64,
 }
 
@@ -152,7 +131,7 @@ pub struct MouseMoveEvent {
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64,
-    pub handled: Cell<Area>,
+    pub handled: Rc<Cell<Area>>,
 }
 
 #[derive(Clone, Debug)]
@@ -170,7 +149,7 @@ pub struct MouseLeaveEvent {
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64,
-    pub handled: Cell<Area>,
+    pub handled: Rc<Cell<Area>>,
 }
 
 #[derive(Clone, Debug)]
@@ -212,7 +191,7 @@ pub struct TouchPoint {
     pub rotation_angle: f64,
     pub force: f64,
     pub radius: DVec2,
-    pub handled: Cell<Area>,
+    pub handled: Rc<Cell<Area>>,
     pub sweep_lock: Cell<Area>,
 }
 
@@ -222,6 +201,61 @@ pub struct TouchUpdateEvent {
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub touches: Vec<TouchPoint>,
+}
+
+
+/// A special wrapper struct that is used to mark an event as handled or not.
+///
+/// * This is returned along with certain `Hit` variants,
+///   which allows the caller to mark the original event that caused the `Hit`
+///   as handled or not handled.
+/// * Marking an event as handled prevents other views from handling it too
+///   (unless they ignore the handled status, e.g., by enabling `capture_overload`).
+///
+/// ## Behavior on Drop
+/// When this struct is dropped, it will mark the original event as handled,
+/// which is the default historical behavior in Makepad.
+///
+/// This type does not and should not implement `Clone`.
+#[derive(Debug)] // Do not derive/implement `Clone`.
+pub struct EventHandled {
+    handled_ref: Rc<Cell<Area>>,
+    area: Area,
+}
+impl Drop for EventHandled {
+    fn drop(&mut self) {
+        self.handled_ref.set(self.area);
+    }
+}
+impl EventHandled {
+    /// Creates a dummy `EventWasHandled` instance that does nothing.
+    ///
+    /// It will not mark the event as handled or not, because it is
+    /// not connected to any event's handled area in any way.
+    pub(crate) fn dummy() -> Self {
+        Self {
+            handled_ref: Rc::new(Cell::new(Area::Empty)),
+            area: Area::Empty,
+        }
+    }
+
+    pub(crate) fn new(handled_ref: &Rc<Cell<Area>>, area: Area) -> Self {
+        Self {
+            handled_ref: Rc::clone(handled_ref),
+            area,
+        }
+    }
+
+    /// Marks the original event that resulted in this `Hit` as handled or not.
+    ///
+    /// The typical behavior in Makepad is to mark the event as handled (`handled: true`).
+    pub fn set_handled(self, handled: bool) {
+        if handled {
+            self.handled_ref.set(self.area);
+        }
+        // Don't let the drop handler run, we already handled it here.
+        std::mem::forget(self);
+    }
 }
 
 
@@ -886,20 +920,21 @@ impl Event {
                             if !hit_test(t.abs, &rect, &options.margin) {
                                 continue;
                             }
-                            
+
                             cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, t.abs);
-                            
-                            t.handled.set(area);
-                            return Hit::FingerDown(FingerDownEvent {
-                                window_id: e.window_id,
-                                abs: t.abs,
-                                digit_id,
-                                device,
-                                tap_count: cx.fingers.tap_count(),
-                                modifiers: e.modifiers,
-                                time: e.time,
-                                rect,
-                            });
+                            return Hit::FingerDown(
+                                FingerDownEvent {
+                                    window_id: e.window_id,
+                                    abs: t.abs,
+                                    digit_id,
+                                    device,
+                                    tap_count: cx.fingers.tap_count(),
+                                    modifiers: e.modifiers,
+                                    time: e.time,
+                                    rect,
+                                },
+                                EventHandled::new(&t.handled, area),
+                            );
                         }
                         TouchState::Stop => {
                             let tap_count = cx.fingers.tap_count();
@@ -926,41 +961,45 @@ impl Event {
                             let tap_count = cx.fingers.tap_count();
                             //let hover_last = cx.fingers.get_hover_area(digit_id);
                             let rect = area.clipped_rect(&cx);
-                            
-                            //let handled_area = t.handled.get();
+
                             if !options.sweep_area.is_empty() {
                                 if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
                                     if capture.switch_capture.is_none()
                                         && hit_test(t.abs, &rect, &options.margin)
                                     {
                                         if t.handled.get().is_empty() {
-                                            t.handled.set(area);
                                             if capture.area == area {
-                                                return Hit::FingerMove(FingerMoveEvent {
-                                                    window_id: e.window_id,
-                                                    abs: t.abs,
-                                                    digit_id,
-                                                    device,
-                                                    tap_count,
-                                                    modifiers: e.modifiers,
-                                                    time: e.time,
-                                                    abs_start: capture.abs_start,
-                                                    rect,
-                                                    is_over: true,
-                                                });
+                                                return Hit::FingerMove(
+                                                    FingerMoveEvent {
+                                                        window_id: e.window_id,
+                                                        abs: t.abs,
+                                                        digit_id,
+                                                        device,
+                                                        tap_count,
+                                                        modifiers: e.modifiers,
+                                                        time: e.time,
+                                                        abs_start: capture.abs_start,
+                                                        rect,
+                                                        is_over: true,
+                                                    },
+                                                    EventHandled::new(&t.handled, area),
+                                                );
                                             }
                                             else if capture.sweep_area == options.sweep_area { // take over the capture
                                                 capture.switch_capture = Some(area);
-                                                return Hit::FingerDown(FingerDownEvent {
-                                                    window_id: e.window_id,
-                                                    abs: t.abs,
-                                                    digit_id,
-                                                    device,
-                                                    tap_count: cx.fingers.tap_count(),
-                                                    modifiers: e.modifiers,
-                                                    time: e.time,
-                                                    rect,
-                                                });
+                                                return Hit::FingerDown(
+                                                    FingerDownEvent {
+                                                        window_id: e.window_id,
+                                                        abs: t.abs,
+                                                        digit_id,
+                                                        device,
+                                                        tap_count: cx.fingers.tap_count(),
+                                                        modifiers: e.modifiers,
+                                                        time: e.time,
+                                                        rect,
+                                                    },
+                                                    EventHandled::new(&t.handled, area),
+                                                );
                                             }
                                         }
                                     }
@@ -987,18 +1026,23 @@ impl Event {
                                 }
                             }
                             else if let Some(capture) = cx.fingers.find_area_capture(area) {
-                                return Hit::FingerMove(FingerMoveEvent {
-                                    window_id: e.window_id,
-                                    abs: t.abs,
-                                    digit_id,
-                                    device,
-                                    tap_count,
-                                    modifiers: e.modifiers,
-                                    time: e.time,
-                                    abs_start: capture.abs_start,
-                                    rect,
-                                    is_over: hit_test(t.abs, &rect, &options.margin),
-                                })
+                                return Hit::FingerMove(
+                                    FingerMoveEvent {
+                                        window_id: e.window_id,
+                                        abs: t.abs,
+                                        digit_id,
+                                        device,
+                                        tap_count,
+                                        modifiers: e.modifiers,
+                                        time: e.time,
+                                        abs_start: capture.abs_start,
+                                        rect,
+                                        is_over: hit_test(t.abs, &rect, &options.margin),
+                                    },
+                                    // Note: the existing behavior here was to *not* mark this event's TouchPoint as handled.
+                                    // I am preserving this behavior for now, but I don't know if that's right.
+                                    EventHandled::dummy(),
+                                );
                             }
                         }
                         TouchState::Stable => {}
@@ -1025,36 +1069,42 @@ impl Event {
                     if !options.sweep_area.is_empty() {
                         if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
                             if capture.switch_capture.is_none()
-                                && hit_test(e.abs, &rect, &options.margin) {
+                                && hit_test(e.abs, &rect, &options.margin)
+                            {
                                 if e.handled.get().is_empty() {
-                                    e.handled.set(area);
                                     if capture.area == area {
-                                        return Hit::FingerMove(FingerMoveEvent {
-                                            window_id: e.window_id,
-                                            abs: e.abs,
-                                            digit_id,
-                                            device,
-                                            tap_count,
-                                            modifiers: e.modifiers,
-                                            time: e.time,
-                                            abs_start: capture.abs_start,
-                                            rect,
-                                            is_over: true,
-                                        })
+                                        return Hit::FingerMove(
+                                            FingerMoveEvent {
+                                                window_id: e.window_id,
+                                                abs: e.abs,
+                                                digit_id,
+                                                device,
+                                                tap_count,
+                                                modifiers: e.modifiers,
+                                                time: e.time,
+                                                abs_start: capture.abs_start,
+                                                rect,
+                                                is_over: true,
+                                            },
+                                            EventHandled::new(&e.handled, area),
+                                        );
                                     }
                                     else if capture.sweep_area == options.sweep_area { // take over the capture
                                         capture.switch_capture = Some(area);
                                         cx.fingers.new_hover_area(digit_id, area);
-                                        return Hit::FingerDown(FingerDownEvent {
-                                            window_id: e.window_id,
-                                            abs: e.abs,
-                                            digit_id,
-                                            device,
-                                            tap_count: cx.fingers.tap_count(),
-                                            modifiers: e.modifiers,
-                                            time: e.time,
-                                            rect,
-                                        })
+                                        return Hit::FingerDown(
+                                            FingerDownEvent {
+                                                window_id: e.window_id,
+                                                abs: e.abs,
+                                                digit_id,
+                                                device,
+                                                tap_count: cx.fingers.tap_count(),
+                                                modifiers: e.modifiers,
+                                                time: e.time,
+                                                rect,
+                                            },
+                                            EventHandled::new(&e.handled, area),
+                                        );
                                     }
                                 }
                             }
@@ -1082,20 +1132,25 @@ impl Event {
                         }
                     }
                     else if let Some(capture) = cx.fingers.find_area_capture(area) {
-                        let event = Hit::FingerMove(FingerMoveEvent {
-                            window_id: e.window_id,
-                            abs: e.abs,
-                            digit_id,
-                            device,
-                            tap_count,
-                            modifiers: e.modifiers,
-                            time: e.time,
-                            abs_start: capture.abs_start,
-                            rect,
-                            is_over: hit_test(e.abs, &rect, &options.margin),
-                        });
+                        let event = Hit::FingerMove(
+                            FingerMoveEvent {
+                                window_id: e.window_id,
+                                abs: e.abs,
+                                digit_id,
+                                device,
+                                tap_count,
+                                modifiers: e.modifiers,
+                                time: e.time,
+                                abs_start: capture.abs_start,
+                                rect,
+                                is_over: hit_test(e.abs, &rect, &options.margin),
+                            },
+                            // Note: the existing behavior here was to *not* mark the event as handled.
+                            // I am preserving this behavior for now, but I don't know if that's right.
+                            EventHandled::dummy(),
+                        );
                         cx.fingers.new_hover_area(digit_id, area);
-                        return event
+                        return event;
                     }
                 }
                 else {
@@ -1104,7 +1159,6 @@ impl Event {
                     };
                     
                     let handled_area = e.handled.get();
-                    
                     let fhe = FingerHoverEvent {
                         window_id: e.window_id,
                         abs: e.abs,
@@ -1117,20 +1171,24 @@ impl Event {
                     
                     if hover_last == area {
                         if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
-                            e.handled.set(area);
                             cx.fingers.new_hover_area(digit_id, area);
-                            return Hit::FingerHoverOver(fhe)
+                            return Hit::FingerHoverOver(
+                                fhe,
+                                EventHandled::new(&e.handled, area),
+                            );
                         }
                         else {
-                            return Hit::FingerHoverOut(fhe)
+                            return Hit::FingerHoverOut(fhe);
                         }
                     }
                     else {
                         if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
-                            e.handled.set(area);
-                            return Hit::FingerHoverIn(fhe)
+                            return Hit::FingerHoverIn(
+                                fhe,
+                                EventHandled::new(&e.handled, area),
+                            );
                         }
                     }
                 }
@@ -1160,23 +1218,27 @@ impl Event {
                     button: e.button,
                 };
                 
-                if cx.fingers.find_digit_for_captured_area(area).is_some() {
-                    return Hit::Nothing;
+                if let Some(existing_digit_id) = cx.fingers.find_digit_for_captured_area(area) {
+                    if existing_digit_id != digit_id {
+                        return Hit::Nothing;
+                    }
                 }
                 
                 cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, e.abs);
-                e.handled.set(area);
                 cx.fingers.new_hover_area(digit_id, area);
-                return Hit::FingerDown(FingerDownEvent {
-                    window_id: e.window_id,
-                    abs: e.abs,
-                    digit_id,
-                    device,
-                    tap_count: cx.fingers.tap_count(),
-                    modifiers: e.modifiers,
-                    time: e.time,
-                    rect,
-                })
+                return Hit::FingerDown(
+                    FingerDownEvent {
+                        window_id: e.window_id,
+                        abs: e.abs,
+                        digit_id,
+                        device,
+                        tap_count: cx.fingers.tap_count(),
+                        modifiers: e.modifiers,
+                        time: e.time,
+                        rect,
+                    },
+                    EventHandled::new(&e.handled, area),
+                );
             },
             Event::MouseUp(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
@@ -1230,17 +1292,16 @@ impl Event {
                 let hover_last = cx.fingers.find_hover_area(digit_id);
                 let handled_area = e.handled.get();
                 
-                let fhe = FingerHoverEvent {
-                    window_id: e.window_id,
-                    abs: e.abs,
-                    digit_id,
-                    device,
-                    modifiers: e.modifiers,
-                    time: e.time,
-                    rect,
-                };
                 if hover_last == area {
-                    return Hit::FingerHoverOut(fhe);
+                    return Hit::FingerHoverOut(FingerHoverEvent {
+                        window_id: e.window_id,
+                        abs: e.abs,
+                        digit_id,
+                        device,
+                        modifiers: e.modifiers,
+                        time: e.time,
+                        rect,
+                    });
                 }
             },
             Event::LongPress(e) => {
@@ -1260,6 +1321,8 @@ impl Event {
                     let device = DigitDevice::Touch {
                         uid: e.uid,
                     };
+
+                    // TODO: should we add a `handled` area to LongPressEvent and FingerLongPress?
                     return Hit::FingerLongPress(FingerLongPressEvent {
                         window_id: e.window_id,
                         abs: e.abs,

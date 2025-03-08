@@ -1767,7 +1767,7 @@ impl Widget for Slider {
 
         if self.hover_actions_enabled {
             match event.hits_with_capture_overload(cx, self.label_area, true) {
-                Hit::FingerHoverIn(fh) => {
+                Hit::FingerHoverIn(fh, _) => {
                     cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
                 }
                 Hit::FingerHoverOut(_) => {
@@ -1778,21 +1778,24 @@ impl Widget for Slider {
         }
 
         match event.hits(cx, self.draw_slider.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 self.animator_play(cx, id!(hover.on));
             },
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerHoverOver(_) => {
+            Hit::FingerHoverOver(..) => {
                 cx.set_cursor(MouseCursor::Grab);
             },
-            Hit::FingerDown(FingerDownEvent {
-                // abs,
-                // rect,
-                device,
-                ..
-            }) if device.is_primary_hit() => {
+            Hit::FingerDown(
+                FingerDownEvent {
+                    // abs,
+                    // rect,
+                    device,
+                    ..
+                },
+                _,
+            ) if device.is_primary_hit() => {
                 // cx.set_key_focus(self.slider.area());
                 // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
@@ -1822,7 +1825,7 @@ impl Widget for Slider {
                 cx.widget_action(uid, &scope.path, SliderAction::EndSlide);
                 cx.set_cursor(MouseCursor::Grab);
             }
-            Hit::FingerMove(fe) => {
+            Hit::FingerMove(fe, _) => {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     if let DragAxis::Horizontal = self.axis {

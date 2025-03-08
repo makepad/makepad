@@ -1,5 +1,5 @@
 use {
-    std::cell::Cell,
+    std::{cell::Cell, rc::Rc},
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::*,
@@ -186,7 +186,7 @@ impl From<WTouchPoint> for TouchPoint {
             radius: dvec2(v.radius_x, v.radius_y),
             rotation_angle: v.rotation_angle,
             sweep_lock: Cell::new(Area::Empty),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
         }
     }
 }
@@ -253,7 +253,7 @@ impl From<ToWasmMouseDown> for MouseDownEvent {
             button: wmouse_to_mouse_button(v.mouse.button),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
             time: v.mouse.time
         }
     }
@@ -271,7 +271,7 @@ impl From<ToWasmMouseMove> for MouseMoveEvent {
             abs: dvec2(v.mouse.x, v.mouse.y),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),
-            handled: Cell::new(Area::Empty),
+            handled: Rc::new(Cell::new(Area::Empty)),
             time: v.mouse.time
         }
     }

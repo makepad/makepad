@@ -382,14 +382,14 @@ impl Widget for CheckBox {
         self.animator_handle_event(cx, event);
                 
         match event.hits(cx, self.draw_check.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             },
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe, _) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, id!(selected.on)) {
                     self.animator_play(cx, id!(selected.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
@@ -402,7 +402,7 @@ impl Widget for CheckBox {
             Hit::FingerUp(_fe) => {
                                 
             }
-            Hit::FingerMove(_fe) => {
+            Hit::FingerMove(..) => {
                                 
             }
             _ => ()

@@ -221,7 +221,7 @@ impl Widget for FlatList {
                     self.area.redraw(cx);
                 },
                 
-                Hit::FingerDown(e) => {
+                Hit::FingerDown(e, _) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
                     }
@@ -231,7 +231,7 @@ impl Widget for FlatList {
                         };
                     }
                 }
-                Hit::FingerMove(e) => {
+                Hit::FingerMove(e, _) => {
                     //log!("Finger move {} {}", e.time, e.abs);
                     cx.set_cursor(MouseCursor::Default);
                     match &mut self.scroll_state {

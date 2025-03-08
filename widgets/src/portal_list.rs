@@ -911,7 +911,7 @@ impl Widget for PortalList {
                     },
                     _ => ()
                 }
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe, _) => {
                     // We allow other mouse buttons to grab key focus and stop the tail range behavior,
                     // but we only want the primary button (or touch) to actually scroll via dragging.
 
@@ -931,7 +931,7 @@ impl Widget for PortalList {
                         };
                     }
                 }
-                Hit::FingerMove(e) => {
+                Hit::FingerMove(e, _) => {
                     //log!("Finger move {} {}", e.time, e.abs);
                     cx.set_cursor(MouseCursor::Default);
                     match &mut self.scroll_state {

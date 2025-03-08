@@ -177,14 +177,14 @@ impl TouchGesture {
         }
 
         match event.hits_with_capture_overload(cx, area, true) {
-            Hit::FingerDown(e) => {
+            Hit::FingerDown(e, _) => {
                 self.scroll_state = ScrollState::Drag {
                     samples: vec![ScrollSample{abs: e.abs.y, time: e.time}]
                 };
 
                 return TouchMotionChange::ScrollStateChanged
             }
-            Hit::FingerMove(e) => {
+            Hit::FingerMove(e, _) => {
                 cx.set_cursor(MouseCursor::Default);
                 match &mut self.scroll_state {
                     ScrollState::Drag {samples}=>{

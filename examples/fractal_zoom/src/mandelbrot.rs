@@ -504,7 +504,7 @@ impl Widget for Mandelbrot {
         // in this mode we get fingerdown events for each finger.
         
         match event.hits(cx, self.view_area) {
-            Hit::FingerDown(fe) => {
+            Hit::FingerDown(fe, _) => {
                 // ok so we get multiple finger downs
                 self.is_zooming = true;
                 self.finger_abs = fe.abs;
@@ -528,7 +528,7 @@ impl Widget for Mandelbrot {
                                         
                 }
             }
-            Hit::FingerMove(fe) => {
+            Hit::FingerMove(fe, _) => {
             //if fe.digit.index == 0 { // only respond to digit 0
                 self.finger_abs = fe.abs;
                 //}

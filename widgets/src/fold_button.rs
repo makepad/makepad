@@ -167,7 +167,7 @@ impl Widget for FoldButton {
         };
                 
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
+            Hit::FingerDown(_fe, _) => {
                 if self.animator_in_state(cx, id!(open.on)) {
                     self.animator_play(cx, id!(open.off));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Closing)
@@ -178,7 +178,7 @@ impl Widget for FoldButton {
                 }
                 self.animator_play(cx, id!(hover.on));
             },
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(..) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
             }
