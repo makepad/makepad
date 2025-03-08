@@ -234,7 +234,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::toggle_panel::live_design(cx);
     crate::cached_widget::live_design(cx);
     crate::command_text_input::live_design(cx);
-    crate::spinner::live_design(cx);
+    crate::loading_spinner::live_design(cx);
 
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
