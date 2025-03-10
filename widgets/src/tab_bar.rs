@@ -16,18 +16,20 @@ live_design!{
     
     pub TabBarBase = {{TabBar}} {}
     pub TabBar = <TabBarBase> {
-        CloseableTab = <Tab> {closeable:true}
-        PermanentTab = <Tab> {closeable:false}
-        
+        CloseableTab = <TabGradientY> {closeable:true}
+        PermanentTab = <TabGradientY> {closeable:false}
+
         draw_drag: {
             draw_depth: 10
             color: (THEME_COLOR_BG_CONTAINER)
         }
+
         draw_fill: {
             color: (THEME_COLOR_D_1)
         }
         
         width: Fill, height: (THEME_TAB_HEIGHT)
+
         margin: { top: 0.5, right: 0.5, bottom: 0.0, left: 0.5 }
         
         scroll_bars: <ScrollBarsTabs> {
@@ -41,27 +43,9 @@ live_design!{
         }
     }
     
-    pub TabBarMinimal = <TabBarBase> {
+    pub TabBarMinimal = <TabBar> {
         tab: <TabMinimal> {}
-        draw_drag: {
-            draw_depth: 10
-            color: (THEME_COLOR_BG_CONTAINER)
-        }
-        draw_fill: {
-            color: (THEME_COLOR_U_HIDDEN)
-        }
-        
-        width: Fill, height: (THEME_TAB_HEIGHT)
-        
-        scroll_bars: <ScrollBars> {
-            show_scroll_x: true
-            show_scroll_y: false
-            scroll_bar_x: {
-                draw_bg: {bar_width: 3.0}
-                bar_size: 4
-                use_vertical_finger_scroll: true
-            }
-        }
+        draw_fill: { color: (THEME_COLOR_U_HIDDEN) }
     }
 }
 
@@ -85,10 +69,10 @@ pub struct TabBar {
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] tabs: ComponentMap<LiveId, (Tab, LiveId)>,
     
-    #[rust] selected_tab: Option<usize>,
+    #[rust] active_tab: Option<usize>,
     
-    #[rust] selected_tab_id: Option<LiveId>,
-    #[rust] next_selected_tab_id: Option<LiveId>,
+    #[rust] active_tab_id: Option<LiveId>,
+    #[rust] next_active_tab_id: Option<LiveId>,
 }
 
 impl LiveHook for TabBar {
@@ -134,7 +118,7 @@ impl Widget for TabBar{
             self.view_area.redraw(cx);
         };
                 
-        if let Some(tab_id) = self.next_selected_tab_id.take() {
+        if let Some(tab_id) = self.next_active_tab_id.take() {
             cx.widget_action(uid, &scope.path, TabBarAction::TabWasPressed(tab_id));
         }
         for (tab_id, (tab,_)) in self.tabs.iter_mut() {
@@ -201,10 +185,10 @@ impl Widget for TabBar{
 
 
 impl TabBar {
-    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>, walk:Walk) {
-        self.selected_tab = selected_tab;
-        //if selected_tab.is_some(){
-        //    self.selected_tab_id = None
+    pub fn begin(&mut self, cx: &mut Cx2d, active_tab: Option<usize>, walk:Walk) {
+        self.active_tab = active_tab;
+        //if active_tab.is_some(){
+        //    self.active_tab_id = None
         // }
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
         self.tab_order.clear();
@@ -227,18 +211,18 @@ impl TabBar {
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, template:LiveId) {
-        if let Some(selected_tab) = self.selected_tab {
+        if let Some(active_tab) = self.active_tab {
             let tab_order_len = self.tab_order.len();
             let tab = self.get_or_create_tab(cx, tab_id, template);
-            if tab_order_len == selected_tab {
-                tab.set_is_selected(cx, true, Animate::No);
+            if tab_order_len == active_tab {
+                tab.set_is_active(cx, true, Animate::No);
             }
             else {
-                tab.set_is_selected(cx, false, Animate::No);
+                tab.set_is_active(cx, false, Animate::No);
             }
             tab.draw(cx, name);
-            if tab_order_len == selected_tab {
-                self.selected_tab_id = Some(tab_id);
+            if tab_order_len == active_tab {
+                self.active_tab_id = Some(tab_id);
             }
             self.tab_order.push(tab_id);
         }
@@ -257,42 +241,42 @@ impl TabBar {
         tab
     }
     
-    pub fn selected_tab_id(&self) -> Option<LiveId> {
-        self.selected_tab_id
+    pub fn active_tab_id(&self) -> Option<LiveId> {
+        self.active_tab_id
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<LiveId>, animate: Animate) {
-        if self.selected_tab_id == tab_id {
+    pub fn set_active_tab_id(&mut self, cx: &mut Cx, tab_id: Option<LiveId>, animate: Animate) {
+        if self.active_tab_id == tab_id {
             return;
         }
-        if let Some(tab_id) = self.selected_tab_id {
+        if let Some(tab_id) = self.active_tab_id {
             let (tab,_) = &mut self.tabs[tab_id];
-            tab.set_is_selected(cx, false, animate);
+            tab.set_is_active(cx, false, animate);
         }
-        self.selected_tab_id = tab_id;
-        if let Some(tab_id) = self.selected_tab_id {
+        self.active_tab_id = tab_id;
+        if let Some(tab_id) = self.active_tab_id {
             let (tab,_) = &mut self.tabs[tab_id];
-            tab.set_is_selected(cx, true, animate);
+            tab.set_is_active(cx, true, animate);
         }
         self.view_area.redraw(cx);
     }
     
     
-    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, tab_id: LiveId, animate: Animate) {
+    pub fn set_next_active_tab(&mut self, cx: &mut Cx, tab_id: LiveId, animate: Animate) {
         if let Some(index) = self.tab_order.iter().position( | id | *id == tab_id) {
-            if self.selected_tab_id != Some(tab_id) {
-                self.next_selected_tab_id = self.selected_tab_id;
+            if self.active_tab_id != Some(tab_id) {
+                self.next_active_tab_id = self.active_tab_id;
             }
             else if index >0 {
-                self.next_selected_tab_id = Some(self.tab_order[index - 1]);
-                self.set_selected_tab_id(cx, self.next_selected_tab_id, animate);
+                self.next_active_tab_id = Some(self.tab_order[index - 1]);
+                self.set_active_tab_id(cx, self.next_active_tab_id, animate);
             }
             else if index + 1 < self.tab_order.len() {
-                self.next_selected_tab_id = Some(self.tab_order[index + 1]);
-                self.set_selected_tab_id(cx, self.next_selected_tab_id, animate);
+                self.next_active_tab_id = Some(self.tab_order[index + 1]);
+                self.set_active_tab_id(cx, self.next_active_tab_id, animate);
             }
             else {
-                self.set_selected_tab_id(cx, None, animate);
+                self.set_active_tab_id(cx, None, animate);
             }
             cx.new_next_frame();
         }
