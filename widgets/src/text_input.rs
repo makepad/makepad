@@ -218,7 +218,6 @@ live_design!{
             }
 
         }
-    
 
     pub TextInputGradientX = <TextInput> {
         draw_bg: {
@@ -443,7 +442,6 @@ live_design!{
             }
 
     }
-
 
 }
 
