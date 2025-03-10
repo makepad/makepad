@@ -220,6 +220,7 @@ impl Widget for CommandTextInput {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.update_highlights(cx);
+        self.ensure_popup_consistent(cx);
 
         while !self.deref.draw_walk(cx, scope, walk).is_done() {}
 
@@ -289,6 +290,7 @@ impl Widget for CommandTextInput {
                             &scope.path,
                             InternalAction::ShouldBuildItems,
                         );
+                        self.ensure_popup_consistent(cx);
                     }
                 }
             }
@@ -348,16 +350,28 @@ impl Widget for CommandTextInput {
                             &scope.path,
                             InternalAction::ShouldBuildItems,
                         );
+                        self.ensure_popup_consistent(cx);
                     }
                 }
             }
         }
 
         self.prev_cursor_position = get_head(&self.text_input_ref());
+        self.ensure_popup_consistent(cx);
     }
 }
 
 impl CommandTextInput {
+    // Ensure popup state consistency
+    fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
+        if self.view(id!(popup)).visible() {
+            if self.inline_search {
+                self.view(id!(search_input_wrapper)).set_visible(cx, false);
+            } else {
+                self.view(id!(search_input_wrapper)).set_visible(cx, true);
+            }
+        }
+    }
 
     pub fn keyboard_focus_index(&self) -> Option<usize> {
         self.keyboard_focus_index
@@ -390,6 +404,7 @@ impl CommandTextInput {
                 &scope.path,
                 InternalAction::ShouldBuildItems,
             );
+            self.ensure_popup_consistent(cx);
         }
     }
 
@@ -419,17 +434,44 @@ impl CommandTextInput {
 
         let text = self.text();
         let end = get_head(&self.text_input_ref());
-        let Some(start) = end.checked_sub(to_remove.len()) else {
+        // Use graphemes instead of byte indices
+        let text_graphemes: Vec<&str> = text.graphemes(true).collect();
+        let mut byte_index = 0;
+        let mut end_grapheme_idx = 0;
+
+        // Find the grapheme index corresponding to the end position
+        for (i, g) in text_graphemes.iter().enumerate() {
+            if byte_index <= end && byte_index + g.len() > end {
+                end_grapheme_idx = i;
+                break;
+            }
+            byte_index += g.len();
+        }
+
+        // Calculate the start grapheme index
+        let start_grapheme_idx = if end_grapheme_idx >= to_remove.graphemes(true).count() {
+            end_grapheme_idx - to_remove.graphemes(true).count()
+        } else {
             return;
         };
 
-        let text = text[..start].to_string() + &text[end..];
+        // Rebuild the string
+        let new_text = text_graphemes[..start_grapheme_idx].join("") +
+                        &text_graphemes[end_grapheme_idx..].join("");
 
-        self.text_input_ref().set_cursor(start, start);
-        self.set_text(cx, &text);
+        // Calculate the new cursor position (grapheme)
+        let new_cursor_pos = text_graphemes[..start_grapheme_idx].join("").graphemes(true).count();
+
+        self.text_input_ref().set_cursor(new_cursor_pos, new_cursor_pos);
+        self.set_text(cx, &new_text);
     }
 
     fn show_popup(&mut self, cx: &mut Cx) {
+        if self.inline_search {
+            self.view(id!(search_input_wrapper)).set_visible(cx, false);
+        } else {
+            self.view(id!(search_input_wrapper)).set_visible(cx, true);
+        }
         self.view(id!(popup)).set_visible(cx, true);
         self.view(id!(popup)).redraw(cx);
     }
@@ -490,7 +532,26 @@ impl CommandTextInput {
                 let head = get_head(&self.text_input_ref());
 
                 if head > trigger_pos {
-                    text[trigger_pos..head].to_string()
+                    // Convert byte indices to grapheme indices
+                    let text_graphemes: Vec<&str> = text.graphemes(true).collect();
+                    let mut byte_pos = 0;
+                    let mut trigger_grapheme_idx = 0;
+                    let mut head_grapheme_idx = 0;
+
+                    // Find corresponding grapheme indices
+                    for (i, g) in text_graphemes.iter().enumerate() {
+                        if byte_pos <= trigger_pos && byte_pos + g.len() > trigger_pos {
+                            trigger_grapheme_idx = i;
+                        }
+                        if byte_pos <= head && byte_pos + g.len() > head {
+                            head_grapheme_idx = i;
+                            break;
+                        }
+                        byte_pos += g.len();
+                    }
+
+                    // Use grapheme indices for operations
+                    text_graphemes[trigger_grapheme_idx..head_grapheme_idx].join("")
                 } else {
                     String::new()
                 }
