@@ -125,7 +125,7 @@
 
                         tTests = Tab { name: "Tests", template: CloseableTab, kind: TabTests }
                         tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
-                        tLayoutDemos = Tab { name: "Layout demos", template: PermanentTab, kind: TabLayoutDemos }
+                        tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
                         tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
                         tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
