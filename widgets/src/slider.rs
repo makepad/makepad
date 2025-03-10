@@ -1027,8 +1027,6 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
                 let label_offset = 20.;
-                
-
                 let one_deg = PI / 180;
                 let threesixty_deg = 2. * PI;
                 let gap_size = self.gap * one_deg;
