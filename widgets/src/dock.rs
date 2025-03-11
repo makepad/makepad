@@ -58,7 +58,7 @@ live_design!{
             draw_depth: 10.0
             color: (THEME_COLOR_DRAG_QUAD)
         }
-        tab_bar: <TabBar> {}
+        tab_bar: <TabBarGradientY> {}
         splitter: <Splitter> {}
     }
 
@@ -95,7 +95,7 @@ live_design!{
             draw_depth: 10.0
             color: (THEME_COLOR_DRAG_QUAD)
         }
-        tab_bar: <TabBarMinimal> {}
+        tab_bar: <TabBar> {}
         splitter: <Splitter> {}
     }
 
