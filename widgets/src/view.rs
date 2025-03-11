@@ -17,6 +17,12 @@ pub enum ViewOptimize {
     Texture,
 }
 
+impl Default for ViewOptimize {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 #[derive(Live)]
 #[live_ignore]
 pub enum ViewDebug {
