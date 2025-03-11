@@ -1,5 +1,6 @@
 use {
     std::{
+        cell::Cell,
         collections::{HashSet, HashMap}
     },
     crate::{
@@ -205,7 +206,16 @@ pub enum Event {
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
     
-    BackPressed,
+    /// The "go back" navigational button or gesture was performed.
+    ///
+    /// Tip: use the [`Event::consume_back_pressed()`] method to handle this event
+    /// instead of matching on it directly.
+    ///
+    /// Once a widget has handled this event, it should set the `handled` flag to `true`
+    /// to ensure that a single "go back" action is not handled multiple times.
+    BackPressed {
+        handled: Cell<bool>,
+    },
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
     
@@ -351,13 +361,27 @@ impl Event{
             Self::TextureHandleReady(_)=>48,
             Self::MouseLeave(_)=>49,
             Self::Actions(_)=>50,
-            Self::BackPressed=>51,
+            Self::BackPressed{..}=>51,
             
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_)=>52,
             
             Self::DesignerPick(_) =>53,
         }
+    }
+
+    /// A convenience function to check if the event is a [`BackPressed`] event
+    /// that has not yet been handled, and then mark it as handled.
+    ///
+    /// Returns `true` if the event was a [`BackPressed`] event that wasn't already handled.
+    pub fn back_pressed(&self) -> bool {
+        if let Self::BackPressed { handled } = self {
+            if !handled.get() {
+                handled.set(true);
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -383,8 +407,6 @@ pub enum Hit{
     FingerLongPress(FingerLongPressEvent),
     
     DesignerPick(DesignerPickEvent),
-
-    BackPressed,
 
     Nothing
 }
