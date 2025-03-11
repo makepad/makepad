@@ -1,7 +1,6 @@
     use makepad_widgets::*;
     use makepad_platform::live_atomic::*;
 
-
     live_design!{
         use link::theme::*;
         use link::shaders::*;
@@ -23,12 +22,36 @@
 
         UIZooTab = <RectView> {
             height: Fill, width: Fill
-            padding: 10.,
             flow: Down,
-            spacing: 10.,
-            scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+            padding: 0
+            spacing: 0.
         }
                             
+        UIZooTabLayout_A = <View> {
+            height: Fill, width: Fill
+            flow: Right,
+            padding: 0
+            spacing: 0.
+            scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+
+            desc = <View> {
+                width: 300., height: Fill,
+                flow: Down,
+                spacing: (THEME_SPACE_2)
+                padding: <THEME_MSPACE_3> {}
+            }
+
+            <Vr> {}
+
+            demos = <View> {
+                width: Fill, height: Fill,
+                flow: Down,
+                spacing: (THEME_SPACE_2)
+                padding: <THEME_MSPACE_3> {}
+            }
+
+        }
+
         App = {{App}} {
             ui: <Window> {
                 width: Fill, height: Fill,
@@ -91,7 +114,6 @@
                             selected: 0
                         }
 
-
                         tab_set_2 = Tabs {
                             tabs: [
                                 tTests,
@@ -99,6 +121,7 @@
                                 tLayoutDemos,
                                 tButton,
                                 tCheckbox,
+                                tColorPicker,
                                 tCommandTextInput,
                                 tDesktopButton,
                                 tDropDown
@@ -143,6 +166,7 @@
                         tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
+                        tColorPicker = Tab { name: "ColorPicker", template: PermanentTab, kind: TabColorPicker }
                         tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
                         tSlidesView = Tab { name: "SlidesView", template: PermanentTab, kind: TabSlidesView }
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
@@ -391,29 +415,30 @@
                         }
 
                         TabLayoutDemos = <UIZooTab> {
-                            <View> {
-                                flow: Right,
-
-                                <View> {
-                                    width: 250,
-                                    <P> { text: "lorem ipsum"}
+                            <UIZooTabLayout_A> {
+                                desc = {
+                                    <H3> { text: "<XXX>"}
                                 }
-                                <Vr> {}
-                                <View> {
-                                    <P> { text: "lorem ipsum"}
+                                demos = {
                                 }
                             }
                         }
 
                         TabDesktopButton = <UIZooTab> {
-                            align: { x: 0.5, y: 0.5 }
-                            flow: Right,
-                            <DesktopButton> { draw_bg: { button_type: WindowsMax} }
-                            <DesktopButton> { draw_bg: { button_type: WindowsMaxToggled} }
-                            <DesktopButton> { draw_bg: { button_type: WindowsClose} }
-                            <DesktopButton> { draw_bg: { button_type: XRMode} }
-                            <DesktopButton> { draw_bg: { button_type: Fullscreen } }
+                            <UIZooTabLayout_A> {
+                                desc = {
+                                    <H3> { text: "<DesktopButton>"}
+                                }
+                                demos = {
+                                    <DesktopButton> { draw_bg: { button_type: WindowsMax} }
+                                    <DesktopButton> { draw_bg: { button_type: WindowsMaxToggled} }
+                                    <DesktopButton> { draw_bg: { button_type: WindowsClose} }
+                                    <DesktopButton> { draw_bg: { button_type: XRMode} }
+                                    <DesktopButton> { draw_bg: { button_type: Fullscreen } }
+                                }
+                            }
                         }
+
 
                         TabFoldButton = <UIZooTab> {
                             align: { x: 0.5, y: 0.5 }
@@ -447,80 +472,105 @@
                             }
                         }
 
+                        TabColorPicker = <UIZooTab> {
+                            <UIZooTabLayout_A> {
+                                desc = {
+                                    <H3> { text: "<ColorPicker>"}
+                                }
+                                demos = {
+                                    // <ColorPicker> {}
+                                }
+                            }
+
+                        }
+
                         TabDropDown = <UIZooTab> {
-                            align: { x: 0.5, y: 0.5 }
-                            dropdown = <DropDown> {
-                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-                            }
-                            dropdown_flat = <DropDownFlat> {
-                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-                            }
-                            dropdown_gradient_x = <DropDownGradientX> {
-                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-                            }
-                            dropdown_gradient_y = <DropDownGradientY> {
-                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-                            }
-                            dropdown_custom = <DropDownGradientY> {
-                                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-
-                                
-                                draw_text: {
-                                    color: #f00
-                                    color_hover: #0f0
-                                    color_focus: #0ff
+                            <UIZooTabLayout_A> {
+                                desc = {
+                                    <H3> { text: "<CommandTextInput>"}
                                 }
+                                demos = {
+                                    dropdown = <DropDown> {
+                                    labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                        values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                                    }
+                                    dropdown_flat = <DropDownFlat> {
+                                        labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                        values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                                    }
+                                    dropdown_gradient_x = <DropDownGradientX> {
+                                        labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                        values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                                    }
+                                    dropdown_gradient_y = <DropDownGradientY> {
+                                        labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                        values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                                    }
+                                    dropdown_custom = <DropDownGradientY> {
+                                        labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                                        values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
 
-                            
-                                draw_bg: {
-                                    border_size: (THEME_BEVELING)
-                                    border_radius: (THEME_CORNER_RADIUS)
+                                        
+                                        draw_text: {
+                                            color: #f00
+                                            color_hover: #0f0
+                                            color_focus: #0ff
+                                        }
 
-                                    color_dither: 1.0
+                                    
+                                        draw_bg: {
+                                            border_size: (THEME_BEVELING)
+                                            border_radius: (THEME_CORNER_RADIUS)
 
-                                    color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
-                                    color_1_hover: #0
-                                    color_1_focus: #2
+                                            color_dither: 1.0
 
-                                    color_2: (THEME_COLOR_CTRL_DEFAULT)
-                                    color_2_hover: #3
-                                    color_2_focus: #4
+                                            color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
+                                            color_1_hover: #0
+                                            color_1_focus: #2
 
-                                    border_color_1: #8
-                                    border_color_1_hover: #C
-                                    border_color_1_focus: #A
+                                            color_2: (THEME_COLOR_CTRL_DEFAULT)
+                                            color_2_hover: #3
+                                            color_2_focus: #4
 
-                                    border_color_2: #8
-                                    border_color_2_hover: #C
-                                    border_color_2_focus: #A
-                                }
+                                            border_color_1: #8
+                                            border_color_1_hover: #C
+                                            border_color_1_focus: #A
 
-                                popup_menu: <PopupMenuGradientY> {
-                                    // menu_item: <PopupMenuItem> {}
+                                            border_color_2: #8
+                                            border_color_2_hover: #C
+                                            border_color_2_focus: #A
+                                        }
 
-                                    draw_bg: {
-                                        color_dither: 1.0
-                                        border_radius: 4.0
-                                        border_size: (THEME_BEVELING)
-                                        inset: vec4(0.0, 0.0, 0.0, 0.0),
+                                        popup_menu: <PopupMenuGradientY> {
+                                            // menu_item: <PopupMenuItem> {}
 
-                                        color_1: #4
-                                        color_2: #2
+                                            draw_bg: {
+                                                color_dither: 1.0
+                                                border_radius: 4.0
+                                                border_size: (THEME_BEVELING)
+                                                inset: vec4(0.0, 0.0, 0.0, 0.0),
 
-                                        border_color_1: #C
-                                        border_color_2: #C
+                                                color_1: #4
+                                                color_2: #2
+
+                                                border_color_1: #C
+                                                border_color_2: #C
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
                         TabCommandTextInput = <UIZooTab> {
-                            <CommandTextInput> {}
+                            <UIZooTabLayout_A> {
+                                desc = {
+                                    <H3> { text: "<CommandTextInput>"}
+                                }
+                                demos = {
+                                    <CommandTextInput> {}
+                                }
+                            }
                         }
                         
                         TabSlidesView = <UIZooTab> {
@@ -890,191 +940,107 @@
 
 
                         TabCheckbox = <UIZooTab> {
-                            flow: Right,
-                            padding: 0
-                            spacing: 0.
+                            <UIZooTabLayout_A> {
+                                desc = {
+                                    <H3> { text: "Checkbox"}
+                                    <P> {
+                                        text: "The `CheckBox` widget provides a control for user input in the form of a checkbox. It allows users to select or deselect options."
+                                    }
 
-                            <View> {
-                                width: 300.,
-                                height: Fill,
-                                padding: <THEME_MSPACE_3> {}
-                                flow: Down,
+                                    <H4> { text: "Layouting"}
+                                    <P> {
+                                        text: "Complete layouting feature set support."
+                                    }
 
-                                show_bg: false,
-                                draw_bg: { color: (THEME_COLOR_U_1) }
-                            
-                                <H3> { text: "Checkbox"}
-                                <P> {
-                                    text: "The `CheckBox` widget provides a control for user input in the form of a checkbox. It allows users to select or deselect options."
+                                    <H4> { text: "Draw Shaders"}
+                                    <P> {
+                                        text: "Complete layouting feature set support."
+                                    }
                                 }
+                                demos = {
+                                    <H3> { text: "Demos"}
+                                    <Hr> {}
+                                    <H4> { text: "Standard Mode"}
+                                    <View> {
+                                        height: Fit
+                                        flow: Right
+                                        spacing: (THEME_SPACE_1)
+                                        align: { x: 0.0, y: 0.5}
+                                        <CheckBox> {text:"Check me out!"}
+                                    }
+                                    <H4> { text: "Customized"}
+                                    <View> {
+                                        height: Fit
+                                        flow: Right
+                                        spacing: (THEME_SPACE_1)
+                                        align: { x: 0.0, y: 0.5}
+                                        CheckBoxCustomized = <CheckBox> {
+                                            text:"Check me out!"
 
-                                <H4> { text: "Layouting"}
-                                <P> {
-                                    text: "Complete layouting feature set support."
-                                }
-
-                                <H4> { text: "Draw Shaders"}
-                                <P> {
-                                    text: "Complete layouting feature set support."
-                                }
-
-
-                            }                            
-
-                            <Vr> {}
-
-                            <View> {
-                                width: Fill,
-                                height: Fill,
-                                flow: Down,
-                                padding: <THEME_MSPACE_3> {}
-
-                                <H3> { text: "Demos"}
-                                <Hr> {}
-                                <H4> { text: "Standard Mode"}
-                                <View> {
-                                    height: Fit
-                                    flow: Right
-                                    spacing: (THEME_SPACE_1)
-                                    align: { x: 0.0, y: 0.5}
-                                    <CheckBox> {text:"Check me out!"}
-                                }
-                                <H4> { text: "Customized"}
-                                <View> {
-                                    height: Fit
-                                    flow: Right
-                                    spacing: (THEME_SPACE_1)
-                                    align: { x: 0.0, y: 0.5}
-                                    CheckBoxCustomized = <CheckBox> {
-                                        text:"Check me out!"
-
-                                        label_walk: {
-                                            width: Fit, height: Fit,
-                                            margin: <THEME_MSPACE_H_1> { left: 12.5 }
-                                        }
-
-                                        draw_bg: {
-                                            border_size: 1.0
-
-                                            color_1: #F40
-                                            color_1_hover: #F44
-                                            color_1_active: #F00
-
-                                            color_2: #F80
-                                            color_2_hover: #FA4
-                                            color_2_active: #F80
-
-                                            border_color_1: #0
-                                            border_color_1_hover: #F
-                                            border_color_1_active: #8
-
-                                            border_color_2: #0
-                                            border_color_2_hover: #F
-                                            border_color_2_active: #8
-
-                                            mark_color: #FFF0
-                                            mark_color_hover: #FFF0
-                                            mark_color_active: #FFFC
-                                        }  
-                                    
-                                        draw_text: {
-                                            color: #A
-                                            color_hover: #F
-                                            color_active: #C
-
-                                            text_style: <THEME_FONT_REGULAR> {
-                                                font_size: (THEME_FONT_SIZE_P)
+                                            label_walk: {
+                                                width: Fit, height: Fit,
+                                                margin: <THEME_MSPACE_H_1> { left: 12.5 }
                                             }
+
+                                            draw_bg: {
+                                                border_size: 1.0
+
+                                                color_1: #F40
+                                                color_1_hover: #F44
+                                                color_1_active: #F00
+
+                                                color_2: #F80
+                                                color_2_hover: #FA4
+                                                color_2_active: #F80
+
+                                                border_color_1: #0
+                                                border_color_1_hover: #F
+                                                border_color_1_active: #8
+
+                                                border_color_2: #0
+                                                border_color_2_hover: #F
+                                                border_color_2_active: #8
+
+                                                mark_color: #FFF0
+                                                mark_color_hover: #FFF0
+                                                mark_color_active: #FFFC
+                                            }  
+                                        
+                                            draw_text: {
+                                                color: #A
+                                                color_hover: #F
+                                                color_active: #C
+
+                                                text_style: <THEME_FONT_REGULAR> {
+                                                    font_size: (THEME_FONT_SIZE_P)
+                                                }
+                                            }
+
+                                            draw_icon: {
+                                                color: #F00
+                                                color_hover: #F44
+                                                color_active: #F00
+                                            }
+
+                                            icon_walk: { width: 13.0, height: Fit }
                                         }
 
-                                        draw_icon: {
-                                            color: #F00
-                                            color_hover: #F44
-                                            color_active: #F00
-                                        }
-
-                                        icon_walk: { width: 13.0, height: Fit }
                                     }
 
-                                }
+                                    <Hr> {}
 
-                                <Hr> {}
-
-                                <H4> { text: "Toggle Mode"}
-                                <View> {
-                                    height: Fit
-                                    flow: Right
-                                    spacing: (THEME_SPACE_1)
-                                    align: { x: 0.0, y: 0.5}
-                                    <CheckBoxToggle> {text:"Check me out!" }
-                                    <CheckBoxToggle> {text:"Check me out!" }
-                                }
-                                <H4> { text: "Toggle Customized"}
-                                <CheckBoxToggle> {
-                                    text:"Check me out!"
-
-                                    draw_bg: {
-                                        border_size: 1.0
-
-                                        color_1: #F00
-                                        color_1_hover: #F44
-                                        color_1_active: #F00
-
-                                        color_2: #F80
-                                        color_2_hover: #FA4
-                                        color_2_active: #F80
-
-                                        border_color_1: #0
-                                        border_color_1_hover: #F
-                                        border_color_1_active: #8
-
-                                        border_color_2: #0
-                                        border_color_2_hover: #F
-                                        border_color_2_active: #8
-
-                                        mark_color: #FFFF
-                                        mark_color_hover: #FFFF
-                                        mark_color_active: #FFFC
-                                    }  
-                                
-                                    draw_text: {
-                                        color: #A
-                                        color_hover: #F
-                                        color_active: #C
-
-                                        text_style: <THEME_FONT_REGULAR> {
-                                            font_size: (THEME_FONT_SIZE_P)
-                                        }
+                                    <H4> { text: "Toggle Mode"}
+                                    <View> {
+                                        height: Fit
+                                        flow: Right
+                                        spacing: (THEME_SPACE_1)
+                                        align: { x: 0.0, y: 0.5}
+                                        <CheckBoxToggle> {text:"Check me out!" }
+                                        <CheckBoxToggle> {text:"Check me out!" }
                                     }
-
-                                    draw_icon: {
-                                        color: #F00
-                                        color_hover: #F44
-                                        color_active: #F00
-                                    }
-
-                                    icon_walk: { width: 13.0, height: Fit }
-
-                                }
-                                <Hr> {}
-
-                                <H4> { text: "Custom Icon Mode"}
-                                <View> {
-                                    height: Fit
-                                    flow: Right
-                                    spacing: (THEME_SPACE_1)
-                                    align: { x: 0.0, y: 0.5}
-                                    <CheckBoxCustom> {
+                                    <H4> { text: "Toggle Customized"}
+                                    <CheckBoxToggle> {
                                         text:"Check me out!"
-                                        draw_bg: { check_type: None }
-                                        draw_icon: {
-                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                        }
-
-                                        label_walk: {
-                                            width: Fit, height: Fit,
-                                            margin: <THEME_MSPACE_H_1> { left: 12.5 }
-                                        }
 
                                         draw_bg: {
                                             border_size: 1.0
@@ -1095,15 +1061,15 @@
                                             border_color_2_hover: #F
                                             border_color_2_active: #8
 
-                                            mark_color: #FFF0
+                                            mark_color: #FFFF
                                             mark_color_hover: #FFFF
                                             mark_color_active: #FFFC
                                         }  
                                     
                                         draw_text: {
-                                            color: #330
-                                            color_hover: #8
-                                            color_active: #F80
+                                            color: #A
+                                            color_hover: #F
+                                            color_active: #C
 
                                             text_style: <THEME_FONT_REGULAR> {
                                                 font_size: (THEME_FONT_SIZE_P)
@@ -1111,29 +1077,93 @@
                                         }
 
                                         draw_icon: {
-                                            color: #300
-                                            color_hover: #800
+                                            color: #F00
+                                            color_hover: #F44
                                             color_active: #F00
                                         }
 
                                         icon_walk: { width: 13.0, height: Fit }
+
                                     }
-                                    <CheckBoxCustom> {
-                                        text:"Check me out!"
-                                        draw_bg: { check_type: None }
-                                        draw_icon: {
-                                            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                    <Hr> {}
+
+                                    <H4> { text: "Custom Icon Mode"}
+                                    <View> {
+                                        height: Fit
+                                        flow: Right
+                                        spacing: (THEME_SPACE_1)
+                                        align: { x: 0.0, y: 0.5}
+                                        <CheckBoxCustom> {
+                                            text:"Check me out!"
+                                            draw_bg: { check_type: None }
+                                            draw_icon: {
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                            }
+
+                                            label_walk: {
+                                                width: Fit, height: Fit,
+                                                margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                                            }
+
+                                            draw_bg: {
+                                                border_size: 1.0
+
+                                                color_1: #F00
+                                                color_1_hover: #F44
+                                                color_1_active: #F00
+
+                                                color_2: #F80
+                                                color_2_hover: #FA4
+                                                color_2_active: #F80
+
+                                                border_color_1: #0
+                                                border_color_1_hover: #F
+                                                border_color_1_active: #8
+
+                                                border_color_2: #0
+                                                border_color_2_hover: #F
+                                                border_color_2_active: #8
+
+                                                mark_color: #FFF0
+                                                mark_color_hover: #FFFF
+                                                mark_color_active: #FFFC
+                                            }  
+                                        
+                                            draw_text: {
+                                                color: #330
+                                                color_hover: #8
+                                                color_active: #F80
+
+                                                text_style: <THEME_FONT_REGULAR> {
+                                                    font_size: (THEME_FONT_SIZE_P)
+                                                }
+                                            }
+
+                                            draw_icon: {
+                                                color: #300
+                                                color_hover: #800
+                                                color_active: #F00
+                                            }
+
+                                            icon_walk: { width: 13.0, height: Fit }
+                                        }
+                                        <CheckBoxCustom> {
+                                            text:"Check me out!"
+                                            draw_bg: { check_type: None }
+                                            draw_icon: {
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                            }
                                         }
                                     }
-                                }
-                                <Hr> {} 
-                                <H4> { text: "Output demo"}
-                                <View> {
-                                    height: Fit
-                                    flow: Right
-                                    align: { x: 0.0, y: 0.5}
-                                    simplecheckbox = <CheckBox> {text:"Check me out!"}
-                                    simplecheckbox_output = <Label> { text:"hmm" }
+                                    <Hr> {} 
+                                    <H4> { text: "Output demo"}
+                                    <View> {
+                                        height: Fit
+                                        flow: Right
+                                        align: { x: 0.0, y: 0.5}
+                                        simplecheckbox = <CheckBox> {text:"Check me out!"}
+                                        simplecheckbox_output = <Label> { text:"hmm" }
+                                    }
                                 }
                             }
                         }
@@ -1728,254 +1758,256 @@
                             }
 
                             TabButton = <UIZooTab> {
-                                height: Fill, width: Fill
-                                padding: 10.,
-                                flow: Down,
-                                spacing: 10.,
-                                scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+                                <UIZooTabLayout_A> {
+                                    desc = {
+                                        <H3> { text: "<XXX>"}
+                                    }
+                                    demos = {
                                 
-                                basicbutton = <Button> {
+                                        basicbutton = <Button> {
 
-                                    draw_text: {
-                                        color: (THEME_COLOR_TEXT_DEFAULT)
-                                        color_hover: (THEME_COLOR_TEXT_HOVER)
-                                        color_down: (THEME_COLOR_TEXT_PRESSED)
-                                        text_style: <THEME_FONT_REGULAR> {
-                                            font_size: (THEME_FONT_SIZE_P)
-                                        }
-                                    }
-
-
-                                    icon_walk: {
-                                        width: (THEME_DATA_ICON_WIDTH), height: Fit,
-                                    }
-
-                                    draw_icon: {
-                                        color: (THEME_COLOR_TEXT_DEFAULT)
-                                        color_hover: (THEME_COLOR_TEXT_HOVER)
-                                        color_down: (THEME_COLOR_TEXT_PRESSED)
-                                    }
-
-                                    draw_bg: {
-                                        border_radius: (THEME_BEVELING)
-                                        border_radius: (THEME_CORNER_RADIUS)
-
-                                        color: (THEME_COLOR_CTRL_DEFAULT)
-                                        color_hover: (THEME_COLOR_CTRL_HOVER)
-                                        color_down: (THEME_COLOR_CTRL_PRESSED)
-
-                                        border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-                                        border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-                                        border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-
-                                        border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-                                        border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-                                        border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-                                    }
-
-                                    text: "<Button>"
-                                }
-
-                                iconbutton = <ButtonIcon> {
-                                    draw_icon: {
-                                        color: #f00,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                    text: "<ButtonIcon>"
-                                }
-
-                                <ButtonGradientX> { text: "<ButtonGradientX>" }
-                                <ButtonGradientX> {
-                                    draw_bg: {
-                                        border_radius: 1.0,
-                                        border_radius: 4.0
-
-                                        color_1: #C00
-                                        color_1_hover: #F0F
-                                        color_1_down: #800
-
-                                        color_2: #0CC
-                                        color_2_hover: #0FF
-                                        color_2_down: #088
-
-                                        border_color_1: #C
-                                        border_color_1_hover: #F
-                                        border_color_1_down: #0
-
-                                        border_color_2: #3
-                                        border_color_2_hover: #6
-                                        border_color_2_down: #8
-
-                                    }
-                                    text: "<ButtonGradientX>"
-                                }
-
-                                <ButtonGradientY> { text: "<ButtonGradientY>" }
-                                <ButtonGradientY> {
-                                    draw_bg: {
-                                        border_radius: 1.0,
-                                        border_radius: 4.0
-
-                                        color_1: #C00
-                                        color_1_hover: #F0F
-                                        color_1_down: #800
-
-                                        color_2: #0CC
-                                        color_2_hover: #0FF
-                                        color_2_down: #088
-
-                                        border_color_1: #C
-                                        border_color_1_hover: #F
-                                        border_color_1_down: #0
-
-                                        border_color_2: #3
-                                        border_color_2_hover: #6
-                                        border_color_2_down: #8
-
-                                    }
-                                    text: "<ButtonGradientY>"
-                                }
-
-                                <ButtonFlat> {
-                                    draw_icon: {
-                                        color: #f00,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                    text: "<ButtonFlat>"
-                                }
-
-                                <ButtonFlat> {
-                                    flow: Down,
-                                    icon_walk: { width: 15. }
-                                    draw_icon: {
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                    text: "<ButtonFlat> (Vertical)"
-                                }
-
-                                <ButtonFlatter> {
-                                    draw_icon: {
-                                        color: #f00,
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                    }
-                                    text: "<ButtonFlatter>"
-                                }
-
-                                styledbutton = <Button> {
-                                // Allows instantiation of customly styled elements as i.e. <MyButton> {}.
-
-                                    // BUTTON SPECIFIC PROPERTIES
-
-                                    draw_bg: { // Shader object that draws the bg.
-                                            fn pixel(self) -> vec4 {
-                                            return mix( // State transition animations.
-                                                mix(
-                                                    #800,
-                                                    mix(#800, #f, 0.5),
-                                                    self.hover
-                                                ),
-                                                #00f,
-                                                self.down
-                                            )
-                                        }
-                                    },
-
-                                    draw_icon: { // Shader object that draws the icon.
-                                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                                        // Icon file dependency.
-
-                                        fn get_color(self) -> vec4 { // Overwrite the shader's fill method.
-                                            return mix( // State transition animations.
-                                                mix(
-                                                    #f0f,
-                                                    #fff,
-                                                    self.hover
-                                                ),
-                                                #000,
-                                                self.down
-                                            )
-                                        }
-                                    }
-
-                                    grab_key_focus: true, // Keyboard gets focus when clicked.
-
-                                    icon_walk: {
-                                        margin: 10.,
-                                        width: 16.,
-                                        height: Fit
-                                    }
-
-                                    label_walk: {
-                                        margin: 0.,
-                                        width: Fit,
-                                        height: Fit,
-                                    }
-
-                                    text: "Freely Styled <Button> clicked: 0", // Text label.
-
-                                    animator: { // State change triggered animations.
-                                        hover = { // State
-                                            default: off // The state's starting point.
-                                            off = { // Behavior when the animation is started to the off-state
-                                                from: { // Behavior depending on the prior states
-                                                    all: Forward {duration: 0.1}, // Default animation direction and speed in secs.
-                                                    down: Forward {duration: 0.25} // Direction and speed for 'pressed' in secs.
-                                                }
-                                                apply: { // Shader methods to animate
-                                                    draw_bg: { down: 0.0, hover: 0.0 } // Timeline target positions for the given states.
-                                                    draw_icon: { down: 0.0, hover: 0.0 }
-                                                    draw_text: { down: 0.0, hover: 0.0 }
+                                            draw_text: {
+                                                color: (THEME_COLOR_TEXT_DEFAULT)
+                                                color_hover: (THEME_COLOR_TEXT_HOVER)
+                                                color_down: (THEME_COLOR_TEXT_PRESSED)
+                                                text_style: <THEME_FONT_REGULAR> {
+                                                    font_size: (THEME_FONT_SIZE_P)
                                                 }
                                             }
 
-                                            on = { // Behavior when the animation is started to the on-state
-                                                from: {
-                                                    all: Forward {duration: 0.1},
-                                                    pressed: Forward {duration: 0.5}
-                                                }
-                                                apply: {
-                                                    draw_bg: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
-                                                    // pressed: 'pressed' timeline target position
-                                                    // hover, time: Normalized timeline from 0.0 - 1.0. 'duration' then determines the actual playback duration of this animation in seconds.
-                                                    // hover, value: target timeline position
-                                                    draw_icon: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
-                                                    draw_text: { down: 0.0, hover: [{time: 0.0, value: 1.0}] }
-                                                }
+
+                                            icon_walk: {
+                                                width: (THEME_DATA_ICON_WIDTH), height: Fit,
                                             }
-                                
-                                            pressed = { // Behavior when the animation is started to the pressed-state
-                                                from: {all: Forward {duration: 0.2}}
-                                                apply: {
-                                                    draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0}, 
-                                                    draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0},
-                                                    draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0}
-                                                }
+
+                                            draw_icon: {
+                                                color: (THEME_COLOR_TEXT_DEFAULT)
+                                                color_hover: (THEME_COLOR_TEXT_HOVER)
+                                                color_down: (THEME_COLOR_TEXT_PRESSED)
                                             }
+
+                                            draw_bg: {
+                                                border_radius: (THEME_BEVELING)
+                                                border_radius: (THEME_CORNER_RADIUS)
+
+                                                color: (THEME_COLOR_CTRL_DEFAULT)
+                                                color_hover: (THEME_COLOR_CTRL_HOVER)
+                                                color_down: (THEME_COLOR_CTRL_PRESSED)
+
+                                                border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+                                                border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+                                                border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+                                                border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+                                                border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+                                                border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+                                            }
+
+                                            text: "<Button>"
                                         }
-                                    }
 
-                                    // LAYOUT PROPERTIES
+                                        iconbutton = <ButtonIcon> {
+                                            draw_icon: {
+                                                color: #f00,
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                            }
+                                            text: "<ButtonIcon>"
+                                        }
 
-                                    height: Fit,
-                                    // Element assumes the height of its children.
+                                        <ButtonGradientX> { text: "<ButtonGradientX>" }
+                                        <ButtonGradientX> {
+                                            draw_bg: {
+                                                border_radius: 1.0,
+                                                border_radius: 4.0
 
-                                    width: Fill,
-                                    // Element assumes the width of its children.
+                                                color_1: #C00
+                                                color_1_hover: #F0F
+                                                color_1_down: #800
 
-                                    margin: 5.0
-                                    padding: { top: 3.0, right: 6.0, bottom: 3.0, left: 6.0 },
-                                    // Individual space between the element's border and its content
-                                    // for top and left.
+                                                color_2: #0CC
+                                                color_2_hover: #0FF
+                                                color_2_down: #088
 
-                                    flow: Right,
-                                    // Stacks children from left to right.
+                                                border_color_1: #C
+                                                border_color_1_hover: #F
+                                                border_color_1_down: #0
 
-                                    spacing: 5.0,
-                                    // A spacing of 10.0 between children.
+                                                border_color_2: #3
+                                                border_color_2_hover: #6
+                                                border_color_2_down: #8
 
-                                    align: { x: 0.5, y: 0.5 },
-                                    // Positions children at the left (x) bottom (y) corner of the parent.
+                                            }
+                                            text: "<ButtonGradientX>"
+                                        }
+
+                                        <ButtonGradientY> { text: "<ButtonGradientY>" }
+                                        <ButtonGradientY> {
+                                            draw_bg: {
+                                                border_radius: 1.0,
+                                                border_radius: 4.0
+
+                                                color_1: #C00
+                                                color_1_hover: #F0F
+                                                color_1_down: #800
+
+                                                color_2: #0CC
+                                                color_2_hover: #0FF
+                                                color_2_down: #088
+
+                                                border_color_1: #C
+                                                border_color_1_hover: #F
+                                                border_color_1_down: #0
+
+                                                border_color_2: #3
+                                                border_color_2_hover: #6
+                                                border_color_2_down: #8
+
+                                            }
+                                            text: "<ButtonGradientY>"
+                                        }
+
+                                        <ButtonFlat> {
+                                            draw_icon: {
+                                                color: #f00,
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                            }
+                                            text: "<ButtonFlat>"
+                                        }
+
+                                        <ButtonFlat> {
+                                            flow: Down,
+                                            icon_walk: { width: 15. }
+                                            draw_icon: {
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                            }
+                                            text: "<ButtonFlat> (Vertical)"
+                                        }
+
+                                        <ButtonFlatter> {
+                                            draw_icon: {
+                                                color: #f00,
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                            }
+                                            text: "<ButtonFlatter>"
+                                        }
+
+                                        styledbutton = <Button> {
+                                        // Allows instantiation of customly styled elements as i.e. <MyButton> {}.
+
+                                            // BUTTON SPECIFIC PROPERTIES
+
+                                            draw_bg: { // Shader object that draws the bg.
+                                                    fn pixel(self) -> vec4 {
+                                                    return mix( // State transition animations.
+                                                        mix(
+                                                            #800,
+                                                            mix(#800, #f, 0.5),
+                                                            self.hover
+                                                        ),
+                                                        #00f,
+                                                        self.down
+                                                    )
+                                                }
+                                            },
+
+                                            draw_icon: { // Shader object that draws the icon.
+                                                svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                                                // Icon file dependency.
+
+                                                fn get_color(self) -> vec4 { // Overwrite the shader's fill method.
+                                                    return mix( // State transition animations.
+                                                        mix(
+                                                            #f0f,
+                                                            #fff,
+                                                            self.hover
+                                                        ),
+                                                        #000,
+                                                        self.down
+                                                    )
+                                                }
+                                            }
+
+                                            grab_key_focus: true, // Keyboard gets focus when clicked.
+
+                                            icon_walk: {
+                                                margin: 10.,
+                                                width: 16.,
+                                                height: Fit
+                                            }
+
+                                            label_walk: {
+                                                margin: 0.,
+                                                width: Fit,
+                                                height: Fit,
+                                            }
+
+                                            text: "Freely Styled <Button> clicked: 0", // Text label.
+
+                                            animator: { // State change triggered animations.
+                                                hover = { // State
+                                                    default: off // The state's starting point.
+                                                    off = { // Behavior when the animation is started to the off-state
+                                                        from: { // Behavior depending on the prior states
+                                                            all: Forward {duration: 0.1}, // Default animation direction and speed in secs.
+                                                            down: Forward {duration: 0.25} // Direction and speed for 'pressed' in secs.
+                                                        }
+                                                        apply: { // Shader methods to animate
+                                                            draw_bg: { down: 0.0, hover: 0.0 } // Timeline target positions for the given states.
+                                                            draw_icon: { down: 0.0, hover: 0.0 }
+                                                            draw_text: { down: 0.0, hover: 0.0 }
+                                                        }
+                                                    }
+
+                                                    on = { // Behavior when the animation is started to the on-state
+                                                        from: {
+                                                            all: Forward {duration: 0.1},
+                                                            pressed: Forward {duration: 0.5}
+                                                        }
+                                                        apply: {
+                                                            draw_bg: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
+                                                            // pressed: 'pressed' timeline target position
+                                                            // hover, time: Normalized timeline from 0.0 - 1.0. 'duration' then determines the actual playback duration of this animation in seconds.
+                                                            // hover, value: target timeline position
+                                                            draw_icon: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
+                                                            draw_text: { down: 0.0, hover: [{time: 0.0, value: 1.0}] }
+                                                        }
+                                                    }
+                                        
+                                                    pressed = { // Behavior when the animation is started to the pressed-state
+                                                        from: {all: Forward {duration: 0.2}}
+                                                        apply: {
+                                                            draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0}, 
+                                                            draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0},
+                                                            draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0}
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // LAYOUT PROPERTIES
+
+                                            height: Fit,
+                                            // Element assumes the height of its children.
+
+                                            width: Fill,
+                                            // Element assumes the width of its children.
+
+                                            margin: 5.0
+                                            padding: { top: 3.0, right: 6.0, bottom: 3.0, left: 6.0 },
+                                            // Individual space between the element's border and its content
+                                            // for top and left.
+
+                                            flow: Right,
+                                            // Stacks children from left to right.
+
+                                            spacing: 5.0,
+                                            // A spacing of 10.0 between children.
+
+                                            align: { x: 0.5, y: 0.5 },
+                                            // Positions children at the left (x) bottom (y) corner of the parent.
+                                        }
                                 }
+                            }
                         }
 
                         TabTextInput = <UIZooTab> {
@@ -2561,7 +2593,7 @@
         fn live_register(cx: &mut Cx) {
             crate::makepad_widgets::live_design(cx);
             crate::demofiletree::live_design(cx);
-        }
+          }
     }
 
 
