@@ -8,13 +8,19 @@ live_design! {
 
 // maybe we should put an enum on the bools like
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, Clone, Copy)]
 #[live_ignore]
 pub enum ViewOptimize {
     #[pick]
     None,
     DrawList,
     Texture,
+}
+
+impl Default for ViewOptimize {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 #[derive(Live)]
