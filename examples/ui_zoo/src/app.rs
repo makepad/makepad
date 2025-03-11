@@ -407,7 +407,7 @@
                         TabLayoutDemos = <UIZooTab> {
                             <UIZooTabLayout_A> {
                                 desc = {
-                                    <H3> { text: "<XXX>"}
+                                    <H3> { text: "LayoutDemos"}
                                 }
                                 demos = {
                                 }
@@ -1778,7 +1778,7 @@
                             TabButton = <UIZooTab> {
                                 <UIZooTabLayout_A> {
                                     desc = {
-                                        <H3> { text: "<XXX>"}
+                                        <H3> { text: "<Button>"}
                                     }
                                     demos = {
                                 
