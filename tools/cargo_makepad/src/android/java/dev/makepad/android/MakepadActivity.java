@@ -31,6 +31,7 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -68,10 +69,16 @@ class MakepadSurface
         SurfaceHolder.Callback
 {
 
-    // The X,Y coordinates and pointer ID of the most recent touch-down event.
+    // The X,Y coordinates and pointer ID of the most recent ACTION_DOWN touch.
+    private float latestDownTouchX;
+    private float latestDownTouchY;
+    private int latestDownTouchPointerId;
+
+    // The X,Y coordinates and pointer ID of the most recent non-ACTION_DOWN touch event.
     private float latestTouchX;
     private float latestTouchY;
     private int latestTouchPointerId;
+
 
     public MakepadSurface(Context context){
         super(context);
@@ -116,25 +123,74 @@ class MakepadSurface
 
     @Override
     public boolean onTouch(View view, MotionEvent event) {
+        // By default, we return false so that `onLongClick` will trigger.
+        boolean retval = false;
+
+        int actionMasked = event.getActionMasked();
+        int index = event.getActionIndex();
+        int pointerId = event.getPointerId(index);
+
         // Save the details of the latest touch-down event,
         // such that we can use them in the `onLongClick` method.
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            int index = event.getActionIndex();
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
+            latestDownTouchX = event.getX(index);
+            latestDownTouchY = event.getY(index);
+            latestDownTouchPointerId = pointerId;
+            latestTouchPointerId = -1; // invalidate the previous latestTouchX/Y values.
+        }
+        else if (actionMasked == MotionEvent.ACTION_MOVE) {
             latestTouchX = event.getX(index);
             latestTouchY = event.getY(index);
-            latestTouchPointerId = event.getPointerId(index);
+            latestTouchPointerId = pointerId;
+            if (pointerId == latestDownTouchPointerId) {
+                if (isTouchBeyondSlopDistance(view)) {
+                    retval = true;
+                }
+            }
         }
 
         MakepadNative.surfaceOnTouch(event);
-        // return false so that `onLongClick` will trigger.
-        return false;
+        return retval;
     }
 
     @Override
     public boolean onLongClick(View view) {
         long timeMillis = SystemClock.uptimeMillis();
-        MakepadNative.surfaceOnLongClick(latestTouchX, latestTouchY, latestTouchPointerId, timeMillis);
+
+        // If the touch has moved more than the touch slop, ignore this long click.
+        if (isTouchBeyondSlopDistance(view)) {
+            // Returning false here indicates that we have not handled the long click event,
+            // which does *not* trigger the haptic feedback (vibration motor) to buzz.
+            return false;
+        }
+
+        // Here: a valid long click did occur, and we sholud send that event to makepad.
+
+        // Use the latest touch coordinates if they're the same pointer ID as the initial down touch.
+        if (latestTouchPointerId == latestDownTouchPointerId) {
+            MakepadNative.surfaceOnLongClick(latestTouchX, latestTouchY, latestDownTouchPointerId, timeMillis);
+        }
+        // Otherwise, use the coordinates from the original down touch.
+        else {
+            MakepadNative.surfaceOnLongClick(latestDownTouchX, latestDownTouchY, latestDownTouchPointerId, timeMillis);
+        }
+
+        // Returning true here indicates that we have handled the long click event,
+        // which triggers the haptic feedback (vibration motor) to buzz.
         return true;
+    }
+
+    // Returns true if the distance from the latest touch event to the prior down-touch event
+    // is greated than the touch slop distance.
+    //
+    // If true, this indicates that the touch event shouldn't be considered a press/tap,
+    // and is likely a drag or swipe.
+    private boolean isTouchBeyondSlopDistance(View view) {
+        int touchSlop = ViewConfiguration.get(view.getContext()).getScaledTouchSlop();
+        float deltaX = latestTouchX - latestDownTouchX;
+        float deltaY = latestTouchY - latestDownTouchY;
+        double dist = Math.sqrt((deltaX * deltaX) + (deltaY * deltaY));
+        return dist > touchSlop;
     }
 
     @Override
