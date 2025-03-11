@@ -16,21 +16,41 @@ live_design!{
     
     pub TabBarBase = {{TabBar}} {}
     pub TabBar = <TabBarBase> {
-        CloseableTab = <TabGradientY> {closeable:true}
-        PermanentTab = <TabGradientY> {closeable:false}
+        CloseableTab = <Tab> {closeable: true}
+        PermanentTab = <Tab> {closeable: false}
+
+        width: Fill, height: (THEME_TAB_HEIGHT)
+        margin: 0.
 
         draw_drag: {
             draw_depth: 10
             color: (THEME_COLOR_BG_CONTAINER)
         }
 
-        draw_fill: {
-            color: (THEME_COLOR_D_1)
-        }
-        
-        width: Fill, height: (THEME_TAB_HEIGHT)
+        draw_bg: {
+            uniform color_dither: 1.0
+            color: (THEME_COLOR_BG_APP * 0.8);
 
-        margin: { top: 0.5, right: 0.5, bottom: 0.0, left: 0.5 }
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    1.0
+                )
+
+                sdf.fill(self.color);
+                return sdf.result
+            }
+        }
+
+        draw_fill: {
+            color: ((THEME_COLOR_BG_APP))
+        }
         
         scroll_bars: <ScrollBarsTabs> {
             show_scroll_x: true
@@ -43,10 +63,62 @@ live_design!{
         }
     }
     
-    pub TabBarMinimal = <TabBar> {
-        tab: <TabMinimal> {}
-        draw_fill: { color: (THEME_COLOR_U_HIDDEN) }
+
+    pub TabBarGradientX = <TabBar> {
+        CloseableTab = <TabGradientX> {closeable: true}
+        PermanentTab = <TabGradientX> {closeable: false}
+
+        draw_bg: {
+            uniform color_dither: 1.0
+            uniform color_1: (THEME_COLOR_BG_APP * 0.8);
+            uniform color_2: (THEME_COLOR_BG_APP * 1.2);
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    1.0
+                )
+
+                sdf.fill(mix(self.color_1, self.color_2, self.pos.x + dither));
+
+                return sdf.result
+            }
+        }
     }
+
+    pub TabBarGradientY = <TabBar> {
+        CloseableTab = <TabGradientY> {closeable: true}
+        PermanentTab = <TabGradientY> {closeable: false}
+        draw_bg: {
+            uniform color_dither: 1.0
+            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
+            uniform color_2: #1;
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 1.5,
+                    self.rect_size.y - 1.5,
+                    1.0
+                )
+
+                sdf.fill(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));
+
+                return sdf.result
+            }
+        }
+    }
+
 }
 
 #[derive(Live, Widget)]
@@ -55,11 +127,11 @@ pub struct TabBar {
     #[redraw] #[live] scroll_bars: ScrollBars,
     #[live] draw_drag: DrawColor,
 
+    #[live] draw_bg: DrawColor,
     #[live] draw_fill: DrawColor,
     #[walk] walk: Walk,
     
     #[rust] draw_state: DrawStateWrap<()>,
-    
     #[rust] view_area: Area,
 
     #[rust] tab_order: Vec<LiveId>,
@@ -191,6 +263,7 @@ impl TabBar {
         //    self.active_tab_id = None
         // }
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
         self.tab_order.clear();
     }
     

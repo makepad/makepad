@@ -17,7 +17,7 @@ live_design!{
         
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { }
-        margin: {right: -1.5}
+        margin: {right: 0., top: 5.}
         
         close_button: <TabCloseButton> {}
         draw_name: {
@@ -50,12 +50,12 @@ live_design!{
             uniform border_radius: (THEME_CORNER_RADIUS)
             uniform color_dither: 1.
 
-            uniform color: (THEME_COLOR_BG_APP * 0.8)
-            uniform color_hover: (THEME_COLOR_BG_APP * 0.8)
+            uniform color: (THEME_COLOR_D_HIDDEN)
+            uniform color_hover: (THEME_COLOR_D_2)
             uniform color_active: (THEME_COLOR_BG_APP)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform border_color_2: (THEME_COLOR_D_HIDDEN)
@@ -66,13 +66,15 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 1,
-                    self.rect_size.y + 10.,
-                    mix(1., self.border_radius, self.active)
+                sdf.box_y(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y - 1.,
+                    self.border_radius,
+                    0.5
                 )
+
                 sdf.fill_keep(mix(
                         mix(self.color, self.color_hover, self.hover),
                         self.color_active,
@@ -91,7 +93,6 @@ live_design!{
                         self.active
                     ), self.border_size
                 )
-
 
                 return sdf.result
             }
@@ -143,30 +144,48 @@ live_design!{
 
     pub TabGradientX = <Tab> {
         draw_bg: {
-            uniform color_1: (THEME_COLOR_BG_APP * 0.8)
-            uniform color_1_hover: (THEME_COLOR_BG_APP * 0.8)
+            instance hover: float
+            instance active: float
+
+            uniform border_size: 1.
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform color_dither: 1.
+
+            uniform color_1: (THEME_COLOR_D_HIDDEN)
+            uniform color_1_hover: (THEME_COLOR_D_2)
             uniform color_1_active: (THEME_COLOR_BG_APP)
-            
-            uniform color_2: (THEME_COLOR_BG_APP)
-            uniform color_2_hover: (THEME_COLOR_BG_APP * 0.8)
+
+            uniform color_2: (THEME_COLOR_D_HIDDEN)
+            uniform color_2_hover: (THEME_COLOR_D_2)
             uniform color_2_active: (THEME_COLOR_BG_APP)
 
+            uniform border_color_1: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform border_color_2: (THEME_COLOR_D_HIDDEN)
+            uniform border_color_2_hover: (THEME_COLOR_D_HIDDEN)
+            uniform border_color_2_active: (THEME_COLOR_D_HIDDEN)
+              
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 1,
-                    self.rect_size.y + 10.,
-                    mix(1., self.border_radius, self.active)
+                sdf.box_y(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y - 1.,
+                    self.border_radius,
+                    0.5
                 )
+
                 sdf.fill_keep(mix(
                         mix(
                             mix(self.color_1, self.color_2, self.pos.x + dither),
                             mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
-                            self.hover),
+                            self.hover
+                        ),
                         mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
                         self.active
                     )
@@ -184,7 +203,6 @@ live_design!{
                     ), self.border_size
                 )
 
-
                 return sdf.result
             }
         }
@@ -192,14 +210,19 @@ live_design!{
 
     pub TabGradientY = <Tab> {
         draw_bg: {
-            // border_radius: 1.
+            instance hover: float
+            instance active: float
 
-            uniform color_1: (THEME_COLOR_BG_APP)
-            uniform color_1_hover: (THEME_COLOR_BG_APP * 1.1)
+            uniform border_size: 1.
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform color_dither: 1.
+
+            uniform color_1: (THEME_COLOR_D_HIDDEN)
+            uniform color_1_hover: (THEME_COLOR_D_2)
             uniform color_1_active: (THEME_COLOR_BG_APP)
-            
-            uniform color_2: (#3)
-            uniform color_2_hover: (THEME_COLOR_BG_APP)
+
+            uniform color_2: (THEME_COLOR_D_HIDDEN)
+            uniform color_2_hover: (THEME_COLOR_D_2)
             uniform color_2_active: (THEME_COLOR_BG_APP)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
@@ -214,19 +237,22 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 1,
-                    self.rect_size.y + 10.,
-                    self.border_radius
-                    // mix(1., self.border_radius, self.active)
+                sdf.box_y(
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius,
+                    0.5
                 )
-                sdf.fill_keep(mix(
+
+                sdf.fill_keep(
+                    mix(
                         mix(
-                            mix(self.color_1, self.color_2, pow(self.pos.y, 5.) + dither),
-                            mix(self.color_1_hover, self.color_2_hover, pow(self.pos.y, 5.) + dither),
-                            self.hover),
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
                         mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
                         self.active
                     )
@@ -243,7 +269,6 @@ live_design!{
                         self.active
                     ), self.border_size
                 )
-
 
                 return sdf.result
             }
