@@ -108,7 +108,6 @@
 
                         tab_set_2 = Tabs {
                             tabs: [
-                                tTests,
                                 tOverview,
                                 tLayoutDemos,
                                 tButton,
@@ -137,7 +136,6 @@
                             selected: 0
                         }
 
-                        tTests = Tab { name: "Tests", template: CloseableTab, kind: TabTests }
                         tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
@@ -162,12 +160,15 @@
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
 
-
-                        TabTests = <UIZooTab> {
-
+                        TabOverview = <UIZooTab> {
+                            spacing: (THEME_SPACE_2)
+                            padding: <THEME_MSPACE_2> {}
                             <View> {
+                                padding: <THEME_MSPACE_2> {}
+                                spacing: (THEME_SPACE_2)
                                 flow: Right,
                                 height: Fit,
+
                                 <P> { text: "TestLabel", width: Fit}
                                 <LinkLabel> { text: "TestButton", width: Fit}
                                 <FoldButton> {
@@ -184,24 +185,9 @@
                                 <Slider> { text: "TestButton"}
                                 <SliderBig> { text: "TestButton"}
                             }
-                            <Hr> {}
-                            <H3> { text: "Missing"}
-                            <Label> { text: "FoldHeader > Requires Rust code?" }
-                            <Label> { text: "NavControl > OS level widget that's not suitable for UI zoo?" }
-                            <Label> { text: "ImageBlend > Requires Rust code?" }
-                            <Label> { text: "PortalList > not suited for UI Zoo?" }
-                            <Label> { text: "Splitter > Can docks be nested to show this?" }
-                            <Label> { text: "StackNavigation > not suited for UI Zoo?" }
-                            <Label> { text: "SidePanel > Investigate Robrix / Moly for examples." }
-                            <Label> { text: "TextFlow > Not a widget in that sense that would need to be part of UI Zoo or that needs to be styled? Is this rather a helper widget for HTML, Markdown and LogList?" }
-                            <Label> { text: "TogglePanel > at least the example in experiments/toggle_panel_overlay seems to be broken" }
-                            <Label> { text: "ColorPicker > broken?" }
-                            <Label> { text: "Tooltip > Investigate Robrix / Moly for examples." }
-                            <Label> { text: "VectorLine > example in experiments appears to be broken" }
-                            <Label> { text: "VectorSpline > example in experiments appears to be broken" }
-                        }
 
-                        TabOverview = <UIZooTab> {
+                            <Hr> {}
+
                             <View> {
                                 flow: Right,
                                 spacing: (THEME_SPACE_2)
@@ -496,7 +482,7 @@
                         TabDropDown = <UIZooTab> {
                             <UIZooTabLayout_A> {
                                 desc = {
-                                    <H3> { text: "<CommandTextInput>"}
+                                    <H3> { text: "<DropDown>"}
                                 }
                                 demos = {
                                     dropdown = <DropDown> {
@@ -2596,7 +2582,7 @@
                         TabHTML = <UIZooTab> {
                             <UIZooTabLayout_A> {
                                 desc = {
-                                    <H3> { text: "<FoldButton>"}
+                                    <H3> { text: "<Html>"}
                                 }
                                 demos = {
                                     <Html> {
