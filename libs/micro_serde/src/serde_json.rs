@@ -459,6 +459,20 @@ impl DeJsonState {
                             '\0'=>{
                                 return Err(self.err_parse("string"));
                             },
+                            'u'=>{ // 4 digit hex unicode following
+                                fn hex_char_to_u8(byte:char)->u8{
+                                    if byte >= '0' && byte <= '9' {byte as u8 - '0' as u8}
+                                    else if byte >= 'a' && byte <='f' {byte as u8 - 'a' as u8 + 10}
+                                    else if byte >= 'A' && byte <='F' {byte as u8 - 'A' as u8 + 10}
+                                    else{0}    
+                                }
+                                let mut a = 0;
+                                self.next(i);a |= (hex_char_to_u8(self.cur) as u32) << 12;
+                                self.next(i);a |= (hex_char_to_u8(self.cur) as u32) << 8;
+                                self.next(i);a |= (hex_char_to_u8(self.cur) as u32) << 4;
+                                self.next(i);a |= (hex_char_to_u8(self.cur) as u32) << 0;
+                                self.strbuf.push(std::char::from_u32(a).unwrap_or('?'));
+                            }
                             _=>self.strbuf.push(self.cur)
                         }
                         self.next(i);

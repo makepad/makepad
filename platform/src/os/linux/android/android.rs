@@ -1,5 +1,7 @@
 #[allow(unused)]
 use makepad_jni_sys as jni_sys;
+use crate::event::LongPressEvent;
+
 use {
     std::rc::Rc,
     std::cell::{RefCell},
@@ -169,6 +171,15 @@ impl Cx {
                 self.redraw_all();
                 self.os.first_after_resize = true;
                 self.call_event_handler(&Event::ClearAtlasses);
+            }
+            FromJavaMessage::LongClick { x, y, pointer_id, time } => {
+                let e = Event::LongPress(LongPressEvent {
+                    abs: DVec2 { x, y },
+                    uid: pointer_id,
+                    window_id: CxWindowPool::id_zero(),
+                    time,
+                });
+                self.call_event_handler(&e);
             }
             FromJavaMessage::Touch(mut touches) => {
                 let time = touches[0].time;
