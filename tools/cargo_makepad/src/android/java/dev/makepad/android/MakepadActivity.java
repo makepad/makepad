@@ -31,6 +31,7 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -68,10 +69,16 @@ class MakepadSurface
         SurfaceHolder.Callback
 {
 
-    // The X,Y coordinates and pointer ID of the most recent touch-down event.
+    // The X,Y coordinates and pointer ID of the most recent ACTION_DOWN touch.
+    private float latestDownTouchX;
+    private float latestDownTouchY;
+    private int latestDownTouchPointerId;
+
+    // The X,Y coordinates and pointer ID of the most recent non-ACTION_DOWN touch event.
     private float latestTouchX;
     private float latestTouchY;
     private int latestTouchPointerId;
+
 
     public MakepadSurface(Context context){
         super(context);
@@ -116,24 +123,73 @@ class MakepadSurface
 
     @Override
     public boolean onTouch(View view, MotionEvent event) {
+        // By default, we return false so that `onLongClick` will trigger.
+        boolean retval = false;
+
+        int actionMasked = event.getActionMasked();
+        int index = event.getActionIndex();
+        int pointerId = event.getPointerId(index);
+
         // Save the details of the latest touch-down event,
         // such that we can use them in the `onLongClick` method.
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            int index = event.getActionIndex();
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
+            latestDownTouchX = event.getX(index);
+            latestDownTouchY = event.getY(index);
+            latestDownTouchPointerId = pointerId;
+            latestTouchPointerId = -1; // invalidate the previous latestTouchX/Y values.
+        }
+        else if (actionMasked == MotionEvent.ACTION_MOVE) {
             latestTouchX = event.getX(index);
             latestTouchY = event.getY(index);
-            latestTouchPointerId = event.getPointerId(index);
+            latestTouchPointerId = pointerId;
+            Log.i("Makepad", "onTouch MOVE: (" + latestTouchX + ", " + latestTouchY + ")");
+            if (pointerId == latestDownTouchPointerId) {
+                // int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+                int touchSlop = 8; // 8 pixels TODO FIX THIS
+                // If the touch has moved more than the touch slop, disable long click
+                float deltaX = latestTouchX - latestDownTouchX;
+                float deltaY = latestTouchY - latestDownTouchY;
+                double dist = Math.sqrt((deltaX * deltaX) + (deltaY * deltaY));
+                if (dist > touchSlop) {
+                    retval = true;
+                }
+            }
         }
 
         MakepadNative.surfaceOnTouch(event);
-        // return false so that `onLongClick` will trigger.
-        return false;
+        return retval;
     }
 
     @Override
     public boolean onLongClick(View view) {
         long timeMillis = SystemClock.uptimeMillis();
-        MakepadNative.surfaceOnLongClick(latestTouchX, latestTouchY, latestTouchPointerId, timeMillis);
+
+        // int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+        int touchSlop = 8; // 8 pixels TODO FIX THIS
+
+        // If the touch has moved more than the touch slop, ignore this long click.
+        float deltaX = latestTouchX - latestDownTouchX;
+        float deltaY = latestTouchY - latestDownTouchY;
+        double dist = Math.sqrt((deltaX * deltaX) + (deltaY * deltaY));
+        Log.i("Makepad", "onLongClick: " + dist + ", touch slop: " + touchSlop);
+        if (dist > touchSlop) {
+            Log.i("Makepad", "onLongClick: returning false, not delivering longPress to makepad.");
+            // Returning false here indicates that we have not handled the long click event,
+            // which does *not* trigger the haptic feedback (vibration motor) to buzz.
+            return false;
+        }
+
+        // Use the latest touch coordinates if they're the same pointer ID as the initial down touch.
+        if (latestTouchPointerId == latestDownTouchPointerId) {
+            MakepadNative.surfaceOnLongClick(latestTouchX, latestTouchY, latestDownTouchPointerId, timeMillis);
+        }
+        // Otherwise, use the coordinates from the original down touch.
+        else {
+            MakepadNative.surfaceOnLongClick(latestDownTouchX, latestDownTouchY, latestDownTouchPointerId, timeMillis);
+        }
+
+        // Returning true here indicates that we have handled the long click event,
+        // which triggers the haptic feedback (vibration motor) to buzz.
         return true;
     }
 
