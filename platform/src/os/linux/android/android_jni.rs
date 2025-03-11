@@ -42,6 +42,13 @@ pub enum FromJavaMessage {
     },
     SurfaceDestroyed,
     RenderLoop,
+    LongClick {
+        x: f64,
+        y: f64,
+        pointer_id: u64,
+        // The SystemClock time (in seconds) when the LongClick occurred.
+        time: f64,
+    },
     Touch(Vec<TouchPoint>),
     Character {
         character: u32,
@@ -365,6 +372,22 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceChanged(
     });
 }
 
+#[no_mangle]
+pub extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnLongClick(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    x: jni_sys::jfloat,
+    y: jni_sys::jfloat,
+    pointer_id: jni_sys::jint,
+    time_millis: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::LongClick {
+        x: x as f64,
+        y: y as f64,
+        pointer_id: pointer_id as u64,
+        time: time_millis as f64 / 1000.0,
+    });
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
@@ -377,7 +400,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     let touch_count = unsafe {ndk_utils::call_int_method!(env, event, "getPointerCount", "()I")};
 
     let time = unsafe {ndk_utils::call_long_method!(env, event, "getEventTime", "()J")} as i64;
-
+    
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
         let id = unsafe {ndk_utils::call_int_method!(env, event, "getPointerId", "(I)I", touch_index)};
