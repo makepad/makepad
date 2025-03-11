@@ -142,15 +142,8 @@ class MakepadSurface
             latestTouchX = event.getX(index);
             latestTouchY = event.getY(index);
             latestTouchPointerId = pointerId;
-            Log.i("Makepad", "onTouch MOVE: (" + latestTouchX + ", " + latestTouchY + ")");
             if (pointerId == latestDownTouchPointerId) {
-                // int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
-                int touchSlop = 8; // 8 pixels TODO FIX THIS
-                // If the touch has moved more than the touch slop, disable long click
-                float deltaX = latestTouchX - latestDownTouchX;
-                float deltaY = latestTouchY - latestDownTouchY;
-                double dist = Math.sqrt((deltaX * deltaX) + (deltaY * deltaY));
-                if (dist > touchSlop) {
+                if (isTouchBeyondSlopDistance(view)) {
                     retval = true;
                 }
             }
@@ -164,20 +157,14 @@ class MakepadSurface
     public boolean onLongClick(View view) {
         long timeMillis = SystemClock.uptimeMillis();
 
-        // int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
-        int touchSlop = 8; // 8 pixels TODO FIX THIS
-
         // If the touch has moved more than the touch slop, ignore this long click.
-        float deltaX = latestTouchX - latestDownTouchX;
-        float deltaY = latestTouchY - latestDownTouchY;
-        double dist = Math.sqrt((deltaX * deltaX) + (deltaY * deltaY));
-        Log.i("Makepad", "onLongClick: " + dist + ", touch slop: " + touchSlop);
-        if (dist > touchSlop) {
-            Log.i("Makepad", "onLongClick: returning false, not delivering longPress to makepad.");
+        if (isTouchBeyondSlopDistance(view)) {
             // Returning false here indicates that we have not handled the long click event,
             // which does *not* trigger the haptic feedback (vibration motor) to buzz.
             return false;
         }
+
+        // Here: a valid long click did occur, and we sholud send that event to makepad.
 
         // Use the latest touch coordinates if they're the same pointer ID as the initial down touch.
         if (latestTouchPointerId == latestDownTouchPointerId) {
@@ -191,6 +178,19 @@ class MakepadSurface
         // Returning true here indicates that we have handled the long click event,
         // which triggers the haptic feedback (vibration motor) to buzz.
         return true;
+    }
+
+    // Returns true if the distance from the latest touch event to the prior down-touch event
+    // is greated than the touch slop distance.
+    //
+    // If true, this indicates that the touch event shouldn't be considered a press/tap,
+    // and is likely a drag or swipe.
+    private boolean isTouchBeyondSlopDistance(View view) {
+        int touchSlop = ViewConfiguration.get(view.getContext()).getScaledTouchSlop();
+        float deltaX = latestTouchX - latestDownTouchX;
+        float deltaY = latestTouchY - latestDownTouchY;
+        double dist = Math.sqrt((deltaX * deltaX) + (deltaY * deltaY));
+        return dist > touchSlop;
     }
 
     @Override
