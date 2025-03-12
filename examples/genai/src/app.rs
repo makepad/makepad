@@ -136,6 +136,7 @@ pub const DMXOUTPUT_HEADER: [u8;18] = [
     0   // buffer lo
 ];
 
+#[allow(unused)]
 #[derive(Debug, Clone, PartialEq)]
 enum HueLight{
     Switch{on: bool},
@@ -590,7 +591,7 @@ impl App {
         let broadcast_addr = "255.255.255.255:6454";
         socket.set_broadcast(true).unwrap();
         socket.set_read_timeout(Some(Duration::from_nanos(1))).unwrap();
-        let mut buffer = [0u8; 2048];
+        //let mut _buffer = [0u8; 2048];
         
         #[derive(Debug,Default,SerRon, DeRon)]
         struct State{ 
@@ -628,7 +629,7 @@ impl App {
                 }
                 None
             }
-            fn delta(old:&Buttons, new:&Buttons)->Self{
+            fn _delta(old:&Buttons, new:&Buttons)->Self{
                 //let mut mute = [false;8];
                 //let mut rec = [false;8];
                 let mut preset = [false;13];
@@ -663,7 +664,7 @@ impl App {
             let mut universe = [0u8;DMXOUTPUT_HEADER.len() + 512];
                         
             let mut new_buttons = Buttons::default();
-            let mut old_buttons = Buttons::default();
+            ///let mut old_buttons = Buttons::default();
             
             fn map_color(val:f32, fade:f32)->Vec4{
                 let colors = ["fff", "ff7", "f00","ff0","0f0","0ff","00f","f0f"];
@@ -688,7 +689,7 @@ impl App {
                 }
             }
             
-            fn hue_wargb(sender: &mut ToUISender<(usize, HueLight)>,val:f32, fade:f32, hueids: &[usize]){
+            fn _hue_wargb(sender: &mut ToUISender<(usize, HueLight)>,val:f32, fade:f32, hueids: &[usize]){
                 let c = map_color(val, fade);
                 let c = c.to_hsva();
                 for id in hueids{
@@ -841,8 +842,8 @@ impl App {
                     }
                     //log!("{:?}",data.decode());
                 }
-                let buttons = Buttons::delta(&old_buttons,&new_buttons);
-                old_buttons = new_buttons.clone();
+                //let buttons = Buttons::delta(&old_buttons,&new_buttons);
+                //old_buttons = new_buttons.clone();
                 universe[12] = counter as u8;
                 if counter > 255{ counter = 0}
                 clock += 1.0/44.0;
