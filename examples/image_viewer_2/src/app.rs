@@ -39,12 +39,20 @@ live_design! {
             <Window> {
                 body = <View> {
                     <ImageGrid> {}
+=======
+    App = {{App}} {
+        ui: <Root> {
+            main_window = <Window> {
+                body = <View> {
+                    <ImagePlaceholder> {}
+>>>>>>> 45b54fd9b (Image viewer example 2 (WIP))
                 }
             }
         }
     }
 }
 
+<<<<<<< HEAD
 #[derive(Live, LiveHook, Widget)]
 pub struct ImageRow {
     #[deref] view: View,
@@ -93,6 +101,8 @@ impl Widget for ImageGrid {
     }
 }
 
+=======
+>>>>>>> 45b54fd9b (Image viewer example 2 (WIP))
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
