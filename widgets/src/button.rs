@@ -313,7 +313,9 @@ live_design! {
 ///
 /// The sequence of actions emitted by a button is as follows:
 /// 1. `ButtonAction::Pressed` when the button is pressed.
-/// 2. Then, either one of the following, but not both:
+/// 2. `ButtonAction::LongPressed` when the button has been pressed for a long time.
+///    * This only occurs on platforms that support a *native* long press, e.g., mobile.
+/// 3. Then, either one of the following, but not both:
 ///    * `ButtonAction::Clicked` when the mouse/finger is lifted up while over the button area.
 ///    * `ButtonAction::Released` when the mouse/finger is lifted up while *not* over the button area.
 #[derive(Clone, Debug, DefaultNone)]
@@ -321,6 +323,8 @@ pub enum ButtonAction {
     None,
     /// The button was pressed (a "down" event).
     Pressed(KeyModifiers),
+    /// The button was pressed for a long time (only occurs on mobile platforms).
+    LongPressed,
     /// The button was clicked (an "up" event).
     Clicked(KeyModifiers),
     /// The button was released (an "up" event), but should not be considered clicked
@@ -409,8 +413,11 @@ impl Widget for Button {
                 Hit::FingerHoverOut(_) if self.enabled => {
                     self.animator_play(cx, id!(hover.off));
                 }
+                Hit::FingerLongPress(_lp) if self.enabled => {
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
+                }
                 Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
-                    if fe.is_over {
+                    if fe.is_over && fe.was_tap() {
                         cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                         if self.reset_hover_on_click {
                             self.animator_cut(cx, id!(hover.off));
@@ -476,6 +483,17 @@ impl Button {
         self.pressed_modifiers(actions).is_some()
     }
 
+    /// Returns `true` if this button was long-pressed on.
+    ///
+    /// Note that this does not mean the button has been released yet.
+    /// See [`ButtonAction`] for more details.
+    pub fn long_pressed(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).cast_ref(),
+            ButtonAction::LongPressed,
+        )
+    }
+
     /// Returns `true` if this button was released, which is *not* considered to be clicked.
     ///
     /// See [`ButtonAction`] for more details.
@@ -527,6 +545,11 @@ impl ButtonRef {
     /// See [`Button::pressed()`].
     pub fn pressed(&self, actions: &Actions) -> bool {
         self.borrow().is_some_and(|inner| inner.pressed(actions))
+    }
+
+    /// See [`Button::long_pressed()`].
+    pub fn long_pressed(&self, actions: &Actions) -> bool {
+        self.borrow().is_some_and(|inner| inner.long_pressed(actions))
     }
 
     /// See [`Button::released()`].
