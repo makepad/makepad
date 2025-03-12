@@ -310,27 +310,6 @@ impl Cx {
                         }
                     }
                 }
-                CxOsOp::FullscreenWindow(_window_id) => {
-                    todo!()
-                },
-                CxOsOp::NormalizeWindow(_window_id) => {
-                    todo!()
-                }
-                CxOsOp::SetTopmost(_window_id, _is_topmost) => {
-                    todo!()
-                }
-                CxOsOp::XrStartPresenting => {
-                    //todo!()
-                },
-                CxOsOp::XrStopPresenting => {
-                    //todo!()
-                },
-                CxOsOp::ShowTextIME(_area, _pos) => {
-                    //todo!()
-                }
-                CxOsOp::HideTextIME => {
-                    //todo!()
-                },
                 CxOsOp::SetCursor(cursor) => {
                     xlib_app.set_mouse_cursor(cursor);
                 },
@@ -340,30 +319,9 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     xlib_app.stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(_dragged_item) => {
-                },
-                CxOsOp::UpdateMacosMenu(_menu) => {
-                },
-                CxOsOp::HttpRequest{request_id:_, request:_} => {
-                    todo!()
-                },
-                CxOsOp::CancelHttpRequest {request_id:_} => {
-                    todo!();
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
-                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
-                CxOsOp::BeginVideoPlayback(_) => todo!(),
-                CxOsOp::PauseVideoPlayback(_) => todo!(),
-                CxOsOp::ResumeVideoPlayback(_) => todo!(),
-                CxOsOp::MuteVideoPlayback(_) => todo!(),
-                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
-                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
-                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
-
-                CxOsOp::SaveFileDialog(_) => todo!(),
-                CxOsOp::SelectFileDialog(_) => todo!(),
-                CxOsOp::SaveFolderDialog(_) => todo!(),
-                CxOsOp::SelectFolderDialog(_) => todo!(),
-                CxOsOp::ShowInDock(_) => todo!()
             }
         }
         ret

@@ -517,9 +517,6 @@ impl Cx {
                     };
                     window.is_created = true;
                 }
-                CxOsOp::SetCursor(_cursor) => {
-                    //xlib_app.set_mouse_cursor(cursor);
-                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,
@@ -549,7 +546,9 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     //unsafe {android_jni::to_java_show_keyboard(false);}
                 }
-                _ => (),
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
+                }
             }
         }
         EventFlow::Poll
