@@ -163,26 +163,29 @@ impl CodeSession {
         let mut new_folding_lines = HashSet::new();
         let fold_state = &mut *fold_state_ref;
         for &line in &fold_state.folding_lines {
-            layout.scale[line] *= 0.9;
-            if layout.scale[line] < 0.1 + 0.001 {
-                layout.scale[line] = 0.1;
-                fold_state.folded_lines.insert(line);
-            } else {
-                new_folding_lines.insert(line);
+            if let Some(scale) = layout.scale.get_mut(line){
+                *scale *= 0.9;
+                if *scale < 0.1 + 0.001 {
+                    *scale = 0.1;
+                    fold_state.folded_lines.insert(line);
+                } else {
+                    new_folding_lines.insert(line);
+                }
+                layout.y.truncate(line + 1);
             }
-            layout.y.truncate(line + 1);
         }
         fold_state.folding_lines = new_folding_lines;
         let mut new_unfolding_lines = HashSet::new();
         for &line in &fold_state_ref.unfolding_lines {
-            let scale = layout.scale[line];
-            layout.scale[line] = 1.0 - 0.9 * (1.0 - scale);
-            if layout.scale[line] > 1.0 - 0.001 {
-                layout.scale[line] = 1.0;
-            } else {
-                new_unfolding_lines.insert(line);
+            if let Some(scale) = layout.scale.get_mut(line){
+                *scale = 1.0 - 0.9 * (1.0 - *scale);
+                if *scale > 1.0 - 0.001 {
+                    *scale = 1.0;
+                } else {
+                    new_unfolding_lines.insert(line);
+                }
+                layout.y.truncate(line + 1);
             }
-            layout.y.truncate(line + 1);
         }
         fold_state_ref.unfolding_lines = new_unfolding_lines;
         drop(layout);
