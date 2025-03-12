@@ -51,7 +51,7 @@ workspace.members = [
     "libs/btree",
     "libs/btree_vec",
     "experiments/scroll",
-    "examples/img_viewer_1",
+    "examples/image_viewer_1",
 ]
 
 workspace.exclude = [
