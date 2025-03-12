@@ -88,7 +88,7 @@ pub struct App {
         Machine::new("10.0.0.113:8188", live_id!(m1)),
         Machine::new("10.0.0.127:8188", live_id!(m2)),
         Machine::new("10.0.0.107:8188", live_id!(m3)),
-        Machine::new("10.0.0.112:8188", live_id!(m4)),
+        Machine::new("10.0.0.114d:8188", live_id!(m4)),
         Machine::new("10.0.0.106:8188", live_id!(m7)),
         Machine::new("10.0.0.123:8188", live_id!(m8)),
         //Machine::new("192.168.8.231:8188", id_lut!(m1)),
@@ -867,10 +867,10 @@ impl App {
                 // KITCHEN STRIP (C) - 38
                 // DESK (B)  - 39
                 // TABLE (B) - 40
-                hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[3, 19, 22, 29]);
+                /*hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[3, 19, 22, 29]);
                 hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[8, 23, 34, 40, 39]);
                 hue_wargb(&mut hue_sender, state.dial_top[0], state.fade[0], &[24, 25, 32, 33, 38]);
-                
+                */
                 // all these buttons become preset= slots
                 
                 // main power 
@@ -963,14 +963,20 @@ impl App {
                 */
                 let rgb_strobe = 120;
                 map_wargb(state.dial_top[3], state.fade[3], dmx, &[rgb_strobe+3-1]); // Strobe RGB
-                dmx_f32(1.0, dmx, &[rgb_strobe], 1);
+                dmx_f32(state.fade[3], dmx, &[rgb_strobe], 1);
                 dmx_f32(state.tempo, dmx, &[rgb_strobe], 10);
+                dmx_f32(state.dial_3[0], dmx, &[rgb_strobe], 13);
+                dmx_f32(state.dial_3[1], dmx, &[rgb_strobe], 14);
+                dmx_f32(state.dial_3[2], dmx, &[rgb_strobe], 15);
+                dmx_f32(state.dial_3[3], dmx, &[rgb_strobe], 16);
+                dmx_f32(state.dial_3[4], dmx, &[rgb_strobe], 17);
                 //dmx_f32(1.0-(state.fade[3].max(0.5).min(1.0)-0.5)*2.0, dmx, &[rgb_strobe], 10);
                 
                 // strobe
                 dmx_f32(state.fade[4], dmx, &[rgb_strobe], 6);
                 dmx_f32(state.tempo, dmx, &[rgb_strobe], 8);
-                
+                dmx_f32(state.dial_4[0], dmx, &[rgb_strobe], 11);
+                dmx_f32(state.dial_4[1], dmx, &[rgb_strobe], 12);
                 
                 /*
                 dmx_f32(state.dial_b[0], dmx, &[rgb_strobe], 7);
@@ -1071,7 +1077,33 @@ impl App {
             }
         });
     }
+    pub fn fetch_hue_lights(&mut self, cx:&mut Cx){
+        // lets http request the hue bridge
+        let url = format!("https://{}/api/{}", HUE_BRIDGE, HUE_KEY);
+        let mut request = HttpRequest::new(url, HttpMethod::GET);
+        request.set_ignore_ssl_cert();
+        cx.http_request(live_id!(hue_fetch), request);
+    }
+    
+    pub fn handle_hue_lights(&mut self, _cx:&mut Cx, res:&HttpResponse){
+        if let Some(data) = res.get_string_body() {
+            let value = JsonValue::deserialize_json(&data).unwrap();
+            // lets push these ids into a vec
+            let mut lights = Vec::new();
+            for (id,light) in value.key("lights").unwrap().object().unwrap(){
+                let id = id.parse::<u64>().unwrap();
+                lights.push((id, light.key("name").unwrap().string().unwrap(), light.key("uniqueid").unwrap().string().unwrap()));
+            }
+            lights.sort_by(|a,b| a.0.cmp(&b.0));
+            for (id, name, _unique) in lights{
+                log!("Hue light {}: {}", id, name);
+            }
+        }
+    }
 }
+// get a HUE key from here: https://developers.meethue.com/develop/get-started-2/
+const HUE_KEY:&'static str = "Ay0O7saTTq3FNogyKhDwB8WWY7MdIyzeFzzsydRz";
+const HUE_BRIDGE:&'static str = "10.0.0.104";
 
 impl MatchEvent for App {
     fn handle_midi_ports(&mut self, cx: &mut Cx, ports: &MidiPortsEvent) {
@@ -1087,16 +1119,58 @@ impl MatchEvent for App {
         //self.update_seed_display(cx);
         self.start_http_server();
         self.start_artnet_client(cx);
-        
+        self.fetch_hue_lights(cx);
+        self.hue_poll = cx.start_interval(0.1);
     }
     
     fn handle_timer(&mut self, cx: &mut Cx, e:&TimerEvent){
         if self.delay_timer.is_timer(e).is_some(){
             self.check_to_render(cx);
         }
+        
+        // lets remove ids out of the hue light set one at a time
+        if self.hue_poll.is_timer(e).is_some(){
+            if let Some(key) = self.hue_light_set.keys().next(){
+                let key = key.clone();
+                let light = self.hue_light_set.remove(&key).unwrap();
+                // lets set the light
+                let url = format!("https://{}/api/{}/lights/{}/state", HUE_BRIDGE, HUE_KEY, key);
+                let mut request = HttpRequest::new(url, HttpMethod::PUT);
+                request.set_header("Content-Type".to_string(), "application/json".to_string());
+                
+                match light{
+                    HueLight::Color{on, hue, sat, val}=>{
+                        let ws = format!("{{\"on\":{}, \"sat\":{}, \"bri\":{},\"hue\":{}}}",
+                        on,
+                        (sat*255.0) as u32,
+                        (val*255.0) as u32,
+                        (hue*65535.0) as u32
+                    );
+                    request.set_body(ws.as_bytes().to_vec());
+                }
+                HueLight::Switch{on}=>{
+                    let ws = format!("{{\"on\":{}}}",
+                    on,
+                );
+                request.set_body(ws.as_bytes().to_vec());
+            }
+        }
+        request.set_ignore_ssl_cert();
+        cx.http_request(live_id!(hue_set), request);
+    }
+    
+    
+};
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
+        while let Ok((id,data)) = self.hue_light_change.try_recv(){
+            if self.hue_light_last.get(&id) != Some(&data){
+                self.hue_light_set.insert(id, data.clone());
+            }
+            self.hue_light_last.insert(id, data);
+        }
+        
         if self.db.handle_decoded_images(cx) {
             self.update_textures(cx);
             self.ui.redraw(cx);
@@ -1209,6 +1283,12 @@ impl MatchEvent for App {
                 NetworkResponse::HttpResponse(res) => {
                     // alright we got an image back
                     match event.request_id {
+                        live_id!(hue_set)=>{
+                            
+                        }
+                        live_id!(hue_fetch)=>{
+                            self.handle_hue_lights(cx, res);
+                        }
                         live_id!(llm)=>if let Some(res) = res.get_string_body() {
                             // lets parse it as json
                             if let Ok(val) = JsonValue::deserialize_json(&res){
