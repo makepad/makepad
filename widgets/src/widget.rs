@@ -1223,6 +1223,16 @@ impl<T: Clone> DrawStateWrap<T> {
         }
     }
 
+    pub fn begin_state(&mut self, cx: &mut Cx) -> Option<&mut Option<T>>
+    {
+        if self.redraw_id != cx.redraw_id() {
+            self.redraw_id = cx.redraw_id();
+            Some(&mut self.state)
+        } else {
+            None
+        }
+    }
+
     pub fn get(&self) -> Option<T> {
         self.state.clone()
     }
