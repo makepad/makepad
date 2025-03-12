@@ -7,6 +7,7 @@
         use link::widgets::*;
         use makepad_widgets::vectorline::*;
         use makepad_example_ui_zoo::demofiletree::*;
+        use crate::demoinput::*;
 
         COLOR_CONTAINER = (THEME_COLOR_D_1)
         COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
@@ -396,6 +397,7 @@
                                     <H3> { text: "LayoutDemos"}
                                 }
                                 demos = {
+                                    <DemoInput> {}
                                 }
                             }
                         }
@@ -2648,6 +2650,7 @@
         fn live_register(cx: &mut Cx) {
             crate::makepad_widgets::live_design(cx);
             crate::demofiletree::live_design(cx);
+            crate::demoinput::live_design(cx);
           }
     }
 
