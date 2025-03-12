@@ -298,16 +298,15 @@ impl Cx {
                     };
                     window.is_created = true;
                 },
-                CxOsOp::SetCursor(_cursor) => {
-                    //xlib_app.set_mouse_cursor(cursor);
-                },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
                     direct_app.timers.start_timer(timer_id, interval, repeats);
                 },
                 CxOsOp::StopTimer(timer_id) => {
                     direct_app.timers.stop_timer(timer_id);
                 },
-                _ => ()
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
+                }
             }
         }
         EventFlow::Poll

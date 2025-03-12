@@ -804,9 +804,6 @@ impl Cx {
                         old_geom
                     }));
                 },
-                CxOsOp::SetCursor(_cursor) => {
-                    //xlib_app.set_mouse_cursor(cursor);
-                },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
                     self.os.timers.timers.insert(timer_id, PollTimer::new(interval, repeats));
                 },
@@ -820,9 +817,6 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     //self.os.keyboard_visible = false;
                     unsafe {android_jni::to_java_show_keyboard(false);}
-                },
-                CxOsOp::ShowClipboardActions(_selected) => {
-                    //to_java.show_clipboard_actions(selected.as_str());
                 },
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {android_jni::to_java_copy_to_clipboard(content);}
@@ -872,7 +866,9 @@ impl Cx {
                         android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
-                _ => ()
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
+                }
             }
         }
         EventFlow::Poll
