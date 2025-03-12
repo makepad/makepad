@@ -82,6 +82,13 @@ pub struct Tooltip {
 impl Widget for Tooltip {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.content.handle_event(cx, event, scope);
+
+        match event.hits_with_capture_overload(cx, self.content.area(), true) {
+            Hit::FingerUp(fue) if fue.is_over => {
+                self.hide(cx);
+            }
+            _ => { }
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {

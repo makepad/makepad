@@ -1,6 +1,5 @@
 use {
-    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*},
-    std::cell::RefCell,
+    crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*}, makepad_draw::event::FingerLongPressEvent, std::cell::RefCell
 };
 
 live_design! {
@@ -9,13 +8,19 @@ live_design! {
 
 // maybe we should put an enum on the bools like
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, Clone, Copy)]
 #[live_ignore]
 pub enum ViewOptimize {
     #[pick]
     None,
     DrawList,
     Texture,
+}
+
+impl Default for ViewOptimize {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 #[derive(Live)]
@@ -281,6 +286,7 @@ pub enum ViewAction {
     None,
     FingerDown(FingerDownEvent),
     FingerUp(FingerUpEvent),
+    FingerLongPress(FingerLongPressEvent),
     FingerMove(FingerMoveEvent),
     FingerHoverIn(FingerHoverEvent),
     FingerHoverOut(FingerHoverEvent),
@@ -690,6 +696,7 @@ impl Widget for View {
                     }
                 }
                 Hit::FingerMove(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e)),
+                Hit::FingerLongPress(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerLongPress(e)), 
                 Hit::FingerUp(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
                     if self.animator.live_ptr.is_some() {
