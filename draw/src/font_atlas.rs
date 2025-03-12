@@ -294,7 +294,7 @@ impl<'a> Cx2d<'a> {
         }: Command
     ) {
         let font = font_loader[font_id].as_mut().unwrap();
-        let atlas_page = &font.atlas_pages[atlas_page_id];
+        let _atlas_page = &font.atlas_pages[atlas_page_id];
 
         if ['\t', '\n', '\r'].iter().any(|&c| {
             Some(glyph_id) == font.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))

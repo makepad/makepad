@@ -183,7 +183,7 @@ live_design! {
     pub THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
-
+    
     pub THEME_FONT_LABEL = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
