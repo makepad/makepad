@@ -154,6 +154,9 @@ impl Widget for DesktopButton{
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
+            Hit::FingerLongPress(_) => {
+                cx.widget_action(uid, &scope.path, ButtonAction::LongPressed);
+            }
             Hit::FingerUp(fe) => if fe.is_over {
                 cx.widget_action(uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                 if fe.device.has_hovers() {
