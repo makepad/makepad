@@ -123,7 +123,7 @@ macro_rules! message_args_impl {
         impl<$($t),*> MessageArguments for ($($t,)*) {
             unsafe fn invoke<R>(imp: Imp, obj: *mut Object, sel: Sel, ($($a,)*): Self) -> R
                     where R: Any {
-                let imp: unsafe extern fn(*mut Object, Sel $(, $t)*) -> R =
+                let imp: unsafe extern "C" fn(*mut Object, Sel $(, $t)*) -> R =
                     mem::transmute(imp);
                 imp(obj, sel $(, $a)*)
             }
