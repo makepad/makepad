@@ -36,7 +36,7 @@ impl MetalXPCClasses {
     }
 }
 
-extern {
+extern "C" {
     fn define_xpc_service_protocol() -> &'static Protocol;
     fn hackily_heapify_block2_obj_u64(data: *const c_void) -> ObjcId;
     fn hackily_heapify_block0(data: *const c_void) -> ObjcId;
@@ -126,7 +126,7 @@ pub fn start_xpc_service() {
 
 pub fn define_xpc_service_delegate() -> *const Class {
     
-    extern fn listener(_this: &Object, _: Sel, _listener: ObjcId, connection: ObjcId) -> bool {
+    extern "C" fn listener(_this: &Object, _: Sel, _listener: ObjcId, connection: ObjcId) -> bool {
         //insane_debug_out("LISTENER INCOMING");
         unsafe {
             let iface: ObjcId = msg_send![
@@ -147,7 +147,7 @@ pub fn define_xpc_service_delegate() -> *const Class {
     let mut decl = ClassDecl::new("MetalXPCServiceDelegate", superclass).unwrap();
     
     unsafe {
-        decl.add_method(sel!(listener: shouldAcceptNewConnection:), listener as extern fn(&Object, Sel, ObjcId, ObjcId) -> bool);
+        decl.add_method(sel!(listener: shouldAcceptNewConnection:), listener as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> bool);
     }
     
     return decl.register();
@@ -155,7 +155,7 @@ pub fn define_xpc_service_delegate() -> *const Class {
 
 pub fn define_xpc_service_class() -> *const Class {
     
-    extern fn fetch_texture(_this: &Object, _: Sel, presentable_image_id_u64: u64, _padding: u64, completion: ObjcId) {
+    extern "C" fn fetch_texture(_this: &Object, _: Sel, presentable_image_id_u64: u64, _padding: u64, completion: ObjcId) {
         let storage = get_metal_xpc_storage();
         if let Some(obj) = storage.textures_by_presentable_image_id_u64.lock().unwrap().remove(&presentable_image_id_u64) {
             unsafe {
@@ -169,7 +169,7 @@ pub fn define_xpc_service_class() -> *const Class {
         //insane_debug_out("GOT CALL! POST FETCH TEXTURE!");
     }
      
-    extern fn store_texture(_this: &Object, _: Sel, presentable_image_id_u64: u64, obj: ObjcId, _padding: u64, completion: ObjcId) {
+    extern "C" fn store_texture(_this: &Object, _: Sel, presentable_image_id_u64: u64, obj: ObjcId, _padding: u64, completion: ObjcId) {
         let storage = get_metal_xpc_storage();
         storage.textures_by_presentable_image_id_u64.lock().unwrap().insert(
             presentable_image_id_u64,
@@ -184,8 +184,8 @@ pub fn define_xpc_service_class() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(fetchTexture: _padding: with:), fetch_texture as extern fn(&Object, Sel, u64, u64, ObjcId));
-        decl.add_method(sel!(storeTexture: obj: _padding: with:), store_texture as extern fn(&Object, Sel, u64, ObjcId, u64, ObjcId));
+        decl.add_method(sel!(fetchTexture: _padding: with:), fetch_texture as extern "C" fn(&Object, Sel, u64, u64, ObjcId));
+        decl.add_method(sel!(storeTexture: obj: _padding: with:), store_texture as extern "C" fn(&Object, Sel, u64, ObjcId, u64, ObjcId));
         decl.add_protocol(define_xpc_service_protocol());
     }
     
