@@ -5,10 +5,8 @@ live_design! {
 
     App = {{App}} {
         ui: <Root> {
-            main_window = <Window> {
-                body = <View> {
-                    
-                }
+            <Window> {
+                body = <View> {}
             }
         }
     }
