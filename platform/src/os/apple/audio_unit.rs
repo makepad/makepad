@@ -57,7 +57,7 @@ impl KeyValueObserver {
 
 pub fn define_key_value_observing_delegate() -> *const Class {
     
-    extern fn observe_value_for_key_path(
+    extern "C" fn observe_value_for_key_path(
         this: &Object,
         _: Sel,
         _key_path: ObjcId,
@@ -81,7 +81,7 @@ pub fn define_key_value_observing_delegate() -> *const Class {
     unsafe {
         decl.add_method(
             sel!(observeValueForKeyPath: ofObject: change: context:),
-            observe_value_for_key_path as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId, *mut std::ffi::c_void)
+            observe_value_for_key_path as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId, *mut std::ffi::c_void)
         );
     }
     // Store internal state as user data

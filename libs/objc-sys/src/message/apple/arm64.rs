@@ -1,6 +1,6 @@
 use runtime::Imp;
 
-extern {
+extern "C" {
     fn objc_msgSend();
 
     fn objc_msgSendSuper();
