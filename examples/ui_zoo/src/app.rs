@@ -177,7 +177,7 @@
                             <DemoLinkLabel> {} // TODO: FIX
                         } 
                         TabMarkdown = <UIZooTab> {
-                            // <DemoMarkdown> {}// TODO: FIX
+                            <DemoMarkdown> {}
                         } 
                         TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
                         TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
