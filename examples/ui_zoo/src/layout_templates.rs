@@ -15,22 +15,24 @@ live_design!{
         padding: 0
         spacing: 0.
 
-        desc = <View> {
+        desc = <RoundedView> {
             width: 350., height: Fill,
-            margin: { bottom: 10.}
+            show_bg: true,
+            draw_bg: { color: (THEME_COLOR_D_1) }
+            margin: 10.
+
             flow: Down,
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_3> {}
             scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         }
 
-        <Vr> {}
-
         demos = <View> {
             width: Fill, height: Fill,
             flow: Down,
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_3> {}
+            margin: <THEME_MSPACE_V_2> {}
             scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         }
 

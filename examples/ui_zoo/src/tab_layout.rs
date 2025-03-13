@@ -12,7 +12,7 @@ live_design!{
         height: Fill, width: Fill,
         padding: 10., margin: 0.,
         show_bg: true,
-        draw_bg: { color: #0002 }
+        draw_bg: { color: #0F02 }
         flow: Down,
         align: { x: 0.5, y: 0.5}
         <P> { width: Fit, text: "width: Fill\nheight: Fill\nflow: Down"}
@@ -22,10 +22,10 @@ live_design!{
         height: Fit, width: Fit,
         padding: 10., margin: 0.,
         show_bg: true,
-        draw_bg: { color: #0002 }
+        draw_bg: { color: #F002 }
         flow: Down,
         align: { x: 0.5, y: 0.5}
-        <P> { width: Fit, text: "width: Fill\nheight: Fill\nflow: Down"}
+        <P> { width: Fit, text: "width: Fit\nheight: Fit\nflow: Down"}
     }
 
     BoxC = <RoundedView> {
@@ -93,6 +93,7 @@ live_design!{
             <BoxC> {
                 <BoxB> {}
                 <BoxB> {}
+                <BoxA> {}
                 <Filler> {}
                 <BoxB> {}
             }
