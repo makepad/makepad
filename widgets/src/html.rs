@@ -820,6 +820,16 @@ impl Widget for HtmlLink {
     }
 }
 
+impl HtmlLink {
+    pub fn url(&self) -> String{
+        self.url.clone()
+    }
+
+    pub fn set_url(&mut self, cx: &mut Cx, url: &str) {
+        self.url = url.to_string();
+        self.redraw(cx);
+    }
+}
 
 /// The format and metadata of a list at a given nesting level.
 #[derive(Debug)]
