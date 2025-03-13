@@ -1,8 +1,8 @@
 use {
     super::{
+        builtins,
         font::{Font, FontId},
         font_atlas::{ColorAtlas, FontAtlas, GrayscaleAtlas},
-        font_data,
         font_face::FontFace,
         font_family::{FontFamily, FontFamilyId},
         geom::Size,
@@ -21,22 +21,26 @@ pub struct FontLoader {
     sdfer: Rc<RefCell<Sdfer>>,
     grayscale_atlas: Rc<RefCell<GrayscaleAtlas>>,
     color_atlas: Rc<RefCell<ColorAtlas>>,
-    definitions: FontDefinitions,
+    font_family_definitions: HashMap<FontFamilyId, FontFamilyDefinition>,
+    font_definitions: HashMap<FontId, FontDefinition>,
     font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: HashMap<FontId, Rc<Font>>,
 }
 
 impl FontLoader {
-    pub fn new(definitions: FontDefinitions, settings: Settings) -> Self {
-        Self {
+    pub fn new(settings: Settings) -> Self {
+        let mut loader = Self {
             shaper: Rc::new(RefCell::new(Shaper::new(settings.shaper))),
             sdfer: Rc::new(RefCell::new(Sdfer::new(settings.sdfer))),
             grayscale_atlas: Rc::new(RefCell::new(FontAtlas::new(settings.grayscale_atlas_size))),
             color_atlas: Rc::new(RefCell::new(FontAtlas::new(settings.grayscale_atlas_size))),
-            definitions,
+            font_family_definitions: HashMap::new(),
+            font_definitions: HashMap::new(),
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
-        }
+        };
+        builtins::define(&mut loader);
+        loader
     }
 
     pub fn sdfer(&self) -> &Rc<RefCell<Sdfer>> {
@@ -51,6 +55,14 @@ impl FontLoader {
         &self.color_atlas
     }
 
+    pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        self.font_family_definitions.insert(id, definition);
+    }
+
+    pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
+        self.font_definitions.insert(id, definition);
+    }
+
     pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> &Rc<FontFamily> {
         if !self.font_family_cache.contains_key(&id) {
             let font_family = self.load_font_family(id);
@@ -61,8 +73,7 @@ impl FontLoader {
 
     fn load_font_family(&mut self, id: FontFamilyId) -> FontFamily {
         let definition = self
-            .definitions
-            .families
+            .font_family_definitions
             .remove(&id)
             .expect("font family is not defined");
         FontFamily::new(
@@ -86,8 +97,7 @@ impl FontLoader {
 
     fn load_font(&mut self, id: FontId) -> Font {
         let definition = self
-            .definitions
-            .fonts
+            .font_definitions
             .remove(&id)
             .expect("font is not defined");
         Font::new(
@@ -107,72 +117,6 @@ pub struct Settings {
     pub sdfer: sdfer::Settings,
     pub grayscale_atlas_size: Size<usize>,
     pub color_atlas_size: Size<usize>,
-}
-
-#[derive(Clone, Debug)]
-pub struct FontDefinitions {
-    pub families: HashMap<FontFamilyId, FontFamilyDefinition>,
-    pub fonts: HashMap<FontId, FontDefinition>,
-}
-
-impl Default for FontDefinitions {
-    fn default() -> Self {
-        Self {
-            families: [
-                (
-                    "Sans".into(),
-                    FontFamilyDefinition {
-                        font_ids: [
-                            "IBM Plex Sans Text".into(),
-                            "LXG WWen Kai Regular".into(),
-                            "Noto Color Emoji".into(),
-                        ]
-                        .into(),
-                    },
-                ),
-                (
-                    "Monospace".into(),
-                    FontFamilyDefinition {
-                        font_ids: ["Liberation Mono Regular".into()].into(),
-                    },
-                ),
-            ]
-            .into_iter()
-            .collect(),
-            fonts: [
-                (
-                    "IBM Plex Sans Text".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(font_data::IBM_PLEX_SANS_TEXT).into(),
-                        index: 0,
-                    },
-                ),
-                (
-                    "LXG WWen Kai Regular".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(font_data::LXG_WEN_KAI_REGULAR).into(),
-                        index: 0,
-                    },
-                ),
-                (
-                    "Noto Color Emoji".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(font_data::NOTO_COLOR_EMOJI).into(),
-                        index: 0,
-                    },
-                ),
-                (
-                    "Liberation Mono Regular".into(),
-                    FontDefinition {
-                        data: Cow::Borrowed(font_data::LIBERATION_MONO_REGULAR).into(),
-                        index: 0,
-                    },
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
