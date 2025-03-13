@@ -16,7 +16,8 @@ live_design!{
         spacing: 0.
 
         desc = <View> {
-            width: 300., height: Fill,
+            width: 350., height: Fill,
+            margin: { bottom: 10.}
             flow: Down,
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_3> {}
