@@ -6,6 +6,7 @@ use {
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         image::{Rgba, R},
+        intern::Intern,
         sdfer::Sdfer,
     },
     makepad_rustybuzz as rustybuzz,
@@ -17,7 +18,20 @@ use {
     },
 };
 
-pub type FontId = Rc<str>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontId(u64);
+
+impl From<u64> for FontId {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for FontId {
+    fn from(value: &str) -> Self {
+        Self(value.intern().as_ptr() as u64)
+    }
+}
 
 #[derive(Debug)]
 pub struct Font {

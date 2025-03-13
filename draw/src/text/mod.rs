@@ -10,6 +10,7 @@ pub mod geom;
 pub mod glyph_outline;
 pub mod glyph_raster_image;
 pub mod image;
+pub mod intern;
 pub mod layout;
 pub mod num;
 pub mod sdfer;
