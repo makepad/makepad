@@ -13,11 +13,17 @@ live_design!{
             <H3> { text: "<Icon>"}
         }
         demos = {
+            <H3> { text: "<Demos>"}
+            <Hr> {}
+
+            <H4> { text: "Standard" }
             <Icon> {
                 icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
             }
 
+            <Hr> {}
+            <H4> { text: "Gradient Versions" }
             <IconGradientX> {
                 icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }

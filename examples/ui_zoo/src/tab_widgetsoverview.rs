@@ -172,16 +172,9 @@ live_design!{
             <Hr> {}
             <View> {
                 flow: Right,
-                spacing: (THEME_SPACE_2)
+                spacing: (THEME_SPACE_3)
                 height: Fit,
                 width: Fit,
-                <View> {
-                    flow: Down,
-                    radio1 = <RadioButton> { text: "<RadioButton>" }
-                    radio2 = <RadioButton> { text: "Option 2" }
-                    radio3 = <RadioButton> { text: "Option 3" }
-                    radio4 = <RadioButton> { text: "Option 4" }
-                }
 
                 iconradios_demo = <View> {
                     width: Fit, height: Fit,
