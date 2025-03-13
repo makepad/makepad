@@ -140,7 +140,7 @@ impl DrawText2 {
             text,
             spans: [Span {
                 style: Style {
-                    font_family_id: self.text_style.font_family.clone().into(),
+                    font_family_id: self.text_style.font_family.as_str().into(),
                     font_size_in_lpxs: self.text_style.font_size,
                     color: None,
                 },

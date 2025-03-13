@@ -65,7 +65,7 @@ impl FontLoader {
             .definitions
             .families
             .remove(&font_family_id)
-            .unwrap_or_else(|| panic!("font family {} is not defined", font_family_id));
+            .expect("font family is not defined");
         FontFamily::new(
             font_family_id,
             self.shaper.clone(),
@@ -89,7 +89,7 @@ impl FontLoader {
             .definitions
             .faces
             .remove(&font_id)
-            .unwrap_or_else(|| panic!("font {} is not defined", font_id));
+            .expect("font is not defined");
         Font::new(
             font_id.clone(),
             self.sdfer.clone(),
@@ -97,7 +97,7 @@ impl FontLoader {
             self.color_atlas.clone(),
             face_definition,
         )
-        .unwrap_or_else(|| panic!("failed to create font {} from definition", font_id))
+        .expect("failed to create font from definition")
     }
 }
 

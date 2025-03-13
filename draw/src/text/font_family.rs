@@ -1,6 +1,7 @@
 use {
     super::{
         font::Font,
+        intern::Intern,
         shape::{ShapeParams, ShapedText, Shaper},
         substr::Substr,
     },
@@ -11,7 +12,20 @@ use {
     },
 };
 
-pub type FontFamilyId = Rc<str>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontFamilyId(u64);
+
+impl From<u64> for FontFamilyId {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for FontFamilyId {
+    fn from(value: &str) -> Self {
+        Self(value.intern().as_ptr() as u64)
+    }
+}
 
 #[derive(Debug)]
 pub struct FontFamily {
