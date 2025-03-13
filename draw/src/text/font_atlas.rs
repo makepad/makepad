@@ -10,6 +10,7 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct FontAtlas<T> {
+    did_overflow: bool,
     image: Image<T>,
     dirty_rect: Rect<usize>,
     current_point: Point<usize>,
@@ -23,12 +24,17 @@ impl<T> FontAtlas<T> {
         T: Clone + Default,
     {
         Self {
+            did_overflow: false,
             image: Image::new(size),
             dirty_rect: Rect::ZERO,
             current_point: Point::ZERO,
             current_row_height: 0,
             cached_glyph_image_rects: HashMap::new(),
         }
+    }
+
+    pub fn did_overflow(&self) -> bool {
+        self.did_overflow
     }
 
     pub fn size(&self) -> Size<usize> {
@@ -69,6 +75,7 @@ impl<T> FontAtlas<T> {
             self.current_row_height = 0;
         }
         if self.current_point.y + padded_size.height > self.size().height {
+            self.did_overflow = true;
             return None;
         }
         let origin = self.current_point;
@@ -77,6 +84,14 @@ impl<T> FontAtlas<T> {
         let rect = Rect::new(origin, size);
         self.dirty_rect = self.dirty_rect.union(rect);
         Some(rect)
+    }
+
+    pub fn reset(&mut self) {
+        self.did_overflow = false;
+        self.dirty_rect = Rect::ZERO;
+        self.current_point = Point::ZERO;
+        self.current_row_height = 0;
+        self.cached_glyph_image_rects.clear();
     }
 }
 

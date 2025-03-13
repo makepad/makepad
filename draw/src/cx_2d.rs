@@ -65,7 +65,10 @@ impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {se
 
 impl<'a> Drop for Cx2d<'a> {
     fn drop(&mut self) {
-        self.update_fonts_textures();
+        if !self.fonts.borrow_mut().update_textures(&mut self.cx) {
+            self.cx.redraw_all();
+        }
+
         self.draw_font_atlas();
         self.draw_icon_atlas();
     }

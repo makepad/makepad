@@ -98,15 +98,24 @@ impl Fonts {
         self.layouter.get_or_layout(params)
     }
 
-    pub fn update_textures(&mut self, cx: &mut Cx) {
-        self.update_grayscale_texture(cx);
-        self.update_color_texture(cx);
+    pub fn update_textures(&mut self, cx: &mut Cx) -> bool {
+        if !self.update_grayscale_texture(cx) {
+            return false;
+        }
+        if !self.update_color_texture(cx) {
+            return false
+        }
+        true
     }
 
-    fn update_grayscale_texture(&mut self, cx: &mut Cx) {
-        let mut texture_data = self.grayscale_texture.take_vec_u8(cx);
+    fn update_grayscale_texture(&mut self, cx: &mut Cx) -> bool {
         let mut atlas = self.layouter.grayscale_atlas().borrow_mut();
-        let atlas_size = atlas.size();
+        if atlas.did_overflow() {
+            atlas.reset();
+            return false;
+        }
+        let mut data = self.grayscale_texture.take_vec_u8(cx);
+        let size = atlas.size();
         let dirty_image = atlas.take_dirty_image();
         let dirty_rect = dirty_image.bounds();
         for src_y in 0..dirty_rect.size.height {
@@ -114,20 +123,21 @@ impl Fonts {
                 let dst_x = dirty_rect.origin.x + src_x;
                 let dst_y = dirty_rect.origin.y + src_y;
                 let pixel = dirty_image[Point::new(src_x, src_y)];
-                texture_data[dst_y * atlas_size.width + dst_x] = pixel.r;
+                data[dst_y * size.width + dst_x] = pixel.r;
             }
         }
         self.grayscale_texture.put_back_vec_u8(
             cx,
-            texture_data,
+            data,
             Some(RectUsize::new(
                 PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
                 SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
             )),
         );
+        true
     }
 
-    fn update_color_texture(&mut self, cx: &mut Cx) {
+    fn update_color_texture(&mut self, cx: &mut Cx) -> bool {
         fn rgba_to_u32(pixel: Rgba) -> u32 {
             let r = u32::from(pixel.r);
             let g = u32::from(pixel.g);
@@ -136,9 +146,13 @@ impl Fonts {
             (a << 24) | (r << 16) | (g << 8) | b
         }
 
-        let mut texture_data = self.color_texture.take_vec_u32(cx);
         let mut atlas = self.layouter.color_atlas().borrow_mut();
-        let atlas_size = atlas.size();
+        if atlas.did_overflow() {
+            atlas.reset();
+            return false;
+        }
+        let mut data = self.color_texture.take_vec_u32(cx);
+        let size = atlas.size();
         let dirty_image = atlas.take_dirty_image();
         let dirty_rect = dirty_image.bounds();
         for src_y in 0..dirty_rect.size.height {
@@ -146,16 +160,17 @@ impl Fonts {
                 let dst_x = dirty_rect.origin.x + src_x;
                 let dst_y = dirty_rect.origin.y + src_y;
                 let pixel = dirty_image[Point::new(src_x, src_y)];
-                texture_data[dst_y * atlas_size.width + dst_x] = rgba_to_u32(pixel);
+                data[dst_y * size.width + dst_x] = rgba_to_u32(pixel);
             }
         }
         self.color_texture.put_back_vec_u32(
             cx,
-            texture_data,
+            data,
             Some(RectUsize::new(
                 PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
                 SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
             )),
         );
+        true
     }
 }
