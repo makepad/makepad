@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::{Arc, OnceLock, Mutex}};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 pub trait Intern {
     fn intern(&self) -> Arc<str>;
@@ -6,7 +9,11 @@ pub trait Intern {
 
 impl Intern for str {
     fn intern(&self) -> Arc<str> {
-        INTERNER.get_or_init(|| Mutex::new(Interner::new())).lock().unwrap().intern(self)
+        INTERNER
+            .get_or_init(|| Mutex::new(Interner::new()))
+            .lock()
+            .unwrap()
+            .intern(self)
     }
 }
 

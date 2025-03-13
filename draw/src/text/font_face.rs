@@ -8,16 +8,16 @@ use {
 pub struct FontFace(Pin<Box<FontFaceInner>>);
 
 impl FontFace {
-    pub fn from_definition(definition: FontFaceDefinition) -> Option<Self> {
+    pub fn from_data_and_index(data: Rc<Cow<'static, [u8]>>, index: u32) -> Option<Self> {
         let mut inner = Box::pin(FontFaceInner {
-            data: definition.data,
+            data,
             ttf_parser_face: None,
             rustybuzz_face: None,
             _pinned: PhantomPinned,
         });
         unsafe {
             let data: &'static [u8] = mem::transmute(&**inner.data);
-            let ttf_parser_face = ttf_parser::Face::parse(data, definition.index).ok()?;
+            let ttf_parser_face = ttf_parser::Face::parse(data, index).ok()?;
             let rustybuzz_face = rustybuzz::Face::from_face(ttf_parser_face.clone());
             let inner_ref = Pin::as_mut(&mut inner).get_unchecked_mut();
             inner_ref.ttf_parser_face = Some(ttf_parser_face);
@@ -46,10 +46,4 @@ impl fmt::Debug for FontFaceInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FontFaceInner").finish_non_exhaustive()
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct FontFaceDefinition {
-    pub data: Rc<Cow<'static, [u8]>>,
-    pub index: u32,
 }

@@ -1,13 +1,13 @@
 use {
     super::{
         color::Color,
-        selection::{Cursor, Affinity, Position, Selection},
         font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
         font_loader::{self, FontDefinitions, FontLoader},
         geom::{Point, Rect, Size},
         sdfer,
+        selection::{Affinity, Cursor, Position, Selection},
         shape::{self, ShapedText},
         substr::Substr,
     },
@@ -145,7 +145,7 @@ impl<'a> LayoutContext<'a> {
     fn layout_span(&mut self, span: &Span) {
         let font_family = self
             .loader
-            .get_or_load_font_family(&span.style.font_family_id)
+            .get_or_load_font_family(span.style.font_family_id)
             .clone();
         if self.options.max_width_in_lpxs.is_none() {
             self.append_shaped_text_to_current_row(
@@ -302,7 +302,10 @@ impl<'a> Fitter<'a> {
                 .split_word_bounds()
                 .map(|segment| segment.len())
                 .collect(),
-            SegmentKind::Grapheme => text[range.clone()].graphemes(true).map(|segment| segment.len()).collect(),
+            SegmentKind::Grapheme => text[range.clone()]
+                .graphemes(true)
+                .map(|segment| segment.len())
+                .collect(),
         };
         let segment_widths_in_lpxs: Vec<_> = segment_lens
             .iter()
@@ -560,14 +563,11 @@ impl LaidoutText {
         if start_row_index == end_row_index {
             let row = &self.rows[start_row_index];
             rects_in_lpxs.push(Rect::new(
-                Point::new(
-                    start_x_in_lpxs,
-                    row.origin_in_lpxs.y - row.ascender_in_lpxs,
-                ),
+                Point::new(start_x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
                 Size::new(
                     end_x_in_lpxs - start_x_in_lpxs,
                     row.ascender_in_lpxs - row.descender_in_lpxs,
-                )
+                ),
             ));
         } else {
             let start_row = &self.rows[start_row_index];
@@ -580,24 +580,27 @@ impl LaidoutText {
                 Size::new(
                     start_row.width_in_lpxs - start_x_in_lpxs,
                     start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
-                )
+                ),
             ));
             for row_index in start_row_index + 1..end_row_index {
                 let row = &self.rows[row_index];
                 rects_in_lpxs.push(Rect::new(
-                    Point::new(row.origin_in_lpxs.x, row.origin_in_lpxs.y - row.ascender_in_lpxs),
-                    Size::new(row.width_in_lpxs, row.ascender_in_lpxs - row.descender_in_lpxs),
+                    Point::new(
+                        row.origin_in_lpxs.x,
+                        row.origin_in_lpxs.y - row.ascender_in_lpxs,
+                    ),
+                    Size::new(
+                        row.width_in_lpxs,
+                        row.ascender_in_lpxs - row.descender_in_lpxs,
+                    ),
                 ));
             }
             rects_in_lpxs.push(Rect::new(
-                Point::new(
-                    0.0,
-                    end_row.origin_in_lpxs.y - end_row.ascender_in_lpxs,
-                ),
+                Point::new(0.0, end_row.origin_in_lpxs.y - end_row.ascender_in_lpxs),
                 Size::new(
                     end_x_in_lpxs,
                     end_row.ascender_in_lpxs - end_row.descender_in_lpxs,
-                )
+                ),
             ));
         }
         rects_in_lpxs

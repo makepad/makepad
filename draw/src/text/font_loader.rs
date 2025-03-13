@@ -3,7 +3,7 @@ use {
         font::{Font, FontId},
         font_atlas::{ColorAtlas, FontAtlas, GrayscaleAtlas},
         font_data,
-        font_face::FontFaceDefinition,
+        font_face::FontFace,
         font_family::{FontFamily, FontFamilyId},
         geom::Size,
         image::{Rgba, R},
@@ -17,11 +17,11 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct FontLoader {
-    definitions: FontDefinitions,
     shaper: Rc<RefCell<Shaper>>,
+    sdfer: Rc<RefCell<Sdfer>>,
     grayscale_atlas: Rc<RefCell<GrayscaleAtlas>>,
     color_atlas: Rc<RefCell<ColorAtlas>>,
-    sdfer: Rc<RefCell<Sdfer>>,
+    definitions: FontDefinitions,
     font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: HashMap<FontId, Rc<Font>>,
 }
@@ -51,53 +51,53 @@ impl FontLoader {
         &self.color_atlas
     }
 
-    pub fn get_or_load_font_family(&mut self, font_family_id: &FontFamilyId) -> &Rc<FontFamily> {
-        if !self.font_family_cache.contains_key(font_family_id) {
-            let font_family = self.load_font_family(font_family_id.clone());
-            self.font_family_cache
-                .insert(font_family_id.clone(), Rc::new(font_family));
+    pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> &Rc<FontFamily> {
+        if !self.font_family_cache.contains_key(&id) {
+            let font_family = self.load_font_family(id);
+            self.font_family_cache.insert(id, Rc::new(font_family));
         }
-        self.font_family_cache.get(font_family_id).unwrap()
+        self.font_family_cache.get(&id).unwrap()
     }
 
-    fn load_font_family(&mut self, font_family_id: FontFamilyId) -> FontFamily {
-        let font_ids = self
+    fn load_font_family(&mut self, id: FontFamilyId) -> FontFamily {
+        let definition = self
             .definitions
             .families
-            .remove(&font_family_id)
+            .remove(&id)
             .expect("font family is not defined");
         FontFamily::new(
-            font_family_id,
+            id,
             self.shaper.clone(),
-            font_ids
+            definition
+                .font_ids
                 .into_iter()
-                .map(|font_id| self.get_or_load_font(&font_id).clone())
+                .map(|font_id| self.get_or_load_font(font_id).clone())
                 .collect(),
         )
     }
 
-    pub fn get_or_load_font(&mut self, font_id: &FontId) -> &Rc<Font> {
-        if !self.font_cache.contains_key(font_id) {
-            let font = self.load_font(font_id.clone());
-            self.font_cache.insert(font_id.clone(), Rc::new(font));
+    pub fn get_or_load_font(&mut self, id: FontId) -> &Rc<Font> {
+        if !self.font_cache.contains_key(&id) {
+            let font = self.load_font(id);
+            self.font_cache.insert(id, Rc::new(font));
         }
-        self.font_cache.get(font_id).unwrap()
+        self.font_cache.get(&id).unwrap()
     }
 
-    fn load_font(&mut self, font_id: FontId) -> Font {
-        let face_definition = self
+    fn load_font(&mut self, id: FontId) -> Font {
+        let definition = self
             .definitions
-            .faces
-            .remove(&font_id)
+            .fonts
+            .remove(&id)
             .expect("font is not defined");
         Font::new(
-            font_id.clone(),
+            id.clone(),
             self.sdfer.clone(),
             self.grayscale_atlas.clone(),
             self.color_atlas.clone(),
-            face_definition,
+            FontFace::from_data_and_index(definition.data, definition.index)
+                .expect("failed to load font from definition"),
         )
-        .expect("failed to create font from definition")
     }
 }
 
@@ -111,8 +111,8 @@ pub struct Settings {
 
 #[derive(Clone, Debug)]
 pub struct FontDefinitions {
-    pub families: HashMap<FontFamilyId, Vec<FontId>>,
-    pub faces: HashMap<FontId, FontFaceDefinition>,
+    pub families: HashMap<FontFamilyId, FontFamilyDefinition>,
+    pub fonts: HashMap<FontId, FontDefinition>,
 }
 
 impl Default for FontDefinitions {
@@ -121,45 +121,49 @@ impl Default for FontDefinitions {
             families: [
                 (
                     "Sans".into(),
-                    [
-                        "IBM Plex Sans Text".into(),
-                        "LXG WWen Kai Regular".into(),
-                        "Noto Color Emoji".into(),
-                    ]
-                    .into(),
+                    FontFamilyDefinition {
+                        font_ids: [
+                            "IBM Plex Sans Text".into(),
+                            "LXG WWen Kai Regular".into(),
+                            "Noto Color Emoji".into(),
+                        ]
+                        .into(),
+                    },
                 ),
                 (
                     "Monospace".into(),
-                    ["Liberation Mono Regular".into()].into(),
+                    FontFamilyDefinition {
+                        font_ids: ["Liberation Mono Regular".into()].into(),
+                    },
                 ),
             ]
             .into_iter()
             .collect(),
-            faces: [
+            fonts: [
                 (
                     "IBM Plex Sans Text".into(),
-                    FontFaceDefinition {
+                    FontDefinition {
                         data: Cow::Borrowed(font_data::IBM_PLEX_SANS_TEXT).into(),
                         index: 0,
                     },
                 ),
                 (
                     "LXG WWen Kai Regular".into(),
-                    FontFaceDefinition {
+                    FontDefinition {
                         data: Cow::Borrowed(font_data::LXG_WEN_KAI_REGULAR).into(),
                         index: 0,
                     },
                 ),
                 (
                     "Noto Color Emoji".into(),
-                    FontFaceDefinition {
+                    FontDefinition {
                         data: Cow::Borrowed(font_data::NOTO_COLOR_EMOJI).into(),
                         index: 0,
                     },
                 ),
                 (
                     "Liberation Mono Regular".into(),
-                    FontFaceDefinition {
+                    FontDefinition {
                         data: Cow::Borrowed(font_data::LIBERATION_MONO_REGULAR).into(),
                         index: 0,
                     },
@@ -169,4 +173,15 @@ impl Default for FontDefinitions {
             .collect(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct FontFamilyDefinition {
+    pub font_ids: Vec<FontId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FontDefinition {
+    pub data: Rc<Cow<'static, [u8]>>,
+    pub index: u32,
 }
