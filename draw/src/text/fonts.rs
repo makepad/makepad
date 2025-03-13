@@ -1,6 +1,9 @@
 use {
     super::{
+        font::FontId,
         font_atlas::{ColorAtlas, GrayscaleAtlas},
+        font_family::FontFamilyId,
+        font_loader::{FontDefinition, FontFamilyDefinition},
         geom::Point,
         image::Rgba,
         layout,
@@ -73,6 +76,22 @@ impl Fonts {
 
     pub fn color_texture(&self) -> &Texture {
         &self.color_texture
+    }
+
+    pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
+        self.layouter.is_font_family_known(id)
+    }
+
+    pub fn is_font_known(&self, id: FontId) -> bool {
+        self.layouter.is_font_known(id)
+    }
+
+    pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        self.layouter.define_font_family(id, definition);
+    }
+
+    pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
+        self.layouter.define_font(id, definition);
     }
 
     pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {

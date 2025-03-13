@@ -1,7 +1,4 @@
-use {
-    super::font_loader::{FontDefinition, FontFamilyDefinition, FontLoader},
-    std::borrow::Cow,
-};
+use super::font_loader::{FontDefinition, FontFamilyDefinition, FontLoader};
 
 pub const IBM_PLEX_SANS_TEXT: &[u8] =
     include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
@@ -32,28 +29,28 @@ pub fn define(loader: &mut FontLoader) {
     loader.define_font(
         "IBM Plex Sans Text".into(),
         FontDefinition {
-            data: Cow::Borrowed(IBM_PLEX_SANS_TEXT).into(),
+            data: IBM_PLEX_SANS_TEXT.to_vec().into(),
             index: 0,
         },
     );
     loader.define_font(
         "LXG WWen Kai Regular".into(),
         FontDefinition {
-            data: Cow::Borrowed(LXG_WEN_KAI_REGULAR).into(),
+            data: LXG_WEN_KAI_REGULAR.to_vec().into(),
             index: 0,
         },
     );
     loader.define_font(
         "Noto Color Emoji".into(),
         FontDefinition {
-            data: Cow::Borrowed(NOTO_COLOR_EMOJI).into(),
+            data: NOTO_COLOR_EMOJI.to_vec().into(),
             index: 0,
         },
     );
     loader.define_font(
         "Liberation Mono Regular".into(),
         FontDefinition {
-            data: Cow::Borrowed(LIBERATION_MONO_REGULAR).into(),
+            data: LIBERATION_MONO_REGULAR.to_vec().into(),
             index: 0,
         },
     );

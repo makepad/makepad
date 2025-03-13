@@ -166,7 +166,7 @@ impl<'a> Iterator for IterMut<'a> {
 pub type FontId = usize;
 
 fn load(cx: &mut Cx, path: &str) -> Option<CxFont> {
-    match cx.take_dependency(&path) {
+    match cx.get_dependency(&path) {
         Ok(data) => match CxFont::load_from_ttf_bytes(data) {
             Ok(font) => Some(font),
             Err(_) => {

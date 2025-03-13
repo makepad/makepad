@@ -25,7 +25,7 @@ live_design! {
             instance focus: 0.0
             wrap: Word,
             text_style: {
-                font_family: (THEME_FONT_FAMILY_REGULAR),
+                font_family: <THEME_FONT_FAMILY_REGULAR> {},
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: 16.0
             }

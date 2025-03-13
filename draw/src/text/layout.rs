@@ -1,10 +1,10 @@
 use {
     super::{
         color::Color,
-        font::{Font, GlyphId, RasterizedGlyph},
+        font::{Font, FontId, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
-        font_loader::{self, FontLoader},
+        font_loader::{self, FontDefinition, FontFamilyDefinition, FontLoader},
         geom::{Point, Rect, Size},
         sdfer,
         selection::{Affinity, Cursor, Position, Selection},
@@ -48,6 +48,22 @@ impl Layouter {
 
     pub fn color_atlas(&self) -> &Rc<RefCell<ColorAtlas>> {
         self.font_loader.color_atlas()
+    }
+
+    pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
+        self.font_loader.is_font_family_known(id)
+    }
+
+    pub fn is_font_known(&self, id: FontId) -> bool {
+        self.font_loader.is_font_known(id)
+    }
+
+    pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        self.font_loader.define_font_family(id, definition);
+    }
+
+    pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
+        self.font_loader.define_font(id, definition);
     }
 
     pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
