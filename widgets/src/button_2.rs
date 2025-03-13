@@ -21,7 +21,7 @@ live_design! {
             instance pressed: 0.0,
             color: (THEME_COLOR_TEXT_DEFAULT)
             text_style: {
-                font_family: (THEME_FONT_FAMILY_REGULAR),
+                font_family: <THEME_FONT_FAMILY_REGULAR> {},
                 font_size: (THEME_FONT_SIZE_P)
             }
         }

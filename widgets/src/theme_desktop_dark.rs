@@ -188,7 +188,11 @@ live_design! {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
-    pub THEME_FONT_FAMILY_REGULAR = "Sans"
+    pub THEME_FONT_FAMILY_REGULAR = {
+        latin: dep("crate://self/resources/IBMPlexSans-Text.ttf"),
+        chinese: dep("crate://self/resources/LXGWWenKaiRegular.ttf")
+        emoji: dep("crate://self/resources/NotoColorEmoji.ttf")
+    };
     pub THEME_FONT_REGULAR = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },

@@ -6,14 +6,17 @@ use {
         makepad_platform::*,
         text::{
             color::Color,
-            font::{AtlasKind, RasterizedGlyph},
+            font::{AtlasKind, FontId, RasterizedGlyph},
+            font_family::FontFamilyId,
+            font_loader::{FontDefinition, FontFamilyDefinition},
+            fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layout::{LaidoutGlyph, LaidoutRow, LaidoutText},
             substr::Substr,
         },
         turtle::{Align, Walk},
     },
-    std::rc::Rc,
+    std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
@@ -140,7 +143,7 @@ impl DrawText2 {
             text,
             spans: [Span {
                 style: Style {
-                    font_family_id: self.text_style.font_family.as_str().into(),
+                    font_family_id: self.text_style.font_family.to_font_family_id(),
                     font_size_in_lpxs: self.text_style.font_size,
                     color: None,
                 },
@@ -378,9 +381,71 @@ impl DrawText2 {
 #[live_ignore]
 pub struct TextStyle {
     #[live]
-    pub font_family: String,
+    pub font_family: FontFamily,
     #[live]
     pub font_size: f32,
     #[live]
     pub line_spacing: f32,
+}
+
+#[derive(Debug, Clone, Live, LiveRegister, PartialEq)]
+pub struct FontFamily {
+    #[rust]
+    id: LiveId,
+}
+
+impl FontFamily {
+    fn to_font_family_id(&self) -> FontFamilyId {
+        (self.id.0 as usize).into()
+    }
+}
+
+impl LiveHook for FontFamily {
+    fn skip_apply(
+        &mut self,
+        cx: &mut Cx,
+        _apply: &mut Apply,
+        index: usize,
+        nodes: &[LiveNode],
+    ) -> Option<usize> {
+        Cx2d::lazy_construct_fonts(cx);
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let mut fonts = fonts.borrow_mut();
+        let fonts = &mut fonts;
+
+        let mut id = LiveId::seeded();
+        let mut next_child_index = Some(index + 1);
+        while let Some(child_index) = next_child_index {
+            if let LiveValue::Dependency(dependency) = &nodes[child_index].value {
+                id = id.xor(dependency.as_ptr() as u64);
+            }
+            next_child_index = nodes.next_child(child_index);
+        }
+        self.id = id;
+
+        let font_family_id = self.to_font_family_id();
+        if !fonts.is_font_family_known(font_family_id) {
+            let mut font_ids = Vec::new();
+            let mut next_child_index = Some(index + 1);
+            while let Some(child_index) = next_child_index {
+                if let LiveValue::Dependency(dependency) = &nodes[child_index].value {
+                    let font_id: FontId = dependency.as_str().into();
+                    if !fonts.is_font_known(font_id) {
+                        fonts.define_font(
+                            font_id,
+                            FontDefinition {
+                                data: cx.get_dependency(dependency).unwrap().into(),
+                                index: 0,
+                            },
+                        );
+                    }
+                    font_ids.push(font_id);
+                }
+                next_child_index = nodes.next_child(child_index);
+            }
+            fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
+        }
+        
+        Some(nodes.skip_node(index))
+    }
 }
