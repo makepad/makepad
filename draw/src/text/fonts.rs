@@ -1,7 +1,6 @@
 use {
     super::{
         font_atlas::{ColorAtlas, GrayscaleAtlas},
-        font_loader::FontDefinitions,
         geom::Point,
         image::Rgba,
         layout,
@@ -20,8 +19,8 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(cx: &mut Cx, definitions: FontDefinitions, settings: layout::Settings) -> Self {
-        let layouter = Layouter::new(definitions, settings);
+    pub fn new(cx: &mut Cx, settings: layout::Settings) -> Self {
+        let layouter = Layouter::new(settings);
         let grayscale_atlas_size = layouter.grayscale_atlas().borrow().size();
         let color_atlas_size = layouter.color_atlas().borrow().size();
         Self {

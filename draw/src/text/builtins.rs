@@ -1,0 +1,60 @@
+use {
+    super::font_loader::{FontDefinition, FontFamilyDefinition, FontLoader},
+    std::borrow::Cow,
+};
+
+pub const IBM_PLEX_SANS_TEXT: &[u8] =
+    include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
+pub const LXG_WEN_KAI_REGULAR: &[u8] =
+    include_bytes!("../../../widgets/resources/LXGWWenKaiRegular.ttf");
+pub const NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../widgets/resources/NotoColorEmoji.ttf");
+pub const LIBERATION_MONO_REGULAR: &[u8] =
+    include_bytes!("../../../widgets/resources/LiberationMono-Regular.ttf");
+
+pub fn define(loader: &mut FontLoader) {
+    loader.define_font_family(
+        "Sans".into(),
+        FontFamilyDefinition {
+            font_ids: [
+                "IBM Plex Sans Text".into(),
+                "LXG WWen Kai Regular".into(),
+                "Noto Color Emoji".into(),
+            ]
+            .into(),
+        },
+    );
+    loader.define_font_family(
+        "Monospace".into(),
+        FontFamilyDefinition {
+            font_ids: ["Liberation Mono Regular".into()].into(),
+        },
+    );
+    loader.define_font(
+        "IBM Plex Sans Text".into(),
+        FontDefinition {
+            data: Cow::Borrowed(IBM_PLEX_SANS_TEXT).into(),
+            index: 0,
+        },
+    );
+    loader.define_font(
+        "LXG WWen Kai Regular".into(),
+        FontDefinition {
+            data: Cow::Borrowed(LXG_WEN_KAI_REGULAR).into(),
+            index: 0,
+        },
+    );
+    loader.define_font(
+        "Noto Color Emoji".into(),
+        FontDefinition {
+            data: Cow::Borrowed(NOTO_COLOR_EMOJI).into(),
+            index: 0,
+        },
+    );
+    loader.define_font(
+        "Liberation Mono Regular".into(),
+        FontDefinition {
+            data: Cow::Borrowed(LIBERATION_MONO_REGULAR).into(),
+            index: 0,
+        },
+    );
+}

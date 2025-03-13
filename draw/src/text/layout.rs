@@ -4,7 +4,7 @@ use {
         font::{Font, GlyphId, RasterizedGlyph},
         font_atlas::{ColorAtlas, GrayscaleAtlas},
         font_family::{FontFamily, FontFamilyId},
-        font_loader::{self, FontDefinitions, FontLoader},
+        font_loader::{self, FontLoader},
         geom::{Point, Rect, Size},
         sdfer,
         selection::{Affinity, Cursor, Position, Selection},
@@ -29,9 +29,9 @@ pub struct Layouter {
 }
 
 impl Layouter {
-    pub fn new(definitions: FontDefinitions, settings: Settings) -> Self {
+    pub fn new(settings: Settings) -> Self {
         Self {
-            font_loader: FontLoader::new(definitions, settings.font_loader),
+            font_loader: FontLoader::new(settings.font_loader),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
             cached_results: HashMap::with_capacity(settings.cache_size),
