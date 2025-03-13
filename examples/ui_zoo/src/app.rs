@@ -165,100 +165,52 @@
 
                         tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
-                        tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
-                        tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
-                        tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
-                        tTextInput = Tab { name: "TextInput", template: PermanentTab, kind: TabTextInput }
-                        tTooltip = Tab { name: "Tooltip", template: PermanentTab, kind: TabTooltip }
-                        tLabel = Tab { name: "Label", template: PermanentTab, kind: TabLabel }
-                        tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
-                        tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
-                        tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
-                        tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
-                        tImage = Tab { name: "Image", template: PermanentTab, kind: TabImage }
-                        tImageBlend = Tab { name: "ImageBlend", template: PermanentTab, kind: TabImageBlend }
-                        tView = Tab { name: "View", template: PermanentTab, kind: TabView }
-                        tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
-                        tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
                         tColorPicker = Tab { name: "ColorPicker", template: PermanentTab, kind: TabColorPicker }
-                        tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
-                        tSlidesView = Tab { name: "SlidesView", template: PermanentTab, kind: TabSlidesView }
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
+                        tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
-
-                        TabOverview = <UIZooTab> {
-                            <WidgetsOverview> {}
-                        }
-
-                        TabLayoutDemos = <UIZooTab> {
-                            <UIZooTabLayout_A> {
-                                desc = {
-                                    <H3> { text: "LayoutDemos"}
-                                }
-                                demos = {
-                                }
-                            }
-                        }
-
-                        TabDesktopButton = <UIZooTab> {
-                            <UIZooTabLayout_A> {
-                                desc = {
-                                    <H3> { text: "<DesktopButton>"}
-                                }
-                                demos = {
-                                    <DesktopButton> { draw_bg: { button_type: WindowsMax} }
-                                    <DesktopButton> { draw_bg: { button_type: WindowsMaxToggled} }
-                                    <DesktopButton> { draw_bg: { button_type: WindowsClose} }
-                                    <DesktopButton> { draw_bg: { button_type: XRMode} }
-                                    <DesktopButton> { draw_bg: { button_type: Fullscreen } }
-                                }
-                            }
-                        }
-
-
-                        TabFoldButton = <UIZooTab> {
-                            <UIZooTabLayout_A> {
-                                desc = {
-                                    <H3> { text: "<FoldButton>"}
-                                }
-                                demos = {
-                                    <FoldButton> { }
-                                }
-                            }
-                        }
-
-                        TabScrollbar = <UIZooTab> {
-                            <UIZooTabLayout_A> {
-                                desc = {
-                                    <H3> { text: "<ScrollBar>"}
-                                }
-                                demos = {
-                                    <H1> { text: "Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up."}
-                                    scroll_bars: <ScrollBars> { }
-                                }
-                            }
-                        }
-
-                        TabImageBlend = <UIZooTab> { <DemoImageBlend> {} }
-                        TabIcon = <UIZooTab> { <DemoIcon> {} }
-                        TabColorPicker = <UIZooTab> { <DemoColorpicker> {} }
-                        TabDropDown = <UIZooTab> { <DemoDropdown> {} }
-                        TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
-                        TabSlidesView = <UIZooTab> { <DemoSlidesView> {} }
-                        TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
-                        TabCheckbox = <UIZooTab> { <DemoCheckbox> {} }
-                        TabFiletree = <UIZooTab> { <DemoFT> {} }
-                        TabView = <UIZooTab> { <DemoView> {} }
-                        TabImage = <UIZooTab> { <DemoImage> {} }
-                        TabLinkLabel = <UIZooTab> { } // TODO: FIX
+                        tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
+                        tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
+                        tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
+                        tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
+                        tImage = Tab { name: "Image", template: PermanentTab, kind: TabImage }
+                        tImageBlend = Tab { name: "ImageBlend", template: PermanentTab, kind: TabImageBlend }
+                        tLabel = Tab { name: "Label", template: PermanentTab, kind: TabLabel }
+                        tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
+                        tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
+                        tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
+                        tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
+                        tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
+                        tSlidesView = Tab { name: "SlidesView", template: PermanentTab, kind: TabSlidesView }
+                        tTextInput = Tab { name: "TextInput", template: PermanentTab, kind: TabTextInput }
+                        tTooltip = Tab { name: "Tooltip", template: PermanentTab, kind: TabTooltip }
+                        tView = Tab { name: "View", template: PermanentTab, kind: TabView }
+                        
+                        TabOverview = <UIZooTab> { <WidgetsOverview> {} }
+                        TabLayoutDemos = <UIZooTab> { <DemoLayout> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
+                        TabCheckbox = <UIZooTab> { <DemoCheckbox> {} }
+                        TabColorPicker = <UIZooTab> { <DemoColorpicker> {} }
+                        TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
+                        TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
+                        TabDropDown = <UIZooTab> { <DemoDropdown> {} }
+                        TabFiletree = <UIZooTab> { <DemoFT> {} }
+                        TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
+                        TabHTML = <UIZooTab> { <DemoHtml> {} }
+                        TabIcon = <UIZooTab> { <DemoIcon> {} }
+                        TabImage = <UIZooTab> { <DemoImage> {} }
+                        TabImageBlend = <UIZooTab> { <DemoImageBlend> {} }
+                        TabLabel = <UIZooTab> { <DemoLabel> {} }
+                        TabLinkLabel = <UIZooTab> { } // TODO: FIX
+                        TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
+                        TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
+                        TabSlider = <UIZooTab> { <DemoSlider> {} }
+                        TabSlidesView = <UIZooTab> { <DemoSlidesView> {} }
                         TabTextInput = <UIZooTab> { <DemoTextInput> {} }
                         TabTooltip = <UIZooTab> { <DemoTooltip> {} }
-                        TabLabel = <UIZooTab> { <DemoLabel> {} }
-                        TabSlider = <UIZooTab> { <DemoSlider> {} }
-                        TabHTML = <UIZooTab> { <DemoHtml> {} }
+                        TabView = <UIZooTab> { <DemoView> {} }
 
 
                         TabMarkdown = <UIZooTab> { // TODO: FIX
