@@ -411,7 +411,6 @@ impl LiveHook for FontFamily {
         Cx2d::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
-        let fonts = &mut fonts;
 
         let mut id = LiveId::seeded();
         let mut next_child_index = Some(index + 1);
