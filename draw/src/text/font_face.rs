@@ -1,14 +1,14 @@
 use {
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
-    std::{borrow::Cow, fmt, marker::PhantomPinned, mem, pin::Pin, rc::Rc},
+    std::{fmt, marker::PhantomPinned, mem, pin::Pin, rc::Rc},
 };
 
 #[derive(Debug)]
 pub struct FontFace(Pin<Box<FontFaceInner>>);
 
 impl FontFace {
-    pub fn from_data_and_index(data: Rc<Cow<'static, [u8]>>, index: u32) -> Option<Self> {
+    pub fn from_data_and_index(data: Rc<Vec<u8>>, index: u32) -> Option<Self> {
         let mut inner = Box::pin(FontFaceInner {
             data,
             ttf_parser_face: None,
@@ -36,7 +36,7 @@ impl FontFace {
 }
 
 struct FontFaceInner {
-    data: Rc<Cow<'static, [u8]>>,
+    data: Rc<Vec<u8>>,
     ttf_parser_face: Option<ttf_parser::Face<'static>>,
     rustybuzz_face: Option<rustybuzz::Face<'static>>,
     _pinned: PhantomPinned,
