@@ -1,7 +1,7 @@
 use {
     super::{
         font_atlas::{FontAtlas, GlyphImageKey},
-        font_face::{FontFace, FontFaceDefinition},
+        font_face::FontFace,
         geom::{Rect, Size},
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
@@ -48,15 +48,15 @@ impl Font {
         sdfer: Rc<RefCell<Sdfer>>,
         grayscale_atlas: Rc<RefCell<FontAtlas<R>>>,
         color_atlas: Rc<RefCell<FontAtlas<Rgba>>>,
-        face_definition: FontFaceDefinition,
-    ) -> Option<Self> {
-        Some(Self {
+        face: FontFace,
+    ) -> Self {
+        Self {
             id,
             grayscale_atlas,
             color_atlas,
             sdfer,
-            face: FontFace::from_definition(face_definition)?,
-        })
+            face,
+        }
     }
 
     pub fn id(&self) -> &FontId {
