@@ -12,7 +12,7 @@ use {
         shape,
         shape::Shaper,
     },
-    std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
+    std::{cell::RefCell, collections::HashMap, rc::Rc},
 };
 
 #[derive(Clone, Debug)]
@@ -55,11 +55,39 @@ impl FontLoader {
         &self.color_atlas
     }
 
+    pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
+        if self.font_family_definitions.contains_key(&id) {
+            return true;
+        }
+        if self.font_family_cache.contains_key(&id) {
+            return true;
+        }
+        false
+    }
+
+    pub fn is_font_known(&self, id: FontId) -> bool {
+        if self.font_definitions.contains_key(&id) {
+            return true;
+        }
+        if self.font_cache.contains_key(&id) {
+            return true;
+        }
+        false
+    }
+
     pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        debug_assert!(
+            !self.is_font_family_known(id),
+            "can't redefine a font family that is already known"
+        );
         self.font_family_definitions.insert(id, definition);
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
+        debug_assert!(
+            !self.is_font_known(id),
+            "can't redefine a font that is already known"
+        );
         self.font_definitions.insert(id, definition);
     }
 
@@ -126,6 +154,6 @@ pub struct FontFamilyDefinition {
 
 #[derive(Clone, Debug)]
 pub struct FontDefinition {
-    pub data: Rc<Cow<'static, [u8]>>,
+    pub data: Rc<Vec<u8>>,
     pub index: u32,
 }
