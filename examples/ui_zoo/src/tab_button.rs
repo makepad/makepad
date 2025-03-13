@@ -14,6 +14,10 @@ live_design!{
         }
         demos = {
     
+            <H3> { text: "Demos" }
+            <Hr> {}
+
+            <H4> { text: "Standard"}
             basicbutton = <Button> {
 
                 draw_text: {
@@ -63,7 +67,13 @@ live_design!{
                 text: "<ButtonIcon>"
             }
 
+            <Hr> {}
+            <H4> { text: "Gradient Versions"}
             <ButtonGradientX> { text: "<ButtonGradientX>" }
+            <ButtonGradientY> { text: "<ButtonGradientY>" }
+
+            <Hr> {}
+            <H4> { text: "Styled"}
             <ButtonGradientX> {
                 draw_bg: {
                     border_radius: 1.0,
@@ -89,7 +99,6 @@ live_design!{
                 text: "<ButtonGradientX>"
             }
 
-            <ButtonGradientY> { text: "<ButtonGradientY>" }
             <ButtonGradientY> {
                 draw_bg: {
                     border_radius: 1.0,
@@ -115,6 +124,8 @@ live_design!{
                 text: "<ButtonGradientY>"
             }
 
+            <Hr> {}
+            <H4> { text: "Flat"}
             <ButtonFlat> {
                 draw_icon: {
                     color: #f00,
@@ -129,9 +140,11 @@ live_design!{
                 draw_icon: {
                     svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                 }
-                text: "<ButtonFlat> (Vertical)"
+                text: "<ButtonFlat>"
             }
 
+            <Hr> {}
+            <H4> { text: "Flatter"}
             <ButtonFlatter> {
                 draw_icon: {
                     color: #f00,
@@ -140,6 +153,8 @@ live_design!{
                 text: "<ButtonFlatter>"
             }
 
+            <Hr> {}
+            <H4> { text: "Custom"}
             styledbutton = <Button> {
             // Allows instantiation of customly styled elements as i.e. <MyButton> {}.
 
