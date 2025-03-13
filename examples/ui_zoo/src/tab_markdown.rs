@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoMarkdown = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<MarkDown>"}
+            <H3> { text: "<MarkDown>" }
         }
         demos = {
             <Markdown> {
