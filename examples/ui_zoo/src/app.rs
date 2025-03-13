@@ -7,6 +7,7 @@
         use link::widgets::*;
         use makepad_widgets::vectorline::*;
         use makepad_example_ui_zoo::demofiletree::*;
+        use crate::layout_templates::*;
         use crate::demoinput::*;
         use crate::demobutton::*;
 
@@ -2227,6 +2228,7 @@
     impl LiveRegister for App {
         fn live_register(cx: &mut Cx) {
             crate::makepad_widgets::live_design(cx);
+            crate::layout_templates::live_design(cx);
             crate::demofiletree::live_design(cx);
             crate::demoinput::live_design(cx);
             crate::demobutton::live_design(cx);
