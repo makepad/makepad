@@ -526,39 +526,108 @@ impl CommandTextInput {
     ///
     /// You probably want this for filtering purposes when updating the items.
     pub fn search_text(&self) -> String {
+        // Define maximum search text length to prevent performance issues with very long search texts
+        const MAX_SEARCH_TEXT_LENGTH: usize = 100;
+
         if self.inline_search {
             if let Some(trigger_pos) = self.trigger_position {
                 let text = self.text();
                 let head = get_head(&self.text_input_ref());
 
                 if head > trigger_pos {
-                    // Convert byte indices to grapheme indices
+                    // Parse text into graphemes (Unicode grapheme clusters)
                     let text_graphemes: Vec<&str> = text.graphemes(true).collect();
                     let mut byte_pos = 0;
-                    let mut trigger_grapheme_idx = 0;
-                    let mut head_grapheme_idx = 0;
+                    let mut trigger_grapheme_idx = None;
+                    let mut head_grapheme_idx = None;
+                    let mut last_grapheme_end = 0;
 
-                    // Find corresponding grapheme indices
+                    // Single-pass traversal to calculate all grapheme indices
                     for (i, g) in text_graphemes.iter().enumerate() {
+                        // Check if the trigger character is within this grapheme
                         if byte_pos <= trigger_pos && byte_pos + g.len() > trigger_pos {
-                            trigger_grapheme_idx = i;
+                            trigger_grapheme_idx = Some(i);
                         }
+                        // Check if the trigger character is exactly at the end of this grapheme
+                        else if byte_pos + g.len() == trigger_pos {
+                            // Special case: trigger at grapheme boundary, point to the next grapheme
+                            trigger_grapheme_idx = Some(i + 1);
+                        }
+
+                        // Check if the cursor is within this grapheme
                         if byte_pos <= head && byte_pos + g.len() > head {
-                            head_grapheme_idx = i;
-                            break;
+                            head_grapheme_idx = Some(i);
                         }
+                        // Check if the cursor is exactly at the end of this grapheme
+                        else if byte_pos + g.len() == head {
+                            // Special case: cursor at grapheme boundary, point to the next grapheme
+                            head_grapheme_idx = Some(i + 1);
+                        }
+
                         byte_pos += g.len();
+                        last_grapheme_end = byte_pos;
                     }
 
-                    // Use grapheme indices for operations
-                    text_graphemes[trigger_grapheme_idx..head_grapheme_idx].join("")
-                } else {
-                    String::new()
+                    // Handle edge cases at the end of text symmetrically for both positions
+                    if head_grapheme_idx.is_none() && head >= last_grapheme_end {
+                        head_grapheme_idx = Some(text_graphemes.len());
+                    }
+
+                    if trigger_grapheme_idx.is_none() && trigger_pos >= last_grapheme_end {
+                        trigger_grapheme_idx = Some(text_graphemes.len());
+                    }
+
+                    // Safety check and use indices only if they're valid
+                    if let (Some(t_idx), Some(h_idx)) = (trigger_grapheme_idx, head_grapheme_idx) {
+                        // Additional range check to prevent index errors
+                        if t_idx >= text_graphemes.len() || h_idx > text_graphemes.len() {
+                            log!("Error: Grapheme indices out of range: t_idx={}, h_idx={}, graphemes_len={}",
+                                 t_idx, h_idx, text_graphemes.len());
+                            return String::new();
+                        }
+
+                        if t_idx < h_idx {
+                            // Check length limit
+                            let length = h_idx - t_idx;
+                            if length > MAX_SEARCH_TEXT_LENGTH {
+                                log!("Warning: Search text length({}) exceeds maximum limit({})", length, MAX_SEARCH_TEXT_LENGTH);
+                                // Still return text but truncated to the maximum length
+                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH].join("");
+                            }
+
+                            // Optimized string building with pre-allocated capacity
+                            let mut result = String::with_capacity(
+                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum()
+                            );
+                            for g in &text_graphemes[t_idx..h_idx] {
+                                result.push_str(g);
+                            }
+                            return result;
+                        } else if t_idx == h_idx {
+                            // Edge case: trigger character and cursor in the same grapheme
+                            return String::new();
+                        } else {
+                            // Abnormal case: trigger character is after the cursor
+                            log!("Warning: Trigger character is after cursor: trigger_idx={}, head_idx={}, trigger_pos={}, head={}",
+                                 t_idx, h_idx, trigger_pos, head);
+                            return String::new();
+                        }
+                    } else {
+                        // Comprehensive diagnostic information
+                        log!("Warning: Unable to find valid grapheme indices: trigger_idx={:?}, head_idx={:?}, trigger_pos={}, head={}, text_len={}, graphemes_len={}",
+                             trigger_grapheme_idx, head_grapheme_idx, trigger_pos, head, text.len(), text_graphemes.len());
+                        return String::new();
+                    }
                 }
+
+                // Cursor is at or before the trigger position
+                String::new()
             } else {
+                // No trigger position
                 String::new()
             }
         } else {
+            // Non-inline search mode
             self.search_input_ref().text()
         }
     }
