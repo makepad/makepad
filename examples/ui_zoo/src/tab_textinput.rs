@@ -8,7 +8,7 @@ live_design!{
     use link::widgets::*;
     use crate::layout_templates::*;
 
-    pub DemoInput = <UIZooTabLayout_B> {
+    pub DemoTextInput = <UIZooTabLayout_B> {
                     desc = {
                         <H3> { text: "<TextInput>"}
                     }
