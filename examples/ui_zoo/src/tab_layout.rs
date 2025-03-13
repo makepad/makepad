@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoLayout = <UIZooTabLayout_B> {
         desc = {
-
+            <H3> { text: "LayoutDemos"}
         }
         demos = {
         }

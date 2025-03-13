@@ -10,9 +10,10 @@ live_design!{
 
     pub DemoFoldButton = <UIZooTabLayout_B> {
         desc = {
-
+            <H3> { text: "<FoldButton>"}
         }
         demos = {
+            <FoldButton> { }
         }
     }
 }
