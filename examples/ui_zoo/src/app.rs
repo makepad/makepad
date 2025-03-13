@@ -33,10 +33,6 @@
         use crate::tab_view::*;
         use crate::tab_widgetsoverview::*;
 
-
-        COLOR_CONTAINER = (THEME_COLOR_D_1)
-        COLOR_ACCENT = (THEME_COLOR_MAKEPAD)
-
         UIZooTab = <RectView> {
             height: Fill, width: Fill
             flow: Down,
@@ -44,32 +40,6 @@
             spacing: 0.
         }
                             
-        UIZooTabLayout_A = <View> {
-            height: Fill, width: Fill
-            flow: Right,
-            padding: 0
-            spacing: 0.
-
-            desc = <View> {
-                width: 300., height: Fill,
-                flow: Down,
-                spacing: (THEME_SPACE_2)
-                padding: <THEME_MSPACE_3> {}
-                scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
-            }
-
-            <Vr> {}
-
-            demos = <View> {
-                width: Fill, height: Fill,
-                flow: Down,
-                spacing: (THEME_SPACE_2)
-                padding: <THEME_MSPACE_3> {}
-                scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
-            }
-
-        }
-
         App = {{App}} {
             ui: <Window> {
                 width: Fill, height: Fill,
@@ -203,7 +173,12 @@
                         TabImage = <UIZooTab> { <DemoImage> {} }
                         TabImageBlend = <UIZooTab> { <DemoImageBlend> {} }
                         TabLabel = <UIZooTab> { <DemoLabel> {} }
-                        TabLinkLabel = <UIZooTab> { } // TODO: FIX
+                        TabLinkLabel = <UIZooTab> {
+                            <DemoLinkLabel> {} // TODO: FIX
+                        } 
+                        TabMarkdown = <UIZooTab> {
+                            // <DemoMarkdown> {}// TODO: FIX
+                        } 
                         TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
                         TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
                         TabSlider = <UIZooTab> { <DemoSlider> {} }
@@ -213,19 +188,6 @@
                         TabView = <UIZooTab> { <DemoView> {} }
 
 
-                        TabMarkdown = <UIZooTab> { // TODO: FIX
-                            <UIZooTabLayout_A> {
-                                desc = {
-                                    <H3> { text: "<MarkDown>"}
-                                }
-                                demos = {
-                                    <Markdown> {
-                                        width:Fill, height: Fit,
-                                        body:"# Headline 1 \n ## Headline 2 \n ### Headline 3 \n #### Headline 4 \n This is standard text with a  \n\n line break a short ~~strike through~~ demo.\n\n *Italic text* \n\n **Bold text** \n\n - Bullet\n - Another bullet\n\n - Third bullet\n\n 1. Numbered list Bullet\n 2. Another list entry\n\n 3. Third list entry\n\n `Monospaced text`\n\n> This is a quote.\n\nThis is `inline code`.\n\n ```code block```"
-                                    }
-                                }
-                            }
-                        }
 
                     }
 
