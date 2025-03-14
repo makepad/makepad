@@ -820,14 +820,19 @@ impl Widget for HtmlLink {
     }
 }
 
-impl HtmlLink {
-    pub fn url(&self) -> String{
-        self.url.clone()
+impl HtmlLinkRef {
+    pub fn set_url(&mut self, url: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.url = url.to_string();
+        }
     }
 
-    pub fn set_url(&mut self, cx: &mut Cx, url: &str) {
-        self.url = url.to_string();
-        self.redraw(cx);
+    pub fn url(&self) -> Option<String> {
+        if let Some(inner) = self.borrow() {
+            Some(inner.url.clone())
+        } else {
+            None
+        }
     }
 }
 
