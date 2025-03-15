@@ -58,7 +58,7 @@ cargo makepad ohos --deveco-home=<path-to-deveco> deveco -p makepad-example-simp
 DEVECO_HOME=<$HOME/command-line-tools> cargo makepad ohos deveco -p makepad-example-simple --release
 ```
 
-After this command, it would generates a DevEco Project in `target/makepad-open-haromony/makepad_example_simple`
+After this command, it would generates a DevEco Project in `target/makepad-open-harmony/makepad_example_simple`
 
 ## Signing With DevEco
 Use `DevEco studio` to sign the project, for the Linux user, please copy the project to Windows/MacOS, then sign it with `DevEco studio`
@@ -73,7 +73,7 @@ Click `File` -> `Project Structure` -> `Signing Configs` -> `Sign in`
 
 After signing
 
-`target/makepad-open-haromony/makepad_example_simple/build-profile.json5`
+`target/makepad-open-harmony/makepad_example_simple/build-profile.json5`
 ```json
 {
   "app": {
@@ -143,7 +143,7 @@ cargo makepad ohos --deveco-home=<path-to-deveco> run -p makepad-example-simple 
 DEVECO_HOME=<$HOME/command-line-tools> cargo makepad ohos run -p makepad-example-simple --release
 ```
 
-After this command, it would generates a Hap file  in `target/makepad-open-haromony/makepad_example_simple/entry/build/outputs/default/makepad-default-signed.hap`
+After this command, it would generates a Hap file  in `target/makepad-open-harmony/makepad_example_simple/entry/build/outputs/default/makepad-default-signed.hap`
 
 
 ## HDC Remote
