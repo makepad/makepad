@@ -628,11 +628,15 @@ pub enum HtmlLinkAction {
         url: String,
         key_modifiers: KeyModifiers,
     },
+    SecondaryClicked {
+        url: String,
+        key_modifiers: KeyModifiers,
+    },
     None,
 }
 
 #[derive(Live, Widget)]
-struct HtmlLink {
+pub struct HtmlLink {
     #[animator] animator: Animator,
 
     // TODO: this is unusued; just here to invalidly satisfy the area provider.
@@ -702,11 +706,24 @@ impl Widget for HtmlLink {
 
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                    if self.grab_key_focus {
-                        cx.set_key_focus(self.area());
+                Hit::FingerDown(fe) => {
+                    if fe.is_primary_hit() {
+                        if self.grab_key_focus {
+                            cx.set_key_focus(self.area());
+                        }
+                        self.animator_play(cx, id!(hover.pressed));
                     }
-                    self.animator_play(cx, id!(hover.pressed));
+                    // Fire a secondary click action on a right-click *down* event.
+                    else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
+                        cx.widget_action(
+                            self.widget_uid(),
+                            &scope.path,
+                            HtmlLinkAction::SecondaryClicked {
+                                url: self.url.clone(),
+                                key_modifiers: fe.modifiers,
+                            },
+                        );
+                    }
                 }
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
@@ -714,6 +731,16 @@ impl Widget for HtmlLink {
                 }
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
+                }
+                Hit::FingerLongPress(_) => {
+                    cx.widget_action(
+                        self.widget_uid(),
+                        &scope.path,
+                        HtmlLinkAction::SecondaryClicked {
+                            url: self.url.clone(),
+                            key_modifiers: Default::default(),
+                        },
+                    );
                 }
                 Hit::FingerUp(fu) => {
                     if fu.is_over {

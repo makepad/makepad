@@ -5,6 +5,7 @@ live_design! {
     link widgets;
     use link::widgets::*;
     use link::theme::*;
+    use link::shaders::*;
 
     List = {{List}} {
         flow: Down,
@@ -23,6 +24,84 @@ live_design! {
             flow: Down,
             height: Fit,
             visible: false,
+
+            draw_bg: {
+                color: #fff,
+                border_width: 2.0,
+                border_color: #eaecf0,
+                radius: 8.0,
+
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                    // External outline (entire component including border)
+                    sdf.box_all(
+                        0.0,
+                        0.0,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        self.radius,
+                        self.radius,
+                        self.radius,
+                        self.radius
+                    );
+                    sdf.fill(self.border_color);  // Fill the entire area with border color
+
+                    // Internal outline (content area)
+                    sdf.box_all(
+                        self.border_width,
+                        self.border_width,
+                        self.rect_size.x - self.border_width * 2.0,
+                        self.rect_size.y - self.border_width * 2.0,
+                        self.radius - self.border_width,
+                        self.radius - self.border_width,
+                        self.radius - self.border_width,
+                        self.radius - self.border_width
+                    );
+                    sdf.fill(self.color);  // Fill content area with background color
+
+                    return sdf.result;
+                }
+            }
+
+            header_view = <View> {
+                width: Fill,
+                height: Fit,
+                padding: {left: 12., right: 12., top: 12., bottom: 12.}
+                show_bg: true
+                visible: true,
+                draw_bg: {
+                    color: #f5f5f5,
+                    instance top_radius: 8.0,
+                    instance border_color: #f5f5f5,
+                    instance border_width: 2.0,
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                        sdf.box_all(
+                            0.0,
+                            0.0,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            self.top_radius,
+                            self.top_radius,
+                            1.0,
+                            1.0
+                        );
+                        sdf.fill(self.color);
+                        return sdf.result
+                    }
+                }
+
+                header_label = <Label> {
+                    draw_text: {
+                        color: #495057,
+                        text_style: {
+                            font_size: 13.0,
+                        }
+                    }
+                }
+            }
+
 
             // Wrapper workaround to hide search input when inline search is enabled
             // as we currently can't hide the search input avoiding events.
@@ -141,6 +220,7 @@ impl Widget for CommandTextInput {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.update_highlights(cx);
+        self.ensure_popup_consistent(cx);
 
         while !self.deref.draw_walk(cx, scope, walk).is_done() {}
 
@@ -210,6 +290,7 @@ impl Widget for CommandTextInput {
                             &scope.path,
                             InternalAction::ShouldBuildItems,
                         );
+                        self.ensure_popup_consistent(cx);
                     }
                 }
             }
@@ -269,16 +350,28 @@ impl Widget for CommandTextInput {
                             &scope.path,
                             InternalAction::ShouldBuildItems,
                         );
+                        self.ensure_popup_consistent(cx);
                     }
                 }
             }
         }
 
         self.prev_cursor_position = get_head(&self.text_input_ref());
+        self.ensure_popup_consistent(cx);
     }
 }
 
 impl CommandTextInput {
+    // Ensure popup state consistency
+    fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
+        if self.view(id!(popup)).visible() {
+            if self.inline_search {
+                self.view(id!(search_input_wrapper)).set_visible(cx, false);
+            } else {
+                self.view(id!(search_input_wrapper)).set_visible(cx, true);
+            }
+        }
+    }
 
     pub fn keyboard_focus_index(&self) -> Option<usize> {
         self.keyboard_focus_index
@@ -311,6 +404,7 @@ impl CommandTextInput {
                 &scope.path,
                 InternalAction::ShouldBuildItems,
             );
+            self.ensure_popup_consistent(cx);
         }
     }
 
@@ -340,17 +434,44 @@ impl CommandTextInput {
 
         let text = self.text();
         let end = get_head(&self.text_input_ref());
-        let Some(start) = end.checked_sub(to_remove.len()) else {
+        // Use graphemes instead of byte indices
+        let text_graphemes: Vec<&str> = text.graphemes(true).collect();
+        let mut byte_index = 0;
+        let mut end_grapheme_idx = 0;
+
+        // Find the grapheme index corresponding to the end position
+        for (i, g) in text_graphemes.iter().enumerate() {
+            if byte_index <= end && byte_index + g.len() > end {
+                end_grapheme_idx = i;
+                break;
+            }
+            byte_index += g.len();
+        }
+
+        // Calculate the start grapheme index
+        let start_grapheme_idx = if end_grapheme_idx >= to_remove.graphemes(true).count() {
+            end_grapheme_idx - to_remove.graphemes(true).count()
+        } else {
             return;
         };
 
-        let text = text[..start].to_string() + &text[end..];
+        // Rebuild the string
+        let new_text = text_graphemes[..start_grapheme_idx].join("") +
+                        &text_graphemes[end_grapheme_idx..].join("");
 
-        self.text_input_ref().set_cursor(start, start);
-        self.set_text(cx, &text);
+        // Calculate the new cursor position (grapheme)
+        let new_cursor_pos = text_graphemes[..start_grapheme_idx].join("").graphemes(true).count();
+
+        self.text_input_ref().set_cursor(new_cursor_pos, new_cursor_pos);
+        self.set_text(cx, &new_text);
     }
 
     fn show_popup(&mut self, cx: &mut Cx) {
+        if self.inline_search {
+            self.view(id!(search_input_wrapper)).set_visible(cx, false);
+        } else {
+            self.view(id!(search_input_wrapper)).set_visible(cx, true);
+        }
         self.view(id!(popup)).set_visible(cx, true);
         self.view(id!(popup)).redraw(cx);
     }
@@ -411,7 +532,26 @@ impl CommandTextInput {
                 let head = get_head(&self.text_input_ref());
 
                 if head > trigger_pos {
-                    text[trigger_pos..head].to_string()
+                    // Convert byte indices to grapheme indices
+                    let text_graphemes: Vec<&str> = text.graphemes(true).collect();
+                    let mut byte_pos = 0;
+                    let mut trigger_grapheme_idx = 0;
+                    let mut head_grapheme_idx = 0;
+
+                    // Find corresponding grapheme indices
+                    for (i, g) in text_graphemes.iter().enumerate() {
+                        if byte_pos <= trigger_pos && byte_pos + g.len() > trigger_pos {
+                            trigger_grapheme_idx = i;
+                        }
+                        if byte_pos <= head && byte_pos + g.len() > head {
+                            head_grapheme_idx = i;
+                            break;
+                        }
+                        byte_pos += g.len();
+                    }
+
+                    // Use grapheme indices for operations
+                    text_graphemes[trigger_grapheme_idx..head_grapheme_idx].join("")
                 } else {
                     String::new()
                 }
