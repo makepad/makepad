@@ -27,8 +27,13 @@ live_design!{
             color: (THEME_COLOR_BG_CONTAINER)
         }
 
+        draw_fill: {
+            color: (THEME_COLOR_BG_APP)
+        }
+        
         draw_bg: {
             uniform color_dither: 1.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
             color: (THEME_COLOR_BG_APP * 0.8);
 
             fn pixel(self) -> vec4 {
@@ -40,7 +45,7 @@ live_design!{
                     1.,
                     self.rect_size.x - 2.0,
                     self.rect_size.y - 2.0,
-                    1.0
+                    self.border_radius
                 )
 
                 sdf.fill(self.color);
@@ -48,10 +53,6 @@ live_design!{
             }
         }
 
-        draw_fill: {
-            color: ((THEME_COLOR_BG_APP))
-        }
-        
         scroll_bars: <ScrollBarsTabs> {
             show_scroll_x: true
             show_scroll_y: false
@@ -70,6 +71,7 @@ live_design!{
 
         draw_bg: {
             uniform color_dither: 1.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
             uniform color_1: (THEME_COLOR_BG_APP * 0.8);
             uniform color_2: (THEME_COLOR_BG_APP * 1.2);
 
@@ -82,7 +84,7 @@ live_design!{
                     1.,
                     self.rect_size.x - 2.0,
                     self.rect_size.y - 2.0,
-                    1.0
+                    self.border_radius
                 )
 
                 sdf.fill(mix(self.color_1, self.color_2, self.pos.x + dither));
@@ -97,6 +99,7 @@ live_design!{
         PermanentTab = <TabGradientY> {closeable: false}
         draw_bg: {
             uniform color_dither: 1.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
             uniform color_1: (THEME_COLOR_BG_APP * 0.9);
             uniform color_2: #282828;
 
@@ -109,7 +112,7 @@ live_design!{
                     1.,
                     self.rect_size.x - 1.5,
                     self.rect_size.y - 1.5,
-                    1.0
+                    self.border_radius
                 )
 
                 sdf.fill(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));

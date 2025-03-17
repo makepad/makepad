@@ -20,7 +20,8 @@ live_design!{
         margin: {right: 0., top: 5.}
         
         close_button: <TabCloseButton> {}
-        draw_name: {
+
+        draw_text: {
             text_style: <THEME_FONT_REGULAR> {}
             instance hover: 0.0
             instance active: 0.0
@@ -105,7 +106,7 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                     }
                 }
                 
@@ -114,7 +115,7 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {hover: [{time: 0.0, value: 1.0}]}
-                        draw_name: {hover: [{time: 0.0, value: 1.0}]}
+                        draw_text: {hover: [{time: 0.0, value: 1.0}]}
                     }
                 }
             }
@@ -126,7 +127,7 @@ live_design!{
                     apply: {
                         close_button: {draw_button: {active: 0.0}}
                         draw_bg: {active: 0.0}
-                        draw_name: {active: 0.0}
+                        draw_text: {active: 0.0}
                     }
                 }
                 
@@ -135,7 +136,7 @@ live_design!{
                     apply: {
                         close_button: {draw_button: {active: 1.0}}
                         draw_bg: {active: 1.0}
-                        draw_name: {active: 1.0}
+                        draw_text: {active: 1.0}
                     }
                 }
             }
@@ -144,12 +145,9 @@ live_design!{
 
     pub TabGradientX = <Tab> {
         draw_bg: {
-            instance hover: float
-            instance active: float
-
-            uniform border_size: 1.
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform color_dither: 1.
+            border_size: 1.
+            border_radius: (THEME_CORNER_RADIUS)
+            color_dither: 1.
 
             uniform color_1: (THEME_COLOR_D_HIDDEN)
             uniform color_1_hover: (THEME_COLOR_D_2)
@@ -159,13 +157,13 @@ live_design!{
             uniform color_2_hover: (THEME_COLOR_D_2)
             uniform color_2_active: (THEME_COLOR_BG_APP)
 
-            uniform border_color_1: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1: (THEME_COLOR_U_HIDDEN)
+            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform border_color_2: (THEME_COLOR_D_HIDDEN)
-            uniform border_color_2_hover: (THEME_COLOR_D_HIDDEN)
-            uniform border_color_2_active: (THEME_COLOR_D_HIDDEN)
+            border_color_2: (THEME_COLOR_D_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_D_HIDDEN)
+            border_color_2_active: (THEME_COLOR_D_HIDDEN)
               
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -208,30 +206,27 @@ live_design!{
         }
     }
 
-    pub TabGradientY = <Tab> {
+    pub TabGradientY = <TabGradientX> {
         draw_bg: {
-            instance hover: float
-            instance active: float
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+            color_dither: 1.
 
-            uniform border_size: 1.
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform color_dither: 1.
+            color_1: (THEME_COLOR_D_HIDDEN)
+            color_1_hover: (THEME_COLOR_D_2)
+            color_1_active: (THEME_COLOR_BG_APP)
 
-            uniform color_1: (THEME_COLOR_D_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_D_2)
-            uniform color_1_active: (THEME_COLOR_BG_APP)
+            color_2: (THEME_COLOR_D_HIDDEN)
+            color_2_hover: (THEME_COLOR_D_2)
+            color_2_active: (THEME_COLOR_BG_APP)
 
-            uniform color_2: (THEME_COLOR_D_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_D_2)
-            uniform color_2_active: (THEME_COLOR_BG_APP)
+            border_color_1: (THEME_COLOR_U_HIDDEN)
+            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform border_color_1: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
-
-            uniform border_color_2: (THEME_COLOR_D_HIDDEN)
-            uniform border_color_2_hover: (THEME_COLOR_D_HIDDEN)
-            uniform border_color_2_active: (THEME_COLOR_D_HIDDEN)
+            border_color_2: (THEME_COLOR_D_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_D_HIDDEN)
+            border_color_2_active: (THEME_COLOR_D_HIDDEN)
               
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -285,7 +280,7 @@ pub struct Tab {
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_name: DrawText,
+    #[live] draw_text: DrawText,
     #[live] icon_walk: Walk,
     //#[live] draw_drag: DrawColor,
     
@@ -335,7 +330,7 @@ impl Tab {
         
         self.draw_icon.draw_walk(cx, self.icon_walk);
         //cx.turtle_align_y();
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         //cx.turtle_align_y();
         self.draw_bg.end(cx);
         

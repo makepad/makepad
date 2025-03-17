@@ -27,8 +27,16 @@ live_design!{
     pub Dock = <DockBase> {
         flow: Down,
 
+        tab_bar: <TabBarGradientY> {}
+        splitter: <Splitter> {}
+
+        border_size: (THEME_DOCK_BORDER_SIZE)
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+
         round_corner: {
             border_radius: 20.
+            uniform color: (THEME_COLOR_BG_APP)
+// 
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
@@ -46,27 +54,29 @@ live_design!{
                 );
 
                 sdf.subtract()
-                sdf.fill(THEME_COLOR_BG_APP)
+
+                sdf.fill(self.color)
                 return sdf.result
             }
         }
-        border_size: (THEME_DOCK_BORDER_SIZE)
-
-        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
-        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
         drag_quad: {
             draw_depth: 10.0
             color: (THEME_COLOR_DRAG_QUAD)
         }
-        tab_bar: <TabBarGradientY> {}
-        splitter: <Splitter> {}
     }
 
     pub DockMinimal = <DockBase> {
         flow: Down,
 
+        tab_bar: <TabBar> {}
+        splitter: <Splitter> {}
+
+        border_size: (THEME_DOCK_BORDER_SIZE)
+        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
+
         round_corner: {
             border_radius: 20.
+
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
@@ -87,16 +97,11 @@ live_design!{
                 return sdf.fill(THEME_COLOR_BG_APP)
             }
         }
-        border_size: (THEME_DOCK_BORDER_SIZE)
 
-        padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
-        padding_fill: {color: (THEME_COLOR_BG_APP)} // TODO: unclear what this does
         drag_quad: {
             draw_depth: 10.0
             color: (THEME_COLOR_DRAG_QUAD)
         }
-        tab_bar: <TabBar> {}
-        splitter: <Splitter> {}
     }
 
     pub DockToolbar = <RectShadowView> {
@@ -158,7 +163,6 @@ pub struct Dock {
     #[layout] layout: Layout,
     #[live] drop_target_draw_list: DrawList2d,
     #[live] round_corner: DrawRoundCorner,
-    #[live] padding_fill: DrawColor,
     #[live] border_size: f64,
     #[live] drag_quad: DrawColor,
 
