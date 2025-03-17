@@ -53,6 +53,8 @@ pub trait CxOsApi {
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
+    ResizeWindow(WindowId, DVec2),
+    RepositionWindow(WindowId, DVec2),
     CloseWindow(WindowId),
     MinimizeWindow(WindowId),
     Deminiaturize(WindowId),
