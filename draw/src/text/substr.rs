@@ -1,10 +1,11 @@
 use std::{
+    fmt,
     hash::{Hash, Hasher},
     ops::{Deref, RangeBounds},
     rc::Rc,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Substr {
     parent: Rc<str>,
     start: usize,
@@ -72,6 +73,12 @@ impl Substr {
             start: self.start + start,
             end: self.start + end,
         }
+    }
+}
+
+impl fmt::Debug for Substr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self.as_str())
     }
 }
 

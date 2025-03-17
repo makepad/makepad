@@ -6,6 +6,7 @@ use {
         font_family::{FontFamily, FontFamilyId},
         font_loader::{self, FontDefinition, FontFamilyDefinition, FontLoader},
         geom::{Point, Rect, Size},
+        num::Zero,
         sdfer,
         selection::{Affinity, Cursor, Position, Selection},
         shape::{self, ShapedText},
@@ -15,9 +16,9 @@ use {
         cell::RefCell,
         collections::{HashMap, VecDeque},
         hash::{Hash, Hasher},
-        ops::Range,
         rc::Rc,
     },
+    unicode_segmentation::UnicodeSegmentation,
 };
 
 #[derive(Debug)]
@@ -80,19 +81,7 @@ impl Layouter {
     }
 
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
-        use super::num::Zero;
-
-        LayoutContext {
-            loader: &mut self.font_loader,
-            text: &params.text,
-            options: params.options,
-            current_point_in_lpxs: Point::ZERO,
-            current_row_start: 0,
-            current_row_end: 0,
-            rows: Vec::new(),
-            glyphs: Vec::new(),
-        }
-        .layout(&params.spans)
+        LayoutContext::new(&mut self.font_loader, params.text, params.options).layout(&params.spans)
     }
 }
 
@@ -120,6 +109,309 @@ impl Default for Settings {
     }
 }
 
+#[derive(Debug)]
+struct LayoutContext<'a> {
+    font_loader: &'a mut FontLoader,
+    text: Substr,
+    options: LayoutOptions,
+    current_point_in_lpxs: Point<f32>,
+    current_row_start: usize,
+    current_row_end: usize,
+    rows: Vec<LaidoutRow>,
+    glyphs: Vec<LaidoutGlyph>,
+}
+
+impl<'a> LayoutContext<'a> {
+    fn new(font_loader: &'a mut FontLoader, text: Substr, options: LayoutOptions) -> Self {
+        Self {
+            font_loader,
+            text,
+            options,
+            current_point_in_lpxs: Point::ZERO,
+            current_row_start: 0,
+            current_row_end: 0,
+            rows: Vec::new(),
+            glyphs: Vec::new(),
+        }
+    }
+
+    fn current_row_is_empty(&self) -> bool {
+        self.current_row_start == self.current_row_end
+    }
+
+    fn current_row_len(&self) -> usize {
+        self.current_row_end - self.current_row_start
+    }
+
+    fn remaining_width_in_lpxs(&self) -> Option<f32> {
+        self.options
+            .max_width_in_lpxs
+            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_point_in_lpxs.x)
+    }
+
+    fn layout(mut self, spans: &[Span]) -> LaidoutText {
+        for span in spans {
+            self.layout_span(span);
+        }
+        self.finish_current_row();
+        self.finish()
+    }
+
+    fn layout_span(&mut self, span: &Span) {
+        let font_family = self
+            .font_loader
+            .get_or_load_font_family(span.style.font_family_id)
+            .clone();
+        if self.options.max_width_in_lpxs.is_some() {
+            self.layout_span_by_word(&span.style, &font_family, span.len);
+        } else {
+            self.layout_span_directly(&span.style, &font_family, span.len);
+        }
+    }
+
+    fn layout_span_by_word(
+        &mut self,
+        style: &Style,
+        font_family: &Rc<FontFamily>,
+        len: usize,
+    ) {
+        let mut fitter = Fitter::new(
+            self.text.substr(self.current_row_end..self.current_row_end + len),
+            font_family.clone(),
+            style.font_size_in_lpxs,
+            SegmentKind::Word,
+        );
+        while !fitter.is_empty() {
+            match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
+                Some(text) => self.append_text(style, &text),
+                None => {
+                    if self.current_row_is_empty() {
+                        self.layout_span_by_grapheme(style, font_family, fitter.pop());
+                    } else {
+                        self.finish_current_row()
+                    }
+                }
+            }
+        }
+    }
+
+    fn layout_span_by_grapheme(
+        &mut self,
+        style: &Style,
+        font_family: &Rc<FontFamily>,
+        len: usize,
+    ) {
+        let mut fitter = Fitter::new(
+            self.text.substr(self.current_row_end..self.current_row_end + len),
+            font_family.clone(),
+            style.font_size_in_lpxs,
+            SegmentKind::Grapheme,
+        );
+        while !fitter.is_empty() {
+            match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
+                Some(text) => self.append_text(style, &text),
+                None => {
+                    if self.current_row_is_empty() {
+                        self.layout_span_directly(style, font_family, fitter.pop());
+                    } else {
+                        self.finish_current_row();
+                    }
+                }
+            }
+        }
+    }
+
+    fn layout_span_directly(
+        &mut self,
+        style: &Style,
+        font_family: &FontFamily,
+        len: usize,
+    ) {
+        self.append_text(
+            style,
+            &font_family.get_or_shape(self.text.substr(self.current_row_end..self.current_row_end + len)),
+        );
+    }
+
+    fn append_text(&mut self, style: &Style, text: &ShapedText) {
+        use super::num::Zero;
+
+        for glyph in &text.glyphs {
+            let mut glyph = LaidoutGlyph {
+                origin_in_lpxs: Point::ZERO,
+                font: glyph.font.clone(),
+                font_size_in_lpxs: style.font_size_in_lpxs,
+                color: style.color,
+                id: glyph.id,
+                cluster: self.current_row_len() + glyph.cluster,
+                advance_in_ems: glyph.advance_in_ems,
+                offset_in_ems: glyph.offset_in_ems,
+            };
+            glyph.origin_in_lpxs.x = self.current_point_in_lpxs.x;
+            self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
+            self.glyphs.push(glyph);
+        }
+        self.current_row_end += text.text.len();
+    }
+
+    fn finish_current_row(&mut self) {
+        use {super::num::Zero, std::mem};
+
+        let glyphs = mem::take(&mut self.glyphs);
+        let mut row = LaidoutRow {
+            origin_in_lpxs: Point::ZERO,
+            text: self
+                .text
+                .substr(self.current_row_start..self.current_row_end),
+            width_in_lpxs: self.current_point_in_lpxs.x,
+            ascender_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.ascender_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            descender_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.descender_in_lpxs())
+                .reduce(f32::min)
+                .unwrap_or(0.0),
+            line_gap_in_lpxs: glyphs
+                .iter()
+                .map(|glyph| glyph.line_gap_in_lpxs())
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            line_spacing_scale: self.options.line_spacing_scale,
+            glyphs,
+        };
+        self.current_point_in_lpxs.x = 0.0;
+        self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
+            prev_row.line_spacing_in_lpxs(&row)
+        });
+        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
+        let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
+        row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
+        row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
+        self.current_row_start = self.current_row_end;
+        self.rows.push(row);
+    }
+
+    fn finish(self) -> LaidoutText {
+        LaidoutText {
+            text: self.text,
+            size_in_lpxs: Size::new(
+                self.rows
+                    .iter()
+                    .map(|row| row.width_in_lpxs)
+                    .reduce(f32::max)
+                    .unwrap_or(0.0),
+                self.current_point_in_lpxs.y - self.rows.last().unwrap().descender_in_lpxs,
+            ),
+            rows: self.rows,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Fitter {
+    text: Substr,
+    font_family: Rc<FontFamily>,
+    font_size_in_lpxs: f32,
+    lens: Vec<usize>,
+    widths_in_lpxs: Vec<f32>,
+}
+
+impl Fitter {
+    fn new(
+        text: Substr,
+        font_family: Rc<FontFamily>,
+        font_size_in_lpxs: f32,
+        segment_kind: SegmentKind,
+    ) -> Self {
+        let lens: Vec<_> = match segment_kind {
+            SegmentKind::Word => text
+                .split_word_bounds()
+                .map(|segment| segment.len())
+                .collect(),
+            SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
+        };
+        let widths_in_lpxs: Vec<_> = lens
+            .iter()
+            .copied()
+            .scan(0, |state, len| {
+                let start = *state;
+                let end = start + len;
+                let segment = font_family.get_or_shape(text.substr(start..end));
+                let width_in_lpxs = segment.width_in_ems * font_size_in_lpxs;
+                *state = end;
+                Some(width_in_lpxs)
+            })
+            .collect();
+        Self {
+            text,
+            font_family,
+            font_size_in_lpxs,
+            lens,
+            widths_in_lpxs,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn fit(&mut self, max_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
+        let mut min_count = 1;
+        let mut max_count = self.lens.len() + 1;
+        let mut best_count = None;
+        while min_count < max_count {
+            let mid_count = (min_count + max_count) / 2;
+            if self.can_fit(mid_count, max_width_in_lpxs) {
+                best_count = Some(mid_count);
+                min_count = mid_count + 1;
+            } else {
+                max_count = mid_count;
+            }
+        }
+        if let Some(best_count) = best_count {
+            let best_len = self.lens[..best_count].iter().sum();
+            let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
+            self.lens.drain(..best_count);
+            self.widths_in_lpxs.drain(..best_count);
+            self.text = self.text.substr(best_len..);
+            Some(best_text)
+        } else {
+            None
+        }
+    }
+
+    fn can_fit(&self, count: usize, max_width_in_lpxs: f32) -> bool {
+        let len = self.lens[..count].iter().sum();
+        let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
+        if 0.5 * estimated_width_in_lpxs > max_width_in_lpxs {
+            return false;
+        }
+        let text = self.font_family.get_or_shape(self.text.substr(0..len));
+        let actual_width_in_lpxs = text.width_in_ems * self.font_size_in_lpxs;
+        if actual_width_in_lpxs > max_width_in_lpxs {
+            return false;
+        }
+        true
+    }
+
+    fn pop(&mut self) -> usize {
+        let len = self.lens.remove(0);
+        self.widths_in_lpxs.remove(0);
+        self.text = self.text.substr(len..);
+        len
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SegmentKind {
+    Word,
+    Grapheme,
+}
+
+/*
 #[derive(Debug)]
 struct LayoutContext<'a> {
     loader: &'a mut FontLoader,
@@ -407,6 +699,7 @@ enum SegmentKind {
     Word,
     Grapheme,
 }
+*/
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LayoutParams {
@@ -418,7 +711,7 @@ pub struct LayoutParams {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Span {
     pub style: Style,
-    pub range: Range<usize>,
+    pub len: usize,
 }
 
 #[derive(Clone, Debug)]

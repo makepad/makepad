@@ -103,7 +103,7 @@ impl Fonts {
             return false;
         }
         if !self.update_color_texture(cx) {
-            return false
+            return false;
         }
         true
     }
