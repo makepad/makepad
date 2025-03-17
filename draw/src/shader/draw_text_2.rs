@@ -147,7 +147,7 @@ impl DrawText2 {
                     font_size_in_lpxs: self.text_style.font_size,
                     color: None,
                 },
-                range: 0..text_len,
+                len: text_len,
             }]
             .into(),
             options: LayoutOptions {
@@ -201,7 +201,7 @@ impl DrawText2 {
             turtle_rect.pos.x as f32 + align.x as f32 * remaining_width_in_lpxs,
             turtle_rect.pos.y as f32 + align.y as f32 * remaining_height_in_lpxs,
         );
-        self.draw_laidout_text(cx, origin_in_lpxs, &laidout_text);
+        self.draw_text(cx, origin_in_lpxs, &laidout_text);
 
         rect(
             origin_in_lpxs.x as f64,
@@ -211,18 +211,13 @@ impl DrawText2 {
         )
     }
 
-    fn draw_laidout_text(
-        &mut self,
-        cx: &mut Cx2d<'_>,
-        origin_in_lpxs: Point<f32>,
-        text: &LaidoutText,
-    ) {
+    fn draw_text(&mut self, cx: &mut Cx2d<'_>, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
         self.update_draw_vars(cx);
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
         self.draw_depth = 1.0;
         for row in &text.rows {
-            self.draw_laidout_row(
+            self.draw_row(
                 cx,
                 origin_in_lpxs + Size::from(row.origin_in_lpxs),
                 row,
@@ -249,7 +244,7 @@ impl DrawText2 {
         drop(fonts);
     }
 
-    fn draw_laidout_row(
+    fn draw_row(
         &mut self,
         cx: &mut Cx2d<'_>,
         origin_in_lpxs: Point<f32>,
@@ -257,7 +252,7 @@ impl DrawText2 {
         out_instances: &mut Vec<f32>,
     ) {
         for glyph in &row.glyphs {
-            self.draw_laidout_glyph(
+            self.draw_glyph(
                 cx,
                 origin_in_lpxs + Size::from(glyph.origin_in_lpxs),
                 glyph,
@@ -310,7 +305,7 @@ impl DrawText2 {
         }
     }
 
-    fn draw_laidout_glyph(
+    fn draw_glyph(
         &mut self,
         cx: &mut Cx2d<'_>,
         origin_in_lpxs: Point<f32>,
@@ -444,7 +439,7 @@ impl LiveHook for FontFamily {
             }
             fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
         }
-        
+
         Some(nodes.skip_node(index))
     }
 }
