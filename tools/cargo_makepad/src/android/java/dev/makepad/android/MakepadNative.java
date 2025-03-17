@@ -1,9 +1,7 @@
 package dev.makepad.android;
 
 import android.view.Surface;
-import android.graphics.SurfaceTexture;
 import android.view.MotionEvent;
-import java.nio.ByteBuffer;
 
 public class MakepadNative {
     // belongs to MakepadActivity class
@@ -24,6 +22,7 @@ public class MakepadNative {
     // belongs to QuadSurface class
     public native static void surfaceOnSurfaceCreated(Surface surface);
     public native static void surfaceOnSurfaceDestroyed(Surface surface);
+    public static native void surfaceOnLongClick(float x, float y, int pointerId, long timeMillis);
     public static native void surfaceOnTouch(MotionEvent event);
     public native static void surfaceOnSurfaceChanged(Surface surface, int width, int height);
     public native static void surfaceOnKeyDown(int keycode, int meta_state);

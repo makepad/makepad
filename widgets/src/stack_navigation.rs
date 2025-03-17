@@ -170,11 +170,11 @@ impl Widget for StackNavigationView {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
         }
+        self.view.handle_event(cx, event, scope);
 
         self.handle_stack_view_closure_request(cx, event, scope);
         self.trigger_action_post_opening_if_done(cx);
         self.finish_closure_animation_if_done(cx);
-        self.view.handle_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk) -> DrawStep{
@@ -189,15 +189,6 @@ impl Widget for StackNavigationView {
     }
 }
 
-impl WidgetMatchEvent for StackNavigationView {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        let left_button_clicked = self.button(id!(left_button)).clicked(&actions);
-        if left_button_clicked {
-            self.hide_stack_view(cx);
-        }
-    }
-}
-
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
         self.animator_play(cx, id!(slide.hide));
@@ -208,21 +199,17 @@ impl StackNavigationView {
         );
     }
 
-    fn handle_stack_view_closure_request(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // This will invoke WidgetMatchEvent::handle_actions() on the widget.
-        // If the back button was clicked, it will be handled there.
-        self.widget_match_event(cx, event, scope);
-
-        // Hide the active stack view if the "back" button on the mouse is clicked,
-        // or if the Android back navigation "action"/gesture occurred.
-        if self.state == StackNavigationViewState::Active {
-            let back_mouse_button_released = match event {
-                Event::MouseUp(mouse) => mouse.button.is_back(),
-                _ => false,
-            };
-
-            // TODO: in the future, a swipe right gesture on touchscreen, or two-finger swipe on trackpad
-            if back_mouse_button_released || matches!(event, Event::BackPressed) {
+    fn handle_stack_view_closure_request(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // Hide the active stack view if:
+        // * the back navigation button/gesture occurred,
+        // * the left_button was clicked,
+        // * the "back" button on the mouse was clicked.
+        // TODO: in the future, handle a swipe right gesture on touchscreen, or two-finger swipe on trackpad
+        if matches!(self.state, StackNavigationViewState::Active) {
+            if event.back_pressed()
+                || matches!(event, Event::Actions(actions) if self.button(id!(left_button)).clicked(&actions))
+                || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
+            {
                 self.hide_stack_view(cx);
             }
         }
@@ -337,7 +324,7 @@ impl Widget for StackNavigation {
         }
 
         // Leaving this to the final step, so that the active stack view can handle the event first.
-        // It is releveant when the active stack view is animating out and want to handle
+        // It is relevant when the active stack view is animating out and wants to handle
         // the StackNavigationTransitionAction::HideEnd action.
         self.widget_match_event(cx, event, scope);
     }
