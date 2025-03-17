@@ -36,6 +36,10 @@ impl Substr {
         self.start
     }
 
+    pub fn end_in_parent(&self) -> usize {
+        self.end
+    }
+
     pub fn as_str(&self) -> &str {
         &self.parent[self.start..self.end]
     }
