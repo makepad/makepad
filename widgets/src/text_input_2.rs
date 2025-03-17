@@ -93,24 +93,20 @@ impl TextInput2 {
     }
 
     fn move_cursor_left(&mut self, keep_selection: bool) {
-        use makepad_draw::text::selection::Affinity;
-
         self.set_cursor(
             Cursor {
                 index: prev_grapheme_boundary(&self.text, self.selection.cursor.index),
-                affinity: Affinity::After,
+                prefer_next_row: true,
             },
             keep_selection
         );
     }
 
     fn move_cursor_right(&mut self, keep_selection: bool) {
-        use makepad_draw::text::selection::Affinity;
-        
         self.set_cursor(
             Cursor {
                 index: next_grapheme_boundary(&self.text, self.selection.cursor.index),
-                affinity: Affinity::Before,
+                prefer_next_row: false,
             },
             keep_selection,
         );

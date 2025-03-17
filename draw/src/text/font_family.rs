@@ -49,6 +49,10 @@ impl FontFamily {
             fonts: self.fonts.clone(),
         })
     }
+
+    pub fn fonts(&self) -> &[Rc<Font>] {
+        &self.fonts
+    }
 }
 
 impl Eq for FontFamily {}
