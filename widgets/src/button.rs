@@ -78,7 +78,7 @@ live_design! {
             uniform color_down: (THEME_COLOR_CTRL_PRESSED)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
             uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
@@ -108,7 +108,7 @@ live_design! {
                         self.down
                     ), self.border_size)
 
-                sdf.fill_keep(
+                sdf.fill(
                     mix(
                         mix(
                             self.color,
