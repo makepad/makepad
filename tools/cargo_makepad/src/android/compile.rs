@@ -178,8 +178,8 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
 fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str) -> Result<BuildPaths, String> {
     let cwd = std::env::current_dir().unwrap();
 
-    let tmp_dir = cwd.join(format!("target/makepad-android-apk/{underscore_build_crate}/tmp"));
-    let out_dir = cwd.join(format!("target/makepad-android-apk/{underscore_build_crate}/apk"));
+    let tmp_dir = cwd.join("target").join("makepad-android-apk").join(&underscore_build_crate).join("tmp");
+    let out_dir = cwd.join("target").join("makepad-android-apk").join(&underscore_build_crate).join("apk");
     
     // lets remove tmp and out dir
     let _ = rmdir(&tmp_dir);

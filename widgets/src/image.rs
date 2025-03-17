@@ -219,6 +219,7 @@ impl Image {
         // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
+        crate::log!("Image::draw_walk(): rect: {:?}", rect);
         
         let (width, height) = if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
@@ -244,6 +245,7 @@ impl Image {
         };
         
         let aspect = width / height;
+        log!("Image::draw_walk(): {width} x {height}, aspect: {aspect}, fit: {:?}", self.fit);
         match self.fit {
             ImageFit::Size => {
                 walk.width = Size::Fixed(width);
@@ -277,7 +279,7 @@ impl Image {
             }
         }
         
-        
+        log!("Image::draw_walk(): draw_bg with walk: {:?}", walk);
         self.draw_bg.draw_walk(cx, walk);
         
         DrawStep::done()
