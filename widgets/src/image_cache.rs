@@ -10,7 +10,7 @@ use std::fs::File;
 pub use makepad_zune_png::error::PngDecodeErrors;
 pub use zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 
-#[derive(Live, LiveHook, Clone, Copy)]
+#[derive(Live, LiveHook, Clone, Copy, Debug)]
 #[live_ignore]
 pub enum ImageFit {
     #[pick] Stretch,
@@ -389,8 +389,12 @@ pub trait ImageCacheImpl {
                             }
                         }
                     } else if image_path.ends_with(".png") {
-                        match ImageBuffer::from_png(&*data){
-                            Ok(data)=>{
+                        crate::log!("Found png image {}", image_path);
+                        match ImageBuffer::from_png(&*data) {
+                            Ok(data) => {
+                                crate::log!("load_image_dep_by_path: loaded PNG image, {} x {}, data len: {}, animated? {}",
+                                    data.width, data.height, data.data.len(), data.animation.is_some(),
+                                );
                                 let texture = data.into_new_texture(cx);
                                 cx.get_global::<ImageCache>().map.insert(image_path.to_string(), texture.clone());
                                 self.set_texture(Some(texture), id);
