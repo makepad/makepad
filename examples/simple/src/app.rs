@@ -43,7 +43,7 @@ live_design!{
                     }
                     */
                     text_input = <TextInput2> {
-                        text: "Averylongwordtodemonstratedesperatebreaks The 😊错误 quick brown fox😊 jumped over the lazy dog"
+                        text: "Averylongwordtodemonstratedesperatebreaks The 😊错误 quick\n\nLet's force a new line\n brown fox😊 jumped over the lazy dog"
                     }
                 }
             }

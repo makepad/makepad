@@ -17,14 +17,7 @@ impl Selection {
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Cursor {
     pub index: usize,
-    pub affinity: Affinity,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Affinity {
-    #[default]
-    Before,
-    After,
+    pub prefer_next_row: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
