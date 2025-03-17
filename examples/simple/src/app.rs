@@ -61,14 +61,9 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button1)).clicked(&actions) {
             self.counter += 1;
-            // This does not work
-            //self.ui.window(id!(main_window)).resize(cx, DVec2{x: 1600.0, y: 800.0});
-            // Resize and reposition
-            cx.push_unique_platform_op(CxOsOp::ResizeWindow(WindowId(0,0), DVec2{x: 1600.0, y: 800.0}));
-            cx.push_unique_platform_op(CxOsOp::RepositionWindow(WindowId(0,0), DVec2{x: -400.0, y: 0.0}));
         }
     }
 }
