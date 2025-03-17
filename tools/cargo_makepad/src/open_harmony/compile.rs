@@ -286,7 +286,7 @@ fn create_deveco_project(args : &[String], targets :&[OpenHarmonyTarget]) -> Res
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
-    let prj_path = cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate.clone());
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
     let raw_file = prj_path.join("entry").join("src").join("main").join("resources").join("rawfile");
     let tpl_path = cwd.join("tools").join("open_harmony").join("deveco");
     let _= rmdir(&prj_path);
@@ -319,13 +319,13 @@ fn add_dependencies(args : &[String], targets :&[OpenHarmonyTarget]) -> Result<(
     let profile = get_profile_from_args(args);
     let underscore_build_crate = build_crate.replace('-', "_");
 
-    let prj_path = cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate.clone());
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
     let raw_file = prj_path.join("entry").join("src").join("main").join("resources").join("rawfile");
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        let dst_dir = raw_file.join("makepad").join("underscore_build_crate").join("resources");
+        let dst_dir = raw_file.join("makepad").join(&underscore_build_crate).join("resources");
         let _ = rmdir(&dst_dir);
         mkdir(&dst_dir)?;
         cp_all(&local_resources_path, &dst_dir, false)?;
@@ -350,7 +350,7 @@ fn add_dependencies(args : &[String], targets :&[OpenHarmonyTarget]) -> Result<(
             OpenHarmonyTarget::X86_64 => "x86_64",
         };
         let src_lib = cwd.join("target").join(target_dir).join(profile.clone()).join(format!("lib{underscore_build_crate}.so"));
-        let dst_lib = cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate.clone()).join("entry").join("libs").join(deveco_lib_dir).join("libmakepad.so");
+        let dst_lib = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate).join("entry").join("libs").join(deveco_lib_dir).join("libmakepad.so");
         let _ = rm(&dst_lib);
         cp(&src_lib, &dst_lib, false)?;
     }
@@ -442,9 +442,9 @@ pub fn run(deveco_home: &Option<String>, args: &[String], host_os: &HostOs, targ
     let hdc = get_hdc_path(&deveco_home, &host_os)?;
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
-    let bundle = format!("dev.makepad.{}",underscore_build_crate);
+    let bundle = format!("dev.makepad.{underscore_build_crate}");
 
-    let prj_path = cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate.clone());
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
     let hap_path = prj_path.join("entry").join("build").join("default").join("outputs").join("default").join("makepad-default-signed.hap");
 
     if hap_path.is_file() == false {
