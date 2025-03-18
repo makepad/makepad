@@ -350,7 +350,7 @@ impl<'a> LiveExpander<'a> {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                            message: format!("Can't find live definition of {} did you forget to call live_design for it?", clone)
+                            message: format!("Can't find live definition of {} did you forget to call live_design for it, put the definition above the place where you use it or if imported put pub before the definition?", clone)
                         });
                     }
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
@@ -425,7 +425,7 @@ impl<'a> LiveExpander<'a> {
                                     self.errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                                        message: format!("Can't find live definition of {} did you forget to call live_design for it?", lti.type_name)
+                                        message: format!("Can't find live definition of {} did you forget to call live_design for it, put the definition above the place where you use it or if imported put pub before the definition?", lti.type_name)
                                     });
                                 }
                             }
@@ -473,7 +473,7 @@ impl<'a> LiveExpander<'a> {
                             self.errors.push(LiveError {
                                 origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                                message: format!("Can't find live definition of {} did you forget to call live_design for it?", lti.type_name)
+                                message: format!("Can't find live definition of {} did you forget to call live_design for it, put the definition above the place where you use it or if imported put pub before the definition?", lti.type_name)
                             });
                         }
                     }
