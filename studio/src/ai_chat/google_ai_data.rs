@@ -44,8 +44,16 @@ pub struct GoogleAiCitationSource {
 pub struct GoogleAiMetadata {
     pub promptTokenCount: usize,
     pub candidatesTokenCount: usize,
-    pub totalTokenCount: usize
+    pub totalTokenCount: usize,
+    pub promptTokensDetails: Vec<GoogleAiTokenDetail>
 } 
+
+#[allow(non_snake_case)]
+#[derive(Debug, SerJson, DeJson)]
+pub struct GoogleAiTokenDetail {
+    modality: String,
+    tokenCount: usize
+}
 
 #[allow(non_snake_case)]
 #[derive(Debug, SerJson, DeJson)]
