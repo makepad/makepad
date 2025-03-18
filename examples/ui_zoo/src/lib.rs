@@ -9,6 +9,7 @@ pub mod tab_colorpicker;
 pub mod tab_commandtextinput;
 pub mod tab_desktopbutton;
 pub mod tab_dropdown;
+pub mod tab_expandablepanel;
 pub mod tab_filetree;
 pub mod tab_foldbutton;
 pub mod tab_html;
