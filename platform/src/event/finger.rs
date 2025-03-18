@@ -420,6 +420,10 @@ impl CxFingers {
         /*}*/
     }
     
+    pub (crate) fn uncapture_area(&mut self, area: Area){
+        self.captures.retain(|v| v.area != area);
+    }
+    
     pub (crate) fn find_digit_capture(&mut self, digit_id: DigitId) -> Option<&mut CxDigitCapture> {
         self.captures.iter_mut().find( | v | v.digit_id == digit_id)
     }
@@ -772,6 +776,30 @@ impl HitOptions {
     }
 }
 
+impl Event{
+    pub fn unhandle(&self, cx:&mut Cx, area:&Area){
+        match self{
+            Event::TouchUpdate(e)=>{
+                for t in &e.touches {
+                    if let TouchState::Start = t.state{
+                        if t.handled.get() == *area{
+                            t.handled.set(Area::Empty);
+                            // lets uncapture the finger as well
+                            cx.fingers.uncapture_area(*area);
+                        }
+                    }
+                }
+            }
+            Event::MouseDown(fd)=>{
+                if fd.handled.get() == *area{
+                    fd.handled.set(Area::Empty);
+                    cx.fingers.uncapture_area(*area);
+                }
+            }
+            _=>()
+        }
+    }
+}
 
 impl Event {
     
