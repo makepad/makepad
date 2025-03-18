@@ -8,9 +8,9 @@ live_design!{
     use link::widgets::*;
     use crate::layout_templates::*;
 
-    pub DemoExpandablePanel = <UIZooTabLayout_B> {
+    pub DemoRotatedImage = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<ExpandablePanel>"}
+            <H3> { text: "<RotatedImage>"}
         }
         demos = {
             <H3> { text: "<Demos>"}

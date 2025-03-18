@@ -27,6 +27,7 @@
         use crate::tab_linklabel::*;
         use crate::tab_markdown::*;
         use crate::tab_radiobutton::*;
+        use crate::tab_rotatedimage::*;
         use crate::tab_scrollbar::*;
         use crate::tab_slider::*;
         use crate::tab_slidesview::*;
@@ -126,6 +127,7 @@
                                 tLinkLabel,
                                 tMarkdown,
                                 tRadioButton,
+                                tRotatedImage,
                                 tScrollbar,
                                 tSlider,
                                 tSlidesView,
@@ -157,6 +159,7 @@
                         tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
                         tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
                         tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
+                        tRotatedImage = Tab { name: "RotatedImage", template: PermanentTab, kind: TabRotatedImage }
                         tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
                         tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
                         tSlidesView = Tab { name: "SlidesView", template: PermanentTab, kind: TabSlidesView }
@@ -188,6 +191,7 @@
                             <DemoMarkdown> {}
                         } 
                         TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
+                        TabRotatedImage = <UIZooTab> { <DemoRotatedImage> {} }
                         TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
                         TabSlider = <UIZooTab> { <DemoSlider> {} }
                         TabSlidesView = <UIZooTab> { <DemoSlidesView> {} }
@@ -259,6 +263,7 @@
             crate::tab_linklabel::live_design(cx);
             crate::tab_markdown::live_design(cx);
             crate::tab_radiobutton::live_design(cx);
+            crate::tab_rotatedimage::live_design(cx);
             crate::tab_scrollbar::live_design(cx);
             crate::tab_slider::live_design(cx);
             crate::tab_slidesview::live_design(cx);
