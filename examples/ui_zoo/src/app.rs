@@ -14,6 +14,7 @@
         use crate::tab_commandtextinput::*;
         use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
+        use crate::tab_expandablepanel::*;
         use crate::tab_filetree::*;
         use crate::tab_foldbutton::*;
         use crate::tab_html::*;
@@ -111,7 +112,8 @@
                                 tColorPicker,
                                 tCommandTextInput,
                                 tDesktopButton,
-                                tDropDown
+                                tDropDown,
+                                tExpandablePanel,
                                 tFiletree,
                                 tFoldButton,
                                 tHTML,
@@ -141,6 +143,7 @@
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
                         tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
+                        tExpandablePanel = Tab { name: "Expandable Panel" , template: PermanentTab, kind: TabExpandablePanel }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
@@ -166,6 +169,7 @@
                         TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
                         TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
+                        TabExpandablePanel = <UIZooTab> { <DemoExpandablePanel> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
                         TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
@@ -238,6 +242,7 @@
             crate::tab_commandtextinput::live_design(cx);
             crate::tab_desktopbutton::live_design(cx);
             crate::tab_dropdown::live_design(cx);
+            crate::tab_expandablepanel::live_design(cx);
             crate::tab_filetree::live_design(cx);
             crate::tab_foldbutton::live_design(cx);
             crate::tab_html::live_design(cx);
