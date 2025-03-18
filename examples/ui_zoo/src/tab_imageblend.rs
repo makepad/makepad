@@ -13,6 +13,24 @@ live_design!{
             <H3> { text: "<ImageBlend>"}
         }
         demos = {
+            blendbutton = <Button> { text: "Blend Image"}
+
+            blendimage = <ImageBlend> {
+                // width: 200, height: 200.
+                image_a: {
+                    source: dep("crate://self/resources/ducky.png"),
+                    fit: Smallest
+                    width: Fill,
+                    height: Fill
+                }
+                image_b: {
+                    source: dep("crate://self/resources/ismael-jean-deGBOI6yQv4-unsplash.jpg")
+                    fit: Smallest
+                    width: Fill,
+                    height: Fill
+                }
+            
+            }
         }
     }
 }

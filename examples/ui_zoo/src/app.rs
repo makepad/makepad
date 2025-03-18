@@ -308,6 +308,10 @@
             btn.set_text(cx,&format!("Clicky clicky! {}", self.counter));
         }
 
+        if self.ui.button(id!(blendbutton)).clicked(&actions) {
+            self.ui.image_blend(id!(blendimage)).switch_image(cx);
+        }
+
         if self.ui.button(id!(styledbutton)).clicked(&actions) {
             log!("STYLED BUTTON CLICKED {}", self.counter);
             self.counter += 1;
