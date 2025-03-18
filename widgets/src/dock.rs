@@ -30,7 +30,6 @@ live_design!{
         tab_bar: <TabBarGradientY> {}
         splitter: <Splitter> {}
 
-        border_size: (THEME_DOCK_BORDER_SIZE)
         padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
 
         round_corner: {
@@ -59,9 +58,9 @@ live_design!{
                 return sdf.result
             }
         }
-        drag_quad: {
+        drag_target_preview: {
             draw_depth: 10.0
-            color: (THEME_COLOR_DRAG_QUAD)
+            color: (THEME_COLOR_drag_target_preview)
         }
     }
 
@@ -71,7 +70,6 @@ live_design!{
         tab_bar: <TabBar> {}
         splitter: <Splitter> {}
 
-        border_size: (THEME_DOCK_BORDER_SIZE)
         padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
 
         round_corner: {
@@ -98,9 +96,9 @@ live_design!{
             }
         }
 
-        drag_quad: {
+        drag_target_preview: {
             draw_depth: 10.0
-            color: (THEME_COLOR_DRAG_QUAD)
+            color: (THEME_COLOR_drag_target_preview)
         }
     }
 
@@ -163,8 +161,7 @@ pub struct Dock {
     #[layout] layout: Layout,
     #[live] drop_target_draw_list: DrawList2d,
     #[live] round_corner: DrawRoundCorner,
-    #[live] border_size: f64,
-    #[live] drag_quad: DrawColor,
+    #[live] drag_target_preview: DrawColor,
 
     #[live] tab_bar: Option<LivePtr>,
     #[live] splitter: Option<LivePtr>,
@@ -434,7 +431,7 @@ impl Dock {
 
         if self.drop_target_draw_list.begin(cx, Walk::default()).is_redrawing() {
             if let Some(pos) = &self.drop_state {
-                self.drag_quad.draw_abs(cx, pos.rect);
+                self.drag_target_preview.draw_abs(cx, pos.rect);
             }
             self.drop_target_draw_list.end(cx);
         }
