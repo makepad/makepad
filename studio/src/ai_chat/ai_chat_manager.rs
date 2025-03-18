@@ -560,7 +560,7 @@ impl AiChatManager{
                     let in_flight = doc.in_flight.as_ref().unwrap();
                     match &e.response{
                         NetworkResponse::HttpRequestError(_err)=>{
-                            println!("HTTP ERROR {}", _err);
+                            println!("HTTP ERROR {:?}", _err);
                         }
                         NetworkResponse::HttpStreamResponse(res)=>{
                             let data = res.get_string_body().unwrap();
