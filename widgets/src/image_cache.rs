@@ -17,11 +17,17 @@ pub enum ImageFit {
     Vertical,
     Smallest,
     Biggest,
-    Size
+    Size,
+    /// `Size` if image's true size (both width & height) are inside the turtle size, otherwise `Smallest`.
+    AutoFit,
+    /// `Size` if image's true width is inside the turtle size, otherwise `Smallest`.
+    AutoFitWidth,
+    /// `Size` if image's true height is inside the turtle size, otherwise `Smallest`.
+    AutoFitHeight,
 }
 
 
-#[derive(Default, Clone)] 
+#[derive(Default, Clone)]
 pub struct ImageBuffer {
     pub width: usize,
     pub height: usize,
@@ -60,7 +66,7 @@ impl ImageBuffer {
             }
             unsupported => {
                 return Err(ImageError::InvalidPixelAlignment(unsupported));
-            }     
+            }
         }
         Ok(ImageBuffer {
             width,
@@ -69,7 +75,7 @@ impl ImageBuffer {
             animation: None
         })
     }
-    
+
     pub fn into_new_texture(self, cx:&mut Cx)->Texture{
         let texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
             width: self.width,
@@ -80,11 +86,11 @@ impl ImageBuffer {
         texture.set_animation(cx, self.animation);
         texture
     }
-    
+
     pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
         let mut decoder = PngDecoder::new(data);
         decoder.decode_headers()?;
-        
+
         if decoder.is_animated() {
             return Ok(Self::decode_animated_png(&mut decoder)?);
         }
@@ -189,13 +195,13 @@ impl ImageBuffer {
                 }
                 _ => {
                     return Err(ImageError::InvalidPixelAlignment(num_components));
-                }     
+                }
             }
             cx += width;
             if cx >= total_width {
                 cy += height;
                 cx = 0
-            } 
+            }
         }
         Ok(final_buffer)
     }
@@ -280,7 +286,7 @@ pub trait ImageCacheImpl {
             }
         }
     }
-    
+
     fn load_jpg_from_data(&mut self, cx: &mut Cx, data: &[u8], id:usize) -> Result<(), ImageError> {
         match ImageBuffer::from_jpg(&*data){
             Ok(data)=>{
@@ -292,7 +298,7 @@ pub trait ImageCacheImpl {
             }
         }
     }
-    
+
     fn load_image_file_by_path(
         &mut self,
         cx: &mut Cx,
@@ -352,7 +358,7 @@ pub trait ImageCacheImpl {
             }
         }
     }
-    
+
     fn load_image_dep_by_path(
         &mut self,
         cx: &mut Cx,
@@ -362,7 +368,7 @@ pub trait ImageCacheImpl {
         if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
             self.set_texture(Some(texture.clone()), id);
             Ok(())
-        } 
+        }
         else{
             match cx.take_dependency(image_path) {
                 Ok(data) => {
