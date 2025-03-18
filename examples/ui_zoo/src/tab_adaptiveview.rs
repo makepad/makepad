@@ -43,7 +43,7 @@ live_design!{
                             height: Fill,
                             padding: 10.
 
-                            <H3> { width: Fit, height: Fit, text: "Sidebar"}
+                            <H3> { width: Fit, height: Fit, text: "Menu"}
                         }
                         <View> {
                             show_bg: true,
@@ -80,10 +80,10 @@ live_design!{
                         draw_bg: {color: #008}
 
                         width: 200,
-                        height: Fill,
+                        height: 100,
                         padding: 10.
 
-                        <H3> { width: Fill, height: Fit, text: "Sidebar"}
+                        <H3> { width: Fill, height: Fit, text: "Menu"}
                     }
 
                     <View> {
