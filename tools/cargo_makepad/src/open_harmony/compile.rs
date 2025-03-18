@@ -198,6 +198,7 @@ fn check_deveco_prj(args: &[String]) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
+    // TODO: don't use the current working dir here, instead, use the cargo target directory
     let prj_path =  cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate);
     if prj_path.is_dir() == false {
         Err("run \"deveco\" to create DevEco project before \"build\"".to_owned())
@@ -227,18 +228,21 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
         let target_triple = target.target_triple_str();
         let native_llvm_bin = sdk_path.join("native").join("llvm").join("bin");
         let full_clang_path = native_llvm_bin.join(bin_path(&format!("{target_triple}-clang"), "cmd"));
+        let full_clangcl_path = native_llvm_bin.join(bin_path(&format!("{target_triple}-clang-cl"), "cmd"));
         let full_clangpp_path = native_llvm_bin.join(bin_path(&format!("{target_triple}-clang++"), "cmd"));
         let full_llvm_ar_path = native_llvm_bin.join(bin_path("llvm-ar", "exe"));
         let full_llvm_ranlib_path = native_llvm_bin.join(bin_path("llvm-ranlib", "exe"));
 
         println!("full_clang_path: {}", full_clang_path.display());
+        println!("full_clangcl_path: {}", full_clangcl_path.display());
         println!("full_clangpp_path: {}", full_clangpp_path.display());
         println!("full_llvm_ar_path: {}", full_llvm_ar_path.display());
         println!("full_llvm_ranlib_path: {}", full_llvm_ranlib_path.display());
         
         #[cfg(target_os = "windows")]
-        if !full_clang_path.is_file() || !full_clangpp_path.is_file() {
-            return Err(format!("please copy \"{}-clang.cmd\" and \"{}-clang++.cmd\" from  \"{}\\tools\\open_harmony\\cmd\" to \"{}\\native\\llvm\\bin\"",
+        if !full_clang_path.is_file() || !full_clangcl_path.is_file() || !full_clangpp_path.is_file() {
+            return Err(format!("please copy \"{}-clang.cmd\", \"{}-clang-cl.cmd\", and \"{}-clang++.cmd\" from  \"{}\\tools\\open_harmony\\cmd\" into \"{}\\native\\llvm\\bin\"",
+                target_triple,
                 target_triple,
                 target_triple,
                 cwd.display(),
@@ -267,16 +271,21 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
         let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
         shell_env(
             &[
-                (&format!("CC_{toolchain}"),     full_clang_path.to_str().unwrap()),
+                // Use clang-cl for the compiler, which accepts MSVC-style arguments.
+                // This is necessary for building native code, e.g., any crate that uses `cc` in its build script.
+                (&format!("CC_{toolchain}"),     full_clangcl_path.to_str().unwrap()),
                 (&format!("CXX_{toolchain}"),    full_clangpp_path.to_str().unwrap()),
                 (&format!("AR_{toolchain}"),     full_llvm_ar_path.to_str().unwrap()),
                 (&format!("RANLIB_{toolchain}"), full_llvm_ranlib_path.to_str().unwrap()),
-                (&format!("CARGO_TARGET_{}_LINKER",toolchain.to_uppercase()), full_clang_path.to_str().unwrap()),
+                // Use the regular clang for the linker.
+                (&format!("CARGO_TARGET_{}_LINKER", toolchain.to_uppercase()), full_clang_path.to_str().unwrap()),
+
                 ("MAKEPAD", &makepad_env),
             ],
             &cwd,
             "rustup",
-            &args_out)?;
+            &args_out,
+        )?;
     }
     Ok(())
 }
@@ -286,26 +295,39 @@ fn create_deveco_project(args : &[String], targets :&[OpenHarmonyTarget]) -> Res
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
-    let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
-    let raw_file = prj_path.join("entry").join("src").join("main").join("resources").join("rawfile");
-    let tpl_path = cwd.join("tools").join("open_harmony").join("deveco");
-    let _= rmdir(&prj_path);
-    mkdir(&prj_path)?;
-    cp_all(&tpl_path, &prj_path, false)?;
-    mkdir(&raw_file)?;
-    let app_cfg = prj_path.join("AppScope").join("app.json5");
+    // TODO: don't use the current working dir here, instead, use cargo's target dir for crate being built
+    let project_output_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
+    let resources_rawfile = project_output_path.join("entry").join("src").join("main").join("resources").join("rawfile");
+
+    // Currently, the project template is stored in the `MAKEPAD/tools/openharmony/deveco` directory in the makepad git repo.
+    let project_template_path = {
+        let cargo_makepad_installation_path = env!("CARGO_MANIFEST_DIR");
+        let cwd = std::env::current_dir().unwrap();
+        let tools_openharmony_dir = cwd.join(cargo_makepad_installation_path)
+            .parent()
+            .expect("Unable to locate the `makepad/tools/` directory")
+            .join("open_harmony");
+        println!("tools_openharmony_dir: {}", tools_openharmony_dir.display());
+        tools_openharmony_dir.join("deveco")
+    };
+
+    let _= rmdir(&project_output_path);
+    mkdir(&project_output_path)?;
+    cp_all(&project_template_path, &project_output_path, false)?;
+    mkdir(&resources_rawfile)?;
+    let app_cfg = project_output_path.join("AppScope").join("app.json5");
     if let Ok(mut app_file) = std::fs::File::create(app_cfg) {
         let _ = app_file.write_all(app_json(&underscore_build_crate).as_bytes());
     }
-    let lable_path = prj_path.join("entry").join("src").join("main").join("resources").join("base").join("element").join("string.json");
+    let lable_path = project_output_path.join("entry").join("src").join("main").join("resources").join("base").join("element").join("string.json");
     if let Ok(mut label_file) = std::fs::File::create(lable_path) {
         let _ = label_file.write_all(label_json(&underscore_build_crate).as_bytes());
     }
-    let label_us_path = prj_path.join("entry").join("src").join("main").join("resources").join("en_US").join("element").join("string.json");
+    let label_us_path = project_output_path.join("entry").join("src").join("main").join("resources").join("en_US").join("element").join("string.json");
     if let Ok(mut label_file) = std::fs::File::create(label_us_path) {
         let _ = label_file.write_all(label_json(&underscore_build_crate).as_bytes());
     }
-    let label_zh_path = prj_path.join("entry").join("src").join("main").join("resources").join("zh_CN").join("element").join("string.json");
+    let label_zh_path = project_output_path.join("entry").join("src").join("main").join("resources").join("zh_CN").join("element").join("string.json");
     if let Ok(mut label_file) = std::fs::File::create(label_zh_path) {
         let _ = label_file.write_all(label_zh_json(&underscore_build_crate).as_bytes());
     }
