@@ -8,6 +8,7 @@
         use makepad_widgets::vectorline::*;
         use crate::layout_templates::*;
 
+        use crate::tab_adaptiveview::*;
         use crate::tab_button::*;
         use crate::tab_checkbox::*;
         use crate::tab_colorpicker::*;
@@ -107,6 +108,7 @@
                             tabs: [
                                 tOverview,
                                 tLayoutDemos,
+                                tAdaptiveView,
                                 tButton,
                                 tCheckbox,
                                 tColorPicker,
@@ -137,6 +139,7 @@
 
                         tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
+                        tAdaptiveView = Tab { name: "Adaptive View", template: PermanentTab, kind: TabAdaptiveView }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
                         tColorPicker = Tab { name: "ColorPicker", template: PermanentTab, kind: TabColorPicker }
@@ -163,6 +166,7 @@
                         
                         TabOverview = <UIZooTab> { <WidgetsOverview> {} }
                         TabLayoutDemos = <UIZooTab> { <DemoLayout> {} }
+                        TabAdaptiveView = <UIZooTab> { <DemoAdaptiveView> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
                         TabCheckbox = <UIZooTab> { <DemoCheckbox> {} }
                         TabColorPicker = <UIZooTab> { <DemoColorpicker> {} }
@@ -236,6 +240,7 @@
             crate::layout_templates::live_design(cx);
             crate::demofiletree::live_design(cx);
 
+            crate::tab_adaptiveview::live_design(cx);
             crate::tab_button::live_design(cx);
             crate::tab_checkbox::live_design(cx);
             crate::tab_colorpicker::live_design(cx);

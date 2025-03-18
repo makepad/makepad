@@ -3,6 +3,7 @@ pub mod app;
 pub mod layout_templates;
 pub mod demofiletree;
 
+pub mod tab_adaptiveview;
 pub mod tab_button;
 pub mod tab_checkbox;
 pub mod tab_colorpicker;
