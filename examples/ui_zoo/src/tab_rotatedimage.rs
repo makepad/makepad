@@ -13,9 +13,6 @@ live_design!{
             <H3> { text: "<RotatedImage>"}
         }
         demos = {
-            <H3> { text: "<Demos>"}
-            <Hr> {}
-
             <RotatedImage> {
                 width: 200, height: 200,
                 draw_bg: {
