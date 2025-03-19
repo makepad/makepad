@@ -13,10 +13,6 @@ live_design!{
             <H3> { text: "<Button>"}
         }
         demos = {
-    
-            <H3> { text: "Demos" }
-            <Hr> {}
-
             <H4> { text: "Standard"}
             basicbutton = <Button> {
 

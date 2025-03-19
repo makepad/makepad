@@ -26,8 +26,6 @@ live_design!{
             }
         }
         demos = {
-            <H3> { text: "Demos"}
-            <Hr> {}
             <H4> { text: "Standard Mode"}
             <View> {
                 height: Fit
