@@ -13,9 +13,6 @@ live_design!{
             <H3> { text: "<Icon>"}
         }
         demos = {
-            <H3> { text: "<Demos>"}
-            <Hr> {}
-
             <H4> { text: "Standard" }
             <Icon> {
                 icon_walk: { width: 100.  }

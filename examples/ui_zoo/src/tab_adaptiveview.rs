@@ -14,9 +14,6 @@ live_design!{
             <P> { text: "Resizing the window will make the layout block switch between a desktop and a mobile version."}
         }
         demos = {
-            <H3> { text: "Demos"}
-            <Hr> {}
-            
             <AdaptiveView> {
                 Desktop = {
                     flow: Down,
