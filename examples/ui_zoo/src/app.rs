@@ -190,9 +190,8 @@
                         TabLinkLabel = <UIZooTab> {
                             <DemoLinkLabel> {} // TODO: FIX
                         } 
-                        TabMarkdown = <UIZooTab> {
-                            <DemoMarkdown> {}
-                        } 
+                        TabMarkdown = <UIZooTab> { <DemoMarkdown> {} } 
+                        TabPageFlip = <UIZooTab> { <DemoPageFlip> {} } 
                         TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
                         TabRotatedImage = <UIZooTab> { <DemoRotatedImage> {} }
                         TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
