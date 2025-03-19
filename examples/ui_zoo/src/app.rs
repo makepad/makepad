@@ -26,6 +26,7 @@
         use crate::tab_layout::*;
         use crate::tab_linklabel::*;
         use crate::tab_markdown::*;
+        use crate::tab_pageflip::*;
         use crate::tab_radiobutton::*;
         use crate::tab_rotatedimage::*;
         use crate::tab_scrollbar::*;
@@ -126,6 +127,7 @@
                                 tLabel,
                                 tLinkLabel,
                                 tMarkdown,
+                                tPageFlip,
                                 tRadioButton,
                                 tRotatedImage,
                                 tScrollbar,
@@ -158,6 +160,7 @@
                         tLabel = Tab { name: "Label", template: PermanentTab, kind: TabLabel }
                         tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
                         tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
+                        tPageFlip = Tab { name: "PageFlip", template: PermanentTab, kind: TabPageFlip }
                         tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
                         tRotatedImage = Tab { name: "RotatedImage", template: PermanentTab, kind: TabRotatedImage }
                         tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
@@ -262,6 +265,7 @@
             crate::tab_layout::live_design(cx);
             crate::tab_linklabel::live_design(cx);
             crate::tab_markdown::live_design(cx);
+            crate::tab_pageflip::live_design(cx);
             crate::tab_radiobutton::live_design(cx);
             crate::tab_rotatedimage::live_design(cx);
             crate::tab_scrollbar::live_design(cx);
@@ -276,78 +280,90 @@
 
 
     impl MatchEvent for App{
-        fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions) {
             let ui = self.ui.clone();
 
-        ui.radio_button_set(ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4))
-            .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
+            ui.radio_button_set(ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
 
-        ui.radio_button_set(ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4))
-            .selected_to_visible(cx, &ui, actions, ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4));
+            ui.radio_button_set(ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4));
 
-        ui.radio_button_set(ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4))
-            .selected_to_visible(cx, &ui, actions, ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4));
+            ui.radio_button_set(ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(radiotabs_demo.radio1, radiotabs_demo.radio2, radiotabs_demo.radio3, radiotabs_demo.radio4));
 
-        ui.radio_button_set(ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4))
-            .selected_to_visible(cx, &ui, actions, ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4));
+            ui.radio_button_set(ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4));
 
-        ui.radio_button_set(ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4))
-            .selected_to_visible(cx, &ui, actions, ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4));
+            ui.radio_button_set(ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4));
 
-        if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
-            log!("TEXTBOX CHANGED {}", self.counter);
-            self.counter += 1;
-            let lbl = self.ui.label(id!(simpletextinput_outputbox));
-            lbl.set_text(cx,&format!("{} {}" , self.counter, txt));
-        }
+            if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
+                log!("TEXTBOX CHANGED {}", self.counter);
+                self.counter += 1;
+                let lbl = self.ui.label(id!(simpletextinput_outputbox));
+                lbl.set_text(cx,&format!("{} {}" , self.counter, txt));
+            }
 
-        if self.ui.button(id!(basicbutton)).clicked(&actions) {
-            log!("BASIC BUTTON CLICKED {}", self.counter);
-            self.counter += 1;
-            let btn = self.ui.button(id!(basicbutton));
-            btn.set_text(cx,&format!("Clicky clicky! {}", self.counter));
-        }
+            if self.ui.button(id!(basicbutton)).clicked(&actions) {
+                log!("BASIC BUTTON CLICKED {}", self.counter);
+                self.counter += 1;
+                let btn = self.ui.button(id!(basicbutton));
+                btn.set_text(cx,&format!("Clicky clicky! {}", self.counter));
+            }
 
-        if self.ui.button(id!(blendbutton)).clicked(&actions) {
-            self.ui.image_blend(id!(blendimage)).switch_image(cx);
-        }
+            if self.ui.button(id!(blendbutton)).clicked(&actions) {
+                self.ui.image_blend(id!(blendimage)).switch_image(cx);
+            }
 
-        if self.ui.button(id!(styledbutton)).clicked(&actions) {
-            log!("STYLED BUTTON CLICKED {}", self.counter);
-            self.counter += 1;
-            let btn = self.ui.button(id!(styledbutton));
-            btn.set_text(cx,&format!("Styled button clicked: {}", self.counter));
-        }
+            if self.ui.button(id!(pageflipbutton_a)).clicked(&actions) {
+                self.ui.page_flip(id!(page_flip)).set_active_page(cx, live_id!(page_a));
+            }
 
-        if self.ui.button(id!(iconbutton)).clicked(&actions) {
-            log!("ICON BUTTON CLICKED {}", self.counter);
-            self.counter += 1;
-            let btn = self.ui.button(id!(iconbutton));
-            btn.set_text(cx,&format!("Icon button clicked: {}", self.counter));
-        }
+            if self.ui.button(id!(pageflipbutton_b)).clicked(&actions) {
+                self.ui.page_flip(id!(page_flip)).set_active_page(cx, live_id!(page_b));
+            }
 
+            if self.ui.button(id!(pageflipbutton_c)).clicked(&actions) {
+                self.ui.page_flip(id!(page_flip)).set_active_page(cx, live_id!(page_c));
+            }
 
-        if let Some(check) = self.ui.check_box(id!(simplecheckbox)).changed(actions) {
-            log!("CHECK BUTTON CLICKED {} {}", self.counter, check);
-            self.counter += 1;
-            let lbl = self.ui.label(id!(simplecheckbox_output));
-            lbl.set_text(cx,&format!("{} {}" , self.counter, check));
-        }
+            if self.ui.button(id!(styledbutton)).clicked(&actions) {
+                log!("STYLED BUTTON CLICKED {}", self.counter);
+                self.counter += 1;
+                let btn = self.ui.button(id!(styledbutton));
+                btn.set_text(cx,&format!("Styled button clicked: {}", self.counter));
+            }
 
-        if self.ui.fold_button(id!(folderbutton)).opening(actions) {
-            log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12);
-//            self.ui.fold_header(id!(thefoldheader)).opened = true;
-
-            self.counter += 1;
-        }
-
-        if self.ui.fold_button(id!(folderbutton)).closing(actions) {
-            log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12);
+            if self.ui.button(id!(iconbutton)).clicked(&actions) {
+                log!("ICON BUTTON CLICKED {}", self.counter);
+                self.counter += 1;
+                let btn = self.ui.button(id!(iconbutton));
+                btn.set_text(cx,&format!("Icon button clicked: {}", self.counter));
+            }
 
 
+            if let Some(check) = self.ui.check_box(id!(simplecheckbox)).changed(actions) {
+                log!("CHECK BUTTON CLICKED {} {}", self.counter, check);
+                self.counter += 1;
+                let lbl = self.ui.label(id!(simplecheckbox_output));
+                lbl.set_text(cx,&format!("{} {}" , self.counter, check));
+            }
 
-            self.counter += 1;
-        }
+            if self.ui.fold_button(id!(folderbutton)).opening(actions) {
+                log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12);
+    //            self.ui.fold_header(id!(thefoldheader)).opened = true;
+
+                self.counter += 1;
+            }
+
+            if self.ui.fold_button(id!(folderbutton)).closing(actions) {
+                log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12);
+
+
+
+                self.counter += 1;
+            }
 
 
         let mut db = DataBindingStore::new();
