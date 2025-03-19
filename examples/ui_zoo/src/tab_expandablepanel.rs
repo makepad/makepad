@@ -13,43 +13,6 @@ live_design!{
             <H3> { text: "<ExpandablePanel>"}
         }
         demos = {
-            <View> {
-                height: Fit, width: Fill,
-                flow: Right,
-                spacing: 10.
-                pageflipbutton_a = <Button> { text: "Page A" }
-                pageflipbutton_b = <Button> { text: "Page B" }
-                pageflipbutton_c = <Button> { text: "Page C" }
-            }
-
-            page_flip = <PageFlip> {
-                width: Fill, height: Fill,
-                flow: Down
-
-                active_page: page_a 
-
-                page_a = <View> {
-                    show_bg: true,
-                    draw_bg: { color: #f00 }
-                    width: Fill, height: Fill,
-                    <H3> { text: "Page A"}
-                }
-
-                page_b = <View> {
-                    show_bg: true,
-                    draw_bg: { color: #080 }
-                    width: Fill, height: Fill,
-                    <H3> { text: "Page B"}
-                }
-
-                page_c = <View> {
-                    show_bg: true,
-                    draw_bg: { color: #008 }
-                    width: Fill, height: Fill,
-                    <H3> { text: "Page C"}
-                }
-            }
-
             // <Modal> {
             //     content: {
             //         show_bg: true,
