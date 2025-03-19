@@ -3,7 +3,7 @@ use {makepad_widgets::*, std::{env, path::PathBuf}};
 live_design! {
     use link::widgets::*;
 
-    IMAGE_PLACEHOLDER = dep("crate://self/resources/placeholder.jpg");
+    PLACEHOLDER_IMAGE = dep("crate://self/resources/placeholder_image.jpg");
 
     ImageItem = <View> {
         width: 256,
@@ -13,7 +13,7 @@ live_design! {
             width: Fill,
             height: Fill,
             fit: Biggest,
-            source: (IMAGE_PLACEHOLDER)
+            source: (PLACEHOLDER_IMAGE)
         }
     }
 
