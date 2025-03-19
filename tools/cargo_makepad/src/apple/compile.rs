@@ -79,12 +79,15 @@ pub fn parse_profiles()->Result<ParsedProfiles, String>{
     let home_dir = std::env::var("HOME").unwrap();
     let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
         
-    let profile_files = std::fs::read_dir(profile_dir).unwrap();
+    let profile_files: Vec<_> = std::fs::read_dir(profile_dir).unwrap()
+    .filter_map(Result::ok)
+    .map(|e| e.path())
+    .filter(|p| p.extension().map_or(false, |ext| ext == "mobileprovision"))
+    .collect();
     let mut profiles = Vec::new();
     for file in profile_files {
         // lets read it
-        let profile_path = file.unwrap().path();
-        if let Some(profile) = ProvisionData::parse(&profile_path) {
+        if let Some(profile) = ProvisionData::parse(&file) {
             profiles.push(profile);
         }
     }
