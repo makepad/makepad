@@ -233,9 +233,9 @@ live_design!{
             uniform color_1_hover: (THEME_COLOR_INSET_DEFAULT)
             uniform color_1_focus: (THEME_COLOR_CTRL_ACTIVE)
 
-            uniform color_2: #f00
-            uniform color_2_hover: #0ff
-            uniform color_2_focus: #0f0
+            uniform color_2: (THEME_COLOR_INSET_DEFAULT * 2.5)
+            uniform color_2_hover: (THEME_COLOR_INSET_DEFAULT * 3.)
+            uniform color_2_focus: (THEME_COLOR_INSET_DEFAULT * 4. )
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
