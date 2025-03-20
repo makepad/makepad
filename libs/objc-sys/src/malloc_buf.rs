@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::slice;
 
 struct MallocPtr(*mut i8);
-extern{
+extern "C" {
     pub fn free(p: *mut i8);
 }
 

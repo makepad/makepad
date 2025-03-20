@@ -60,10 +60,10 @@ pub struct Object {
     _priv: PrivateMarker,
 }
 
-pub type Imp = unsafe extern fn();
+pub type Imp = unsafe extern "C" fn();
 
 #[link(name = "objc", kind = "dylib")]
-extern {
+extern "C"{
     pub fn sel_registerName(name: *const c_char) -> Sel;
     pub fn sel_getName(sel: Sel) -> *const c_char;
 

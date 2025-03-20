@@ -335,9 +335,10 @@ impl<'a> Cx2d<'a> {
         self.end_turtle_with_guard(Area::Empty)
     }
     
-    pub fn end_turtle_with_area(&mut self, area: &mut Area) {
+    pub fn end_turtle_with_area(&mut self, area: &mut Area)->Rect {
         let rect = self.end_turtle_with_guard(Area::Empty);
-        self.add_aligned_rect_area(area, rect)
+        self.add_aligned_rect_area(area, rect);
+        rect
     }
     
     pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {

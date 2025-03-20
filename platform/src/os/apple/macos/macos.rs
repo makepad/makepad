@@ -493,29 +493,11 @@ impl Cx {
                         metal_window.cocoa_window.hide();
                     }
                 }
-                CxOsOp::FullscreenWindow(_window_id) => {
-                    todo!()
-                },
-                CxOsOp::NormalizeWindow(_window_id) => {
-                    todo!()
-                }
-                CxOsOp::SetTopmost(_window_id, _is_topmost) => {
-                    todo!()
-                }
-                CxOsOp::XrStartPresenting => {
-                    //todo!()
-                },
-                CxOsOp::XrStopPresenting => {
-                    //todo!()
-                },
                 CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each( | w | {
                         w.cocoa_window.set_ime_spot(pos);
                     });
-                },
-                CxOsOp::HideTextIME => {
-                    //todo!()
                 },
                 CxOsOp::SetCursor(cursor) => {
                     with_macos_app(|app| app.set_mouse_cursor(cursor));
@@ -548,15 +530,6 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     with_macos_app(|app| app.copy_to_clipboard(&content));
                 },
-                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
-                CxOsOp::BeginVideoPlayback(_) => todo!(),
-                CxOsOp::PauseVideoPlayback(_) => todo!(),
-                CxOsOp::ResumeVideoPlayback(_) => todo!(),
-                CxOsOp::MuteVideoPlayback(_) => todo!(),
-                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
-                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
-                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
-
                 CxOsOp::SaveFileDialog(settings) => 
                 {
                     with_macos_app(|app| app.open_save_file_dialog(settings));
@@ -578,6 +551,9 @@ impl Cx {
                 }
                 CxOsOp::ShowInDock(show) => {
                     with_macos_app(|app| app.show_in_dock(show));
+                }
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
         }
