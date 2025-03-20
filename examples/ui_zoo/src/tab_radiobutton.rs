@@ -701,6 +701,24 @@ live_design!{
                 }
             }
 
+            <Hr> {}
+            <H4> { text: "Button Group GradientY" }
+            <ButtonGroup> {
+                height: Fit
+                flow: Right
+                align: { x: 0.0, y: 0.5 }
+                radiotabs_demo = <View> {
+                    spacing: 5.
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonTabGradientY> { text: "Option 1" }
+                    radio2 = <RadioButtonTabGradientY> { text: "Option 2" }
+                    radio3 = <RadioButtonTabGradientY> { text: "Option 3" }
+                    radio4 = <RadioButtonTabGradientY> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Button Group GradientY styled" }
             <ButtonGroup> {
                 height: Fit
                 flow: Right
@@ -740,12 +758,123 @@ live_design!{
                             border_color_2_active: #8
                         }
                     }
-                    radio2 = <RadioButtonTabGradientY> { text: "Option 2" }
-                    radio3 = <RadioButtonTabGradientY> { text: "Option 3" }
-                    radio4 = <RadioButtonTabGradientY> { text: "Option 4" }
+                    radio2 = <RadioButtonTabGradientY> {
+                        text: "Option 2"
+
+                        draw_text: {
+                            color: #0
+                            color_hover: #C
+                            color_active: #F
+                        }
+
+                        draw_bg: {
+                            border_size: (THEME_BEVELING)
+                            border_radius: 6.
+
+                            color_dither: 1.0
+
+                            color_1: #F00
+                            color_1_hover: #F44
+                            color_1_active: #300
+
+                            color_2: #F80
+                            color_2_hover: #FA4
+                            color_2_active: #310
+
+                            border_color_1: #0
+                            border_color_1_hover: #F
+                            border_color_1_active: #8
+
+                            border_color_2: #0
+                            border_color_2_hover: #F
+                            border_color_2_active: #8
+                        }
+                    }
+                    radio3 = <RadioButtonTabGradientY> {
+                        text: "Option 3"
+
+                        draw_text: {
+                            color: #0
+                            color_hover: #C
+                            color_active: #F
+                        }
+
+                        draw_bg: {
+                            border_size: (THEME_BEVELING)
+                            border_radius: 6.
+
+                            color_dither: 1.0
+
+                            color_1: #F00
+                            color_1_hover: #F44
+                            color_1_active: #300
+
+                            color_2: #F80
+                            color_2_hover: #FA4
+                            color_2_active: #310
+
+                            border_color_1: #0
+                            border_color_1_hover: #F
+                            border_color_1_active: #8
+
+                            border_color_2: #0
+                            border_color_2_hover: #F
+                            border_color_2_active: #8
+                        }
+                    }
+                    radio4 = <RadioButtonTabGradientY> {
+                        text: "Option 4"
+
+                        draw_text: {
+                            color: #0
+                            color_hover: #C
+                            color_active: #F
+                        }
+
+                        draw_bg: {
+                            border_size: (THEME_BEVELING)
+                            border_radius: 6.
+
+                            color_dither: 1.0
+
+                            color_1: #F00
+                            color_1_hover: #F44
+                            color_1_active: #300
+
+                            color_2: #F80
+                            color_2_hover: #FA4
+                            color_2_active: #310
+
+                            border_color_1: #0
+                            border_color_1_hover: #F
+                            border_color_1_active: #8
+
+                            border_color_2: #0
+                            border_color_2_hover: #F
+                            border_color_2_active: #8
+                        }
+                    }
                 }
             }
 
+            <Hr> {}
+            <H4> { text: "Button Group GradientX" }
+            <ButtonGroup> {
+                height: Fit
+                flow: Right
+                align: { x: 0.0, y: 0.5 }
+                radiotabs_demo = <View> {
+                    spacing: 5.
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonTabGradientX> { text: "Option 1" }
+                    radio2 = <RadioButtonTabGradientX> { text: "Option 2" }
+                    radio3 = <RadioButtonTabGradientX> { text: "Option 3" }
+                    radio4 = <RadioButtonTabGradientX> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Button Group GradientX" }
             <ButtonGroup> {
                 height: Fit
                 flow: Right
@@ -784,9 +913,99 @@ live_design!{
                             border_color_2_active: #8
                         }
                     }
-                    radio2 = <RadioButtonTabGradientX> { text: "Option 2" }
-                    radio3 = <RadioButtonTabGradientX> { text: "Option 3" }
-                    radio4 = <RadioButtonTabGradientX> { text: "Option 4" }
+                    radio2 = <RadioButtonTabGradientX> {
+                        text: "Option 2"
+
+                        draw_text: {
+                            color: #0
+                            color_hover: #C
+                            color_active: #F
+                        }
+
+                        draw_bg: {
+                            border_size: (THEME_BEVELING)
+
+                            color_dither: 1.0
+
+                            color_1: #F00
+                            color_1_hover: #F44
+                            color_1_active: #300
+
+                            color_2: #F80
+                            color_2_hover: #FA4
+                            color_2_active: #310
+
+                            border_color_1: #0
+                            border_color_1_hover: #F
+                            border_color_1_active: #8
+
+                            border_color_2: #0
+                            border_color_2_hover: #F
+                            border_color_2_active: #8
+                        }
+                    }
+                    radio3 = <RadioButtonTabGradientX> {
+                        text: "Option 3"
+
+                        draw_text: {
+                            color: #0
+                            color_hover: #C
+                            color_active: #F
+                        }
+
+                        draw_bg: {
+                            border_size: (THEME_BEVELING)
+
+                            color_dither: 1.0
+
+                            color_1: #F00
+                            color_1_hover: #F44
+                            color_1_active: #300
+
+                            color_2: #F80
+                            color_2_hover: #FA4
+                            color_2_active: #310
+
+                            border_color_1: #0
+                            border_color_1_hover: #F
+                            border_color_1_active: #8
+
+                            border_color_2: #0
+                            border_color_2_hover: #F
+                            border_color_2_active: #8
+                        }
+                    }
+                    radio4 = <RadioButtonTabGradientX> {
+                        text: "Option 4"
+
+                        draw_text: {
+                            color: #0
+                            color_hover: #C
+                            color_active: #F
+                        }
+
+                        draw_bg: {
+                            border_size: (THEME_BEVELING)
+
+                            color_dither: 1.0
+
+                            color_1: #F00
+                            color_1_hover: #F44
+                            color_1_active: #300
+
+                            color_2: #F80
+                            color_2_hover: #FA4
+                            color_2_active: #310
+
+                            border_color_1: #0
+                            border_color_1_hover: #F
+                            border_color_1_active: #8
+
+                            border_color_2: #0
+                            border_color_2_hover: #F
+                            border_color_2_active: #8
+                        }
+                    }
                 }
             }
 
