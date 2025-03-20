@@ -68,7 +68,7 @@ impl Drop for RcObjcId {
 }
 
 #[link(name = "system")]
-extern {
+extern "C" {
     pub static _NSConcreteStackBlock: [*const c_void; 32];
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
@@ -100,7 +100,7 @@ pub fn UIApplicationMain(
 }
 
 #[link(name = "Foundation", kind = "framework")]
-extern {
+extern "C" {
     pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
     pub fn dispatch_get_global_queue(ident:u64, flags: u64) -> ObjcId;
     pub fn dispatch_release(object: ObjcId);
@@ -131,7 +131,7 @@ extern {
 }
 
 #[link(name = "ImageIO", kind = "framework")]
-extern {
+extern "C" {
     pub static kUTTypePNG: ObjcId;
     pub fn CGImageDestinationCreateWithURL(url: ObjcId, ty: ObjcId, count: u64, options: ObjcId) -> ObjcId;
     pub fn CGImageDestinationAddImage(dest: ObjcId, img: ObjcId, props: ObjcId);
@@ -140,7 +140,7 @@ extern {
 
 #[cfg(target_os = "macos")]
 #[link(name = "AppKit", kind = "framework")]
-extern {
+extern "C" {
     pub static NSPasteboardURLReadingFileURLsOnlyKey: ObjcId;
     pub static NSTrackingArea: ObjcId;
     pub static NSStringPboardType: ObjcId;
@@ -150,7 +150,7 @@ extern {
 }
 
 #[link(name = "Vision", kind = "framework")]
-extern {
+extern "C" {
     pub static VNImageRequestHandler: ObjcId;
     pub static VNRecognizeTextRequest: ObjcId;
 }
@@ -184,7 +184,7 @@ extern "C" {
 }
 
 #[link(name = "AVFoundation", kind = "framework")]
-extern {
+extern "C" {
     pub static AVAudioUnitComponentManager: ObjcId;
     pub static AVAudioUnit: ObjcId;
     pub static AVCaptureDevice: ObjcId;
@@ -255,14 +255,14 @@ pub type CVPixelBufferLockFlags = u64;
 pub type CVReturn = i32;
 
 #[link(name = "CoreMedia", kind = "framework")]
-extern {
+extern "C" {
     pub fn CMVideoFormatDescriptionGetDimensions(videoDesc: CMFormatDescriptionRef) -> CMVideoDimensions;
     pub fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
-extern {
+extern "C" {
     pub static kCVPixelBufferWidthKey: CFStringRef;
     pub static kCVPixelBufferHeightKey: CFStringRef;
     pub static kCVPixelBufferPixelFormatTypeKey: CFStringRef;

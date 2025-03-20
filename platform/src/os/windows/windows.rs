@@ -347,12 +347,6 @@ impl Cx {
                 CxOsOp::Quit=>{
                     ret = EventFlow::Exit
                 }
-                CxOsOp::FullscreenWindow(_window_id) => {
-                    todo!()
-                },
-                CxOsOp::NormalizeWindow(_window_id) => {
-                    todo!()
-                }
                 CxOsOp::SetTopmost(window_id, is_topmost) => {
                     if d3d11_windows.len() == 0 {
                         self.platform_ops.insert(0, CxOsOp::SetTopmost(window_id, is_topmost));
@@ -362,24 +356,10 @@ impl Cx {
                         window.win32_window.set_topmost(is_topmost);
                     }
                 }
-                CxOsOp::ShowClipboardActions(_) => {
-                },
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {
                         Win32Window::copy_to_clipboard(&content);
                     }
-                },
-                CxOsOp::XrStartPresenting => {
-                    //todo!()
-                },
-                CxOsOp::XrStopPresenting => {
-                    //todo!()
-                },
-                CxOsOp::ShowTextIME(_area, _pos) => {
-                    //todo!()
-                }
-                CxOsOp::HideTextIME => {
-                    //todo!()
                 },
                 CxOsOp::SetCursor(cursor) => {
                     get_win32_app_global().set_mouse_cursor(cursor);
@@ -393,30 +373,15 @@ impl Cx {
                 CxOsOp::StartDragging(dragged_item) => {
                     get_win32_app_global().start_dragging(dragged_item);
                 },
-                CxOsOp::UpdateMacosMenu(_menu) => {
-                },
                 CxOsOp::HttpRequest {request_id, request} => {
                     use crate::os::windows::http::WindowsHttpSocket;
                     WindowsHttpSocket::open(request_id, request, self.os.network_response.sender.clone());
 
                     //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
-                CxOsOp::CancelHttpRequest {request_id:_} => {
-                    todo!();
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
-                CxOsOp::PrepareVideoPlayback(_, _, _, _, _) => todo!(),
-                CxOsOp::BeginVideoPlayback(_) => todo!(),
-                CxOsOp::PauseVideoPlayback(_) => todo!(),
-                CxOsOp::ResumeVideoPlayback(_) => todo!(),
-                CxOsOp::MuteVideoPlayback(_) => todo!(),
-                CxOsOp::UnmuteVideoPlayback(_) => todo!(),
-                CxOsOp::CleanupVideoPlaybackResources(_) => todo!(),
-                CxOsOp::UpdateVideoSurfaceTexture(_) => todo!(),
-                CxOsOp::SaveFileDialog(_) =>  todo!(),
-                CxOsOp::SelectFileDialog(_) =>  todo!(),
-                CxOsOp::SaveFolderDialog(_) =>  todo!(),
-                CxOsOp::SelectFolderDialog(_) =>  todo!(),
-                CxOsOp::ShowInDock(_) => todo!()
             }
         }
         if geom_changes.len()>0{

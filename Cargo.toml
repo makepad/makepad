@@ -18,6 +18,7 @@ workspace.members = [
     "experiments/huedmx",
     "experiments/text_bare",
     "experiments/sdxl_remote",
+    "experiments/web_view",
     # === examples ===
     # "examples/bare_text",
     # "examples/fractal_zoom",
