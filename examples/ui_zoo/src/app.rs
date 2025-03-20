@@ -31,7 +31,6 @@
         use crate::tab_slider::*;
         use crate::tab_slidesview::*;
         use crate::tab_textinput::*;
-        use crate::tab_tooltip::*;
         use crate::tab_view::*;
         use crate::tab_widgetsoverview::*;
 
@@ -132,7 +131,6 @@
                                 tSlider,
                                 tSlidesView,
                                 tTextInput,
-                                tTooltip,
                                 tView,
 
                             ],
@@ -163,7 +161,6 @@
                         tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
                         tSlidesView = Tab { name: "SlidesView", template: PermanentTab, kind: TabSlidesView }
                         tTextInput = Tab { name: "TextInput", template: PermanentTab, kind: TabTextInput }
-                        tTooltip = Tab { name: "Tooltip", template: PermanentTab, kind: TabTooltip }
                         tView = Tab { name: "View", template: PermanentTab, kind: TabView }
                         
                         TabOverview = <UIZooTab> { <WidgetsOverview> {} }
@@ -192,7 +189,6 @@
                         TabSlider = <UIZooTab> { <DemoSlider> {} }
                         TabSlidesView = <UIZooTab> { <DemoSlidesView> {} }
                         TabTextInput = <UIZooTab> { <DemoTextInput> {} }
-                        TabTooltip = <UIZooTab> { <DemoTooltip> {} }
                         TabView = <UIZooTab> { <DemoView> {} }
 
 
@@ -263,7 +259,6 @@
             crate::tab_slider::live_design(cx);
             crate::tab_slidesview::live_design(cx);
             crate::tab_textinput::live_design(cx);
-            crate::tab_tooltip::live_design(cx);
             crate::tab_view::live_design(cx);
             crate::tab_widgetsoverview::live_design(cx);
           }
