@@ -13,9 +13,6 @@ live_design!{
             <H3> { text: "<Slider>"}
         }
         demos = {
-            flow: Down,
-
-            <Hr> {}
             <H4> { text: "Slider"}
             <Slider> { text: "Default" }
             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
