@@ -10,143 +10,148 @@ live_design!{
 
     pub DemoButton = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<Button>"}
+            <H3> { text: "Button"}
         }
         demos = {
             <H4> { text: "Standard"}
-            basicbutton = <Button> {
+            <UIZooRowH> {
+                basicbutton = <Button> {
 
-                draw_text: {
-                    color: (THEME_COLOR_TEXT_DEFAULT)
-                    color_hover: (THEME_COLOR_TEXT_HOVER)
-                    color_down: (THEME_COLOR_TEXT_PRESSED)
-                    text_style: <THEME_FONT_REGULAR> {
-                        font_size: (THEME_FONT_SIZE_P)
+                    draw_text: {
+                        color: (THEME_COLOR_TEXT_DEFAULT)
+                        color_hover: (THEME_COLOR_TEXT_HOVER)
+                        color_down: (THEME_COLOR_TEXT_PRESSED)
+                        text_style: <THEME_FONT_REGULAR> {
+                            font_size: (THEME_FONT_SIZE_P)
+                        }
                     }
+
+                    icon_walk: {
+                        width: (THEME_DATA_ICON_WIDTH), height: Fit,
+                    }
+
+                    draw_icon: {
+                        color: (THEME_COLOR_TEXT_DEFAULT)
+                        color_hover: (THEME_COLOR_TEXT_HOVER)
+                        color_down: (THEME_COLOR_TEXT_PRESSED)
+                    }
+
+                    draw_bg: {
+                        border_radius: (THEME_BEVELING)
+                        border_radius: (THEME_CORNER_RADIUS)
+
+                        color: (THEME_COLOR_CTRL_DEFAULT)
+                        color_hover: (THEME_COLOR_CTRL_HOVER)
+                        color_down: (THEME_COLOR_CTRL_PRESSED)
+
+                        border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+                        border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+                        border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+                        border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+                        border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+                        border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+                    }
+
+                    text: "<Button>"
                 }
 
-                icon_walk: {
-                    width: (THEME_DATA_ICON_WIDTH), height: Fit,
+                iconbutton = <ButtonIcon> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                    text: "<ButtonIcon>"
                 }
-
-                draw_icon: {
-                    color: (THEME_COLOR_TEXT_DEFAULT)
-                    color_hover: (THEME_COLOR_TEXT_HOVER)
-                    color_down: (THEME_COLOR_TEXT_PRESSED)
-                }
-
-                draw_bg: {
-                    border_radius: (THEME_BEVELING)
-                    border_radius: (THEME_CORNER_RADIUS)
-
-                    color: (THEME_COLOR_CTRL_DEFAULT)
-                    color_hover: (THEME_COLOR_CTRL_HOVER)
-                    color_down: (THEME_COLOR_CTRL_PRESSED)
-
-                    border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-                    border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-
-                    border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-                    border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-                }
-
-                text: "<Button>"
-            }
-
-            iconbutton = <ButtonIcon> {
-                draw_icon: {
-                    color: #f00,
-                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                }
-                text: "<ButtonIcon>"
             }
 
             <Hr> {}
             <H4> { text: "Gradient Versions"}
-            <ButtonGradientX> { text: "<ButtonGradientX>" }
-            <ButtonGradientY> { text: "<ButtonGradientY>" }
+            <UIZooRowH> {
+                <ButtonGradientX> { text: "<ButtonGradientX>" }
+                <ButtonGradientY> { text: "<ButtonGradientY>" }
+                <ButtonGradientX> {
+                    draw_bg: {
+                        border_radius: 1.0,
+                        border_radius: 4.0
 
-            <Hr> {}
-            <H4> { text: "Styled"}
-            <ButtonGradientX> {
-                draw_bg: {
-                    border_radius: 1.0,
-                    border_radius: 4.0
+                        color_1: #C00
+                        color_1_hover: #F0F
+                        color_1_down: #800
 
-                    color_1: #C00
-                    color_1_hover: #F0F
-                    color_1_down: #800
+                        color_2: #0CC
+                        color_2_hover: #0FF
+                        color_2_down: #088
 
-                    color_2: #0CC
-                    color_2_hover: #0FF
-                    color_2_down: #088
+                        border_color_1: #C
+                        border_color_1_hover: #F
+                        border_color_1_down: #0
 
-                    border_color_1: #C
-                    border_color_1_hover: #F
-                    border_color_1_down: #0
+                        border_color_2: #3
+                        border_color_2_hover: #6
+                        border_color_2_down: #8
 
-                    border_color_2: #3
-                    border_color_2_hover: #6
-                    border_color_2_down: #8
-
+                    }
+                    text: "<ButtonGradientX>"
                 }
-                text: "<ButtonGradientX>"
-            }
 
-            <ButtonGradientY> {
-                draw_bg: {
-                    border_radius: 1.0,
-                    border_radius: 4.0
+                <ButtonGradientY> {
+                    draw_bg: {
+                        border_radius: 1.0,
+                        border_radius: 4.0
 
-                    color_1: #C00
-                    color_1_hover: #F0F
-                    color_1_down: #800
+                        color_1: #C00
+                        color_1_hover: #F0F
+                        color_1_down: #800
 
-                    color_2: #0CC
-                    color_2_hover: #0FF
-                    color_2_down: #088
+                        color_2: #0CC
+                        color_2_hover: #0FF
+                        color_2_down: #088
 
-                    border_color_1: #C
-                    border_color_1_hover: #F
-                    border_color_1_down: #0
+                        border_color_1: #C
+                        border_color_1_hover: #F
+                        border_color_1_down: #0
 
-                    border_color_2: #3
-                    border_color_2_hover: #6
-                    border_color_2_down: #8
+                        border_color_2: #3
+                        border_color_2_hover: #6
+                        border_color_2_down: #8
 
+                    }
+                    text: "<ButtonGradientY>"
                 }
-                text: "<ButtonGradientY>"
             }
 
             <Hr> {}
             <H4> { text: "Flat"}
-            <ButtonFlat> {
-                draw_icon: {
-                    color: #f00,
-                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+            <UIZooRowH> {
+                <ButtonFlat> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                    text: "<ButtonFlat>"
                 }
-                text: "<ButtonFlat>"
-            }
 
-            <ButtonFlat> {
-                flow: Down,
-                icon_walk: { width: 15. }
-                draw_icon: {
-                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                <ButtonFlat> {
+                    flow: Down,
+                    icon_walk: { width: 15. }
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                    text: "<ButtonFlat>"
                 }
-                text: "<ButtonFlat>"
             }
 
             <Hr> {}
             <H4> { text: "Flatter"}
-            <ButtonFlatter> {
-                draw_icon: {
-                    color: #f00,
-                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+            <UIZooRowH> {
+                <ButtonFlatter> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                    text: "<ButtonFlatter>"
                 }
-                text: "<ButtonFlatter>"
             }
 
             <Hr> {}

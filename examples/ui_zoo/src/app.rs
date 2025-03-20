@@ -11,11 +11,9 @@
         use crate::tab_adaptiveview::*;
         use crate::tab_button::*;
         use crate::tab_checkbox::*;
-        use crate::tab_colorpicker::*;
         use crate::tab_commandtextinput::*;
         use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
-        use crate::tab_expandablepanel::*;
         use crate::tab_filetree::*;
         use crate::tab_foldbutton::*;
         use crate::tab_html::*;
@@ -43,6 +41,8 @@
             padding: 0
             spacing: 0.
         }
+
+        <H3> { draw_bg: {color: #f00}}
                             
         App = {{App}} {
             ui: <Window> {
@@ -113,11 +113,9 @@
                                 tAdaptiveView,
                                 tButton,
                                 tCheckbox,
-                                tColorPicker,
                                 tCommandTextInput,
                                 tDesktopButton,
                                 tDropDown,
-                                tExpandablePanel,
                                 tFiletree,
                                 tFoldButton,
                                 tHTML,
@@ -146,11 +144,9 @@
                         tAdaptiveView = Tab { name: "Adaptive View", template: PermanentTab, kind: TabAdaptiveView }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
-                        tColorPicker = Tab { name: "ColorPicker", template: PermanentTab, kind: TabColorPicker }
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
                         tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
-                        tExpandablePanel = Tab { name: "Expandable Panel" , template: PermanentTab, kind: TabExpandablePanel }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
@@ -175,11 +171,9 @@
                         TabAdaptiveView = <UIZooTab> { <DemoAdaptiveView> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
                         TabCheckbox = <UIZooTab> { <DemoCheckbox> {} }
-                        TabColorPicker = <UIZooTab> { <DemoColorpicker> {} }
                         TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
                         TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
-                        TabExpandablePanel = <UIZooTab> { <DemoExpandablePanel> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
                         TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
@@ -249,11 +243,9 @@
             crate::tab_adaptiveview::live_design(cx);
             crate::tab_button::live_design(cx);
             crate::tab_checkbox::live_design(cx);
-            crate::tab_colorpicker::live_design(cx);
             crate::tab_commandtextinput::live_design(cx);
             crate::tab_desktopbutton::live_design(cx);
             crate::tab_dropdown::live_design(cx);
-            crate::tab_expandablepanel::live_design(cx);
             crate::tab_filetree::live_design(cx);
             crate::tab_foldbutton::live_design(cx);
             crate::tab_html::live_design(cx);
