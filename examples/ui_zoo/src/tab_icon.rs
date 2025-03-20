@@ -20,12 +20,14 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Gradient Versions" }
+            <H4> { text: "IconGradientX" }
             <IconGradientX> {
                 icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
             }
             
+            <Hr> {}
+            <H4> { text: "IconGradientY" }
             <IconGradientY> {
                 icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }

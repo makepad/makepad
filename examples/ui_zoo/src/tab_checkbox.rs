@@ -26,20 +26,12 @@ live_design!{
             }
         }
         demos = {
-            <H4> { text: "Standard Mode"}
-            <View> {
-                height: Fit
-                flow: Right
-                spacing: (THEME_SPACE_1)
-                align: { x: 0.0, y: 0.5}
-                <CheckBox> {text:"Check me out!"}
-            }
+            <H4> { text: "Standard"}
+            <CheckBox> {text:"Check me out!"}
+
+            <Hr> {}
             <H4> { text: "Customized"}
-            <View> {
-                height: Fit
-                flow: Right
-                spacing: (THEME_SPACE_1)
-                align: { x: 0.0, y: 0.5}
+            <UIZooRowH> {
                 CheckBoxCustomized = <CheckBox> {
                     text:"Check me out!"
 
@@ -96,14 +88,12 @@ live_design!{
             <Hr> {}
 
             <H4> { text: "Toggle Mode"}
-            <View> {
-                height: Fit
-                flow: Right
-                spacing: (THEME_SPACE_1)
-                align: { x: 0.0, y: 0.5}
+            <UIZooRowH> {
                 <CheckBoxToggle> {text:"Check me out!" }
                 <CheckBoxToggle> {text:"Check me out!" }
             }
+
+            <Hr> {}
             <H4> { text: "Toggle Customized"}
             <CheckBoxToggle> {
                 text:"Check me out!"
@@ -154,11 +144,7 @@ live_design!{
             <Hr> {}
 
             <H4> { text: "Custom Icon Mode"}
-            <View> {
-                height: Fit
-                flow: Right
-                spacing: (THEME_SPACE_1)
-                align: { x: 0.0, y: 0.5}
+            <UIZooRowH> {
                 <CheckBoxCustom> {
                     text:"Check me out!"
                     draw_bg: { check_type: None }
@@ -221,9 +207,10 @@ live_design!{
                     }
                 }
             }
+
             <Hr> {} 
             <H4> { text: "Output demo"}
-            <View> {
+            <UIZooRowH> {
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5}

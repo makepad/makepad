@@ -37,5 +37,11 @@ live_design!{
         }
 
     }
+    pub UIZooRowH = <View> {
+        height: Fit, width: Fill,
+        spacing: 10.
+        flow: Right,
+        align: { x: 0., y: 0.5 }
+    }
 
 }

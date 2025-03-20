@@ -13,6 +13,7 @@ live_design!{
             <H3> { text: "<CommandTextInput>"}
         }
         demos = {
+            <H4> { text: "Standard" }
             <CommandTextInput> {}
         }
     }
