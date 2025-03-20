@@ -14,23 +14,15 @@ live_design!{
         }
         demos = {
             <RotatedImage> {
-                width: 200, height: 200,
+                width: Fill, height: Fill,
                 draw_bg: {
-                    scale: .75, 
+                    scale: 1., 
                     rotation: 45.
-                    opacity: .5
+                    opacity: .25
                 }
+
                 source: dep("crate://self/resources/ducky.png"),
             }
-
-            // <Modal> {
-            //     content: {
-            //         show_bg: true,
-            //         draw_bg: {color: #f00},
-            //         <H3> { text: "hallo" }
-            //     }
-            // }
-            <H4> { text: "Standard" }
         }
     }
 }
