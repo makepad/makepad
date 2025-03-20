@@ -74,7 +74,7 @@ impl Widget for SlidePanel {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, mut walk: Walk) -> DrawStep {
-        // ok lets set abs pos
+        // we need to make this thing work with a 
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
             SlideSide::Top=>{

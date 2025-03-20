@@ -7,7 +7,7 @@ use {
     },
     crate::{
         font_loader::FontLoader,
-        makepad_math::DVec2,
+        makepad_math::{DVec2,Vec2Index},
         makepad_platform::{
             DrawEvent,
             Area,
@@ -40,7 +40,7 @@ pub struct PassStackItem {
 
 pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
-    pub (crate) draw_event: &'a DrawEvent,
+    pub draw_event: &'a DrawEvent,
     pub (crate) pass_stack: Vec<PassStackItem>,
     pub (crate) overlay_id: Option<DrawListId>,
     //pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
@@ -208,4 +208,20 @@ impl<'a> Cx2d<'a> {
         }
         self.draw_event.draw_list_will_redraw(self, draw_list_2d.draw_list.id())
     }
+
+    pub fn will_redraw_check_axis(&self, draw_list_2d: &mut DrawList2d, size:f64, axis:Vec2Index) -> bool {
+        // ok so we need to check if our turtle position has changed since last time.
+        // if it did, we redraw
+        if draw_list_2d.dirty_check_rect.size.index(axis) != size {
+            draw_list_2d.dirty_check_rect.size.set_index(axis, size);
+            return true;
+        }
+        self.draw_event.draw_list_will_redraw(self, draw_list_2d.draw_list.id())
+    }
+    
+    pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d)  {
+        let dl = &mut self.cx.draw_lists[*self.draw_list_stack.last().unwrap()];
+        dl.append_sub_list(self.cx.redraw_id, draw_list_2d.draw_list_id());
+    }
+    
 }
