@@ -99,12 +99,75 @@ pub enum CxOsOp {
     CleanupVideoPlaybackResources(LiveId),
     UpdateVideoSurfaceTexture(LiveId),
     
+    CreateWebView{
+        id: LiveId,
+        area: Area,
+        texture: Texture,
+        url: String
+    },
+    UpdateWebView{
+        id: LiveId,
+        area: Area
+    },
+    CloseWebView{
+        id:LiveId
+    },
     SaveFileDialog(FileDialog),
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
     SelectFolderDialog(FileDialog),    
 }
 
+impl std::fmt::Debug for CxOsOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self{
+            Self::CreateWindow(..)=>write!(f, "CreateWindow"),
+            Self::CloseWindow(..)=>write!(f, "CloseWindow"),
+            Self::MinimizeWindow(..)=>write!(f, "MinimizeWindow"),
+            Self::Deminiaturize(..)=>write!(f, "Deminiaturize"),
+            Self::MaximizeWindow(..)=>write!(f, "MaximizeWindow"),
+            Self::FullscreenWindow(..)=>write!(f, "FullscreenWindow"),
+            Self::NormalizeWindow(..)=>write!(f, "NormalizeWindow"),
+            Self::RestoreWindow(..)=>write!(f, "RestoreWindow"),
+            Self::HideWindow(..)=>write!(f, "HideWindow"),
+            Self::SetTopmost(..)=>write!(f, "SetTopmost"),
+            Self::ShowInDock(..)=>write!(f, "ShowInDock"),
+            Self::XrStartPresenting=>write!(f, "XrStartPresenting"),
+            Self::XrStopPresenting=>write!(f, "XrStopPresenting"),
+            
+            Self::ShowTextIME(..)=>write!(f, "ShowTextIME"),
+            Self::HideTextIME=>write!(f, "HideTextIME"),
+            Self::SetCursor(..)=>write!(f, "SetCursor"),
+            Self::StartTimer{..}=>write!(f, "StartTimer"),
+            Self::StopTimer(..)=>write!(f, "StopTimer"),
+            Self::Quit=>write!(f, "Quit"),
+            
+            Self::StartDragging(..)=>write!(f, "StartDragging"),
+            Self::UpdateMacosMenu(..)=>write!(f, "UpdateMacosMenu"),
+            Self::ShowClipboardActions(..)=>write!(f, "ShowClipboardActions"),
+            Self::CopyToClipboard(..)=>write!(f, "CopyToClipboard"),
+            
+            Self::HttpRequest{..}=>write!(f, "HttpRequest"),
+            Self::CancelHttpRequest{..}=>write!(f, "CancelHttpRequest"),
+            
+            Self::PrepareVideoPlayback(..)=>write!(f, "PrepareVideoPlayback"),
+            Self::BeginVideoPlayback(..)=>write!(f, "BeginVideoPlayback"),
+            Self::PauseVideoPlayback(..)=>write!(f, "PauseVideoPlayback"),
+            Self::ResumeVideoPlayback(..)=>write!(f, "ResumeVideoPlayback"),
+            Self::MuteVideoPlayback(..)=>write!(f, "MuteVideoPlayback"),
+            Self::UnmuteVideoPlayback(..)=>write!(f, "UnmuteVideoPlayback"),
+            Self::CleanupVideoPlaybackResources(..)=>write!(f, "CleanupVideoPlaybackResources"),
+            Self::UpdateVideoSurfaceTexture(..)=>write!(f, "UpdateVideoSurfaceTexture"),
+            Self::CreateWebView{..}=>write!(f, "CreateWebView"),
+            Self::UpdateWebView{..}=>write!(f, "UpdateWebView"),
+            Self::CloseWebView{..}=>write!(f, "CloseWebView"),
+            Self::SaveFileDialog(..)=>write!(f, "SaveFileDialog"),
+            Self::SelectFileDialog(..)=>write!(f, "SelectFileDialog"),
+            Self::SaveFolderDialog(..)=>write!(f, "SaveFolderDialog"),
+            Self::SelectFolderDialog(..)=>write!(f, "SelectFolderDialog"),
+        }
+    }
+}
 impl Cx {
     pub fn in_draw_event(&self)->bool{
         self.in_draw_event

@@ -344,7 +344,7 @@ impl AvVideoCaptureCallback {
 
 pub fn define_av_video_callback_delegate() -> *const Class {
     
-    extern fn capture_output_did_output_sample_buffer(
+    extern "C" fn capture_output_did_output_sample_buffer(
         this: &Object,
         _: Sel,
         _: ObjcId,
@@ -376,11 +376,11 @@ pub fn define_av_video_callback_delegate() -> *const Class {
     unsafe {
         decl.add_method(
             sel!(captureOutput: didOutputSampleBuffer: fromConnection:),
-            capture_output_did_output_sample_buffer as extern fn(&Object, Sel, ObjcId, CMSampleBufferRef, ObjcId)
+            capture_output_did_output_sample_buffer as extern "C" fn(&Object, Sel, ObjcId, CMSampleBufferRef, ObjcId)
         );
         decl.add_method(
             sel!(captureOutput: didDropSampleBuffer: fromConnection:),
-            capture_output_did_drop_sample_buffer as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId)
+            capture_output_did_drop_sample_buffer as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId)
         );
         decl.add_protocol(
             Protocol::get("AVCaptureVideoDataOutputSampleBufferDelegate").unwrap(),

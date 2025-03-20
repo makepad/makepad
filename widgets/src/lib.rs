@@ -30,7 +30,7 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod portal_list;
-//pub mod portal_list2;
+pub mod portal_list2;
 pub mod stack_navigation;
 pub mod expandable_panel;
 pub mod desktop_button;
@@ -45,6 +45,8 @@ pub mod modal;
 pub mod tooltip;
 pub mod popup_notification;
 pub mod loading_spinner;
+pub mod web_view;
+
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
 pub mod video;
@@ -119,6 +121,7 @@ pub use crate::{
     text_input::*,
     link_label::*,
     portal_list::*,
+    portal_list2::*,
     flat_list::*,
     page_flip::*,
     slide_panel::*,
@@ -129,6 +132,7 @@ pub use crate::{
     command_text_input::*,
     window::*,
     multi_window::*,
+    web_view::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
@@ -211,7 +215,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::drop_down::live_design(cx);
     crate::multi_window::live_design(cx);
     crate::portal_list::live_design(cx);
-    //crate::portal_list2::live_design(cx);
+    crate::portal_list2::live_design(cx);
     crate::flat_list::live_design(cx);
     crate::slide_panel::live_design(cx);
     crate::tab::live_design(cx);
@@ -235,7 +239,8 @@ pub fn live_design(cx: &mut Cx) {
     crate::cached_widget::live_design(cx);
     crate::command_text_input::live_design(cx);
     crate::loading_spinner::live_design(cx);
-
+    crate::web_view::live_design(cx);
+    
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);

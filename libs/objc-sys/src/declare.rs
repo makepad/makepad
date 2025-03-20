@@ -68,8 +68,8 @@ macro_rules! method_decl_impl {
         }
     );
     ($($t:ident),*) => (
-        method_decl_impl!(-T, R, extern fn(&T, Sel $(, $t)*) -> R, $($t),*);
-        method_decl_impl!(-T, R, extern fn(&mut T, Sel $(, $t)*) -> R, $($t),*);
+        method_decl_impl!(-T, R, extern "C" fn(&T, Sel $(, $t)*) -> R, $($t),*);
+        method_decl_impl!(-T, R, extern "C" fn(&mut T, Sel $(, $t)*) -> R, $($t),*);
     );
 }
 
@@ -148,7 +148,7 @@ impl ClassDecl {
     Functionality it expects, like implementations of `-retain` and `-release`
     used by ARC, will not be present otherwise.
     */
-    pub fn root(name: &str, intitialize_fn: extern fn(&Class, Sel))
+    pub fn root(name: &str, intitialize_fn: extern "C" fn(&Class, Sel))
             -> Option<ClassDecl> {
         let mut decl = ClassDecl::with_superclass(name, None);
         if let Some(ref mut decl) = decl {

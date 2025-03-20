@@ -31,14 +31,14 @@ use {
 
 pub fn define_web_socket_delegate() -> *const Class {
     
-    extern fn did_open_with_protocol(_codethis: &Object, _: Sel, _web_socket_task: ObjcId, _open_with_protocol: ObjcId) {
+    extern "C" fn did_open_with_protocol(_codethis: &Object, _: Sel, _web_socket_task: ObjcId, _open_with_protocol: ObjcId) {
         crate::log!("DID OPEN WITH PROTOCOL");
         //let sender_box: u64 = *this.get_ivar("sender_box");
         // TODO send Open and Close websocket messages
         // lets turn t
     }
     
-    extern fn did_close_with_code(_this: &Object, _: Sel, _web_socket_task: ObjcId, _code: usize, _reason: ObjcId) {
+    extern "C" fn did_close_with_code(_this: &Object, _: Sel, _web_socket_task: ObjcId, _code: usize, _reason: ObjcId) {
         crate::log!("DID CLOSE WITH CODE");
     }
     
@@ -47,8 +47,8 @@ pub fn define_web_socket_delegate() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(webSocketTask: didOpenWithProtocol:), did_open_with_protocol as extern fn(&Object, Sel, ObjcId, ObjcId));
-        decl.add_method(sel!(webSocketTask: didCloseWithCode: reason:), did_close_with_code as extern fn(&Object, Sel, ObjcId, usize, ObjcId));
+        decl.add_method(sel!(webSocketTask: didOpenWithProtocol:), did_open_with_protocol as extern "C" fn(&Object, Sel, ObjcId, ObjcId));
+        decl.add_method(sel!(webSocketTask: didCloseWithCode: reason:), did_close_with_code as extern "C" fn(&Object, Sel, ObjcId, usize, ObjcId));
     }
     decl.add_ivar::<u64>("sender_box");
         
@@ -63,7 +63,7 @@ struct UrlSessionDataDelegateContext{
 }
 
 pub fn define_url_session_data_delegate() -> *const Class {
-    extern fn did_receive_response(
+    extern "C" fn did_receive_response(
         _this: &Object,
         _: Sel,
         _session: ObjcId,
@@ -80,7 +80,7 @@ pub fn define_url_session_data_delegate() -> *const Class {
         }
     }
 
-    extern fn did_receive_data(
+    extern "C" fn did_receive_data(
         this: &Object,
         _: Sel,
         _session: ObjcId,
@@ -113,7 +113,7 @@ pub fn define_url_session_data_delegate() -> *const Class {
         }
     }
 
-    extern fn did_complete_with_error(
+    extern "C" fn did_complete_with_error(
         this: &Object,
         _: Sel,
         _session: ObjcId,
@@ -158,15 +158,15 @@ pub fn define_url_session_data_delegate() -> *const Class {
     unsafe {
         decl.add_method(
             sel!(URLSession:dataTask:didReceiveResponse:completionHandler:),
-            did_receive_response as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId, ObjcId),
+            did_receive_response as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId, ObjcId),
         );
         decl.add_method(
             sel!(URLSession:dataTask:didReceiveData:),
-            did_receive_data as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
+            did_receive_data as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
         );
         decl.add_method(
             sel!(URLSession:task:didCompleteWithError:),
-            did_complete_with_error as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
+            did_complete_with_error as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
         );
     }
 
@@ -179,7 +179,7 @@ pub fn define_url_session_data_delegate() -> *const Class {
 // this allows for locally signed SSL certificates to pass
 // TODO make this configurable
 pub fn define_url_session_delegate() -> *const Class {
-    extern fn did_receive_challenge(_this: &Object, _: Sel, _session: ObjcId, challenge: ObjcId, completion: ObjcId) {
+    extern "C" fn did_receive_challenge(_this: &Object, _: Sel, _session: ObjcId, challenge: ObjcId, completion: ObjcId) {
         unsafe{
             let pspace: ObjcId = msg_send![challenge, protectionSpace];
             let trust: ObjcId = msg_send![pspace, serverTrust];
@@ -203,7 +203,7 @@ pub fn define_url_session_delegate() -> *const Class {
     let mut decl = ClassDecl::new("NSURLSessionDelegate", superclass).unwrap();
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(URLSession: didReceiveChallenge: completionHandler:), did_receive_challenge as extern fn(&Object, Sel, ObjcId,ObjcId, ObjcId));
+        decl.add_method(sel!(URLSession: didReceiveChallenge: completionHandler:), did_receive_challenge as extern "C" fn(&Object, Sel, ObjcId,ObjcId, ObjcId));
     }
     return decl.register();
 }
