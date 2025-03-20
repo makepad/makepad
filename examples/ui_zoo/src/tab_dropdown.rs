@@ -13,22 +13,35 @@ live_design!{
             <H3> { text: "<DropDown>"}
         }
         demos = {
+            <H4> { text: "Standard" }
             dropdown = <DropDown> {
             labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
+
+            <Hr> {}
+            <H4> { text: "DropDownFlat" }
             dropdown_flat = <DropDownFlat> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
+
+            <Hr> {}
+            <H4> { text: "DropDownGradientX" }
             dropdown_gradient_x = <DropDownGradientX> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
+
+            <Hr> {}
+            <H4> { text: "DropDownGradientY" }
             dropdown_gradient_y = <DropDownGradientY> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
+
+            <Hr> {}
+            <H4> { text: "DropDowGradientY Custom" }
             dropdown_custom = <DropDownGradientY> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
