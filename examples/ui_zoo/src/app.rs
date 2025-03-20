@@ -277,6 +277,9 @@
             ui.radio_button_set(ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4))
                 .selected_to_visible(cx, &ui, actions, ids!(radios_demo.radio1, radios_demo.radio2, radios_demo.radio3, radios_demo.radio4));
 
+            ui.radio_button_set(ids!(iconradios_demo2.radio1, iconradios_demo2.radio2, iconradios_demo2.radio3, iconradios_demo2.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(iconradios_demo2.radio1, iconradios_demo2.radio2, iconradios_demo2.radio3, iconradios_demo2.radio4));
+
             ui.radio_button_set(ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4))
                 .selected_to_visible(cx, &ui, actions, ids!(iconradios_demo.radio1, iconradios_demo.radio2, iconradios_demo.radio3, iconradios_demo.radio4));
 
@@ -285,6 +288,9 @@
 
             ui.radio_button_set(ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4))
                 .selected_to_visible(cx, &ui, actions, ids!(textonlyradios_demo.radio1, textonlyradios_demo.radio2, textonlyradios_demo.radio3, textonlyradios_demo.radio4));
+
+            ui.radio_button_set(ids!(textonlyradios_demo2.radio1, textonlyradios_demo2.radio2, textonlyradios_demo2.radio3, textonlyradios_demo2.radio4))
+                .selected_to_visible(cx, &ui, actions, ids!(textonlyradios_demo2.radio1, textonlyradios_demo2.radio2, textonlyradios_demo2.radio3, textonlyradios_demo2.radio4));
 
             ui.radio_button_set(ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4))
                 .selected_to_visible(cx, &ui, actions, ids!(mediaradios_demo.radio1, mediaradios_demo.radio2, mediaradios_demo.radio3, mediaradios_demo.radio4));

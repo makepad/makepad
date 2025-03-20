@@ -13,8 +13,11 @@ live_design!{
             <H3> { text: "<Label>"}
         }
         demos = {
+            <H4> { text: "Standard" }
             <Label> { text:"Default single line text" }
-            <Label> { <Label> { text: "This is a small line of text" } }
+            
+            <Hr> {}
+            <H4> { text: "Styled" }
             <Label> {
                 draw_text: {
                     color: (THEME_COLOR_MAKEPAD)
@@ -24,6 +27,10 @@ live_design!{
                 },
                 text: "You can style text using colors and fonts"
             }
+            
+            <Hr> {}
+            <H4> { text: "LabelGradientX" }
+            <LabelGradientX> { text: "<LabelGradientY>" }
             <LabelGradientX> {
                 draw_text: {
                     color_1: #0ff
@@ -35,7 +42,10 @@ live_design!{
                 
                 text: "<LabelGradientX>"
             }
-            <LabelGradientX> { text: "<LabelGradientY>" }
+            
+            <Hr> {}
+            <H4> { text: "LabelGradientY" }
+            <LabelGradientY> { text: "<LabelGradientY>" }
             <LabelGradientY> {
                 draw_text: {
                     color_1: #0ff
@@ -45,9 +55,11 @@ live_design!{
                     }
                 },
                 
-                text: "<LabelGradientX>"
+                text: "<LabelGradientY>"
             }
-            <LabelGradientY> { text: "<LabelGradientY>" }
+            
+            <Hr> {}
+            <H4> { text: "Customized" }
             <Label> {
                 draw_text: {
                     fn get_color(self) ->vec4{
@@ -61,8 +73,9 @@ live_design!{
                 text: "OR EVEN SOME PIXELSHADERS"
             }
 
+            
             <Hr> {}
-
+            <H4> { text: "Typographic System" }
             <H1> { text: "H1 headline" }
             <H1italic> { text: "H1 italic headline" }
             <H2> { text: "H2 headline" }

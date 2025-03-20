@@ -13,10 +13,11 @@ live_design!{
             <H3> { text: "<ImageBlend>"}
         }
         demos = {
+            <H4> { text: "Standard" }
             blendbutton = <Button> { text: "Blend Image"}
 
             blendimage = <ImageBlend> {
-                // width: 200, height: 200.
+                align: { x: 0.0, y: 0.0 }
                 image_a: {
                     source: dep("crate://self/resources/ducky.png"),
                     fit: Smallest

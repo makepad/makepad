@@ -13,9 +13,14 @@ live_design!{
             <H3> { text: "<LinkLabel>"}
         }
         demos = {
-            <View> {
-                width: Fill, height: Fit,
-                spacing: (THEME_SPACE_2)
+            <H4> { text: "Standard" }
+            <UIZooRowH> {
+                <LinkLabel> { text: "Click me!"}
+            }
+
+            <Hr> {}
+            <H4> { text: "Styled" }
+            <UIZooRowH> {
                 <LinkLabel> {
                     draw_bg: {
                         color: #0AA
@@ -31,18 +36,23 @@ live_design!{
 
                     text: "Click me!"
                 }
-                <LinkLabel> { text: "Click me!"}
-                <LinkLabel> { text: "Click me!"}
             }
-            <View> {
-                width: Fill, height: Fit,
-                spacing: (THEME_SPACE_2)
-                <LinkLabelGradientY> { text: "<LinkLabelGradientY>"}
+
+            <Hr> {}
+            <H4> { text: "LinkLabelGradientX" }
+            <UIZooRowH> {
                 <LinkLabelGradientX> { text: "<LinkLabelGradientX>"}
             }
-            <View> {
-                width: Fill, height: Fit,
-                spacing: (THEME_SPACE_2)
+
+            <Hr> {}
+            <H4> { text: "LinkLabelGradientY" }
+            <UIZooRowH> {
+                <LinkLabelGradientY> { text: "<LinkLabelGradientY>"}
+            }
+
+            <Hr> {}
+            <H4> { text: "LinkLabelIcon" }
+            <UIZooRowH> {
                 <LinkLabelIcon> {
                     text: "Click me!"
                     draw_icon: {
@@ -66,18 +76,6 @@ live_design!{
                         margin: 0.0
                     }
                 }
-                <LinkLabelIcon> {
-                    text: "Click me!"
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                    }
-
-                    icon_walk: {
-                        width: 12.5, height: Fit,
-                        margin: 0.0
-                    }
-                }
-
             }
         }
     }

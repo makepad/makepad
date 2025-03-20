@@ -29,24 +29,27 @@ live_design!{
                 active_page: page_a 
 
                 page_a = <View> {
+                    align: { x: 0.5, y: 0.5 }
                     show_bg: true,
                     draw_bg: { color: #f00 }
                     width: Fill, height: Fill,
-                    <H3> { text: "Page A"}
+                    <H3> { width: Fit, text: "Page A"}
                 }
 
                 page_b = <View> {
+                    align: { x: 0.5, y: 0.5 }
                     show_bg: true,
                     draw_bg: { color: #080 }
                     width: Fill, height: Fill,
-                    <H3> { text: "Page B"}
+                    <H3> { width: Fit, text: "Page B"}
                 }
 
                 page_c = <View> {
+                    align: { x: 0.5, y: 0.5 }
                     show_bg: true,
                     draw_bg: { color: #008 }
                     width: Fill, height: Fill,
-                    <H3> { text: "Page C"}
+                    <H3> { width: Fit, text: "Page C"}
                 }
             }
 
