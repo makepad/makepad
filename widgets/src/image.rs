@@ -34,7 +34,6 @@ live_design!{
         width: 100
         height: 100
         draw_bg: {
-
         }
     }
 

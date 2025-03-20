@@ -5,7 +5,7 @@ use std::{
     ops::DerefMut,
 };
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct IdPoolFree(Rc<RefCell<Vec<usize >> >);
 
 #[derive(Default, Debug)]
@@ -14,7 +14,7 @@ pub struct IdPool<T> where T: Default {
     pub free: IdPoolFree
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct IdPoolItem<T> {
     pub item: T,
     pub generation: u64,
@@ -29,7 +29,7 @@ impl<T> DerefMut for IdPoolItem<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.item}
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct PoolId {
     pub id: usize,
     pub generation: u64,

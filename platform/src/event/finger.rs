@@ -420,6 +420,10 @@ impl CxFingers {
         /*}*/
     }
     
+    pub (crate) fn uncapture_area(&mut self, area: Area){
+        self.captures.retain(|v| v.area != area);
+    }
+    
     pub (crate) fn find_digit_capture(&mut self, digit_id: DigitId) -> Option<&mut CxDigitCapture> {
         self.captures.iter_mut().find( | v | v.digit_id == digit_id)
     }
@@ -772,6 +776,30 @@ impl HitOptions {
     }
 }
 
+impl Event{
+    pub fn unhandle(&self, cx:&mut Cx, area:&Area){
+        match self{
+            Event::TouchUpdate(e)=>{
+                for t in &e.touches {
+                    if let TouchState::Start = t.state{
+                        if t.handled.get() == *area{
+                            t.handled.set(Area::Empty);
+                            // lets uncapture the finger as well
+                            cx.fingers.uncapture_area(*area);
+                        }
+                    }
+                }
+            }
+            Event::MouseDown(fd)=>{
+                if fd.handled.get() == *area{
+                    fd.handled.set(Area::Empty);
+                    cx.fingers.uncapture_area(*area);
+                }
+            }
+            _=>()
+        }
+    }
+}
 
 impl Event {
     
@@ -838,11 +866,6 @@ impl Event {
                     return Hit::TextCut(tc.clone());
                 }
             },
-            Event::BackPressed => {
-                if cx.keyboard.has_key_focus(area) {
-                    return Hit::BackPressed;
-                }
-            },
             Event::Scroll(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
                     // log!("Skipping Scroll sweep_area: {:?}", options.sweep_area);
@@ -878,6 +901,20 @@ impl Event {
 
                     match t.state {
                         TouchState::Start => {
+                            // someone did a second call on our area
+                            if t.handled.get() == area{
+                                let rect = area.clipped_rect(&cx);
+                                return Hit::FingerDown(FingerDownEvent {
+                                    window_id: e.window_id,
+                                    abs: t.abs,
+                                    digit_id,
+                                    device,
+                                    tap_count: cx.fingers.tap_count(),
+                                    modifiers: e.modifiers,
+                                    time: e.time,
+                                    rect,
+                                });
+                            }
                             
                             if !options.capture_overload && !t.handled.get().is_empty() {
                                 continue;
@@ -1141,12 +1178,33 @@ impl Event {
                 }
             },
             Event::MouseDown(e) => {
+                                
+                let digit_id = live_id!(mouse).into();
+                                                
+                let device = DigitDevice::Mouse {
+                    button: e.button,
+                };
+                 
+                // someone did a second call on our area, just return it
+                if e.handled.get() == area{
+                    let rect = area.clipped_rect(&cx);
+                    return Hit::FingerDown(FingerDownEvent {
+                        window_id: e.window_id,
+                        abs: e.abs,
+                        digit_id,
+                        device,
+                        tap_count: cx.fingers.tap_count(),
+                        modifiers: e.modifiers,
+                        time: e.time,
+                        rect,
+                    })
+                }
+                
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
                     // log!("Skipping MouseDown, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
-                let digit_id = live_id!(mouse).into();
                 
                 if !options.capture_overload && !e.handled.get().is_empty() {
                     return Hit::Nothing
@@ -1161,9 +1219,6 @@ impl Event {
                     return Hit::Nothing
                 }
                 
-                let device = DigitDevice::Mouse {
-                    button: e.button,
-                };
                 
                 if cx.fingers.find_digit_for_captured_area(area).is_some() {
                     return Hit::Nothing;

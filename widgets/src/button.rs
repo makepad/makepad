@@ -91,6 +91,24 @@ live_design! {
         }
         
         animator: {
+            time = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        //draw_bg: {anim_time: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Loop {duration: 1.0, end:1000000000.0}}
+                    apply: {
+                        draw_bg: {anim_time: [{time: 0.0, value: 0.0},{time:1.0, value:1.0}]}
+                    }
+                }
+            }
+        }
+                
+        animator: {
             hover = {
                 default: off,
                 off = {

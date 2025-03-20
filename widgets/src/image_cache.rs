@@ -1,5 +1,6 @@
 use crate::makepad_draw::*;
 use std::collections::HashMap;
+use std::error::Error;
 use zune_jpeg::JpegDecoder;
 use makepad_zune_png::{post_process_image, PngDecoder};
 use std::fmt;
@@ -9,7 +10,7 @@ use std::fs::File;
 pub use makepad_zune_png::error::PngDecodeErrors;
 pub use zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, Clone, Copy)]
 #[live_ignore]
 pub enum ImageFit {
     #[pick] Stretch,
@@ -26,6 +27,11 @@ pub enum ImageFit {
     AutoFitHeight,
 }
 
+impl Default for ImageFit {
+    fn default() -> Self {
+        ImageFit::Stretch
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct ImageBuffer {
@@ -253,6 +259,9 @@ pub enum ImageError {
     /// Currently, only JPEG and PNG are supported.
     UnsupportedFormat,
 }
+
+impl Error for ImageError {}
+
 impl From<PngDecodeErrors> for ImageError {
     fn from(value: PngDecodeErrors) -> Self {
         Self::PngDecode(value)
