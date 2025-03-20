@@ -13,6 +13,7 @@ live_design!{
             <H3> { text: "<FoldButton>"}
         }
         demos = {
+            <H4> { text: "Standard" }
             <FoldButton> { }
         }
     }
