@@ -1,6 +1,6 @@
 use {
     self::super::gl_sys, crate::{
-        cx::{Cx, OsType}, draw_list::DrawListId, draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput}, event::{Event, TextureHandleReadyEvent}, log, makepad_live_id::*, makepad_math::{DVec2, Mat4, Vec4}, makepad_shader_compiler::generate_glsl, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
+        cx::{Cx, OsType}, draw_list::DrawListId, draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput}, event::{Event, TextureHandleReadyEvent}, makepad_live_id::*, makepad_math::{DVec2, Mat4, Vec4}, makepad_shader_compiler::generate_glsl, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
     }, std::{
         ffi::{c_char, CStr}, fs::{remove_file, File}, io::prelude::*, mem, ptr
     }
@@ -627,7 +627,7 @@ impl GlShader{
                         let mut binary_format = 0u32;
                         gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
                         if return_size != 0 {
-                            //log!("GOT FORMAT {}", format);
+                            // crate::log!("GOT FORMAT {}", format);
                             let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
                             let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
 
