@@ -26,7 +26,7 @@ pub const EGL_NONE: u32 = 0x3038;
 pub const EGL_RENDERABLE_TYPE: u32 = 12352;
 pub const EGL_HEIGHT: u32 = 12374;
 pub const EGL_WIDTH: u32 = 12375;
-pub const EGL_CONTEXT_CLIENT_VERSION: u32 = 0x3098;
+pub const EGL_CONTEXT_MAJOR_VERSION: u32 = 0x3098;
 pub const EGL_CONTEXT_MINOR_VERSION_KHR: u32 = 0x30FB;
 pub const EGL_OPENGL_ES_API: u32 = 12448;
 pub const EGL_CONTEXT_OPENGL_PROFILE_MASK: u32 = 0x30FD;
@@ -458,7 +458,7 @@ pub unsafe fn create_egl_context(
     if !exact_cfg_found {
         config = available_cfgs[0];
     }
-    let ctx_attributes = vec![EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
+    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 2, EGL_NONE];
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,
@@ -520,11 +520,11 @@ pub unsafe  fn create_egl_context(
     let ctx_attributes = vec![
         // We set version 3.0 to match that of the pixel/vertex shaders,
         // which define `#version 300 es` at the top of their code.
-        EGL_CONTEXT_CLIENT_VERSION, 3,
+        EGL_CONTEXT_MAJOR_VERSION, 2, // version 1 and 3 also work
         EGL_CONTEXT_MINOR_VERSION_KHR , 0,
         // The rest of this was taken from servo's OpenGL config for OpenHarmony.
         EGL_CONTEXT_OPENGL_PROFILE_MASK,
-        EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+        EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, // allows use of deprecated features
         EGL_NONE, 0, 0, 0,
     ];
     let context = (egl.eglCreateContext.unwrap())(
