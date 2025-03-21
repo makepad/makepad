@@ -7,39 +7,41 @@ live_design!{
     use link::widgets::*;
     
     App = {{App}} {
-        ui: <Root>{
-            main_window = <Window>{
-                body = <View>{
-                    flow: Down,
-                    spacing: 10,
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    },
-                    show_bg: true,
-                    draw_bg:{
-                        fn pixel(self) -> vec4 {
-                            let center = vec2(0.5, 0.5);
-                            let uv = self.pos - center;
-                            let radius = length(uv);
-                            let angle = atan(uv.y, uv.x);
-                            let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
-                            let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
-                            return mix(color1, color2, radius);
-                        }
+        ui: <Window>{
+            body = <View>{
+                flow: Down,
+                spacing: 10,
+                align: {
+                    x: 0.5,
+                    y: 0.5
+                },
+                show_bg: true,
+                draw_bg:{
+                    fn pixel(self) -> vec4 {
+                        let center = vec2(0.5, 0.5);
+                        let uv = self.pos - center;
+                        let radius = length(uv);
+                        let angle = atan(uv.y, uv.x);
+                        let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
+                        let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
+                        return mix(color1, color2, radius);
                     }
-                    b0= <Button> {
-                        text: "Click me 123"
-                        draw_text:{color:#fff}
-                    }
-                    button1 = <Button> {
-                        text: "Click me 123"
-                        draw_text:{color:#fff}
-                    }
-                    button2 = <Button> {
-                        text: "Click me 345"
-                        draw_text:{color:#fff}
-                    }
+                }
+                // image = <Image> {
+                //     width: 400,
+                //     source: dep("crate://self/resources/ducky.png")
+                // }
+                b0= <Button> {
+                    text: "Click me 123"
+                    draw_text:{color:#fff}
+                }
+                button1 = <Button> {
+                    text: "Click me 234"
+                    draw_text:{color:#fff}
+                }
+                button2 = <Button> {
+                    text: "Click me 345"
+                    draw_text:{color:#fff}
                 }
             }
         }
