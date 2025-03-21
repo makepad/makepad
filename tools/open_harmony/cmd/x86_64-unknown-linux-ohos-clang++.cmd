@@ -1,4 +1,4 @@
-@echo off
+@echo on
 setlocal
 
 set "SOURCE=%~dp0"
