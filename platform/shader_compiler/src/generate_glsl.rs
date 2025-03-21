@@ -87,6 +87,7 @@ impl<'a> DrawShaderGenerator<'a> {
             Some(packed_geometries_slots),
             Some(packed_instances_slots),
             packed_varyings_slots,
+            false,
         );
         for field in &self.draw_shader_def.fields {
             match field.kind {
@@ -247,7 +248,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     pub fn generate_pixel_shader(&mut self) {
         let packed_varyings_slots = self.compute_packed_varyings_slots();
-        self.generate_decls(None, None, packed_varyings_slots);
+        self.generate_decls(None, None, packed_varyings_slots, true);
         for field in &self.draw_shader_def.fields {
             match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
@@ -360,7 +361,17 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_attributes_size: Option<usize>,
         packed_instances_size: Option<usize>,
         packed_varyings_size: usize,
+        do_textures: bool,
     ) {
+        if do_textures {
+            for decl in &self.draw_shader_def.fields {
+                match decl.kind {
+                    DrawShaderFieldKind::Texture {..} => self.generate_texture_decl(decl),
+                    _ => {}
+                }
+            }
+        }
+        write!(self.string, "\n").unwrap();
         
         if self.const_table.table.len()>0 {
             writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap();
@@ -400,14 +411,6 @@ impl<'a> DrawShaderGenerator<'a> {
             }
             write!(self.string, "\n").unwrap();
         }
-        
-        for decl in &self.draw_shader_def.fields {
-            match decl.kind {
-                DrawShaderFieldKind::Texture {..} => self.generate_texture_decl(decl),
-                _ => {}
-            }
-        }
-        write!(self.string, "\n").unwrap();
         
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_var_decls(
@@ -969,6 +972,10 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
          match ident {
+            // KEVIN TEMP HACK
+            Ident(live_id!(sample2d)) => {
+                write!(string, "texture2D").unwrap()
+            },
             _ => {
                 write!(string, "{}", ident).unwrap()
             }

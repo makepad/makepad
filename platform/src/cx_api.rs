@@ -119,8 +119,6 @@ impl Cx {
     }
     
     pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
-        crate::log!("Cx::take_dependency {}", path);
-        crate::log!("self.dependencies: {:#?}", self.dependencies.keys().collect::<Vec<_>>());
         if let Some(data) = self.dependencies.get_mut(path) {
             if let Some(data) = data.data.take() {
                 return match data {
