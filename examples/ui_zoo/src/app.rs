@@ -25,6 +25,8 @@
         use crate::tab_linklabel::*;
         use crate::tab_markdown::*;
         use crate::tab_pageflip::*;
+        use crate::tab_portallist::*;
+        use crate::tab_pageflip::*;
         use crate::tab_radiobutton::*;
         use crate::tab_rotatedimage::*;
         use crate::tab_scrollbar::*;
@@ -125,6 +127,7 @@
                                 tLinkLabel,
                                 tMarkdown,
                                 tPageFlip,
+                                tPortalList,
                                 tRadioButton,
                                 tRotatedImage,
                                 tScrollbar,
@@ -155,6 +158,7 @@
                         tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
                         tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
                         tPageFlip = Tab { name: "PageFlip", template: PermanentTab, kind: TabPageFlip }
+                        tPortalList = Tab { name: "PageFlip", template: PermanentTab, kind: TabPortalList }
                         tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
                         tRotatedImage = Tab { name: "RotatedImage", template: PermanentTab, kind: TabRotatedImage }
                         tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
@@ -183,6 +187,7 @@
                         } 
                         TabMarkdown = <UIZooTab> { <DemoMarkdown> {} } 
                         TabPageFlip = <UIZooTab> { <DemoPageFlip> {} } 
+                        TabPortalList = <UIZooTab> { <DemoPortalList> {} } 
                         TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
                         TabRotatedImage = <UIZooTab> { <DemoRotatedImage> {} }
                         TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
@@ -253,6 +258,7 @@
             crate::tab_linklabel::live_design(cx);
             crate::tab_markdown::live_design(cx);
             crate::tab_pageflip::live_design(cx);
+            crate::tab_portallist::live_design(cx);
             crate::tab_radiobutton::live_design(cx);
             crate::tab_rotatedimage::live_design(cx);
             crate::tab_scrollbar::live_design(cx);
