@@ -218,7 +218,7 @@ impl Cx {
                             }
                         }
                         gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
-                        crate::warning!("Uniform1i(), slot (i): {i}, texture_id: {texture_id:?}, gl_texture: {:X?}, loc: {:#X}", cxtexture.os.gl_texture, shgl.textures[i].loc);
+                        // crate::warning!("Uniform1i(), slot (i): {i}, texture_id: {texture_id:?}, gl_texture: {:X?}, loc: {:#X}", cxtexture.os.gl_texture, shgl.textures[i].loc);
                     }
                     
                     gl_sys::DrawElementsInstanced(
@@ -801,7 +801,7 @@ impl GlShader{
             name0.push_str("\0");
             unsafe {
                 let loc = gl_sys::GetUniformLocation(program, name0.as_ptr().cast());
-                crate::warning!("opengl_get_texture_slots(): texture slot: ({:?}, {:?}), name0: {:X?}, loc: {loc:#X}", slot.id, slot.ty, name0.as_bytes());
+                // crate::warning!("opengl_get_texture_slots(): texture slot: ({:?}, {:?}), name0: {:X?}, loc: {loc:#X}", slot.id, slot.ty, name0.as_bytes());
                 gl_texture_slots.push(OpenglUniform { loc });
             }
         }
