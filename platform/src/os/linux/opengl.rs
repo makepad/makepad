@@ -1050,38 +1050,38 @@ impl CxTexture {
             };
     
             match updated {
-                // TextureUpdated::Partial(rect) => {
-                //     if needs_realloc {
-                //         gl_sys::TexImage2D(
-                //             gl_sys::TEXTURE_2D,
-                //             0,
-                //             internal_format as i32,
-                //             width as i32, height as i32,
-                //             0,
-                //             format,
-                //             data_type,
-                //             data,
-                //             // 0 as *const _
-                //         );
-                //     }
+                TextureUpdated::Partial(rect) => {
+                    if needs_realloc {
+                        gl_sys::TexImage2D(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32, height as i32,
+                            0,
+                            format,
+                            data_type,
+                            data,
+                            // 0 as *const _
+                        );
+                    }
 
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
-                //     gl_sys::TexSubImage2D(
-                //         gl_sys::TEXTURE_2D,
-                //         0,
-                //         rect.origin.x as i32,
-                //         rect.origin.y as i32 ,
-                //         rect.size.width as i32,
-                //         rect.size.height as i32,
-                //         format,
-                //         data_type,
-                //         data
-                //     );
-                // },
-                TextureUpdated::Partial(_) | TextureUpdated::Full => {
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
+                    gl_sys::TexSubImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        rect.origin.x as i32,
+                        rect.origin.y as i32 ,
+                        rect.size.width as i32,
+                        rect.size.height as i32,
+                        format,
+                        data_type,
+                        data
+                    );
+                },
+                TextureUpdated::Full => {
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
