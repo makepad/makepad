@@ -31,7 +31,6 @@ pub fn shell_env(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> 
     for (key, value) in env {
         cmd_build.env(key, value);
     }
-    println!("### RUNNING COMMAND ###\nenv: {:?}\n\n{:?}\n", cmd_build.get_envs().collect::<Vec<_>>(), cmd_build);
     let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
     
     let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
