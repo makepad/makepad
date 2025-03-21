@@ -106,7 +106,7 @@ impl LiveNew for WindowHandle {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
-        cxwindow.create_title = "Kevin Test".to_string();
+        cxwindow.create_title = "Makepad".to_string();
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
         cx.platform_ops.push(CxOsOp::CreateWindow(window.window_id()));
