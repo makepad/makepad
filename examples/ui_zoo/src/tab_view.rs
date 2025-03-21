@@ -25,6 +25,14 @@ live_design!{
             <H4> { text: "Style Templates" }
             <UIZooRowH> {
                 flow: RightWrap
+                <SolidView> {
+                    width: Fit, height: Fit, 
+                    padding: 10.,
+                    align: { x: 0.5, y: 0.5 }
+                    draw_bg: { color: #0 }
+                    <Label> { text: "<SolidView>" }
+                }
+
                 <Vr> {
                     draw_bg: {
                         color_1: #000,
@@ -40,13 +48,6 @@ live_design!{
                     }
                 }
 
-                <SolidView> {
-                    width: Fit, height: Fit, 
-                    padding: 10.,
-                    align: { x: 0.5, y: 0.5 }
-                    draw_bg: { color: #0 }
-                    <Label> { text: "<SolidView>" }
-                }
 
                 <RectView> {
                     width: Fit, height: Fit, 
