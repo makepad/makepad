@@ -842,15 +842,16 @@ impl CxOsDrawShader {
             maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
         }
 
-        // Currently, these shaders are only compatible with version 100 through version 300.
+        // Currently, these shaders are only compatible with `#version 100` through `#version 300 es`.
         // Version 310 and later have removed/deprecated some features that we currently use:
         // * error C7616: global function texture2D is removed after version 310
         // * error C1121: transpose: function (builtin) redefinition/overload not allowed
         // * error C5514: 'attribute' is deprecated and removed from this profile, use 'in/out' instead
         // * error C7614: GLSL ES doesn't allow use of reserved word attribute
         // * error C7614: GLSL ES doesn't allow use of reserved word varying
+        //
         let vertex = format!("
-            #version 300 es
+            #version 100
             {}
             precision highp float;
             precision highp int;
@@ -862,7 +863,7 @@ impl CxOsDrawShader {
             {}\0", maybe_ext_tex_extension_import, vertex);
 
         let pixel = format!("
-            #version 300 es
+            #version 100
             #extension GL_OES_standard_derivatives : enable
             {}
             precision highp float;
