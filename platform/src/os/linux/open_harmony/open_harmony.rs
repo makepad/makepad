@@ -271,11 +271,10 @@ impl Cx {
                 os_full_name,
                 display_density,
             });
-            crate::error!("wait_init(): os_type: {:#?}", self.os_type);
             self.os.arkts_obj = Some(ArkTsObjRef::new(raw_env, arkts_ref));
             return true;
         } else {
-            crate::error!("Can't recv Init from arkts");
+            crate::error!("Failed to receive init message from ArkTS layer");
             return false;
         }
     }
