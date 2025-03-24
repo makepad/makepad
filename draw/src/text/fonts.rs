@@ -1,6 +1,12 @@
 use {
     super::{
-        font::FontId, font_family::FontFamilyId, geom::Point, image::Rgba, layouter::{self, LaidoutText, LayoutParams, Layouter}, loader::{FontDefinition, FontFamilyDefinition}, rasterizer::Rasterizer
+        font::FontId,
+        font_family::FontFamilyId,
+        geom::Point,
+        image::Rgba,
+        layouter::{self, LaidoutText, LayoutParams, Layouter},
+        loader::{FontDefinition, FontFamilyDefinition},
+        rasterizer::Rasterizer,
     },
     makepad_platform::*,
     std::{cell::RefCell, rc::Rc},

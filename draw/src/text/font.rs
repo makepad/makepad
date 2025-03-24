@@ -5,7 +5,7 @@ use {
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         intern::Intern,
-        rasterizer::{Rasterizer, RasterizedGlyph},
+        rasterizer::{RasterizedGlyph, Rasterizer},
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -39,11 +39,7 @@ pub struct Font {
 }
 
 impl Font {
-    pub fn new(
-        id: FontId,
-        rasterizer: Rc<RefCell<Rasterizer>>,
-        face: FontFace,
-    ) -> Self {
+    pub fn new(id: FontId, rasterizer: Rc<RefCell<Rasterizer>>, face: FontFace) -> Self {
         Self {
             id,
             rasterizer,
@@ -103,7 +99,9 @@ impl Font {
     }
 
     pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
-        self.rasterizer.borrow_mut().rasterize_glyph(self, glyph_id, dpxs_per_em)
+        self.rasterizer
+            .borrow_mut()
+            .rasterize_glyph(self, glyph_id, dpxs_per_em)
     }
 }
 

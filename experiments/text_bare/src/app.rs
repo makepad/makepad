@@ -1,4 +1,4 @@
-use crate::makepad_widgets::{text::{cgeom::Point, layout::{Style, LayoutParams, Span, LayoutOptions}}, *};
+use crate::makepad_widgets::{text::{cgeom::Point, layouter::{Style, LayoutParams, Span, LayoutOptions}}, *};
 
 live_design!{
     use link::theme::*;

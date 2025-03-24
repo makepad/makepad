@@ -4,16 +4,16 @@ pub mod font;
 pub mod font_atlas;
 pub mod font_face;
 pub mod font_family;
-pub mod loader;
 pub mod fonts;
 pub mod geom;
 pub mod glyph_outline;
 pub mod glyph_raster_image;
-pub mod rasterizer;
 pub mod image;
 pub mod intern;
 pub mod layouter;
+pub mod loader;
 pub mod num;
+pub mod rasterizer;
 pub mod sdfer;
 pub mod selection;
 pub mod shaper;
@@ -79,11 +79,7 @@ mod tests {
         let writer = BufWriter::new(file);
         let rasterizer = layouter.rasterizer().borrow();
         let size = rasterizer.grayscale_atlas_size();
-        let mut encoder = png::Encoder::new(
-            writer,
-            size.width as u32,
-            size.height as u32,
-        );
+        let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
@@ -95,11 +91,7 @@ mod tests {
         let file = File::create("/Users/ejpbruel/Desktop/color.png").unwrap();
         let writer = BufWriter::new(file);
         let size = rasterizer.color_atlas_size();
-        let mut encoder = png::Encoder::new(
-            writer,
-            size.width as u32,
-            size.height as u32,
-        );
+        let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
