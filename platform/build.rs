@@ -12,16 +12,17 @@ fn main() {
     file.write_all(&format!("{}", cwd.display()).as_bytes()).unwrap();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,linux_direct,no_android_choreographer,use_unstable_unix_socket_ancillary_data_2021)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,linux_direct,no_android_choreographer,ohos_sim,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
     if let Ok(configs) = env::var("MAKEPAD"){
-        for config in configs.split('+'){
+        for config in configs.split(['+', ',']){
             match config{
                 "lines"=>println!("cargo:rustc-cfg=lines"), 
                 "linux_direct"=>println!("cargo:rustc-cfg=linux_direct"), 
                 "no_android_choreographer"=>println!("cargo:rustc-cfg=no_android_choreographer"), 
                 "apple_bundle"=>println!("cargo:rustc-cfg=apple_bundle"), 
+                "ohos_sim"=>println!("cargo:rustc-cfg=ohos_sim"),
                 _=>{}
             }
         }
