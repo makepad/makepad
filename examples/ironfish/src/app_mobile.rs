@@ -344,7 +344,7 @@ live_design!{
                 radius: 2.0
             },
         }
-        draw_slider: {
+        draw_bg: {
             instance line_color: (COLOR_UP_4)
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
@@ -372,7 +372,7 @@ live_design!{
     
     TextSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {
+            draw_bg: {
                 instance line_color: (COLOR_UP_4)
                 instance bipolar: 0.0
                 fn pixel(self) -> vec4 {
@@ -394,13 +394,13 @@ live_design!{
     
     InstrumentSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 0.0}
+            draw_bg: {bipolar: 0.0}
         }
     }
     
     InstrumentBipolarSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 1.0}
+            draw_bg: {bipolar: 1.0}
         }
     }
     

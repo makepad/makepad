@@ -30,7 +30,6 @@ live_design!{
                 // WindowsMin
                 match self.button_type {
                     DesktopButtonType::WindowsMin => {
-                        sdf.clear(THEME_COLOR_APP_CAPTION_BAR);
                         sdf.move_to(c.x - sz, c.y);
                         sdf.line_to(c.x + sz, c.y);
                         sdf.stroke(
@@ -48,7 +47,6 @@ live_design!{
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMax => {
-                        sdf.clear(THEME_COLOR_APP_CAPTION_BAR);
                         sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                         sdf.stroke(
                             mix(
@@ -65,7 +63,6 @@ live_design!{
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsMaxToggled => {
-                        sdf.clear(THEME_COLOR_APP_CAPTION_BAR);
                         let sz = 5.;
                         sdf.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
                         sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
@@ -85,7 +82,6 @@ live_design!{
                         return sdf.result;
                     }
                     DesktopButtonType::WindowsClose => {
-                        sdf.clear(THEME_COLOR_APP_CAPTION_BAR);
                         sdf.move_to(c.x - sz, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.move_to(c.x - sz, c.y + sz);
@@ -105,7 +101,6 @@ live_design!{
                         return sdf.result;
                     }
                     DesktopButtonType::XRMode => {
-                        sdf.clear(THEME_COLOR_APP_CAPTION_BAR);
                         let w = 12.;
                         let h = 8.;
                         sdf.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
@@ -133,7 +128,6 @@ live_design!{
                     }
                     DesktopButtonType::Fullscreen => {
                         sz = 8.;
-                        sdf.clear(THEME_COLOR_APP_CAPTION_BAR);
                         sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                         sdf.rect(c.x - sz + 1.5, c.y - sz + 1.5, 2. * (sz - 1.5), 2. * (sz - 1.5));
                         sdf.subtract();
