@@ -90,6 +90,7 @@ fn show_help(err: &str){
     println!("");
     println!("    [options]:");
     println!("");
+    println!("       --arch=\"aarch64\"                        The target architecture for the OHOS target device (defaults to the current architecture).");
     println!("       --deveco-home=\"deveco_path\"             The path of DevEco program, this parameter can also be specified by environment variable \"DEVECO_HOME\"");
     println!("       --remote=\"<hdcip:port>\"                 Remote hdc service, this parameter can also be specified by environment variable \"HDC_REMOTE\"");
     println!();

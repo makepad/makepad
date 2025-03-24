@@ -198,7 +198,8 @@ fn check_deveco_prj(args: &[String]) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
-    let prj_path =  cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate);
+    // TODO: don't use the current working dir here, instead, use the cargo target directory
+    let prj_path =  cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate);
     if prj_path.is_dir() == false {
         Err("run \"deveco\" to create DevEco project before \"build\"".to_owned())
     } else {
@@ -216,33 +217,48 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
     let cwd = std::env::current_dir().unwrap();
     let sdk_path = get_sdk_home(deveco_home, &host_os)?;
 
-    let bin_path = | file_name: &str, extension:& str | match host_os {
+    let bin_path = |file_name: &str, extension:& str| match host_os {
         HostOs::LinuxX64 => String::from(file_name),
         HostOs::WindowsX64 => format!("{file_name}.{extension}"),
         HostOs::MacOS => String::from(file_name),
         _ => panic!()
     };
-
-    let full_clang_path = sdk_path.join("native").join("llvm").join("bin").join(bin_path("aarch64-unknown-linux-ohos-clang","cmd"));
-    let full_clangpp_path = sdk_path.join("native").join("llvm").join("bin").join(bin_path("aarch64-unknown-linux-ohos-clang++","cmd"));
-    let full_llvm_ar_path = sdk_path.join("native").join("llvm").join("bin").join(bin_path("llvm-ar","exe"));
-    let full_llvm_ranlib_path = sdk_path.join("native").join("llvm").join("bin").join(bin_path("lvm-ranlib","exe"));
-
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    if full_clang_path.is_file() == false {
-        return Err(format!("please copy \"aarch64-unknown-linux-ohos-clang.cmd\" and \"aarch64-unknown-linux-ohos-clang++.cmd\" from  \"{}\\tools\\open_harmony\\cmd\" to \"{}\\native\\llvm\\bin\"",cwd.to_str().unwrap(),sdk_path.to_str().unwrap()));
-    }
-
+    
     for target in targets {
-        let toolchain = target.toolchain();
-        let target_opt = format!("--target={toolchain}");
-        let toolchain = toolchain.replace('-',"_");
+        let target_triple = target.target_triple_str();
+        let native_llvm_bin = sdk_path.join("native").join("llvm").join("bin");
+        let full_clang_path = native_llvm_bin.join(bin_path(&format!("{target_triple}-clang"), "cmd"));
+        let full_clangcl_path = native_llvm_bin.join(bin_path(&format!("{target_triple}-clang-cl"), "cmd"));
+        let full_clangpp_path = native_llvm_bin.join(bin_path(&format!("{target_triple}-clang++"), "cmd"));
+        let full_llvm_ar_path = native_llvm_bin.join(bin_path("llvm-ar", "exe"));
+        let full_llvm_ranlib_path = native_llvm_bin.join(bin_path("llvm-ranlib", "exe"));
+
+        println!("full_clang_path: {}", full_clang_path.display());
+        println!("full_clangcl_path: {}", full_clangcl_path.display());
+        println!("full_clangpp_path: {}", full_clangpp_path.display());
+        println!("full_llvm_ar_path: {}", full_llvm_ar_path.display());
+        println!("full_llvm_ranlib_path: {}", full_llvm_ranlib_path.display());
+        
+        #[cfg(target_os = "windows")]
+        if !full_clang_path.is_file() || !full_clangcl_path.is_file() || !full_clangpp_path.is_file() {
+            return Err(format!("please copy \"{}-clang.cmd\", \"{}-clang-cl.cmd\", and \"{}-clang++.cmd\" from  \"{}\\tools\\open_harmony\\cmd\" into \"{}\\native\\llvm\\bin\"",
+                target_triple,
+                target_triple,
+                target_triple,
+                cwd.display(),
+                sdk_path.display(),
+            ));
+        }
+
+        let target_opt = format!("--target={target_triple}");
+        let toolchain = target_triple.replace('-',"_");
 
         let base_args = &[
             "run",
             "nightly",
             "cargo",
             "rustc",
+            "--verbose",
             "--lib",
             "--crate-type=cdylib",
             &target_opt
@@ -255,16 +271,21 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
         let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
         shell_env(
             &[
-                (&format!("CC_{toolchain}"),     full_clang_path.to_str().unwrap()),
+                // Use clang-cl for the compiler, which accepts MSVC-style arguments.
+                // This is necessary for building native code, e.g., any crate that uses `cc` in its build script.
+                (&format!("CC_{toolchain}"),     full_clangcl_path.to_str().unwrap()),
                 (&format!("CXX_{toolchain}"),    full_clangpp_path.to_str().unwrap()),
                 (&format!("AR_{toolchain}"),     full_llvm_ar_path.to_str().unwrap()),
                 (&format!("RANLIB_{toolchain}"), full_llvm_ranlib_path.to_str().unwrap()),
-                (&format!("CARGO_TARGET_{}_LINKER",toolchain.to_uppercase()), full_clang_path.to_str().unwrap()),
+                // Use the regular clang for the linker.
+                (&format!("CARGO_TARGET_{}_LINKER", toolchain.to_uppercase()), full_clang_path.to_str().unwrap()),
+
                 ("MAKEPAD", &makepad_env),
             ],
             &cwd,
             "rustup",
-            &args_out)?;
+            &args_out,
+        )?;
     }
     Ok(())
 }
@@ -274,26 +295,39 @@ fn create_deveco_project(args : &[String], targets :&[OpenHarmonyTarget]) -> Res
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
-    let prj_path = cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate.clone());
-    let raw_file = prj_path.join("entry").join("src").join("main").join("resources").join("rawfile");
-    let tpl_path = cwd.join("tools").join("open_harmony").join("deveco");
-    let _= rmdir(&prj_path);
-    mkdir(&prj_path)?;
-    cp_all(&tpl_path, &prj_path, false)?;
-    mkdir(&raw_file)?;
-    let app_cfg = prj_path.join("AppScope").join("app.json5");
+    // TODO: don't use the current working dir here, instead, use cargo's target dir for crate being built
+    let project_output_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
+    let resources_rawfile = project_output_path.join("entry").join("src").join("main").join("resources").join("rawfile");
+
+    // Currently, the project template is stored in the `MAKEPAD/tools/openharmony/deveco` directory in the makepad git repo.
+    let project_template_path = {
+        let cargo_makepad_installation_path = env!("CARGO_MANIFEST_DIR");
+        let cwd = std::env::current_dir().unwrap();
+        let tools_openharmony_dir = cwd.join(cargo_makepad_installation_path)
+            .parent()
+            .expect("Unable to locate the `makepad/tools/` directory")
+            .join("open_harmony");
+        println!("tools_openharmony_dir: {}", tools_openharmony_dir.display());
+        tools_openharmony_dir.join("deveco")
+    };
+
+    let _= rmdir(&project_output_path);
+    mkdir(&project_output_path)?;
+    cp_all(&project_template_path, &project_output_path, false)?;
+    mkdir(&resources_rawfile)?;
+    let app_cfg = project_output_path.join("AppScope").join("app.json5");
     if let Ok(mut app_file) = std::fs::File::create(app_cfg) {
         let _ = app_file.write_all(app_json(&underscore_build_crate).as_bytes());
     }
-    let lable_path = prj_path.join("entry").join("src").join("main").join("resources").join("base").join("element").join("string.json");
+    let lable_path = project_output_path.join("entry").join("src").join("main").join("resources").join("base").join("element").join("string.json");
     if let Ok(mut label_file) = std::fs::File::create(lable_path) {
         let _ = label_file.write_all(label_json(&underscore_build_crate).as_bytes());
     }
-    let label_us_path = prj_path.join("entry").join("src").join("main").join("resources").join("en_US").join("element").join("string.json");
+    let label_us_path = project_output_path.join("entry").join("src").join("main").join("resources").join("en_US").join("element").join("string.json");
     if let Ok(mut label_file) = std::fs::File::create(label_us_path) {
         let _ = label_file.write_all(label_json(&underscore_build_crate).as_bytes());
     }
-    let label_zh_path = prj_path.join("entry").join("src").join("main").join("resources").join("zh_CN").join("element").join("string.json");
+    let label_zh_path = project_output_path.join("entry").join("src").join("main").join("resources").join("zh_CN").join("element").join("string.json");
     if let Ok(mut label_file) = std::fs::File::create(label_zh_path) {
         let _ = label_file.write_all(label_zh_json(&underscore_build_crate).as_bytes());
     }
@@ -307,19 +341,19 @@ fn add_dependencies(args : &[String], targets :&[OpenHarmonyTarget]) -> Result<(
     let profile = get_profile_from_args(args);
     let underscore_build_crate = build_crate.replace('-', "_");
 
-    let prj_path = cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate.clone());
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
     let raw_file = prj_path.join("entry").join("src").join("main").join("resources").join("rawfile");
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        let dst_dir = raw_file.join("makepad").join("underscore_build_crate").join("resources");
+        let dst_dir = raw_file.join("makepad").join(&underscore_build_crate).join("resources");
         let _ = rmdir(&dst_dir);
         mkdir(&dst_dir)?;
         cp_all(&local_resources_path, &dst_dir, false)?;
     }
-    let build_dir =cwd.join("target").join(targets[0].toolchain()).join(profile.clone());
-    let deps = get_crate_dep_dirs(build_crate, &build_dir, &targets[0].toolchain());
+    let build_dir =cwd.join("target").join(targets[0].target_triple_str()).join(profile.clone());
+    let deps = get_crate_dep_dirs(build_crate, &build_dir, &targets[0].target_triple_str());
     for (name, dep_dir) in deps.iter() {
         let resources_path = dep_dir.join("resources");
         if resources_path.is_dir() {
@@ -332,12 +366,13 @@ fn add_dependencies(args : &[String], targets :&[OpenHarmonyTarget]) -> Result<(
     }
 
     for target in targets {
-        let target_dir = target.toolchain();
+        let target_dir = target.target_triple_str();
         let deveco_lib_dir = match target {
-            OpenHarmonyTarget::aarch64 => "arm64-v8a"
+            OpenHarmonyTarget::Aarch64 => "arm64-v8a",
+            OpenHarmonyTarget::X86_64 => "x86_64",
         };
         let src_lib = cwd.join("target").join(target_dir).join(profile.clone()).join(format!("lib{underscore_build_crate}.so"));
-        let dst_lib = cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate.clone()).join("entry").join("libs").join(deveco_lib_dir).join("libmakepad.so");
+        let dst_lib = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate).join("entry").join("libs").join(deveco_lib_dir).join("libmakepad.so");
         let _ = rm(&dst_lib);
         cp(&src_lib, &dst_lib, false)?;
     }
@@ -354,7 +389,7 @@ fn build_hap(deveco_home: &Option<String>, args: &[String], host_os: &HostOs) ->
     let cwd = std::env::current_dir().unwrap();
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
-    let prj_path = cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate);
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate);
 
     println!("{} {} clean --nodaemon", node_path.to_str().unwrap(), hvigorw_path.to_str().unwrap());
     shell_env(
@@ -429,9 +464,9 @@ pub fn run(deveco_home: &Option<String>, args: &[String], host_os: &HostOs, targ
     let hdc = get_hdc_path(&deveco_home, &host_os)?;
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
-    let bundle = format!("dev.makepad.{}",underscore_build_crate);
+    let bundle = format!("dev.makepad.{underscore_build_crate}");
 
-    let prj_path = cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate.clone());
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
     let hap_path = prj_path.join("entry").join("build").join("default").join("outputs").join("default").join("makepad-default-signed.hap");
 
     if hap_path.is_file() == false {
@@ -459,6 +494,6 @@ pub fn hilog(deveco_home: &Option<String>, args: &[String], host_os: &HostOs, hd
     let hdc = get_hdc_path(&deveco_home, &host_os)?;
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
-    let prj_path = cwd.join("target").join("makepad-open-haromony").join(underscore_build_crate);
+    let prj_path = cwd.join("target").join("makepad-open-harmony").join(underscore_build_crate);
     hdc_cmd(&hdc, &prj_path, &["hilog"], &hdc_remote)
 }

@@ -22,12 +22,19 @@ pub const EGL_DEPTH_SIZE: u32 = 12325;
 pub const EGL_STENCIL_SIZE: u32 = 12326;
 pub const EGL_NATIVE_VISUAL_ID: u32 = 12334;
 pub const EGL_SURFACE_TYPE: u32 = 12339;
-pub const EGL_NONE: u32 = 12344;
+pub const EGL_NONE: u32 = 0x3038;
 pub const EGL_RENDERABLE_TYPE: u32 = 12352;
 pub const EGL_HEIGHT: u32 = 12374;
 pub const EGL_WIDTH: u32 = 12375;
-pub const EGL_CONTEXT_CLIENT_VERSION: u32 = 12440;
+pub const EGL_CONTEXT_MAJOR_VERSION: u32 = 0x3098;
+pub const EGL_CONTEXT_MINOR_VERSION_KHR: u32 = 0x30FB;
 pub const EGL_OPENGL_ES_API: u32 = 12448;
+pub const EGL_CONTEXT_OPENGL_PROFILE_MASK: u32 = 0x30FD;
+pub const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT: u32 = 0x0002;
+
+pub const EGL_COLOR_BUFFER_TYPE: u32 = 0x303F;
+pub const EGL_RGB_BUFFER: u32 = 0x308E;
+pub const EGL_PBUFFER_BIT: u32 = 0x0001;
 
 pub const EGL_GL_TEXTURE_2D_KHR: u32 = 12465;
 
@@ -451,7 +458,7 @@ pub unsafe fn create_egl_context(
     if !exact_cfg_found {
         config = available_cfgs[0];
     }
-    let ctx_attributes = vec![EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
+    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 2, EGL_NONE];
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,
@@ -508,7 +515,18 @@ pub unsafe  fn create_egl_context(
 
     let config = available_cfgs[0];
 
-    let ctx_attributes = vec![EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE];
+    // TODO FIXME: these attributes were required to make the OpenHarmony emulator work.
+    //             They may not be necessary on real hardware or on other platforms.
+    let ctx_attributes = vec![
+        // We set version 3.0 to match that of the pixel/vertex shaders,
+        // which define `#version 300 es` at the top of their code.
+        EGL_CONTEXT_MAJOR_VERSION, 2, // version 1 and 3 also work
+        EGL_CONTEXT_MINOR_VERSION_KHR , 0,
+        // The rest of this was taken from servo's OpenGL config for OpenHarmony.
+        EGL_CONTEXT_OPENGL_PROFILE_MASK,
+        EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, // allows use of deprecated features
+        EGL_NONE, 0, 0, 0,
+    ];
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,

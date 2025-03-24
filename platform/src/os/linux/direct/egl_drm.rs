@@ -358,7 +358,7 @@ impl Egl {
         let egl_config = egl_config.unwrap();
         
         let ctx_attribs = [
-            egl_sys::EGL_CONTEXT_CLIENT_VERSION,
+            egl_sys::EGL_CONTEXT_MAJOR_VERSION,
             2,
             egl_sys::EGL_NONE
         ];
