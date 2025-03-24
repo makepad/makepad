@@ -6,12 +6,13 @@ use {
         makepad_platform::*,
         text::{
             color::Color,
-            font::{AtlasKind, FontId, RasterizedGlyph},
+            font::FontId,
             font_family::FontFamilyId,
-            font_loader::{FontDefinition, FontFamilyDefinition},
+            loader::{FontDefinition, FontFamilyDefinition},
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
-            layout::{LaidoutGlyph, LaidoutRow, LaidoutText},
+            layouter::{LaidoutGlyph, LaidoutRow, LaidoutText},
+            rasterizer::{AtlasKind, RasterizedGlyph},
             substr::Substr,
         },
         turtle::{Align, Walk},
@@ -135,7 +136,7 @@ impl DrawText2 {
         align: Align,
         text: impl Into<Substr>,
     ) -> Rc<LaidoutText> {
-        use crate::text::layout::{LayoutOptions, LayoutParams, Span, Style};
+        use crate::text::layouter::{LayoutOptions, LayoutParams, Span, Style};
 
         let text = text.into();
         let text_len = text.len();
@@ -230,18 +231,18 @@ impl DrawText2 {
 
     fn update_draw_vars(&mut self, cx: &mut Cx2d<'_>) {
         let fonts = cx.fonts.borrow();
-        let settings = fonts.sdfer().borrow().settings();
-        self.draw_vars.user_uniforms[0] = settings.radius;
-        self.draw_vars.user_uniforms[1] = settings.cutoff;
-        let grayscale_atlas_size = fonts.grayscale_atlas().borrow().size();
+        let rasterizer = fonts.rasterizer().borrow();
+        let sdfer_settings = rasterizer.sdfer_settings();
+        self.draw_vars.user_uniforms[0] = sdfer_settings.radius;
+        self.draw_vars.user_uniforms[1] = sdfer_settings.cutoff;
+        let grayscale_atlas_size = rasterizer.grayscale_atlas_size();
         self.draw_vars.user_uniforms[2] = grayscale_atlas_size.width as f32;
         self.draw_vars.user_uniforms[3] = grayscale_atlas_size.height as f32;
-        let color_atlas_size = fonts.color_atlas().borrow().size();
+        let color_atlas_size = rasterizer.color_atlas_size();
         self.draw_vars.user_uniforms[4] = color_atlas_size.width as f32;
         self.draw_vars.user_uniforms[5] = color_atlas_size.height as f32;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
-        drop(fonts);
     }
 
     fn draw_row(

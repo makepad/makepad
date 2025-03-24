@@ -2,7 +2,7 @@ use {
     super::{
         font::Font,
         intern::Intern,
-        shape::{ShapeParams, ShapedText, Shaper},
+        shaper::{ShapeParams, ShapedText, Shaper},
         substr::Substr,
     },
     std::{
@@ -39,8 +39,8 @@ impl FontFamily {
         Self { id, shaper, fonts }
     }
 
-    pub fn id(&self) -> &FontFamilyId {
-        &self.id
+    pub fn id(&self) -> FontFamilyId {
+        self.id
     }
 
     pub fn get_or_shape(&self, text: Substr) -> Rc<ShapedText> {
