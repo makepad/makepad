@@ -28,7 +28,28 @@ live_design!{
         }
 
         draw_fill: {
-            color: (THEME_COLOR_BG_APP)
+            uniform color_dither: 1.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            color: (THEME_COLOR_BG_APP * 0.8);
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box_all(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.,
+                    self.rect_size.y - 2.,
+                    0.5,
+                    self.border_radius,
+                    0.0,
+                    0.5
+                )
+
+                sdf.fill(self.color);
+                return sdf.result
+            }
         }
         
         draw_bg: {
