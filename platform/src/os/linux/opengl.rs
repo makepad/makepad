@@ -997,7 +997,7 @@ impl CxTexture {
     ///
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
-    pub fn update_vec_texture(&mut self, os_type: &OsType) {
+    pub fn update_vec_texture(&mut self, _os_type: &OsType) {
         let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
@@ -1026,18 +1026,22 @@ impl CxTexture {
             // Set texture parameters based on the format
             let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &mut self.format {
                 TextureFormat::VecBGRAu8_32{width, height, data, ..} => {
-                    let (internal_format, format) = if matches!(os_type, OsType::OpenHarmony(_)) {
-                        // The OHOS emulators only support RGBA texture formats, so we swap the `R` and `B` channels.
-                        // TODO: test this on *real* OHOS hardware, it may behave differently.
-                        for p in data.as_mut().unwrap() {
-                            let orig = *p;
-                            *p = *p & 0xFF00FF00 | (orig & 0x000000FF) << 16 | (orig & 0x00FF0000) >> 16;
+                    let (internal_format, format) = {
+                        #[cfg(ohos_sim)] {
+                            // The OHOS emulators only support RGBA texture formats, so we swap the `R` and `B` channels.
+                            // TODO: test this on *real* OHOS hardware, it may behave differently.
+                            for p in data.as_mut().unwrap() {
+                                let orig = *p;
+                                *p = *p & 0xFF00FF00 | (orig & 0x000000FF) << 16 | (orig & 0x00FF0000) >> 16;
+                            }
+                            (gl_sys::RGBA, gl_sys::RGBA)
                         }
-                        (gl_sys::RGBA, gl_sys::RGBA)
-                    } else {
-                        // the default for all other devices: use the BGRA texture format
-                        (gl_sys::BGRA, gl_sys::BGRA)
+                        #[cfg(not(ohos_sim))] {
+                            // The default for all other devices: use the BGRA texture format
+                            (gl_sys::BGRA, gl_sys::BGRA)
+                        }
                     };
+
                     (*width, *height, internal_format, format, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false)
                 }
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
@@ -1063,49 +1067,47 @@ impl CxTexture {
                 _ => panic!("Unsupported texture format"),
             };
 
-    
-            match updated {
-                // KEVIN TEMP HACK
-                // TextureUpdated::Partial(rect) => {
-                //     if needs_realloc {
-                //         crate::log!("TextureUpdated::Partial, needs_realloc; internal_format: {}, width: {}, height: {}, format: {}, data_type: {}, data: {:#X}, use_mipmaps: {}", internal_format, width, height, format, data_type, data as usize, use_mipmaps);
-                //         gl_sys::TexImage2D(
-                //             gl_sys::TEXTURE_2D,
-                //             0,
-                //             internal_format as i32,
-                //             width as i32, height as i32,
-                //             0,
-                //             format,
-                //             data_type,
-                //             data,
-                //             // 0 as *const _
-                //         );
-                //     }
+            // Partial texture updates don't (yet) work on OHOS simulators/emulators.
+            const DO_PARTIAL_TEXTURE_UPDATES: bool = cfg!(not(ohos_sim));
 
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
-                //     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
-                //     crate::log!("TextureUpdated::Partial, calling TextSubImage2D; xoff: {}, yoff:{}, width: {}, height: {}, format: {}, data_type: {}, data: {:#X}", rect.origin.x as i32, rect.origin.y as i32 , rect.size.width as i32, rect.size.height as i32, format, data_type, data as usize);
-                //     gl_sys::TexSubImage2D(
-                //         gl_sys::TEXTURE_2D,
-                //         0,
-                //         rect.origin.x as i32,
-                //         rect.origin.y as i32 ,
-                //         rect.size.width as i32,
-                //         rect.size.height as i32,
-                //         format,
-                //         data_type,
-                //         data
-                //     );
-                // },
+            match updated {
+                TextureUpdated::Partial(rect) if DO_PARTIAL_TEXTURE_UPDATES => {
+                    if needs_realloc {
+                        gl_sys::TexImage2D(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32, height as i32,
+                            0,
+                            format,
+                            data_type,
+                            data,
+                            // 0 as *const _
+                        );
+                    }
+
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
+                    gl_sys::TexSubImage2D(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        rect.origin.x as i32,
+                        rect.origin.y as i32 ,
+                        rect.size.width as i32,
+                        rect.size.height as i32,
+                        format,
+                        data_type,
+                        data
+                    );
+                },
+                // Note: this `Partial(_)` case will only match if `DO_PARTIAL_TEXTURE_UPDATES` is false.
                 TextureUpdated::Partial(_) | TextureUpdated::Full => {
-                    // KEVIN TEMP HACK
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
                     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS, 0);
-                    // KEVIN TEMP HACK
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -1120,18 +1122,17 @@ impl CxTexture {
                 TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
             };
     
-            // KEVIN TEMP HACK
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-            //
-            // if use_mipmaps {
-            //     if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
-            //         gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
-            //         gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
-            //         gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
-            //     }
-            // }
-    
+
+            if use_mipmaps {
+                if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
+                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
+                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
+                }
+            }
+
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
