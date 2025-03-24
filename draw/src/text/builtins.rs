@@ -1,4 +1,4 @@
-use super::font_loader::{FontDefinition, FontFamilyDefinition, FontLoader};
+use super::loader::{FontDefinition, FontFamilyDefinition, Loader};
 
 pub const IBM_PLEX_SANS_TEXT: &[u8] =
     include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
@@ -8,7 +8,7 @@ pub const NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../widgets/resources/N
 pub const LIBERATION_MONO_REGULAR: &[u8] =
     include_bytes!("../../../widgets/resources/LiberationMono-Regular.ttf");
 
-pub fn define(loader: &mut FontLoader) {
+pub fn define(loader: &mut Loader) {
     loader.define_font_family(
         "Sans".into(),
         FontFamilyDefinition {
