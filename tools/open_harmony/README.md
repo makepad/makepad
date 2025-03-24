@@ -25,25 +25,6 @@ Run the following command to install needed tools for building the Open Harmony 
 cargo makepad ohos install-toolchain
 ```
 
-## Add Dependencies
-Open `makepad/examples/simple/Cargo.toml`, add the dependencies for the `ohos`
-```toml
-[package]
-name = "makepad-example-simple"
-version = "0.6.0"
-authors = ["Makepad <info@makepad.nl>"]
-edition = "2021"
-description = "Makepad simple example"
-license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "db3R5Gxh5Njhx8E-8kuZ2plQ1AI="
-
-[dependencies]
-makepad-widgets = { path = "../../widgets", version = "0.6.0" }
-
-[target.'cfg(target_env = "ohos")'.dependencies]
-napi-derive-ohos = "0.0.9"
-napi-ohos = "0.1.3"
-```
 
 ## Create DevEco Project
 
