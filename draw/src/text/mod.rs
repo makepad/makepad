@@ -4,18 +4,19 @@ pub mod font;
 pub mod font_atlas;
 pub mod font_face;
 pub mod font_family;
-pub mod font_loader;
+pub mod loader;
 pub mod fonts;
 pub mod geom;
 pub mod glyph_outline;
 pub mod glyph_raster_image;
+pub mod rasterizer;
 pub mod image;
 pub mod intern;
-pub mod layout;
+pub mod layouter;
 pub mod num;
 pub mod sdfer;
 pub mod selection;
-pub mod shape;
+pub mod shaper;
 pub mod slice;
 pub mod substr;
 
@@ -26,13 +27,12 @@ mod tests {
         use {
             super::{
                 color::Color,
-                font_loader::FontDefinitions,
-                layout::{LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
+                layouter::{LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
             },
             std::{fs::File, io::BufWriter},
         };
 
-        let mut layouter = Layouter::new(FontDefinitions::default(), Settings::default());
+        let mut layouter = Layouter::new(Settings::default());
         let text = "The quick brown fox jumps over the lazy dog繁😊😔";
         let text = layouter.get_or_layout(LayoutParams {
             text: text.into(),
@@ -43,7 +43,7 @@ mod tests {
                         font_size_in_lpxs: 16.0,
                         color: Some(Color::RED),
                     },
-                    range: 0..10,
+                    len: 10,
                 },
                 Span {
                     style: Style {
@@ -51,7 +51,7 @@ mod tests {
                         font_size_in_lpxs: 16.0,
                         color: Some(Color::GREEN),
                     },
-                    range: 10..20,
+                    len: 10,
                 },
                 Span {
                     style: Style {
@@ -59,7 +59,7 @@ mod tests {
                         font_size_in_lpxs: 16.0,
                         color: Some(Color::BLUE),
                     },
-                    range: 20..text.len(),
+                    len: text.len() - 20,
                 },
             ]
             .into(),
@@ -77,32 +77,33 @@ mod tests {
 
         let file = File::create("/Users/ejpbruel/Desktop/grayscale.png").unwrap();
         let writer = BufWriter::new(file);
-        let atlas = layouter.grayscale_atlas().borrow();
+        let rasterizer = layouter.rasterizer().borrow();
+        let size = rasterizer.grayscale_atlas_size();
         let mut encoder = png::Encoder::new(
             writer,
-            atlas.size().width as u32,
-            atlas.size().height as u32,
+            size.width as u32,
+            size.height as u32,
         );
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        let pixels = atlas.image().as_pixels();
+        let pixels = rasterizer.grayscale_atlas_image().as_pixels();
         let data =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
         writer.write_image_data(&data).unwrap();
 
         let file = File::create("/Users/ejpbruel/Desktop/color.png").unwrap();
         let writer = BufWriter::new(file);
-        let atlas = layouter.color_atlas().borrow();
+        let size = rasterizer.color_atlas_size();
         let mut encoder = png::Encoder::new(
             writer,
-            atlas.size().width as u32,
-            atlas.size().height as u32,
+            size.width as u32,
+            size.height as u32,
         );
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        let pixels = atlas.image().as_pixels();
+        let pixels = rasterizer.color_atlas_image().as_pixels();
         let data =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         writer.write_image_data(&data).unwrap();
