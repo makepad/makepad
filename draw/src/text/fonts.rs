@@ -1,14 +1,6 @@
 use {
     super::{
-        font::FontId,
-        font_atlas::{ColorAtlas, GrayscaleAtlas},
-        font_family::FontFamilyId,
-        font_loader::{FontDefinition, FontFamilyDefinition},
-        geom::Point,
-        image::Rgba,
-        layout,
-        layout::{LaidoutText, LayoutParams, Layouter},
-        sdfer::Sdfer,
+        font::FontId, font_family::FontFamilyId, geom::Point, image::Rgba, layouter::{self, LaidoutText, LayoutParams, Layouter}, loader::{FontDefinition, FontFamilyDefinition}, rasterizer::Rasterizer
     },
     makepad_platform::*,
     std::{cell::RefCell, rc::Rc},
@@ -22,10 +14,12 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(cx: &mut Cx, settings: layout::Settings) -> Self {
+    pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
-        let grayscale_atlas_size = layouter.grayscale_atlas().borrow().size();
-        let color_atlas_size = layouter.color_atlas().borrow().size();
+        let rasterizer = layouter.rasterizer().borrow();
+        let grayscale_atlas_size = rasterizer.grayscale_atlas_size();
+        let color_atlas_size = rasterizer.color_atlas_size();
+        drop(rasterizer);
         Self {
             layouter,
             grayscale_texture: Texture::new_with_format(
@@ -58,16 +52,8 @@ impl Fonts {
         }
     }
 
-    pub fn sdfer(&self) -> &Rc<RefCell<Sdfer>> {
-        self.layouter.sdfer()
-    }
-
-    pub fn grayscale_atlas(&self) -> &Rc<RefCell<GrayscaleAtlas>> {
-        self.layouter.grayscale_atlas()
-    }
-
-    pub fn color_atlas(&self) -> &Rc<RefCell<ColorAtlas>> {
-        self.layouter.color_atlas()
+    pub fn rasterizer(&self) -> &Rc<RefCell<Rasterizer>> {
+        self.layouter.rasterizer()
     }
 
     pub fn grayscale_texture(&self) -> &Texture {
@@ -109,14 +95,13 @@ impl Fonts {
     }
 
     fn update_grayscale_texture(&mut self, cx: &mut Cx) -> bool {
-        let mut atlas = self.layouter.grayscale_atlas().borrow_mut();
-        if atlas.did_overflow() {
-            atlas.reset();
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        if rasterizer.reset_grayscale_atlas_if_needed() {
             return false;
         }
         let mut data = self.grayscale_texture.take_vec_u8(cx);
-        let size = atlas.size();
-        let dirty_image = atlas.take_dirty_image();
+        let size = rasterizer.grayscale_atlas_size();
+        let dirty_image = rasterizer.take_grayscale_atlas_dirty_image();
         let dirty_rect = dirty_image.bounds();
         for src_y in 0..dirty_rect.size.height {
             for src_x in 0..dirty_rect.size.width {
@@ -146,14 +131,13 @@ impl Fonts {
             (a << 24) | (r << 16) | (g << 8) | b
         }
 
-        let mut atlas = self.layouter.color_atlas().borrow_mut();
-        if atlas.did_overflow() {
-            atlas.reset();
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        if rasterizer.reset_color_atlas_if_needed() {
             return false;
         }
         let mut data = self.color_texture.take_vec_u32(cx);
-        let size = atlas.size();
-        let dirty_image = atlas.take_dirty_image();
+        let size = rasterizer.color_atlas_size();
+        let dirty_image = rasterizer.take_color_atlas_dirty_image();
         let dirty_rect = dirty_image.bounds();
         for src_y in 0..dirty_rect.size.height {
             for src_x in 0..dirty_rect.size.width {

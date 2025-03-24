@@ -1,15 +1,18 @@
 use {
     super::{
         color::Color,
-        font::{Font, FontId, GlyphId, RasterizedGlyph},
-        font_atlas::{ColorAtlas, GrayscaleAtlas},
+        font::{Font, FontId, GlyphId},
         font_family::{FontFamily, FontFamilyId},
-        font_loader::{self, FontDefinition, FontFamilyDefinition, FontLoader},
+        loader,
+        loader::{FontDefinition, FontFamilyDefinition, Loader},
         geom::{Point, Rect, Size},
         num::Zero,
+        rasterizer,
+        rasterizer::{Rasterizer, RasterizedGlyph},
         sdfer,
         selection::{Cursor, CursorPosition, Selection},
-        shape::{self, ShapedText},
+        shaper,
+        shaper::ShapedText,
         substr::Substr,
     },
     std::{
@@ -23,7 +26,7 @@ use {
 
 #[derive(Debug)]
 pub struct Layouter {
-    font_loader: FontLoader,
+    loader: Loader,
     cache_size: usize,
     cached_params: VecDeque<LayoutParams>,
     cached_results: HashMap<LayoutParams, Rc<LaidoutText>>,
@@ -32,39 +35,31 @@ pub struct Layouter {
 impl Layouter {
     pub fn new(settings: Settings) -> Self {
         Self {
-            font_loader: FontLoader::new(settings.font_loader),
+            loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
             cached_results: HashMap::with_capacity(settings.cache_size),
         }
     }
 
-    pub fn sdfer(&self) -> &Rc<RefCell<sdfer::Sdfer>> {
-        self.font_loader.sdfer()
-    }
-
-    pub fn grayscale_atlas(&self) -> &Rc<RefCell<GrayscaleAtlas>> {
-        self.font_loader.grayscale_atlas()
-    }
-
-    pub fn color_atlas(&self) -> &Rc<RefCell<ColorAtlas>> {
-        self.font_loader.color_atlas()
+    pub fn rasterizer(&self) -> &Rc<RefCell<Rasterizer>> {
+        self.loader.rasterizer()
     }
 
     pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
-        self.font_loader.is_font_family_known(id)
+        self.loader.is_font_family_known(id)
     }
 
     pub fn is_font_known(&self, id: FontId) -> bool {
-        self.font_loader.is_font_known(id)
+        self.loader.is_font_known(id)
     }
 
     pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
-        self.font_loader.define_font_family(id, definition);
+        self.loader.define_font_family(id, definition);
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
-        self.font_loader.define_font(id, definition);
+        self.loader.define_font(id, definition);
     }
 
     pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
@@ -81,28 +76,30 @@ impl Layouter {
     }
 
     fn layout(&mut self, params: LayoutParams) -> LaidoutText {
-        LayoutContext::new(&mut self.font_loader, params.text, params.options).layout(&params.spans)
+        LayoutContext::new(&mut self.loader, params.text, params.options).layout(&params.spans)
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
-    pub font_loader: font_loader::Settings,
+    pub loader: loader::Settings,
     pub cache_size: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            font_loader: font_loader::Settings {
-                shaper: shape::Settings { cache_size: 4096 },
-                sdfer: sdfer::Settings {
-                    padding: 4,
-                    radius: 8.0,
-                    cutoff: 0.25,
+            loader: loader::Settings {
+                shaper: shaper::Settings { cache_size: 4096 },
+                rasterizer: rasterizer::Settings {
+                    sdfer: sdfer::Settings {
+                        padding: 4,
+                        radius: 8.0,
+                        cutoff: 0.25,
+                    },
+                    grayscale_atlas_size: Size::new(512, 512),
+                    color_atlas_size: Size::new(512, 512),
                 },
-                grayscale_atlas_size: Size::new(512, 512),
-                color_atlas_size: Size::new(512, 512),
             },
             cache_size: 4096,
         }
@@ -111,7 +108,7 @@ impl Default for Settings {
 
 #[derive(Debug)]
 struct LayoutContext<'a> {
-    font_loader: &'a mut FontLoader,
+    loader: &'a mut Loader,
     text: Substr,
     options: LayoutOptions,
     current_point_in_lpxs: Point<f32>,
@@ -122,9 +119,9 @@ struct LayoutContext<'a> {
 }
 
 impl<'a> LayoutContext<'a> {
-    fn new(font_loader: &'a mut FontLoader, text: Substr, options: LayoutOptions) -> Self {
+    fn new(loader: &'a mut Loader, text: Substr, options: LayoutOptions) -> Self {
         Self {
-            font_loader,
+            loader,
             text,
             options,
             current_point_in_lpxs: Point::ZERO,
@@ -164,7 +161,7 @@ impl<'a> LayoutContext<'a> {
 
     fn layout_span_multiline(&mut self, span: &Span) {
         let font_family = self
-            .font_loader
+            .loader
             .get_or_load_font_family(span.style.font_family_id)
             .clone();
         for (line_index, len) in self
