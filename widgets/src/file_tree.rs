@@ -72,15 +72,17 @@ live_design!{
                 sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
                 sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                 sdf.union();
-                return sdf.fill(mix(
-                    self.color * self.scale,
-                    self.color_active,
-                    self.active
-                ));
+                return sdf.fill(
+                    mix(
+                        self.color * self.scale,
+                        self.color_active,
+                        self.active
+                    )
+                );
             }
         }
         
-        draw_name: {
+        draw_text: {
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
             
@@ -110,7 +112,7 @@ live_design!{
                     apply: {
                         hover: 0.0
                         draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
                 }
@@ -121,7 +123,7 @@ live_design!{
                     apply: {
                         hover: 1.0
                         draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     },
                 }
@@ -147,7 +149,7 @@ live_design!{
                     apply: {
                         active: 0.0
                         draw_bg: {active: 0.0}
-                        draw_name: {active: 0.0}
+                        draw_text: {active: 0.0}
                         draw_icon: {active: 0.0}
                     }
                 }
@@ -156,7 +158,7 @@ live_design!{
                     apply: {
                         active: 1.0
                         draw_bg: {active: 1.0}
-                        draw_name: {active: 1.0}
+                        draw_text: {active: 1.0}
                         draw_icon: {active: 1.0}
                     }
                 }
@@ -177,7 +179,7 @@ live_design!{
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                         draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_name: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        draw_text: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                         draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
@@ -193,7 +195,7 @@ live_design!{
                     apply: {
                         opened: 1.0
                         draw_bg: {opened: 1.0}
-                        draw_name: {opened: 1.0}
+                        draw_text: {opened: 1.0}
                         draw_icon: {opened: 1.0}
                     }
                 }
@@ -213,13 +215,13 @@ live_design!{
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
-            draw_name: {is_folder: 0.0}
+            draw_text: {is_folder: 0.0}
         }
         
         folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
-            draw_name: {is_folder: 1.0}
+            draw_text: {is_folder: 1.0}
         }
         
         filler: { // TODO: Clarify what this is for. Appears not to do anything.
@@ -283,7 +285,7 @@ struct DrawIconQuad {
 pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
-    #[live] draw_name: DrawNameText,
+    #[live] draw_text: DrawNameText,
     #[live] check_box: CheckBox,
     #[layout] layout: Layout,
     
@@ -358,11 +360,11 @@ impl FileTreeNode {
     pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
         self.draw_bg.scale = scale as f32;
         self.draw_bg.is_even = is_even;
-        self.draw_name.scale = scale as f32;
-        self.draw_name.is_even = is_even;
+        self.draw_text.scale = scale as f32;
+        self.draw_text.is_even = is_even;
         self.draw_icon.scale = scale as f32;
         self.draw_icon.is_even = is_even;
-        self.draw_name.font_scale = scale;
+        self.draw_text.font_scale = scale;
     }
     
     pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
@@ -374,7 +376,7 @@ impl FileTreeNode {
         
         self.draw_icon.draw_walk(cx, self.icon_walk);
         
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     
@@ -385,7 +387,7 @@ impl FileTreeNode {
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     
