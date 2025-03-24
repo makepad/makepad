@@ -3,12 +3,12 @@ use {
         color::Color,
         font::{Font, FontId, GlyphId},
         font_family::{FontFamily, FontFamilyId},
+        geom::{Point, Rect, Size},
         loader,
         loader::{FontDefinition, FontFamilyDefinition, Loader},
-        geom::{Point, Rect, Size},
         num::Zero,
         rasterizer,
-        rasterizer::{Rasterizer, RasterizedGlyph},
+        rasterizer::{RasterizedGlyph, Rasterizer},
         sdfer,
         selection::{Cursor, CursorPosition, Selection},
         shaper,
@@ -262,18 +262,15 @@ impl<'a> LayoutContext<'a> {
         use {super::num::Zero, std::mem};
 
         let glyphs = mem::take(&mut self.glyphs);
-        let newline_ascender_in_lpxs = newline
-            .map(|(style, font_family)| {
-                font_family.fonts()[0].ascender_in_ems() * style.font_size_in_lpxs
-            });
-        let newline_descender_in_lpxs = newline
-            .map(|(style, font_family)| {
-                font_family.fonts()[0].descender_in_ems() * style.font_size_in_lpxs
-            });
-        let newline_line_gap_in_lpxs = newline
-            .map(|(style, font_family)| {
-                font_family.fonts()[0].line_gap_in_ems() * style.font_size_in_lpxs
-            });
+        let newline_ascender_in_lpxs = newline.map(|(style, font_family)| {
+            font_family.fonts()[0].ascender_in_ems() * style.font_size_in_lpxs
+        });
+        let newline_descender_in_lpxs = newline.map(|(style, font_family)| {
+            font_family.fonts()[0].descender_in_ems() * style.font_size_in_lpxs
+        });
+        let newline_line_gap_in_lpxs = newline.map(|(style, font_family)| {
+            font_family.fonts()[0].line_gap_in_ems() * style.font_size_in_lpxs
+        });
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             text: self
@@ -587,11 +584,7 @@ impl LaidoutText {
         let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
             index: row.text.start_in_parent() + index,
-            prefer_next_row: if index == 0 {
-                true
-            } else {
-                false
-            },
+            prefer_next_row: if index == 0 { true } else { false },
         }
     }
 
