@@ -4,18 +4,7 @@ use {
         raw_file::RawFileMgr,
     },
     crate::{
-        cx::{Cx, OpenHarmonyParams, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx_stdin::{PollTimer, PollTimers},
-        egl_sys::{self, LibEgl, EGL_NONE},
-        event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom},
-        gpu_info::GpuPerformance,
-        makepad_math::*,
-        os::cx_native::EventFlow,
-        pass::{CxPassParent, PassClearColor, PassClearDepth, PassId},
-        thread::SignalToUI,
-        window::CxWindowPool,
-        WindowGeomChangeEvent,
+        cx::{Cx, OpenHarmonyParams, OsType}, cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace}, cx_stdin::{PollTimer, PollTimers}, egl_sys::{self, LibEgl, EGL_NONE}, event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom}, gpu_info::GpuPerformance, makepad_math::*, os::cx_native::EventFlow, pass::{CxPassParent, PassClearColor, PassClearDepth, PassId}, thread::SignalToUI, window::CxWindowPool, WindowGeomChangeEvent
     },
     napi_derive_ohos::napi,
     napi_ohos::{sys::*, Env, JsObject, NapiRaw},
@@ -285,7 +274,7 @@ impl Cx {
             self.os.arkts_obj = Some(ArkTsObjRef::new(raw_env, arkts_ref));
             return true;
         } else {
-            crate::error!("Cant' recv Init from arkts");
+            crate::error!("Failed to receive init message from ArkTS layer");
             return false;
         }
     }
