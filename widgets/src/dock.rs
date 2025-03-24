@@ -60,7 +60,7 @@ live_design!{
         }
         drag_target_preview: {
             draw_depth: 10.0
-            color: (THEME_COLOR_drag_target_preview)
+            color: (THEME_COLOR_DRAG_TARGET_PREVIEW)
         }
     }
 
@@ -98,7 +98,7 @@ live_design!{
 
         drag_target_preview: {
             draw_depth: 10.0
-            color: (THEME_COLOR_drag_target_preview)
+            color: (THEME_COLOR_DRAG_TARGET_PREVIEW)
         }
     }
 
