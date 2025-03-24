@@ -33,6 +33,10 @@ live_design!{
         min_drag_distance: 10.0
         
         draw_bg: {
+            uniform color_1: (THEME_COLOR_BG_EVEN)
+            uniform color_2: (THEME_COLOR_BG_ODD)
+            uniform color_active: (THEME_COLOR_CTRL_SELECTED)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -45,11 +49,11 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            THEME_COLOR_BG_EVEN,
-                            THEME_COLOR_BG_ODD,
+                            self.color_1,
+                            self.color_2,
                             self.is_even
                         ),
-                        THEME_COLOR_CTRL_SELECTED,
+                        self.color_active,
                         self.active
                     )
                 )
@@ -58,6 +62,9 @@ live_design!{
         }
         
         draw_icon: {
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_active: (THEME_COLOR_TEXT_SELECTED)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let w = self.rect_size.x;
@@ -66,8 +73,8 @@ live_design!{
                 sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                 sdf.union();
                 return sdf.fill(mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
+                    self.color * self.scale,
+                    self.color_active,
                     self.active
                 ));
             }
