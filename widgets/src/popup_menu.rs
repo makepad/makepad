@@ -321,7 +321,7 @@ live_design!{
         }
     }
 
-    Tub PopupMenu = <PopupMenuBase> {
+    pub PopupMenu = <PopupMenuBase> {
         width: 150., height: Fit,
         flow: Down,
         padding: <THEME_MSPACE_1> {}
