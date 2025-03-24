@@ -47,6 +47,10 @@ napi-ohos = "0.1.3"
 
 ## Create DevEco Project
 
+Note: if you are building for an OpenHarmony simulator/emulator, make sure to set the `MAKEPAD=ohos_sim` environment variable
+either permanently in your shell, or in front of each command below.
+
+
 Run the following command to create a DevEco project for the `makepad-example-simple`
 
 ```

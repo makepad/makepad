@@ -515,12 +515,12 @@ pub struct GlShader {
 impl GlShader{
     pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, os_type: &OsType)->Self{
         // On OpenHarmony, re-using cached shaders doesn't work properly yet.
-        #[cfg(target_env = "ohos")]
+        #[cfg(ohos_sim)]
         unsafe fn read_cache(_vertex: &str, _pixel: &str, _os_type: &OsType) -> Option<gl_sys::GLuint> {
             None
         }
                 
-        #[cfg(not(target_env = "ohos"))]
+        #[cfg(not(ohos_sim))]
         unsafe fn read_cache(vertex: &str, pixel: &str, os_type: &OsType) -> Option<gl_sys::GLuint> {
             if let Some(cache_dir) = os_type.get_cache_dir() {
                 let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
@@ -614,7 +614,7 @@ impl GlShader{
                 gl_sys::DeleteShader(vs);
                 gl_sys::DeleteShader(fs);
             
-                #[cfg(not(target_env = "ohos"))] // caching doesn't work properly on OpenHarmony
+                #[cfg(not(ohos_sim))] // caching doesn't work properly on OpenHarmony
                 if let Some(cache_dir) = os_type.get_cache_dir() {
                     let mut binary = Vec::new();
                     let mut binary_len = 0;
