@@ -15,6 +15,7 @@
         use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
         use crate::tab_filetree::*;
+        use crate::tab_foldheader::*;
         use crate::tab_foldbutton::*;
         use crate::tab_html::*;
         use crate::tab_icon::*;
@@ -119,6 +120,7 @@
                                 tDropDown,
                                 tFiletree,
                                 tFoldButton,
+                                tFoldHeader,
                                 tHTML,
                                 tIcon,
                                 tImage,
@@ -150,6 +152,7 @@
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
+                        tFoldHeader = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldHeader }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
                         tImage = Tab { name: "Image", template: PermanentTab, kind: TabImage }
@@ -158,7 +161,7 @@
                         tLinkLabel = Tab { name: "LinkLabel", template: PermanentTab, kind: TabLinkLabel }
                         tMarkdown = Tab { name: "Markdown", template: PermanentTab, kind: TabMarkdown }
                         tPageFlip = Tab { name: "PageFlip", template: PermanentTab, kind: TabPageFlip }
-                        tPortalList = Tab { name: "PageFlip", template: PermanentTab, kind: TabPortalList }
+                        tPortalList = Tab { name: "PortalList", template: PermanentTab, kind: TabPortalList }
                         tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
                         tRotatedImage = Tab { name: "RotatedImage", template: PermanentTab, kind: TabRotatedImage }
                         tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
@@ -177,6 +180,7 @@
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
                         TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
+                        TabHeader = <UIZooTab> { <DemoFoldHeader> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
                         TabImage = <UIZooTab> { <DemoImage> {} }
@@ -249,6 +253,7 @@
             crate::tab_dropdown::live_design(cx);
             crate::tab_filetree::live_design(cx);
             crate::tab_foldbutton::live_design(cx);
+            crate::tab_foldheader::live_design(cx);
             crate::tab_html::live_design(cx);
             crate::tab_icon::live_design(cx);
             crate::tab_image::live_design(cx);
