@@ -1,23 +1,9 @@
 use {
-    std::{
-        fs::{File, remove_file},
-        io::prelude::*,
-        mem,
-        ptr,
-        ffi::{c_char, CStr},
-    },
-    self::super::gl_sys,
-    crate::{
-        makepad_live_id::*,
-        makepad_shader_compiler::generate_glsl,
-        cx::{Cx, OsType, OsType::Android},
-        texture::{Texture, TextureFormat, TexturePixel, TextureUpdated, CxTexture},
-        makepad_math::{Mat4, DVec2, Vec4},
-        pass::{PassClearColor, PassClearDepth, PassId},
-        draw_list::DrawListId,
-        draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
-        event::{Event, TextureHandleReadyEvent}
-    },
+    self::super::gl_sys, crate::{
+        cx::{Cx, OsType}, draw_list::DrawListId, draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput}, event::{Event, TextureHandleReadyEvent}, makepad_live_id::*, makepad_math::{DVec2, Mat4, Vec4}, makepad_shader_compiler::generate_glsl, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
+    }, std::{
+        ffi::{c_char, CStr}, fs::{remove_file, File}, io::prelude::*, mem, ptr
+    }
 };
 
 impl Cx {
@@ -195,7 +181,7 @@ impl Cx {
                         let cxtexture = &mut self.textures[texture_id];
 
                         if cxtexture.format.is_vec(){
-                            cxtexture.update_vec_texture();
+                            cxtexture.update_vec_texture(&self.os_type);
                         } else if cxtexture.format.is_video() {
                             let is_initial_setup = cxtexture.setup_video_texture();
                             if is_initial_setup {
@@ -496,7 +482,7 @@ impl Cx {
         // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
         let gpu_renderer = get_gl_string(gl_sys::RENDERER);
         if gpu_renderer.contains("Adreno") {
-            crate::log!("WARNING: This device is using {gpu_renderer} renderer.
+            crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
             OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
             This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
         }
@@ -511,7 +497,7 @@ pub struct CxOsDrawShader {
     pub pixel: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GlShader {
     pub program: u32,
     pub geometries: Vec<OpenglAttribute>,
@@ -527,6 +513,13 @@ pub struct GlShader {
 
 impl GlShader{
     pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, os_type: &OsType)->Self{
+        // On OpenHarmony, re-using cached shaders doesn't work properly yet.
+        #[cfg(ohos_sim)]
+        unsafe fn read_cache(_vertex: &str, _pixel: &str, _os_type: &OsType) -> Option<gl_sys::GLuint> {
+            None
+        }
+                
+        #[cfg(not(ohos_sim))]
         unsafe fn read_cache(vertex: &str, pixel: &str, os_type: &OsType) -> Option<gl_sys::GLuint> {
             if let Some(cache_dir) = os_type.get_cache_dir() {
                 let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
@@ -544,30 +537,48 @@ impl GlShader{
                 if let Ok(mut cache_file) = File::open(&filename) {
                     let mut binary = Vec::new();
                     let mut format_bytes = [0u8; 4];
-                    if cache_file.read(&mut format_bytes).is_ok() {
-                        let binary_format = u32::from_be_bytes(format_bytes);
-                        if cache_file.read_to_end(&mut binary).is_ok() {
-                            let mut version_consistency_conflict = false;
-                            // On Android, invalidate the cached file if there have been significant system updates
-                            match os_type {
-                                OsType::Android(params) => {
-                                    let current_filename = format!("{}/shader_{:08x}_av{}_bn{}_kv{}.bin", cache_dir, shader_hash.0, params.android_version, params.build_number, params.kernel_version);
-                                    version_consistency_conflict = filename != current_filename;
-                                },
-                                _ => (),
-                            };
-            
-                            if !version_consistency_conflict {
-                                let program = gl_sys::CreateProgram();
-                                gl_sys::ProgramBinary(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
-                                return Some(program);
-                            } else {
-                                // Version mismatch, delete the old cache file
-                                let _ = remove_file(&filename);
+                    match cache_file.read(&mut format_bytes) {
+                        Ok(_bytes_read) => {
+                            let binary_format = u32::from_be_bytes(format_bytes);
+                            match cache_file.read_to_end(&mut binary) {
+                                Ok(_full_bytes) => {
+                                    let mut version_consistency_conflict = false;
+                                    // On Android, invalidate the cached file if there have been significant system updates
+                                    match os_type {
+                                        OsType::Android(params) => {
+                                            let current_filename = format!("{}/shader_{:08x}_av{}_bn{}_kv{}.bin", cache_dir, shader_hash.0, params.android_version, params.build_number, params.kernel_version);
+                                            version_consistency_conflict = filename != current_filename;
+                                        },
+                                        _ => (),
+                                    };
+                    
+                                    if !version_consistency_conflict {
+                                        let program = gl_sys::CreateProgram();
+                                        gl_sys::ProgramBinary(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
+                                        if let Some(error) = GlShader::opengl_has_shader_error(false, program as usize, "") {
+                                            crate::error!("ERROR::SHADER::CACHE::PROGRAM_BINARY_FAILED\n{}", error);
+                                            return None;
+                                        }
+                                        return Some(program);
+                                    } else {
+                                        // Version mismatch, delete the old cache file
+                                        let _ = remove_file(&filename);
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::warning!("Failed to read the full shader cache file {filename}, error: {e}");
+                                }
                             }
                         }
+                        Err(e) => {
+                            crate::warning!("Failed to read format bytes from shader cache file {filename}, error: {e}");
+                        }
                     }
+                } else {
+                    // crate::debug!("File was not in shader cache: {filename}");
                 }
+            } else {
+                crate::warning!("No cache directory available for shader cache");
             }
             None
         }
@@ -602,6 +613,7 @@ impl GlShader{
                 gl_sys::DeleteShader(vs);
                 gl_sys::DeleteShader(fs);
             
+                #[cfg(not(ohos_sim))] // caching doesn't work properly on OpenHarmony
                 if let Some(cache_dir) = os_type.get_cache_dir() {
                     let mut binary = Vec::new();
                     let mut binary_len = 0;
@@ -612,12 +624,12 @@ impl GlShader{
                         let mut binary_format = 0u32;
                         gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
                         if return_size != 0 {
-                            //log!("GOT FORMAT {}", format);
+                            // crate::log!("GOT FORMAT {}", format);
                             let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
                             let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
 
                             match os_type {
-                                Android(params) => {
+                                OsType::Android(params) => {
                                     filename = format!("{}_av{}_bn{}_kv{}", filename, params.android_version, params.build_number, params.kernel_version);
                                 },
                                 _ => (),
@@ -626,9 +638,17 @@ impl GlShader{
                             filename = format!("{}.bin", filename);
 
                             binary.resize(return_size as usize, 0u8);
-                            if let Ok(mut cache) = File::create(filename) {
-                                let _ = cache.write_all(&binary_format.to_be_bytes());
-                                let _ = cache.write_all(&binary);
+                            match File::create(&filename) {
+                                Ok(mut cache)  => {
+                                    let _res1 = cache.write_all(&binary_format.to_be_bytes());
+                                    let _res2 = cache.write_all(&binary);
+                                    if _res1.is_err() || _res2.is_err() {
+                                        crate::error!("Failed to write shader binary to shader cache {filename}");
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::error!("Failed to write shader cache to {filename}, error: {e}");
+                                }
                             }
                         }
                     }
@@ -636,7 +656,7 @@ impl GlShader{
                 program
             };
 
-            Self{
+            let t = Self{
                 program,
                 geometries:Self::opengl_get_attributes(program, "packed_geometry_", mapping.geometries.total_slots),
                 instances: Self::opengl_get_attributes(program, "packed_instance_", mapping.instances.total_slots),
@@ -647,7 +667,13 @@ impl GlShader{
                 user_uniforms: Self::opengl_get_uniform(program, "user_table"),
                 live_uniforms: Self::opengl_get_uniform(program, "live_table"),
                 const_table_uniform: Self::opengl_get_uniform(program, "const_table"),
-            }
+            };
+            // crate::error!("GlShader: {:#?}", t);
+            // for tex in &t.textures {
+            //     crate::error!("TEXTURE loc: {}: vertex:\n{}", tex.loc, vertex);
+            //     crate::error!("TEXTURE loc: {}: pixel:\n{}", tex.loc, pixel);
+            // }
+            t
         }
     }
 
@@ -663,8 +689,9 @@ impl GlShader{
         name0.push_str(name);
         name0.push_str("\0");
         unsafe {
+            let loc = gl_sys::GetUniformLocation(program, name0.as_ptr().cast());
             OpenglUniform {
-                loc: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
+                loc,
                 //name: name.to_string(),
             }
         }
@@ -769,9 +796,9 @@ impl GlShader{
             name0.push_str(&slot.id.to_string());
             name0.push_str("\0");
             unsafe {
-                gl_texture_slots.push(OpenglUniform {
-                    loc: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
-                })
+                let loc = gl_sys::GetUniformLocation(program, name0.as_ptr().cast());
+                // crate::warning!("opengl_get_texture_slots(): texture slot: ({:?}, {:?}), name0: {:X?}, loc: {loc:#X}", slot.id, slot.ty, name0.as_bytes());
+                gl_texture_slots.push(OpenglUniform { loc });
             }
         }
         gl_texture_slots
@@ -796,7 +823,8 @@ impl CxOsDrawShader {
         // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
         // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
         let is_emulator = match os_type {
-            Android(params) => params.is_emulator,
+            OsType::Android(params) => params.is_emulator,
+            OsType::OpenHarmony(_) => true, // TODO FIXME: detect whether we're running on an OHOS emulator
             _ => false,
         };
 
@@ -808,10 +836,18 @@ impl CxOsDrawShader {
             maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
             maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
         }
-        
+
+        // Currently, these shaders are only compatible with `#version 100` through `#version 300 es`.
+        // Version 310 and later have removed/deprecated some features that we currently use:
+        // * error C7616: global function texture2D is removed after version 310
+        // * error C1121: transpose: function (builtin) redefinition/overload not allowed
+        // * error C5514: 'attribute' is deprecated and removed from this profile, use 'in/out' instead
+        // * error C7614: GLSL ES doesn't allow use of reserved word attribute
+        // * error C7614: GLSL ES doesn't allow use of reserved word varying
+        //
         let vertex = format!("
             #version 100
-            {}
+            {maybe_ext_tex_extension_import}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
@@ -819,23 +855,25 @@ impl CxOsDrawShader {
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", maybe_ext_tex_extension_import, vertex);
+            {vertex}\0",
+        );
 
         let pixel = format!("
             #version 100
             #extension GL_OES_standard_derivatives : enable
-            {}
+            {maybe_ext_tex_extension_import}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            {}
+            {maybe_ext_tex_extension_sampler}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", maybe_ext_tex_extension_import, maybe_ext_tex_extension_sampler, pixel);
-        
-            // lets fetch the uniform positions for our uniforms
+            {pixel}\0",
+        );
+
+        // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
             vertex,
             pixel,
@@ -861,7 +899,7 @@ fn get_gl_string(key: gl_sys::types::GLenum) -> String {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct OpenglAttribute {
     pub loc: u32,
     pub size: i32,
@@ -956,7 +994,7 @@ impl CxTexture {
     ///
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
-    pub fn update_vec_texture(&mut self) {
+    pub fn update_vec_texture(&mut self, _os_type: &OsType) {
         let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
@@ -983,9 +1021,26 @@ impl CxTexture {
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
     
             // Set texture parameters based on the format
-            let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &self.format {
-                TextureFormat::VecBGRAu8_32{width, height, data, ..} => 
-                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
+            let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &mut self.format {
+                TextureFormat::VecBGRAu8_32{width, height, data, ..} => {
+                    let (internal_format, format) = {
+                        #[cfg(ohos_sim)] {
+                            // The OHOS emulators only support RGBA texture formats, so we swap the `R` and `B` channels.
+                            // TODO: test this on *real* OHOS hardware, it may behave differently.
+                            for p in data.as_mut().unwrap() {
+                                let orig = *p;
+                                *p = *p & 0xFF00FF00 | (orig & 0x000000FF) << 16 | (orig & 0x00FF0000) >> 16;
+                            }
+                            (gl_sys::RGBA, gl_sys::RGBA)
+                        }
+                        #[cfg(not(ohos_sim))] {
+                            // The default for all other devices: use the BGRA texture format
+                            (gl_sys::BGRA, gl_sys::BGRA)
+                        }
+                    };
+
+                    (*width, *height, internal_format, format, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false)
+                }
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
                     (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, true),
                 TextureFormat::VecRGBAf32{width, height, data, ..} => 
@@ -1008,9 +1063,12 @@ impl CxTexture {
                     (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
                 _ => panic!("Unsupported texture format"),
             };
-    
+
+            // Partial texture updates don't (yet) work on OHOS simulators/emulators.
+            const DO_PARTIAL_TEXTURE_UPDATES: bool = cfg!(not(ohos_sim));
+
             match updated {
-                TextureUpdated::Partial(rect) => {
+                TextureUpdated::Partial(rect) if DO_PARTIAL_TEXTURE_UPDATES => {
                     if needs_realloc {
                         gl_sys::TexImage2D(
                             gl_sys::TEXTURE_2D,
@@ -1020,7 +1078,8 @@ impl CxTexture {
                             0,
                             format,
                             data_type,
-                            0 as *const _
+                            data,
+                            // 0 as *const _
                         );
                     }
 
@@ -1040,7 +1099,8 @@ impl CxTexture {
                         data
                     );
                 },
-                TextureUpdated::Full => {
+                // Note: this `Partial(_)` case will only match if `DO_PARTIAL_TEXTURE_UPDATES` is false.
+                TextureUpdated::Partial(_) | TextureUpdated::Full => {
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
@@ -1061,7 +1121,7 @@ impl CxTexture {
     
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-    
+
             if use_mipmaps {
                 if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
                     gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
@@ -1069,7 +1129,7 @@ impl CxTexture {
                     gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
                 }
             }
-    
+
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }

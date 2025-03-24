@@ -351,7 +351,7 @@ impl OpenglCx {
 
         // Create EGL context.
         let ctx_attribs = [
-            egl_sys::EGL_CONTEXT_CLIENT_VERSION,
+            egl_sys::EGL_CONTEXT_MAJOR_VERSION,
             2,
             egl_sys::EGL_NONE
         ];

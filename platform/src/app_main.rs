@@ -3,6 +3,10 @@ use crate::event::Event;
 use crate::cx::Cx;
 use crate::ui_runner::UiRunner;
 
+#[cfg(target_env = "ohos")]
+pub use napi_ohos;
+
+
 pub trait AppMain{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
     fn ui_runner(&self) -> UiRunner<Self> where Self: Sized + 'static {
@@ -90,9 +94,9 @@ macro_rules!app_main {
         }
 
         #[cfg(target_env = "ohos")]
-        #[napi_derive_ohos::module_exports]
-        fn init(exports: napi_ohos::JsObject, env: napi_ohos::Env) -> napi_ohos::Result<()> {
-            Cx::ohos_init(exports,env, ||{
+        #[no_mangle]
+        extern "C" fn ohos_init_app_main(exports: $crate::napi_ohos::JsObject, env: $crate::napi_ohos::Env) -> $crate::napi_ohos::Result<()> {
+            Cx::ohos_init(exports, env, || {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                     if let Event::Startup = event {
@@ -154,3 +158,12 @@ macro_rules!app_main {
     }
 }
 
+#[cfg(target_env = "ohos")]
+#[napi_derive_ohos::module_exports]
+fn init(exports: napi_ohos::JsObject, env: napi_ohos::Env) -> napi_ohos::Result<()> {
+    #[allow(improper_ctypes)]
+    extern "C" {
+        fn ohos_init_app_main(exports: napi_ohos::JsObject, env: napi_ohos::Env) -> napi_ohos::Result<()>;
+    }
+    unsafe { ohos_init_app_main(exports, env) }
+}
