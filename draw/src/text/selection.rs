@@ -21,7 +21,7 @@ pub struct Cursor {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Position {
+pub struct CursorPosition {
     pub row_index: usize,
     pub x_in_lpxs: f32,
 }
