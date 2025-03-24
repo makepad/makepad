@@ -81,10 +81,13 @@ live_design!{
         }
         
         draw_name: {
+            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
+            
             fn get_color(self) -> vec4 {
                 return mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
+                    self.color * self.scale,
+                    self.color_active,
                     self.active
                 )
             }
