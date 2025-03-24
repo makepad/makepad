@@ -572,11 +572,11 @@ impl<'a> Cx2d<'a> {
                 Flow::RightWrap => {
                     if turtle.pos.x - turtle.origin.x + size.x > turtle.width - turtle.layout.padding.right{
                         
-                        pos.x =  turtle.origin.x + turtle.layout.padding.left;
-                        let dx = pos.x - turtle.pos.x;                        
+                        pos.x =  turtle.origin.x + turtle.layout.padding.left - spacing.x;
+                        let dx = pos.x - turtle.pos.x;
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                         
-                        pos.y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;//turtle.layout.line_spacing;
+                        pos.y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing + spacing.x;//turtle.layout.line_spacing;
                         let dy = pos.y - turtle.pos.y;
                         turtle.pos.y = pos.y;
                         
