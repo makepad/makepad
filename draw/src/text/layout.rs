@@ -8,7 +8,7 @@ use {
         geom::{Point, Rect, Size},
         num::Zero,
         sdfer,
-        selection::{Cursor, Position, Selection},
+        selection::{Cursor, CursorPosition, Selection},
         shape::{self, ShapedText},
         substr::Substr,
     },
@@ -537,11 +537,11 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
-    pub fn cursor_to_position(&self, cursor: Cursor) -> Position {
+    pub fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
         let row_index = self.cursor_to_row_index(cursor);
         let row = &self.rows[row_index];
         let x_in_lpxs = row.index_to_x_in_lpxs(cursor.index - row.text.start_in_parent());
-        Position {
+        CursorPosition {
             row_index,
             x_in_lpxs,
         }
@@ -563,7 +563,7 @@ impl LaidoutText {
 
     pub fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
         let row_index = self.y_in_lpxs_to_row_index(point_in_lpxs.y);
-        self.position_to_cursor(Position {
+        self.position_to_cursor(CursorPosition {
             row_index,
             x_in_lpxs: point_in_lpxs.x,
         })
@@ -585,7 +585,7 @@ impl LaidoutText {
         self.rows.len() - 1
     }
 
-    pub fn position_to_cursor(&self, position: Position) -> Cursor {
+    pub fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
         let row = &self.rows[position.row_index];
         let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
@@ -599,11 +599,11 @@ impl LaidoutText {
     }
 
     pub fn selection_rects_in_lpxs(&self, selection: Selection) -> Vec<Rect<f32>> {
-        let Position {
+        let CursorPosition {
             row_index: start_row_index,
             x_in_lpxs: start_x_in_lpxs,
         } = self.cursor_to_position(selection.start());
-        let Position {
+        let CursorPosition {
             row_index: end_row_index,
             x_in_lpxs: end_x_in_lpxs,
         } = self.cursor_to_position(selection.end());
