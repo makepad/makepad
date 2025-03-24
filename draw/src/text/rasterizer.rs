@@ -1,4 +1,11 @@
-use super::{geom::{Rect, Size}, font::{Font, GlyphId}, sdfer, sdfer::Sdfer, image::{R, Rgba, Image, Subimage}, font_atlas::{GlyphImageKey, GrayscaleAtlas, ColorAtlas}};
+use super::{
+    font::{Font, GlyphId},
+    font_atlas::{ColorAtlas, GlyphImageKey, GrayscaleAtlas},
+    geom::{Rect, Size},
+    image::{Image, Rgba, Subimage, R},
+    sdfer,
+    sdfer::Sdfer,
+};
 
 #[derive(Debug)]
 pub struct Rasterizer {
@@ -62,11 +69,18 @@ impl Rasterizer {
         self.color_atlas.take_dirty_image()
     }
 
-    pub fn rasterize_glyph(&mut self, font: &Font, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
+    pub fn rasterize_glyph(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
         if let Some(rasterized_glyph) = self.rasterize_glyph_outline(font, glyph_id, dpxs_per_em) {
             return Some(rasterized_glyph);
         };
-        if let Some(rasterized_glyph) = self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em) {
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
+        {
             return Some(rasterized_glyph);
         }
         None
@@ -96,13 +110,16 @@ impl Rasterizer {
 
         let padding = self.sdfer.settings().padding;
         let atlas_size = self.grayscale_atlas.size();
-        let mut sdf = self.grayscale_atlas.get_or_allocate_glyph_image(GlyphImageKey {
-            font_id: font.id(),
-            glyph_id,
-            size: coverage.size() + Size::from(padding) * 2,
-        })?;
+        let mut sdf = self
+            .grayscale_atlas
+            .get_or_allocate_glyph_image(GlyphImageKey {
+                font_id: font.id(),
+                glyph_id,
+                size: coverage.size() + Size::from(padding) * 2,
+            })?;
         let atlas_bounds = sdf.bounds();
-        self.sdfer.coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut sdf);
+        self.sdfer
+            .coverage_to_sdf(&coverage.subimage(coverage.size().into()), &mut sdf);
 
         return Some(RasterizedGlyph {
             bounds_in_dpxs: outline.bounds_in_dpxs(dpxs_per_em).pad(padding as f32),
@@ -120,11 +137,13 @@ impl Rasterizer {
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
         let raster_image = font.glyph_raster_image(glyph_id, dpxs_per_em)?;
-        let mut image = self.color_atlas.get_or_allocate_glyph_image(GlyphImageKey {
-            font_id: font.id(),
-            glyph_id,
-            size: raster_image.decode_size(),
-        })?;
+        let mut image = self
+            .color_atlas
+            .get_or_allocate_glyph_image(GlyphImageKey {
+                font_id: font.id(),
+                glyph_id,
+                size: raster_image.decode_size(),
+            })?;
         raster_image.decode(&mut image);
         let atlas_bounds = image.bounds();
         return Some(RasterizedGlyph {
