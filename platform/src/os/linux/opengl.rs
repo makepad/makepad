@@ -181,7 +181,7 @@ impl Cx {
                         let cxtexture = &mut self.textures[texture_id];
 
                         if cxtexture.format.is_vec(){
-                            cxtexture.update_vec_texture();
+                            cxtexture.update_vec_texture(&self.os_type);
                         } else if cxtexture.format.is_video() {
                             let is_initial_setup = cxtexture.setup_video_texture();
                             if is_initial_setup {
@@ -514,8 +514,6 @@ pub struct GlShader {
 
 impl GlShader{
     pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, os_type: &OsType)->Self{
-        // crate::log!("GlShader::new(): \n  --> vertex: {vertex}\n  --> pixel: {pixel}");
-
         // On OpenHarmony, re-using cached shaders doesn't work properly yet.
         #[cfg(target_env = "ohos")]
         unsafe fn read_cache(_vertex: &str, _pixel: &str, _os_type: &OsType) -> Option<gl_sys::GLuint> {
@@ -852,7 +850,7 @@ impl CxOsDrawShader {
         //
         let vertex = format!("
             #version 100
-            {}
+            {maybe_ext_tex_extension_import}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
@@ -860,23 +858,25 @@ impl CxOsDrawShader {
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", maybe_ext_tex_extension_import, vertex);
+            {vertex}\0",
+        );
 
         let pixel = format!("
             #version 100
             #extension GL_OES_standard_derivatives : enable
-            {}
+            {maybe_ext_tex_extension_import}
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            {}
+            {maybe_ext_tex_extension_sampler}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", maybe_ext_tex_extension_import, maybe_ext_tex_extension_sampler, pixel);
-        
-            // lets fetch the uniform positions for our uniforms
+            {pixel}\0",
+        );
+
+        // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
             vertex,
             pixel,
@@ -997,7 +997,7 @@ impl CxTexture {
     ///
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
-    pub fn update_vec_texture(&mut self) {
+    pub fn update_vec_texture(&mut self, os_type: &OsType) {
         let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
@@ -1024,9 +1024,22 @@ impl CxTexture {
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
     
             // Set texture parameters based on the format
-            let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &self.format {
-                TextureFormat::VecBGRAu8_32{width, height, data, ..} => 
-                    (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
+            let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &mut self.format {
+                TextureFormat::VecBGRAu8_32{width, height, data, ..} => {
+                    let (internal_format, format) = if matches!(os_type, OsType::OpenHarmony(_)) {
+                        // The OHOS emulators only support RGBA texture formats, so we swap the `R` and `B` channels.
+                        // TODO: test this on *real* OHOS hardware, it may behave differently.
+                        for p in data.as_mut().unwrap() {
+                            let orig = *p;
+                            *p = *p & 0xFF00FF00 | (orig & 0x000000FF) << 16 | (orig & 0x00FF0000) >> 16;
+                        }
+                        (gl_sys::RGBA, gl_sys::RGBA)
+                    } else {
+                        // the default for all other devices: use the BGRA texture format
+                        (gl_sys::BGRA, gl_sys::BGRA)
+                    };
+                    (*width, *height, internal_format, format, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false)
+                }
                 TextureFormat::VecMipBGRAu8_32{width, height, data, max_level: _, ..} => 
                     (*width, *height, gl_sys::BGRA, gl_sys::BGRA, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, true),
                 TextureFormat::VecRGBAf32{width, height, data, ..} => 
@@ -1049,44 +1062,50 @@ impl CxTexture {
                     (*width, *height, gl_sys::RED, gl_sys::RED, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 4, false),
                 _ => panic!("Unsupported texture format"),
             };
+
     
             match updated {
-                TextureUpdated::Partial(rect) => {
-                    if needs_realloc {
-                        gl_sys::TexImage2D(
-                            gl_sys::TEXTURE_2D,
-                            0,
-                            internal_format as i32,
-                            width as i32, height as i32,
-                            0,
-                            format,
-                            data_type,
-                            data,
-                            // 0 as *const _
-                        );
-                    }
+                // KEVIN TEMP HACK
+                // TextureUpdated::Partial(rect) => {
+                //     if needs_realloc {
+                //         crate::log!("TextureUpdated::Partial, needs_realloc; internal_format: {}, width: {}, height: {}, format: {}, data_type: {}, data: {:#X}, use_mipmaps: {}", internal_format, width, height, format, data_type, data as usize, use_mipmaps);
+                //         gl_sys::TexImage2D(
+                //             gl_sys::TEXTURE_2D,
+                //             0,
+                //             internal_format as i32,
+                //             width as i32, height as i32,
+                //             0,
+                //             format,
+                //             data_type,
+                //             data,
+                //             // 0 as *const _
+                //         );
+                //     }
 
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
-                    gl_sys::TexSubImage2D(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        rect.origin.x as i32,
-                        rect.origin.y as i32 ,
-                        rect.size.width as i32,
-                        rect.size.height as i32,
-                        format,
-                        data_type,
-                        data
-                    );
-                },
-                TextureUpdated::Full => {
+                //     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                //     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                //     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                //     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
+                //     crate::log!("TextureUpdated::Partial, calling TextSubImage2D; xoff: {}, yoff:{}, width: {}, height: {}, format: {}, data_type: {}, data: {:#X}", rect.origin.x as i32, rect.origin.y as i32 , rect.size.width as i32, rect.size.height as i32, format, data_type, data as usize);
+                //     gl_sys::TexSubImage2D(
+                //         gl_sys::TEXTURE_2D,
+                //         0,
+                //         rect.origin.x as i32,
+                //         rect.origin.y as i32 ,
+                //         rect.size.width as i32,
+                //         rect.size.height as i32,
+                //         format,
+                //         data_type,
+                //         data
+                //     );
+                // },
+                TextureUpdated::Partial(_) | TextureUpdated::Full => {
+                    // KEVIN TEMP HACK
                     gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
                     gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
                     gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS, 0);
+                    // KEVIN TEMP HACK
                     gl_sys::TexImage2D(
                         gl_sys::TEXTURE_2D,
                         0,
@@ -1101,16 +1120,17 @@ impl CxTexture {
                 TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
             };
     
+            // KEVIN TEMP HACK
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
             gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-    
-            if use_mipmaps {
-                if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
-                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
-                }
-            }
+            //
+            // if use_mipmaps {
+            //     if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
+            //         gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
+            //         gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
+            //         gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
+            //     }
+            // }
     
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
