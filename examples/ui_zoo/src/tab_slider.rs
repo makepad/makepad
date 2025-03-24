@@ -33,7 +33,7 @@ live_design!{
             <H4> { text: "SliderAlt1"}
             <SliderAlt1> {
                 text: "Colored",
-                draw_slider: {
+                draw_bg: {
                     val_color_1: #FFCC00
                     val_color_1_hover: #FF9944
                     val_color_1_focus: #FFCC44
@@ -55,7 +55,7 @@ live_design!{
                 draw_text: {
                     color: #0ff;
                 }
-                draw_slider: {
+                draw_bg: {
                     val_color_1: #F08
                     val_color_1_hover: #F4A
                     val_color_1_focus: #C04
@@ -74,7 +74,7 @@ live_design!{
             }
             <SliderAlt1> {
                 text: "Solid",
-                draw_slider: {
+                draw_bg: {
                     val_color_1: #6,
                     val_color_2: #6,
                     handle_color: #0,
@@ -85,7 +85,7 @@ live_design!{
             <SliderAlt1> { text: "stepped", step: 0.1 }
             <SliderAlt1> {
                 text: "label_size",
-                draw_slider: {label_size: 150. },
+                draw_bg: {label_size: 150. },
             }
 
 
@@ -97,19 +97,19 @@ live_design!{
                 }
                 <Rotary> {
                     text: "Gap",
-                    draw_slider: {
+                    draw_bg: {
                         gap: 180.,
                     }
                 }
                 <Rotary> {
                     text: "ValSize",
-                    draw_slider: {
+                    draw_bg: {
                         val_size: 30.
                     }
                 }
                 <Rotary> {
                     text: "val_padding",
-                    draw_slider: {
+                    draw_bg: {
                         val_size: 30.
                         val_padding: 20.,
                     }
@@ -126,7 +126,7 @@ live_design!{
                     color_focus: #fff;
                     color_drag: #f00;
                 }
-                draw_slider: {
+                draw_bg: {
                     val_color_1: #80C,
                     val_color_1_hover: #88F,
                     val_color_1_focus: #80F,
@@ -152,19 +152,19 @@ live_design!{
                 }
                 <RotaryFlat> {
                     text: "Gap",
-                    draw_slider: {
+                    draw_bg: {
                         gap: 180.,
                     }
                 }
                 <RotaryFlat> {
                     text: "ValSize",
-                    draw_slider: {
+                    draw_bg: {
                         val_size: 30.
                     }
                 }
                 <RotaryFlat> {
                     text: "val_padding",
-                    draw_slider: {
+                    draw_bg: {
                         val_size: 30.
                         val_padding: 20.,
                     }
@@ -176,7 +176,7 @@ live_design!{
             <UIZooRowH> {
                 <RotaryFlat> {
                     text: "Gap",
-                    draw_slider: {
+                    draw_bg: {
                         gap: 0.,
                         width: 20.
                         val_padding: 0.,
@@ -188,7 +188,7 @@ live_design!{
                     draw_text: {
                         color: #0ff;
                     }
-                    draw_slider: {
+                    draw_bg: {
                         val_color_1: #ff0,
                         val_color_2: #f00,
                         handle_color: #f,
@@ -199,7 +199,7 @@ live_design!{
                 }
                 <RotaryFlat> {
                     text: "Solid",
-                    draw_slider: {
+                    draw_bg: {
                         val_color_1: #0ff,
                         val_color_2: #ff0,
                         handle_color: #f,
@@ -210,7 +210,7 @@ live_design!{
                 }
                 <RotaryFlat> {
                     text: "Solid",
-                    draw_slider: {
+                    draw_bg: {
                         val_color_1: #8;
                         val_color_2: #ff0;
                         gap: 75.,
@@ -225,19 +225,19 @@ live_design!{
             <UIZooRowH> {
                 <RotarySolid> {
                     text: "Colored",
-                    draw_slider: {
+                    draw_bg: {
                         gap: 90.,
                     }
                 }
                 <RotarySolid> {
                     text: "Colored",
-                    draw_slider: {
+                    draw_bg: {
                         gap: 180.,
                     }
                 }
                 <RotarySolid> {
                     text: "Colored",
-                    draw_slider: {
+                    draw_bg: {
                         gap: 60.,
                     }
                 }

@@ -28,7 +28,7 @@ live_design!{
         height: Fit,
         hover_actions_enabled: false,
         
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -204,7 +204,7 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     ease: OutQuad
                     apply: {
-                        draw_slider: { hover: 0.0 },
+                        draw_bg: { hover: 0.0 },
                         draw_text: { hover: 0.0 },
                     }
                 }
@@ -212,7 +212,7 @@ live_design!{
                     //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        draw_slider: { hover: 1.0 },
+                        draw_bg: { hover: 1.0 },
                         draw_text: { hover: 1.0 },
                     }
                 }
@@ -222,7 +222,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_slider: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                         draw_text: {focus: 0.0}
                         // draw_text: {focus: 0.0, hover: 0.0}
                     }
@@ -230,7 +230,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_slider: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         // draw_text: {focus: 1.0, hover: 1.0}
                     }
@@ -241,7 +241,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_slider: {drag: 0.0}
+                        draw_bg: {drag: 0.0}
                         draw_text: {drag: 0.0}
                     }
                 }
@@ -249,7 +249,7 @@ live_design!{
                     cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        draw_slider: {drag: 1.0}
+                        draw_bg: {drag: 1.0}
                         draw_text: {drag: 1.0}
                     }
                 }
@@ -260,7 +260,7 @@ live_design!{
     pub SliderBig = <Slider> {
         height: 36
 
-        draw_slider: {
+        draw_bg: {
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -475,7 +475,7 @@ live_design!{
             }
         }
 
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -659,7 +659,7 @@ live_design!{
         height: 95., width: 65.,
         axis: Vertical,
 
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -1005,7 +1005,7 @@ live_design!{
     pub ROTARY_FLAT_HANDLE_COLOR = (THEME_COLOR_U_3);
 
     pub RotaryFlat = <Rotary> {
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -1177,7 +1177,7 @@ live_design!{
     pub ROTARY_SOLID_HANDLE_COLOR = #FFA;
 
     pub RotarySolid = <Rotary> {
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -1458,7 +1458,7 @@ pub struct DrawSlider {
 #[derive(Live, Widget)]
 #[designable]
 pub struct Slider {
-    #[area] #[redraw] #[live] draw_slider: DrawSlider,
+    #[area] #[redraw] #[live] draw_bg: DrawSlider,
     
     #[walk] walk: Walk,
 
@@ -1540,8 +1540,8 @@ impl Slider {
     }
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.relative_value as f32;
-        self.draw_slider.begin(cx, walk, self.layout);
+        self.draw_bg.slide_pos = self.relative_value as f32;
+        self.draw_bg.begin(cx, walk, self.layout);
         
         if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
@@ -1555,7 +1555,7 @@ impl Slider {
             cx.end_turtle_with_area(&mut self.label_area);
         }
         
-        self.draw_slider.end(cx);
+        self.draw_bg.end(cx);
     }
 
     pub fn value(&self) -> f64 {
@@ -1582,7 +1582,7 @@ impl Widget for Slider {
         self.animator_handle_event(cx, event);
         
         // alright lets match our designer against the slider backgdrop
-        match event.hit_designer(cx, self.draw_slider.area()){
+        match event.hit_designer(cx, self.draw_bg.area()){
             HitDesigner::DesignerPick(_e)=>{
                 cx.widget_action(uid, &scope.path, WidgetDesignAction::PickedBody)
             }
@@ -1623,7 +1623,7 @@ impl Widget for Slider {
             }
         }
 
-        match event.hits(cx, self.draw_slider.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, id!(hover.on));
             },
@@ -1672,12 +1672,12 @@ impl Widget for Slider {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     if let DragAxis::Horizontal = self.axis {
-                        self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_slider.label_size as f64)).max(0.0).min(1.0);
+                        self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_bg.label_size as f64)).max(0.0).min(1.0);
                     } else {
                         self.relative_value = (start_pos - rel.y / fe.rect.size.y as f64).max(0.0).min(1.0);
                     }
                     self.set_internal(self.to_external());
-                    self.draw_slider.redraw(cx);
+                    self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
                     cx.widget_action(uid, &scope.path, SliderAction::Slide(self.to_external()));
                 }
