@@ -417,7 +417,7 @@ live_design! {
                 color: (COLOR_DOWN_0)
             },
         }
-        draw_slider: {
+        draw_bg: {
             instance line_color: #f00
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
@@ -474,13 +474,13 @@ live_design! {
 
     InstrumentSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 0.0}
+            draw_bg: {bipolar: 0.0}
         }
     }
 
     InstrumentBipolarSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 1.0}
+            draw_bg: {bipolar: 1.0}
         }
     }
 
@@ -948,7 +948,7 @@ live_design! {
             spacing: (SSPACING_1)
             attack = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "A"
@@ -957,7 +957,7 @@ live_design! {
 
             hold = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "H"
@@ -966,7 +966,7 @@ live_design! {
 
             decay = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "D"
@@ -975,7 +975,7 @@ live_design! {
 
             sustain = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "S"
@@ -984,7 +984,7 @@ live_design! {
 
             release = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "R"
@@ -1041,7 +1041,7 @@ live_design! {
         modamount = <InstrumentBipolarSlider> {
             width: Fill
             slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
+                draw_bg: {line_color: (COLOR_ENV)}
                 min: -1.0
                 max: 1.0
                 text: "Influence on Cutoff"
@@ -1142,7 +1142,7 @@ live_design! {
             margin: <SPACING_0> {}
             padding: <SPACING_0> {}
             slider = {
-                draw_slider: {line_color: (COLOR_DEFAULT)}
+                draw_bg: {line_color: (COLOR_DEFAULT)}
                 min: -4.0
                 max: 4.0
                 step: 1.0
@@ -1175,7 +1175,7 @@ live_design! {
             padding: <SPACING_0> {}
             slider = {
                 width: Fill
-                draw_slider: {line_color: (COLOR_DEFAULT)}
+                draw_bg: {line_color: (COLOR_DEFAULT)}
                 min: 0.0
                 max: 1.0
                 text: "Portamento"
@@ -1289,7 +1289,7 @@ live_design! {
                     speed = <InstrumentSlider> {
                         width: Fill
                         slider = {
-                            draw_slider: {line_color: (COLOR_DEFAULT)}
+                            draw_bg: {line_color: (COLOR_DEFAULT)}
                             min: 0.0
                             max: 240.0
                             text: "BPM"
@@ -1344,7 +1344,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Size"
@@ -1355,7 +1355,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Stddev"
@@ -1400,7 +1400,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Opacity"
@@ -1411,7 +1411,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 100.0
                     text: "X"
@@ -1422,7 +1422,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 100.0
                     text: "Y"
@@ -1476,7 +1476,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Amount"
@@ -1508,7 +1508,7 @@ live_design! {
 
                 delaysend = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Send"
@@ -1517,7 +1517,7 @@ live_design! {
 
                 delayfeedback = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Feedback"
@@ -1535,7 +1535,7 @@ live_design! {
 
                 delaydifference = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Stereo difference"
@@ -1544,7 +1544,7 @@ live_design! {
 
                 delaycross = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Crossover"
@@ -1561,7 +1561,7 @@ live_design! {
                     
 
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Length"
@@ -1594,7 +1594,7 @@ live_design! {
 
                 chorusmix = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Mix"
@@ -1602,7 +1602,7 @@ live_design! {
                 }
                 chorusdelay = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Pre"
@@ -1616,7 +1616,7 @@ live_design! {
                 height: Fit
                 chorusmod = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Depth"
@@ -1624,7 +1624,7 @@ live_design! {
                 }
                 chorusrate = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Rate"
@@ -1638,7 +1638,7 @@ live_design! {
                 height: Fit
                 chorusphase = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Phasing"
@@ -1647,7 +1647,7 @@ live_design! {
 
                 chorusfeedback = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: -1
                         max: 1
                         text: "Feedback"
@@ -1679,7 +1679,7 @@ live_design! {
 
                 reverbmix = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Mix"
@@ -1687,7 +1687,7 @@ live_design! {
                 }
                 reverbfeedback = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Feedback"
@@ -1787,7 +1787,7 @@ live_design! {
                 height: Fit
                 cutoff = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         min: 0.0
                         max: 1.0
                         text: "Cutoff"
@@ -1796,7 +1796,7 @@ live_design! {
 
                 resonance = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         min: 0.0
                         max: 1.0
                         text: "Resonance"
@@ -1811,7 +1811,7 @@ live_design! {
 
                 lfoamount = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         min: -1.0
                         max: 1.0
                         text: "Cutoff LFO Amount"
@@ -1819,7 +1819,7 @@ live_design! {
                 }
                 rate = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         max: 1.0
                         text: "Cutoff LFO Rate"
                     }
@@ -1859,7 +1859,7 @@ live_design! {
             height: Fit
             transpose = <InstrumentBipolarSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: -24.0
                     max: 24.0
                     step: 1.0
@@ -1870,7 +1870,7 @@ live_design! {
 
             detune = <InstrumentBipolarSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: -1.0
                     max: 1.0
                     text: "Detune"
@@ -1888,7 +1888,7 @@ live_design! {
                 height: Fit
                 spread = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Spread"
@@ -1896,7 +1896,7 @@ live_design! {
                 }
                 diffuse = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Diffuse"
@@ -1911,7 +1911,7 @@ live_design! {
                 height: Fit
                 spread = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Spread"
@@ -1919,7 +1919,7 @@ live_design! {
                 }
                 diffuse = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Diffuse"
@@ -1933,7 +1933,7 @@ live_design! {
                 height: Fit
                 harmonicshift = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0
                         max: 1.0
                         text: "Shift"
@@ -1941,7 +1941,7 @@ live_design! {
                 }
                 harmonicenv = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
                         text: "Env mod"
@@ -1949,7 +1949,7 @@ live_design! {
                 }
                 harmoniclfo = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
                         text: "LFO mod"
@@ -1970,7 +1970,7 @@ live_design! {
             height: Fit
             noise = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
                     text: "Noise"
@@ -1978,7 +1978,7 @@ live_design! {
             }
             sub = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
                     text: "Sub"
@@ -1991,7 +1991,7 @@ live_design! {
             height: Fit
             balance = <InstrumentBipolarSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
                     text: "Oscillator Balance"
