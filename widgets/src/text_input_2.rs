@@ -9,7 +9,7 @@ use {
                     CursorPosition,
                     Selection
                 },
-                layout::LaidoutText,
+                layouter::LaidoutText,
                 substr::Substr
             },
             *
@@ -171,7 +171,7 @@ impl TextInput2 {
             return index;
         }
         let grapheme_index = self.text[..index].graphemes(true).count();
-        self.password_text.grapheme_indices(true).nth(grapheme_index).unwrap().0
+        self.password_text.grapheme_indices(true).nth(grapheme_index).map_or(self.password_text.len(), |(index, _)| index)
     }
 
     fn password_index_to_index(&self, password_index: usize) -> usize {
@@ -179,7 +179,7 @@ impl TextInput2 {
             return password_index;
         }
         let grapheme_index = self.password_text[..password_index].graphemes(true).count();
-        self.text.grapheme_indices(true).nth(grapheme_index).unwrap().0
+        self.text.grapheme_indices(true).nth(grapheme_index).map_or(self.text.len(), |(index, _)| index)
     }
 
     fn layout_text(&mut self, cx: &mut Cx2d) {
