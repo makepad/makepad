@@ -28,7 +28,7 @@ live_design!{
                             return vec4(0.0, 0.0, 0.0, 1.0); // mix(color1, color2, radius);
                         }
                     }
-                    button1 = <Button> {
+                    button = <Button2> {
                         text: "Click me"
                         draw_text:{color:#fff}
                     }
@@ -71,7 +71,7 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
+        if self.ui.button2(id!(button)).clicked(&actions) {
             self.ui.text_input2(id!(text_input)).toggle_is_password(cx);
         }
     }
