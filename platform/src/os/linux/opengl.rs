@@ -218,7 +218,6 @@ impl Cx {
                             }
                         }
                         gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
-                        // crate::warning!("Uniform1i(), slot (i): {i}, texture_id: {texture_id:?}, gl_texture: {:X?}, loc: {:#X}", cxtexture.os.gl_texture, shgl.textures[i].loc);
                     }
                     
                     gl_sys::DrawElementsInstanced(
@@ -691,7 +690,6 @@ impl GlShader{
         name0.push_str("\0");
         unsafe {
             let loc = gl_sys::GetUniformLocation(program, name0.as_ptr().cast());
-            // crate::warning!("opengl_get_uniform(): name0: {name0}, loc: {loc:#X}");
             OpenglUniform {
                 loc,
                 //name: name.to_string(),
@@ -817,7 +815,6 @@ impl CxOsDrawShader {
     pub fn new(vertex: &str, pixel: &str, os_type: &OsType) -> Self {
         // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
         let available_extensions = get_gl_string(gl_sys::EXTENSIONS);
-        // crate::log!("Available extensions: {available_extensions}");
         let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
 
         let mut maybe_ext_tex_extension_import = String::new();
