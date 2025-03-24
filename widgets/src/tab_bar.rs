@@ -141,6 +141,32 @@ live_design!{
                 return sdf.result
             }
         }
+
+        draw_fill: {
+            uniform color_dither: 1.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
+            uniform color_2: #282828;
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box_all(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.,
+                    self.rect_size.y - 2.,
+                    0.5,
+                    self.border_radius,
+                    0.0,
+                    0.5
+                )
+
+                sdf.fill(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));
+                return sdf.result
+            }
+        }
     }
 
 }

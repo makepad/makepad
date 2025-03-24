@@ -69,7 +69,7 @@ live_design!{
 
                 sdf.box_y(
                     0.,
-                    0.,
+                    1.,
                     self.rect_size.x,
                     self.rect_size.y - 1.,
                     self.border_radius,
