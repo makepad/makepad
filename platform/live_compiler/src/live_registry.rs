@@ -39,12 +39,12 @@ pub struct LiveFile {
 #[derive(Default)]
 pub struct LiveLinkTarget{
     targets: Vec<LiveFileId>,
-    combined_exports: Option<HashMap<LiveId, LiveFileId>>
+    pub combined_exports: Option<HashMap<LiveId, LiveFileId>>
 }
 
 pub struct LiveRegistry {
     pub (crate) file_ids: BTreeMap<String, LiveFileId>,
-    pub (crate) link_targets: BTreeMap<LiveId, LiveLinkTarget>,
+    pub link_targets: BTreeMap<LiveId, LiveLinkTarget>,
     pub (crate) link_connections: BTreeMap<LiveId, LiveId>,
     
     pub module_id_to_file_id: BTreeMap<LiveModuleId, LiveFileId>,
