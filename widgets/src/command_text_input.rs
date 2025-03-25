@@ -27,7 +27,7 @@ live_design! {
 
             draw_bg: {
                 color: #fff,
-                border_width: 2.0,
+                border_size: 2.0,
                 border_color: #eaecf0,
                 border_radius: 8.0,
 
