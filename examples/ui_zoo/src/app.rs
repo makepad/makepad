@@ -152,7 +152,7 @@
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
-                        // tFoldHeader = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldHeader }
+                        tFoldHeader = Tab { name: "FoldHeader", template: PermanentTab, kind: TabFoldHeader }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
                         tImage = Tab { name: "Image", template: PermanentTab, kind: TabImage }
@@ -180,7 +180,7 @@
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
                         TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
-                        TabHeader = <UIZooTab> { <DemoFoldHeader> {} }
+                        TabFoldHeader = <UIZooTab> { <DemoFoldHeader> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
                         TabImage = <UIZooTab> { <DemoImage> {} }

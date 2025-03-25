@@ -41,7 +41,7 @@ live_design!{
         width: Fill,
         
         margin: <THEME_MSPACE_H_1> {}
-        draw_check: {
+        draw_bg: {
             uniform size: 3.5;
             instance open: 0.0
             uniform length: 3.0
@@ -225,7 +225,7 @@ impl RunList{
             item.fold_button(id!(fold)).set_action_data(ActionData::FoldBinary{binary_id});
             
             let cb =  item.check_box(id!(check));
-            cb.set_selected(cx, build_manager.active.any_binary_active(&binary.name));
+            cb.set_on(cx, build_manager.active.any_binary_active(&binary.name));
             cb.set_action_data(ActionData::RunMain{binary_id});
             
             item.draw_all(cx, &mut Scope::empty());
@@ -243,7 +243,7 @@ impl RunList{
                         check = {text: (BuildTarget::from_id(i).name())}
                     });
                     let cb = item.check_box(id!(check));
-                    cb.set_selected(cx, build_manager.active.item_id_active(item_id));
+                    cb.set_on(cx, build_manager.active.item_id_active(item_id));
                     
                     cb.set_action_data(ActionData::RunTarget{target:BuildTarget::from_id(i), binary_id});
                     item.draw_all(cx, &mut Scope::empty());
