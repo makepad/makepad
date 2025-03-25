@@ -79,15 +79,15 @@
                         show_bg: true,
                         draw_bg: { color: (THEME_COLOR_U_1) }
 
-                        <SliderAlt1> { text: "Spacing"}
+                        <SliderRound> { text: "Spacing"}
                         <Vr> {}
                         <Pbold> { width: Fit, text: "Color", padding: { top: 1.5}}
-                        <SliderAlt1> { text: "Contrast" }
-                        <SliderAlt1> { text: "Tint Factor" }
+                        <SliderRound> { text: "Contrast" }
+                        <SliderRound> { text: "Tint Factor" }
                         <Vr> {}
                         <Pbold> { width: Fit, text: "Font", padding: { top: 1.5}}
-                        <SliderAlt1> { text: "Scale" }
-                        <SliderAlt1> { text: "Contrast"}
+                        <SliderRound> { text: "Scale" }
+                        <SliderRound> { text: "Contrast"}
                         <Vr> {}
                         <CheckBoxToggle> { text: "Label Hover"}
                         <CheckBoxToggle> { text: "Light Theme"}
