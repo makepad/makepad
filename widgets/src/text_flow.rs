@@ -29,8 +29,8 @@ live_design!{
     
     pub TextFlowLink = <TextFlowLinkBase> {
         color: #xa,
-        hover_color: #xf,
-        pressed_color: #x3,
+        color_hover: #xf,
+        color_down: #x3,
                 
         margin:{right:5}
                 
@@ -42,7 +42,7 @@ live_design!{
                     from: {all: Forward {duration: 0.01}}
                     apply: {
                         hovered: 0.0,
-                        pressed: 0.0,
+                        down: 0.0,
                     }
                 }
                                 
@@ -50,20 +50,20 @@ live_design!{
                     redraw: true,
                     from: {
                         all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+                        down: Forward {duration: 0.01}
                     }
                     apply: {
                         hovered: [{time: 0.0, value: 1.0}],
-                        pressed: [{time: 0.0, value: 1.0}],
+                        down: [{time: 0.0, value: 1.0}],
                     }
                 }
                                 
-                pressed = {
+                down = {
                     redraw: true,
                     from: {all: Forward {duration: 0.01}}
                     apply: {
                         hovered: [{time: 0.0, value: 1.0}],
-                        pressed: [{time: 0.0, value: 1.0}],
+                        down: [{time: 0.0, value: 1.0}],
                     }
                 }
             }
@@ -746,9 +746,6 @@ pub enum TextFlowLinkAction {
     Clicked {
         key_modifiers: KeyModifiers,
     },
-    SecondaryClicked {
-        key_modifiers: KeyModifiers,
-    },
     None,
 }
 
@@ -767,14 +764,14 @@ struct TextFlowLink {
     #[live(true)] grab_key_focus: bool,
     #[live] margin: Margin,
     #[live] hovered: f32,
-    #[live] pressed: f32,
+    #[live] down: f32,
     
-    /// The default font color for the link when not hovered on or pressed.
+    /// The default font color for the link when not hovered on or down.
     #[live] color: Option<Vec4>,
     /// The font color used when the link is hovered on.
-    #[live] hover_color: Option<Vec4>,
-    /// The font color used when the link is pressed.
-    #[live] pressed_color: Option<Vec4>,
+    #[live] color_hover: Option<Vec4>,
+    /// The font color used when the link is down.
+    #[live] color_down: Option<Vec4>,
     
     #[live] pub text: ArcStringMut,
         
@@ -795,27 +792,17 @@ impl Widget for TextFlowLink {
         
         for area in self.drawn_areas.clone().into_iter() {
             match event.hits(cx, area) {
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
-                    self.animator_play(cx, id!(hover.pressed));
-                    if self.click_on_down && fe.is_primary_hit() {
+                    self.animator_play(cx, id!(hover.down));
+                    if self.click_on_down{
                         cx.widget_action_with_data(
                             &self.action_data,
                             self.widget_uid(),
                             &scope.path,
                             TextFlowLinkAction::Clicked {
-                                key_modifiers: fe.modifiers,
-                            },
-                        );
-                    }
-                    if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
-                        cx.widget_action_with_data(
-                            &self.action_data,
-                            self.widget_uid(),
-                            &scope.path,
-                            TextFlowLinkAction::SecondaryClicked {
                                 key_modifiers: fe.modifiers,
                             },
                         );
@@ -828,36 +815,26 @@ impl Widget for TextFlowLink {
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, id!(hover.off));
                 }
-                Hit::FingerLongPress(_) => {
-                    cx.widget_action_with_data(
-                        &self.action_data,
-                        self.widget_uid(),
-                        &scope.path,
-                        TextFlowLinkAction::Clicked {
-                            key_modifiers: Default::default(),
-                        },
-                    );
-                }
-                Hit::FingerUp(fu) if fu.is_primary_hit() => {
-                    if fu.is_over {
-                        self.animator_play(cx, id!(hover.on));
+                Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                    if fe.is_over {
+                        if !self.click_on_down{
+                            cx.widget_action_with_data(
+                                &self.action_data,
+                                self.widget_uid(),
+                                &scope.path,
+                                TextFlowLinkAction::Clicked {
+                                    key_modifiers: fe.modifiers,
+                                },
+                            );
+                        }
+                        
+                        if fe.device.has_hovers() {
+                            self.animator_play(cx, id!(hover.on));
+                        } else {
+                            self.animator_play(cx, id!(hover.off));
+                        }
                     } else {
                         self.animator_play(cx, id!(hover.off));
-                    }
-
-                    if !self.click_on_down
-                        && fu.is_over
-                        && fu.is_primary_hit()
-                        && fu.was_tap()
-                    {
-                        cx.widget_action_with_data(
-                            &self.action_data,
-                            self.widget_uid(),
-                            &scope.path,
-                            TextFlowLinkAction::Clicked {
-                                key_modifiers: fu.modifiers,
-                            },
-                        );
                     }
                 }
                 _ => (),
@@ -875,12 +852,12 @@ impl Widget for TextFlowLink {
         tf.areas_tracker.push_tracker();
         let mut pushed_color = false;
         if self.hovered > 0.0 {
-            if let Some(color) = self.hover_color {
+            if let Some(color) = self.color_hover {
                 tf.font_colors.push(color);
                 pushed_color = true;
             }
-        } else if self.pressed > 0.0 {
-            if let Some(color) = self.pressed_color {
+        } else if self.down > 0.0 {
+            if let Some(color) = self.color_down {
                 tf.font_colors.push(color);
                 pushed_color = true;
             }
