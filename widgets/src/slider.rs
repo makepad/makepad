@@ -1234,7 +1234,7 @@ live_design!{
                         (self.rect_size.y - label_offset - gloss_width) * 0.5
                     );
                 let radius_width_compensation = self.val_size * 0.5;
-                let width_fix = 0.008;
+                let width_fix = 0.006;
                 let bg_width_scaled = min(self.rect_size.x, effective_height) * self.val_size * width_fix;
 
                 // Background
@@ -1334,7 +1334,7 @@ live_design!{
                             self.hover
                         ),
                         self.focus
-                    ), self.border_size * mix(2., 3., self.drag)
+                    ), self.border_size * mix(self.border_size, self.border_size * 1.5, self.drag)
                 )
 
                 let val_size = self.val_size * 0.004;

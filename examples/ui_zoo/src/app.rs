@@ -29,6 +29,7 @@
         use crate::tab_portallist::*;
         use crate::tab_pageflip::*;
         use crate::tab_radiobutton::*;
+        use crate::tab_rotary::*;
         use crate::tab_rotatedimage::*;
         use crate::tab_scrollbar::*;
         use crate::tab_slider::*;
@@ -131,6 +132,7 @@
                                 tPageFlip,
                                 tPortalList,
                                 tRadioButton,
+                                tRotary,
                                 tRotatedImage,
                                 tScrollbar,
                                 tSlider,
@@ -163,6 +165,7 @@
                         tPageFlip = Tab { name: "PageFlip", template: PermanentTab, kind: TabPageFlip }
                         tPortalList = Tab { name: "PortalList", template: PermanentTab, kind: TabPortalList }
                         tRadioButton = Tab { name: "RadioButton", template: PermanentTab, kind: TabRadioButton }
+                        tRotary = Tab { name: "Rotary", template: PermanentTab, kind: TabRotary }
                         tRotatedImage = Tab { name: "RotatedImage", template: PermanentTab, kind: TabRotatedImage }
                         tScrollbar = Tab { name: "Scrollbar", template: PermanentTab, kind: TabScrollbar }
                         tSlider = Tab { name: "Slider", template: PermanentTab, kind: TabSlider }
@@ -186,13 +189,12 @@
                         TabImage = <UIZooTab> { <DemoImage> {} }
                         TabImageBlend = <UIZooTab> { <DemoImageBlend> {} }
                         TabLabel = <UIZooTab> { <DemoLabel> {} }
-                        TabLinkLabel = <UIZooTab> {
-                            <DemoLinkLabel> {} // TODO: FIX
-                        } 
+                        TabLinkLabel = <UIZooTab> { <DemoLinkLabel> {} } 
                         TabMarkdown = <UIZooTab> { <DemoMarkdown> {} } 
                         TabPageFlip = <UIZooTab> { <DemoPageFlip> {} } 
                         TabPortalList = <UIZooTab> { <DemoPortalList> {} } 
                         TabRadioButton = <UIZooTab> { <DemoRadioButton> {} }
+                        TabRotary = <UIZooTab> { <DemoRotary> {} }
                         TabRotatedImage = <UIZooTab> { <DemoRotatedImage> {} }
                         TabScrollbar = <UIZooTab> { <DemoScrollBar> {} }
                         TabSlider = <UIZooTab> { <DemoSlider> {} }
@@ -265,6 +267,7 @@
             crate::tab_pageflip::live_design(cx);
             crate::tab_portallist::live_design(cx);
             crate::tab_radiobutton::live_design(cx);
+            crate::tab_rotary::live_design(cx);
             crate::tab_rotatedimage::live_design(cx);
             crate::tab_scrollbar::live_design(cx);
             crate::tab_slider::live_design(cx);

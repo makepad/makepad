@@ -23,6 +23,7 @@ pub mod tab_markdown;
 pub mod tab_pageflip;
 pub mod tab_portallist;
 pub mod tab_radiobutton;
+pub mod tab_rotary;
 pub mod tab_rotatedimage;
 pub mod tab_scrollbar;
 pub mod tab_slider;
