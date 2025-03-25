@@ -29,8 +29,8 @@ live_design!{
     
     pub TextFlowLink = <TextFlowLinkBase> {
         color: #xa,
-        color_hover: #xf,
-        color_down: #x3,
+        hover_color: #xf,
+        pressed_color: #x3,
                 
         margin:{right:5}
                 
@@ -42,7 +42,7 @@ live_design!{
                     from: {all: Forward {duration: 0.01}}
                     apply: {
                         hovered: 0.0,
-                        down: 0.0,
+                        pressed: 0.0,
                     }
                 }
                                 
@@ -50,20 +50,20 @@ live_design!{
                     redraw: true,
                     from: {
                         all: Forward {duration: 0.1}
-                        down: Forward {duration: 0.01}
+                        pressed: Forward {duration: 0.01}
                     }
                     apply: {
                         hovered: [{time: 0.0, value: 1.0}],
-                        down: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
                                 
-                down = {
+                pressed = {
                     redraw: true,
                     from: {all: Forward {duration: 0.01}}
                     apply: {
                         hovered: [{time: 0.0, value: 1.0}],
-                        down: [{time: 0.0, value: 1.0}],
+                        pressed: [{time: 0.0, value: 1.0}],
                     }
                 }
             }
@@ -767,14 +767,14 @@ struct TextFlowLink {
     #[live(true)] grab_key_focus: bool,
     #[live] margin: Margin,
     #[live] hovered: f32,
-    #[live] down: f32,
+    #[live] pressed: f32,
     
-    /// The default font color for the link when not hovered on or down.
+    /// The default font color for the link when not hovered on or pressed.
     #[live] color: Option<Vec4>,
     /// The font color used when the link is hovered on.
-    #[live] color_hover: Option<Vec4>,
-    /// The font color used when the link is down.
-    #[live] color_down: Option<Vec4>,
+    #[live] hover_color: Option<Vec4>,
+    /// The font color used when the link is pressed.
+    #[live] pressed_color: Option<Vec4>,
     
     #[live] pub text: ArcStringMut,
         
@@ -799,8 +799,8 @@ impl Widget for TextFlowLink {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
-                    self.animator_play(cx, id!(hover.down));
-                    if self.click_on_down{
+                    self.animator_play(cx, id!(hover.pressed));
+                    if self.click_on_down && fe.is_primary_hit() {
                         cx.widget_action_with_data(
                             &self.action_data,
                             self.widget_uid(),
@@ -875,12 +875,12 @@ impl Widget for TextFlowLink {
         tf.areas_tracker.push_tracker();
         let mut pushed_color = false;
         if self.hovered > 0.0 {
-            if let Some(color) = self.color_hover {
+            if let Some(color) = self.hover_color {
                 tf.font_colors.push(color);
                 pushed_color = true;
             }
-        } else if self.down > 0.0 {
-            if let Some(color) = self.color_down {
+        } else if self.pressed > 0.0 {
+            if let Some(color) = self.pressed_color {
                 tf.font_colors.push(color);
                 pushed_color = true;
             }
