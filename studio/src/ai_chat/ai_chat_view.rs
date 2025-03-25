@@ -423,7 +423,7 @@ impl Widget for AiChatView {
                     .map(|(index, _)| index).unwrap_or(0);
                 }
                 
-                self.view.check_box(id!(auto_run)).set_selected(cx, doc.auto_run);
+                self.view.check_box(id!(auto_run)).set_on(cx, doc.auto_run);
                 
                 let history_len = doc.file.history.len(); 
                 self.view.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
