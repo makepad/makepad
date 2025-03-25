@@ -10,28 +10,28 @@ live_design!{
 
     pub DemoSlider = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<Slider>"}
+            <H3> { text: "<SliderMinimal>"}
         }
         demos = {
             <H4> { text: "Slider"}
+            <SliderMinimal> { text: "Default" }
+            <SliderMinimal> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+            <SliderMinimal> { text: "min/max", min: 0., max: 100. }
+            <SliderMinimal> { text: "precision", precision: 20 }
+            <SliderMinimal> { text: "stepped", step: 0.1 }
+
+            <Hr> {}
+            <H4> { text: "SliderBig"}
             <Slider> { text: "Default" }
             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <Slider> { text: "min/max", min: 0., max: 100. }
             <Slider> { text: "precision", precision: 20 }
             <Slider> { text: "stepped", step: 0.1 }
 
-            <Hr> {}
-            <H4> { text: "SliderBig"}
-            <SliderBig> { text: "Default" }
-            <SliderBig> { text: "label_align", label_align: { x: 0.5, y: 0. } }
-            <SliderBig> { text: "min/max", min: 0., max: 100. }
-            <SliderBig> { text: "precision", precision: 20 }
-            <SliderBig> { text: "stepped", step: 0.1 }
-
 
             <Hr> {}
-            <H4> { text: "SliderAlt1"}
-            <SliderAlt1> {
+            <H4> { text: "SliderRound"}
+            <SliderRound> {
                 text: "Colored",
                 draw_bg: {
                     val_color_1: #FFCC00
@@ -50,7 +50,7 @@ live_design!{
                     handle_color_drag: #000F
                 }
             }
-            <SliderAlt1> {
+            <SliderRound> {
                 text: "Solid",
                 draw_text: {
                     color: #0ff;
@@ -72,7 +72,7 @@ live_design!{
                     handle_color_drag: #F
                 }
             }
-            <SliderAlt1> {
+            <SliderRound> {
                 text: "Solid",
                 draw_bg: {
                     val_color_1: #6,
@@ -80,10 +80,10 @@ live_design!{
                     handle_color: #0,
                 }
             }
-            <SliderAlt1> { text: "min/max", min: 0., max: 100. }
-            <SliderAlt1> { text: "precision", precision: 20 }
-            <SliderAlt1> { text: "stepped", step: 0.1 }
-            <SliderAlt1> {
+            <SliderRound> { text: "min/max", min: 0., max: 100. }
+            <SliderRound> { text: "precision", precision: 20 }
+            <SliderRound> { text: "stepped", step: 0.1 }
+            <SliderRound> {
                 text: "label_size",
                 draw_bg: {label_size: 150. },
             }
