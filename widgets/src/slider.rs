@@ -19,7 +19,7 @@ live_design!{
     
     pub SLIDER_ALT1_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
 
-    pub Slider = <SliderBase> {
+    pub SliderMinimal = <SliderBase> {
         min: 0.0, max: 1.0,
         step: 0.0,
         label_align: { y: 0.0 }
@@ -257,7 +257,7 @@ live_design!{
         }
     }
         
-    pub SliderBig = <Slider> {
+    pub Slider = <SliderMinimal> {
         height: 36
 
         draw_bg: {
@@ -459,7 +459,7 @@ live_design!{
     pub SLIDER_ALT1_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
     pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
 
-    pub SliderAlt1 = <Slider> {
+    pub SliderRound = <SliderMinimal> {
         height: 18.,
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
 
@@ -655,7 +655,7 @@ live_design!{
     pub ROTARY_VAL_COLOR_B = (THEME_COLOR_U_2_OPAQUE);
     pub ROTARY_HANDLE_COLOR = (THEME_COLOR_U_3);
 
-    pub Rotary = <Slider> {
+    pub Rotary = <SliderMinimal> {
         height: 95., width: 65.,
         axis: Vertical,
 

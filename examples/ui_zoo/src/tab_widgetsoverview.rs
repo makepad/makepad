@@ -52,7 +52,7 @@ live_design!{
                 <Button> { text: "TestButton, disabled", enabled: true}
                 <TextInput> { text: "TestButton"}
                 <Slider> { text: "TestButton"}
-                <SliderBig> { text: "TestButton"}
+                <Slider> { text: "TestButton"}
             }
 
             <Hr> {}
@@ -244,8 +244,8 @@ live_design!{
                 spacing: (THEME_SPACE_2)
                 height: Fit,
                 <Slider> { text: "TestButton"}
-                <SliderBig> { text: "TestButton"}
-                <SliderAlt1> { text: "TestButton"}
+                <Slider> { text: "TestButton"}
+                <SliderRound> { text: "TestButton"}
                 <Rotary> { text: "TestButton"}
                 <RotaryFlat> { text: "TestButton"}
                 <RotarySolid> { text: "TestButton"}
