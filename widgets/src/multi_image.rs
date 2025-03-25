@@ -8,7 +8,7 @@ use crate::{
 live_design!{
     MultiImageBase = {{MultiImage}} {}
 }
- 
+
 #[derive(Live, Widget)]
 pub struct MultiImage {
     #[walk] walk: Walk,
@@ -28,7 +28,7 @@ impl ImageCacheImpl for MultiImage {
     fn get_texture(&self, id:usize) -> &Option<Texture> {
         &self.textures[id]
     }
-    
+
     fn set_texture(&mut self, texture: Option<Texture>, id:usize) {
         self.textures[id] = texture;
     }
@@ -65,12 +65,12 @@ impl MultiImage {
         // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
-        for i in 0..self.textures.len(){        
+        for i in 0..self.textures.len(){
             if let Some(image_texture) = &self.textures[i]{
                 self.draw_bg.draw_vars.set_texture(i, image_texture);
             }
         }
-        
+
         let (width, height) = if let Some(image_texture) = &self.textures[0]{
             let (width,height) = image_texture.get_format(cx).vec_width_height().unwrap_or((self.min_width as usize, self.min_height as usize));
             (width as f64 * self.width_scale, height as f64)
@@ -79,9 +79,51 @@ impl MultiImage {
             self.draw_bg.draw_vars.empty_texture(0);
             (self.min_width as f64 / dpi, self.min_height as f64 / dpi)
         };
-        
+
         let aspect = width / height;
         match self.fit {
+            ImageFit::AutoFitWidth => {
+                if rect.size.x > width {
+                    walk.width = Size::Fixed(width);
+                    walk.height = Size::Fixed(height);
+                } else {
+                    let walk_height = rect.size.x / aspect;
+                    if walk_height > rect.size.y {
+                        walk.width = Size::Fixed(rect.size.y * aspect);
+                    }
+                    else {
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
+            ImageFit::AutoFitHeight => {
+                if rect.size.y > height {
+                    walk.width = Size::Fixed(width);
+                    walk.height = Size::Fixed(height);
+                } else {
+                    let walk_height = rect.size.x / aspect;
+                    if walk_height > rect.size.y {
+                        walk.width = Size::Fixed(rect.size.y * aspect);
+                    }
+                    else {
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
+            ImageFit::AutoFit => {
+                if rect.size.x > width && rect.size.y > height {
+                    walk.width = Size::Fixed(width);
+                    walk.height = Size::Fixed(height);
+                } else {
+                    let walk_height = rect.size.x / aspect;
+                    if walk_height > rect.size.y {
+                        walk.width = Size::Fixed(rect.size.y * aspect);
+                    }
+                    else {
+                        walk.height = Size::Fixed(walk_height);
+                    }
+                }
+            }
             ImageFit::Size => {
                 walk.width = Size::Fixed(width);
                 walk.height = Size::Fixed(height);
@@ -113,9 +155,9 @@ impl MultiImage {
                 }
             }
         }
-        
+
         self.draw_bg.draw_walk(cx, walk);
-        
+
         DrawStep::done()
     }
 }
