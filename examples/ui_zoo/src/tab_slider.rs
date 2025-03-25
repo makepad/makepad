@@ -178,8 +178,8 @@ live_design!{
                     text: "Gap",
                     draw_bg: {
                         gap: 0.,
-                        width: 20.
-                        val_padding: 0.,
+                        val_size: 30.
+                        val_padding: 20.,
                     }
                 }
 
@@ -193,7 +193,7 @@ live_design!{
                         val_color_2: #f00,
                         handle_color: #f,
                         gap: 180.,
-                        width: 20.,
+                        val_size: 20.,
                         val_padding: 2.,
                     }
                 }
@@ -204,7 +204,7 @@ live_design!{
                         val_color_2: #ff0,
                         handle_color: #f,
                         gap: 90.,
-                        width: 20.,
+                        val_size: 20.,
                         val_padding: 2.,
                     }
                 }
@@ -214,7 +214,7 @@ live_design!{
                         val_color_1: #8;
                         val_color_2: #ff0;
                         gap: 75.,
-                        width: 30.0,
+                        val_size: 30.0,
                         val_padding: 4.,
                     }
                 }

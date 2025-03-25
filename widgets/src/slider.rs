@@ -665,7 +665,7 @@ live_design!{
             instance drag: float
 
             uniform gap: 90.
-            uniform val_padding: 3.0 // TODO: RENAME
+            uniform val_padding: 3.0
 
             uniform border_size: (THEME_BEVELING)
             uniform val_size: 20.
@@ -1010,8 +1010,8 @@ live_design!{
             instance focus: float
             instance drag: float
 
-            uniform width: 5. // TODO: REMOVE / CHANGE?
-            uniform padding: 4.0 // TODO: REMOVE / CHANGE?
+            uniform val_size: 20. // TODO: REMOVE / CHANGE?
+            uniform val_padding: 2.0
             
             uniform color: (ROTARY_FLAT_BG_COLOR)
             uniform color_hover: (ROTARY_FLAT_BG_HOVER_COLOR)
@@ -1039,9 +1039,9 @@ live_design!{
                         (self.rect_size.x - self.border_size) * 0.5,
                         (self.rect_size.y - label_offset - self.border_size) * 0.5
                     );
-                let radius_width_compensation = self.width * 0.5;
+                let radius_width_compensation = self.val_size * 0.5;
                 let width_fix = 0.008;
-                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.val_size * width_fix;
 
                 // Background
                 sdf.arc_round_caps(
@@ -1097,7 +1097,7 @@ live_design!{
                     )
                     , self.border_size);
 
-                let val_size = (self.width - self.padding) * width_fix;
+                let val_size = (self.val_size - self.val_padding) * width_fix;
                 let val_size_scaled = min(
                         self.rect_size.x * val_size,
                         effective_height * val_size
@@ -1233,9 +1233,9 @@ live_design!{
                         (self.rect_size.x - gloss_width) * 0.5,
                         (self.rect_size.y - label_offset - gloss_width) * 0.5
                     );
-                let radius_width_compensation = self.width * 0.5;
+                let radius_width_compensation = self.val_size * 0.5;
                 let width_fix = 0.008;
-                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.width * width_fix;
+                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.val_size * width_fix;
 
                 // Background
                 sdf.circle(
@@ -1337,7 +1337,7 @@ live_design!{
                     ), self.border_size * mix(2., 3., self.drag)
                 )
 
-                let val_size = self.width * 0.004;
+                let val_size = self.val_size * 0.004;
                 let val_size_scaled = min(
                         self.rect_size.x * val_size,
                         effective_height * val_size
