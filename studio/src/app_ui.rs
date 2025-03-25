@@ -66,7 +66,7 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Apps"
-            draw_check: { check_type: None }
+            draw_bg: { check_type: None }
             icon_walk: {width: 11., margin: {top: 1.75, right: 3. }}
             padding: { right: 0, left: 0.}
             draw_icon: {
@@ -78,7 +78,7 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Designer"
-            draw_check: { check_type: None }
+            draw_bg: { check_type: None }
             icon_walk: {width: 12., margin: {top: 1.0 }}
             padding: { right: 0, left: 0.}
             draw_icon: {
@@ -91,7 +91,7 @@ live_design!{
             text:""
             // text:"Editor"
             width: 13.
-            draw_check: { check_type: None }
+            draw_bg: { check_type: None }
             icon_walk: {width: 6., margin: {top: 0.5, left: 3. }}
             padding: { right: 0., left: 0.}
             draw_icon: {
@@ -103,7 +103,7 @@ live_design!{
         <CheckBoxCustom> {
             text:""
             // text:"Scene"
-            draw_check: { check_type: None }
+            draw_bg: { check_type: None }
             icon_walk: {width: 11.5, margin: {top: 1.5 } }
             padding: { right: 5., left: 0.}
             draw_icon: {
@@ -549,7 +549,7 @@ live_design!{
                         <CheckBoxCustom> {
                             padding: 0.
                             text: ""
-                            draw_check: { check_type: None }
+                            draw_bg: { check_type: None }
                             icon_walk: {width: 14.}
                             draw_icon: {
                                 color: (THEME_COLOR_D_3),
@@ -560,7 +560,7 @@ live_design!{
                         <CheckBoxCustom> {
                             padding: 0.
                             text:""
-                            draw_check: { check_type: None }
+                            draw_bg: { check_type: None }
                             icon_walk: {width: 16.}
                             draw_icon: {
                                 color: (THEME_COLOR_D_3),
@@ -571,7 +571,7 @@ live_design!{
                         <CheckBoxCustom> {
                             padding: 0.
                             text:""
-                            draw_check: { check_type: None }
+                            draw_bg: { check_type: None }
                             icon_walk: {width: 12.}
                             draw_icon: {
                                 color: (THEME_COLOR_D_3),
@@ -638,7 +638,7 @@ live_design!{
                                 margin: {left: (THEME_SPACE_1)}
                                 text:"Error"
                                 align: { y: 0.5 }
-                                draw_check: { check_type: None }
+                                draw_bg: { check_type: None }
                                 spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
@@ -650,7 +650,7 @@ live_design!{
                             <CheckBoxCustom> {
                                 text:"Warning"
                                 align: { y: 0.5 }
-                                draw_check: { check_type: None }
+                                draw_bg: { check_type: None }
                                 spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
@@ -662,7 +662,7 @@ live_design!{
                             <CheckBoxCustom> {
                                 text:"Log"
                                 align: { y: 0.5 }
-                                draw_check: { check_type: None }
+                                draw_bg: { check_type: None }
                                 spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
@@ -674,7 +674,7 @@ live_design!{
                             <CheckBoxCustom> {
                                 text:"Wait"
                                 align: { y: 0.5 }
-                                draw_check: { check_type: None }
+                                draw_bg: { check_type: None }
                                 spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {
@@ -686,7 +686,7 @@ live_design!{
                             <CheckBoxCustom> {
                                 text:"Panic"
                                 align: { y: 0.5 }
-                                draw_check: { check_type: None }
+                                draw_bg: { check_type: None }
                                 spacing: (THEME_SPACE_1),
                                 icon_walk: {width: 7.}
                                 draw_icon: {

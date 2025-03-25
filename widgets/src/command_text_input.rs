@@ -17,8 +17,8 @@ live_design! {
         flow: Down,
         height: Fit,
 
-        keyboard_focus_color: (THEME_COLOR_CTRL_HOVER),
-        pointer_hover_color: (THEME_COLOR_CTRL_HOVER * 0.85),
+        color_focus: (THEME_COLOR_CTRL_HOVER),
+        color_hover: (THEME_COLOR_CTRL_HOVER * 0.85),
 
         popup = <RoundedView> {
             flow: Down,
@@ -168,11 +168,11 @@ pub struct CommandTextInput {
 
     /// Strong color to highlight the item that would be submitted if `Return` is pressed.
     #[live]
-    pub keyboard_focus_color: Vec4,
+    pub color_focus: Vec4,
 
     /// Weak color to highlight the item that the pointer is hovering over.
     #[live]
-    pub pointer_hover_color: Vec4,
+    pub color_hover: Vec4,
 
     /// To deal with focus requesting issues.
     #[rust]
@@ -639,7 +639,7 @@ impl CommandTextInput {
                     cx,
                     live! {
                         draw_bg: {
-                            color: (self.keyboard_focus_color),
+                            color: (self.color_focus),
                         }
                     },
                 );
@@ -648,7 +648,7 @@ impl CommandTextInput {
                     cx,
                     live! {
                         draw_bg: {
-                            color: (self.pointer_hover_color),
+                            color: (self.color_hover),
                         }
                     },
                 );
