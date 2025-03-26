@@ -152,6 +152,7 @@ impl DrawText2 {
             }]
             .into(),
             options: LayoutOptions {
+                first_row_start_x_in_lpxs: 0.0,
                 max_width_in_lpxs: cx
                     .turtle()
                     .max_width(walk)
