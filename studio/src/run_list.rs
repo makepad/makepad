@@ -21,7 +21,7 @@ live_design!{
         
         draw_bg: {
             instance is_even: 0.0
-            instance selected: 0.0
+            instance active: 0.0
             instance hover: 0.0
             fn pixel(self) -> vec4 {
                 return mix(
@@ -31,7 +31,7 @@ live_design!{
                         self.is_even
                     ),
                     THEME_COLOR_CTRL_SELECTED,
-                    self.selected
+                    self.active
                 );
             }
         }
@@ -72,7 +72,7 @@ live_design!{
                             1.0
                         );
 
-                        sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_W, THEME_COLOR_TEXT_HOVER, self.hover), self.selected));
+                        sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_W, THEME_COLOR_TEXT_HOVER, self.hover), self.active));
 
                         // PLAY
                         sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
@@ -80,7 +80,7 @@ live_design!{
                         sdf.line_to(c.x, c.y - sz);
                         sdf.line_to(c.x + sz, c.y + sz);
                         sdf.close_path();
-                        sdf.fill(mix(mix(THEME_COLOR_U_4, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.selected));
+                        sdf.fill(mix(mix(THEME_COLOR_U_4, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.active));
 
                     }
                 }
