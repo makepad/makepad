@@ -15,7 +15,7 @@ live_design!{
         demos = {
             <H4> { text: "Default"}
             <UIZooRowH> {
-                radios_demo = <View> {
+                radios_demo_1 = <View> {
                     spacing: (THEME_SPACE_2)
                     width: Fit, height: Fit,
                     radio1 = <RadioButton> { text: "Option 1" }
@@ -28,7 +28,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "Customized"}
             <UIZooRowH> {
-                radios_demo = <View> {
+                radios_demo_2 = <View> {
                     spacing: (THEME_SPACE_2)
                     width: Fit, height: Fit,
                     radio1 = <RadioButton> {
@@ -272,7 +272,7 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "Custom Marker"}
-            iconradios_demo2 = <UIZooRowH> {
+            radios_demo_3 = <UIZooRowH> {
                 radio1 = <RadioButtonCustom> {
                     text: "Option 1"
                     icon_walk: {
@@ -305,7 +305,7 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "Custom styled marker"}
-            iconradios_demo = <UIZooRowH> {
+            radios_demo_4 = <UIZooRowH> {
                 radio1 = <RadioButtonCustom> {
                     text: "Option 1"
                     icon_walk: { width: 12.5, height: Fit }
@@ -420,7 +420,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "Textual"}
             <UIZooRowH> {
-                textonlyradios_demo = <View> {
+                radios_demo_5 = <View> {
                     width: Fit, height: Fit,
                     flow: Right,
                     spacing: (THEME_SPACE_2)
@@ -434,7 +434,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "Textual Customized"}
             <UIZooRowH> {
-                textonlyradios_demo2 = <View> {
+                 radios_demo_6 = <View> {
                     width: Fit, height: Fit,
                     flow: Right,
                     spacing: (THEME_SPACE_2)
@@ -499,7 +499,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                radiotabs_demo = <View> {
+                radios_demo_7 = <View> {
                     spacing: 5.
                     width: Fit, height: Fit,
                     radio1 = <RadioButtonTab> { text: "Option 1" }
@@ -515,7 +515,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                radiotabs_demo = <View> {
+                radios_demo_8 = <View> {
                     spacing: 5.
                     width: Fit, height: Fit,
                     radio1 = <RadioButtonTab> {
@@ -707,7 +707,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                radiotabs_demo = <View> {
+                radios_demo_9 = <View> {
                     spacing: 5.
                     width: Fit, height: Fit,
                     radio1 = <RadioButtonTabGradientY> { text: "Option 1" }
@@ -723,7 +723,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                radiotabs_demo = <View> {
+                radios_demo_10 = <View> {
                     spacing: 5.
                     width: Fit, height: Fit,
                     radio1 = <RadioButtonTabGradientY> {
@@ -863,7 +863,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                radiotabs_demo = <View> {
+                radios_demo_11 = <View> {
                     spacing: 5.
                     width: Fit, height: Fit,
                     radio1 = <RadioButtonTabGradientX> { text: "Option 1" }
@@ -879,7 +879,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                radiotabs_demo = <View> {
+                radios_demo_12 = <View> {
                     spacing: 5.
                     width: Fit, height: Fit,
                     radio1 = <RadioButtonTabGradientX> {
@@ -1014,7 +1014,7 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5 }
-                mediaradios_demo = <View> {
+                radios_demo_13 = <View> {
                     width: Fit, height: Fit,
                     flow: Right,
                     spacing: (THEME_SPACE_2)
