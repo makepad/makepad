@@ -70,7 +70,7 @@ live_design!{
                 shadow_color: (THEME_COLOR_D_3)
                 shadow_radius: 5.0,
                 shadow_offset: vec2(0.0, 0.0)
-                radius: 2.5
+                border_radius: 2.5
                 color: (THEME_COLOR_FG_APP),
             }
             

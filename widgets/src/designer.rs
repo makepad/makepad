@@ -49,7 +49,7 @@ live_design!{
                                 <CheckBoxCustom> {
                                     margin: {left: (THEME_SPACE_1)}
                                     text: ""
-                                    draw_check: { check_type: None }
+                                    draw_bg: { check_type: None }
                                     icon_walk: {width: 13.5 }
                                     draw_icon: {
                                         color: (THEME_COLOR_D_3),
@@ -59,7 +59,7 @@ live_design!{
                                 }
                                 <CheckBoxCustom> {
                                     text: ""
-                                    draw_check: { check_type: None }
+                                    draw_bg: { check_type: None }
                                     icon_walk: {width: 12.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_3),
@@ -69,7 +69,7 @@ live_design!{
                                 }
                                 <CheckBoxCustom> {
                                     text: ""
-                                    draw_check: { check_type: None }
+                                    draw_bg: { check_type: None }
                                     icon_walk: {width: 10.5}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_3),
@@ -79,7 +79,7 @@ live_design!{
                                 }
                                 <CheckBoxCustom> {
                                     text:""
-                                    draw_check: { check_type: None }
+                                    draw_bg: { check_type: None }
                                     icon_walk: {width: 13.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_3),
