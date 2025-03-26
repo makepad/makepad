@@ -213,6 +213,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+                    if SignalToUI::check_and_clear_action_signal() {
+                        self.handle_action_receiver();
+                    }
+                    
                     for event in self.os.stdin_timers.get_dispatch() {
                         self.call_event_handler(&event);
                     }                    
