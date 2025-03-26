@@ -499,6 +499,11 @@ impl Cx {
                         w.cocoa_window.set_ime_spot(pos);
                     });
                 },
+                CxOsOp::HideTextIME => {
+                    metal_windows.iter_mut().for_each( | w | {
+                        w.cocoa_window.set_ime_spot(dvec2(0.0,0.0));
+                    });
+                },
                 CxOsOp::SetCursor(cursor) => {
                     with_macos_app(|app| app.set_mouse_cursor(cursor));
                 },
