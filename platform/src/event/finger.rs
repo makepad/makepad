@@ -784,17 +784,16 @@ impl Event{
                     if let TouchState::Start = t.state{
                         if t.handled.get() == *area{
                             t.handled.set(Area::Empty);
-                            // lets uncapture the finger as well
-                            cx.fingers.uncapture_area(*area);
                         }
+                        cx.fingers.uncapture_area(*area);
                     }
                 }
             }
             Event::MouseDown(fd)=>{
                 if fd.handled.get() == *area{
                     fd.handled.set(Area::Empty);
-                    cx.fingers.uncapture_area(*area);
                 }
+                cx.fingers.uncapture_area(*area);
             }
             _=>()
         }
@@ -902,7 +901,7 @@ impl Event {
                     match t.state {
                         TouchState::Start => {
                             // someone did a second call on our area
-                            if t.handled.get() == area{
+                            if cx.fingers.find_digit_for_captured_area(area).is_some() {
                                 let rect = area.clipped_rect(&cx);
                                 return Hit::FingerDown(FingerDownEvent {
                                     window_id: e.window_id,
@@ -1185,8 +1184,8 @@ impl Event {
                     button: e.button,
                 };
                  
-                // someone did a second call on our area, just return it
-                if e.handled.get() == area{
+                // if we already captured it just return it immediately
+                if cx.fingers.find_digit_for_captured_area(area).is_some() {
                     let rect = area.clipped_rect(&cx);
                     return Hit::FingerDown(FingerDownEvent {
                         window_id: e.window_id,
