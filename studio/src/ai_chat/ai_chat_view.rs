@@ -201,7 +201,7 @@ live_design!{
                 auto_run = <CheckBoxCustom> {
                     text: "Auto run",
                     align: { y: 0.5 }
-                    draw_check: { check_type: None }
+                    draw_bg: { check_type: None }
                     spacing: (THEME_SPACE_1),
                     padding: <THEME_MSPACE_V_2> {}
                     icon_walk: { width: 10. }
