@@ -11,7 +11,7 @@ use std::sync::{
 };
 
 
-pub (crate) static ACTION_SENDER_GLOBAL: Mutex<Option<Sender<ActionSendSync>>> = Mutex::new(None);
+pub (crate) static ACTION_SENDER_GLOBAL: Mutex<Option<Sender<ActionSend>>> = Mutex::new(None);
 
 pub trait ActionTrait: 'static {
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -31,7 +31,7 @@ impl Debug for dyn ActionTrait {
         self.debug_fmt(f)
     }
 }
-pub type ActionSendSync = Box<dyn ActionTrait + Send + Sync>;
+pub type ActionSend = Box<dyn ActionTrait + Send>;
 pub type Action = Box<dyn ActionTrait>;
 pub type ActionsBuf = Vec<Action>;
 pub type Actions = [Action];
@@ -94,7 +94,7 @@ impl Cx{
     ///
     /// This will produce a bare action, *not* a widget action,
     /// so you cannot use `as_widget_action()` when handling this action.
-    pub fn post_action(action:impl ActionTrait + Send + Sync){
+    pub fn post_action(action:impl ActionTrait + Send){
         ACTION_SENDER_GLOBAL.lock().unwrap().as_mut().unwrap().send(Box::new(action)).unwrap();
         SignalToUI::set_action_signal();
     }
