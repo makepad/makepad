@@ -47,6 +47,7 @@ live_design!{
         draw_bg: {
             instance hover: 0.0
             instance focus: 0.0
+            instance active: 0.0
                         
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
@@ -384,7 +385,7 @@ pub struct DropDown {
     
     #[live] popup_menu_position: PopupMenuPosition,
     
-    #[rust] is_open: bool,
+    #[rust] is_active: bool,
     
     #[live] selected_item: usize,
     
@@ -429,9 +430,9 @@ pub enum DropDownAction {
 
 impl DropDown {
     
-    pub fn set_open(&mut self, cx: &mut Cx) {
-        self.is_open = true;
-        self.draw_bg.apply_over(cx, live!{open: 1.0});
+    pub fn set_active(&mut self, cx: &mut Cx) {
+        self.is_active = true;
+        self.draw_bg.apply_over(cx, live!{active: 1.0});
         self.draw_bg.redraw(cx);
         let global = cx.global::<PopupMenuGlobal>().clone();
         let mut map = global.map.borrow_mut();
@@ -442,8 +443,8 @@ impl DropDown {
     }
     
     pub fn set_closed(&mut self, cx: &mut Cx) {
-        self.is_open = false;
-        self.draw_bg.apply_over(cx, live!{open: 0.0});
+        self.is_active = false;
+        self.draw_bg.apply_over(cx, live!{active: 0.0});
         self.draw_bg.redraw(cx);
         cx.sweep_unlock(self.draw_bg.area());
     }
@@ -473,9 +474,9 @@ impl DropDown {
         
         cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Margin::default());
         
-        if self.is_open && self.popup_menu.is_some() {
+        if self.is_active && self.popup_menu.is_some() {
             //cx.set_sweep_lock(self.draw_bg.area());
-            // ok so if self was not open, we need to
+            // ok so if self was not active, we need to
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
@@ -547,7 +548,7 @@ impl Widget for DropDown {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
                 
-        if self.is_open && self.popup_menu.is_some() {
+        if self.is_active && self.popup_menu.is_some() {
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
@@ -613,7 +614,7 @@ impl Widget for DropDown {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
-                self.set_open(cx);
+                self.set_active(cx);
                 // self.animator_play(cx, id!(hover.down));
             },
             Hit::FingerHoverIn(_) => {
