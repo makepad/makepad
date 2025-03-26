@@ -115,7 +115,7 @@ pub enum TextureFormat {
     VideoRGB,
 }
 
-#[derive(Default, Clone)] 
+#[derive(Debug, Default, Clone)] 
 pub struct TextureAnimation {
     pub width: usize,
     pub height: usize,

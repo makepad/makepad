@@ -5,6 +5,8 @@ use crate::{
     widget::*
 };
 
+use std::path::{Path, PathBuf};
+
 live_design!{
     link widgets;
     use link::shaders::*;
@@ -24,13 +26,35 @@ live_design!{
         }
         
         fn pixel(self) -> vec4 {
-            let color = self.get_color();
+            let color = mix(self.get_color(), #3, self.async_load);
             return Pal::premul(vec4(color.xyz, color.w * self.opacity))
         }
+        
     }
     
     pub ImageBase = {{Image}} {}
+    
     pub Image = <ImageBase> {
+        animator: {
+            async_load = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {async_load: 0.0}
+                    }
+                }
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                    }
+                    apply: {
+                        draw_bg: {async_load: 1.0}
+                    }
+                }
+            }
+        }
+        
         width: 100
         height: 100
         draw_bg: {
@@ -46,6 +70,7 @@ pub struct DrawImage {
     #[live] pub opacity: f32,
     #[live] image_scale: Vec2,
     #[live] image_pan: Vec2,
+    #[live] async_load: f32
 }
 
 
@@ -66,6 +91,7 @@ pub enum ImageAnimation {
 #[derive(Live, Widget)]
 pub struct Image {
     #[walk] walk: Walk,
+    #[animator] animator: Animator,
     #[redraw] #[live] pub draw_bg: DrawImage,
     #[live] min_width: i64,
     #[live] min_height: i64,
@@ -76,6 +102,8 @@ pub struct Image {
     #[rust] next_frame: NextFrame,
     #[live] fit: ImageFit,
     #[live] source: LiveDependency,
+    #[rust] async_image_path: Option<PathBuf>,
+    #[rust] async_image_size: Option<(usize, usize)>,
     #[rust] texture: Option<Texture>,
 }
 
@@ -101,6 +129,24 @@ impl LiveHook for Image{
 
 impl Widget for Image {
     fn handle_event(&mut self, cx:&mut Cx, event:&Event, _scope:&mut Scope){
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
+        // lets check if we have a post action
+        if let Event::Actions(actions) = &event{
+            for action in actions{
+                if let Some(AsyncImageLoad{image_path, result}) = &action.downcast_ref(){
+                    if let Some(result) = result.borrow_mut().take(){
+                        // we have a result for the image_cache to load up
+                        if self.process_async_image_load(cx, self.async_image_path.clone(), 0, image_path, result){
+                            self.async_image_size = None;
+                            self.animator_play(cx, id!(async_load.off));
+                            self.redraw(cx);
+                        }
+                    }
+                }
+            }
+        }
         if let Some(nf) = self.next_frame.is_event(event) {
             // compute the next frame and patch things up
             if let Some(image_texture) = &self.texture {
@@ -219,7 +265,11 @@ impl Image {
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
         
-        let (width, height) = if let Some(image_texture) = &self.texture {
+        let (width, height) = if let Some((w,h)) = &self.async_image_size{
+            // still loading
+            
+            (*w as f64,*h as f64)
+        }else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
             let (width,height) = image_texture.get_format(cx).vec_width_height().unwrap_or((self.min_width as usize, self.min_height as usize));
             if let Some(animation) = image_texture.animation(cx){
@@ -283,6 +333,11 @@ impl Image {
     }
 }
 
+pub enum AsyncLoad{
+    Yes,
+    No
+}
+
 impl ImageRef {
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
@@ -294,13 +349,28 @@ impl ImageRef {
     }
     
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_file_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
+    pub fn load_image_file_by_path(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_image_file_by_path(cx, image_path, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
+    }
+    
+    /// Loads the image at the given `image_path` on disk into this `ImageRef`.
+    pub fn load_image_file_by_path_async(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            if let Ok((w,h)) = inner.load_image_file_by_path_async(cx, image_path, 0){
+                // lets set the w-h
+                inner.async_image_size = Some((w,h));
+                inner.async_image_path = Some(image_path.into());
+                inner.animator_play(cx, id!(async_load.on));
+                inner.redraw(cx);
+            }
+        }
+        Ok(())
     }    
+    
     
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {

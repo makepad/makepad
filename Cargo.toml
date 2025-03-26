@@ -27,7 +27,7 @@ workspace.members = [
     "examples/news_feed",
     #"examples/floating_elements",
     # "examples/bare_text",
-    #"examples/async_image",
+    "examples/async_image",
     "examples/hello_widgets",
     "examples/web_cam",
     "examples/ironfish",
