@@ -573,7 +573,7 @@ impl CheckBoxRef {
         }
     }
     
-    pub fn on(&self, cx: &Cx) -> bool {
+    pub fn active(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
             inner.animator_in_state(cx, id!(active.on))
         }
@@ -582,7 +582,7 @@ impl CheckBoxRef {
         }
     }
     
-    pub fn set_on(&self, cx: &mut Cx, value: bool) {
+    pub fn set_active(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
         }
