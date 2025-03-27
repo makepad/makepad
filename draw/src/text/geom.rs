@@ -58,7 +58,6 @@ where
     }
 }
 
-
 impl<T> Sub for Point<T>
 where
     T: Sub<Output = T>,
