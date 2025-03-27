@@ -366,11 +366,11 @@ impl DesignerView{
         /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
-                    .animator_cut(cx, id!(select.on));
+                    .animator_cut(cx, id!(active.on));
             }
             else{
                 comp.container.as_designer_container().borrow_mut().unwrap()
-                    .animator_cut(cx, id!(select.off));
+                    .animator_cut(cx, id!(active.off));
             }
         }
         */
