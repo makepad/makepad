@@ -413,7 +413,7 @@ impl DesignerOutlineTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
+        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
@@ -478,7 +478,7 @@ impl DesignerOutlineTreeNode {
                 }
             }
             Hit::FingerDown(e) => {
-                self.animator_play(cx, id!(select.on));
+                self.animator_play(cx, id!(active.on));
                 actions_out.push((node_id, OutlineTreeNodeAction::Selected(e.modifiers)));
                 /*
                 if self.is_folder {
