@@ -414,7 +414,7 @@ impl FileTreeNode {
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
+        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off));
     }
     
     pub fn handle_event(
@@ -443,12 +443,12 @@ impl FileTreeNode {
             Hit::FingerDown(_) => {
                 self.animator_play(cx, id!(select.on));
                 if self.is_folder {
-                    if self.animator_in_state(cx, id!(open.on)) {
-                        self.animator_play(cx, id!(open.off));
+                    if self.animator_in_state(cx, id!(active.on)) {
+                        self.animator_play(cx, id!(active.off));
                         actions.push((node_id, FileTreeNodeAction::Closing));
                     }
                     else {
-                        self.animator_play(cx, id!(open.on));
+                        self.animator_play(cx, id!(active.on));
                         actions.push((node_id, FileTreeNodeAction::Opening));
                     }
                 }
