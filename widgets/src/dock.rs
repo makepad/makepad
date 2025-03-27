@@ -64,10 +64,10 @@ live_design!{
         }
     }
 
-    pub DockMinimal = <DockBase> {
+    pub DockFlat = <DockBase> {
         flow: Down,
 
-        tab_bar: <TabBar> {}
+        tab_bar: <TabBarFlat> {}
         splitter: <Splitter> {}
 
         padding: {left: (THEME_DOCK_BORDER_SIZE), top: 0, right: (THEME_DOCK_BORDER_SIZE), bottom: (THEME_DOCK_BORDER_SIZE)}
