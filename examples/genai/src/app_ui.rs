@@ -431,7 +431,7 @@ live_design!{
             }
             random_check_box = <CheckBox> {
                 text: "Seed"
-                animator:{selected={default:on}}
+                animator:{active={default:on}}
             }
             seed_input = <TextInput> {
                 draw_text: {text_style: <TEXT_BOLD> {}}
