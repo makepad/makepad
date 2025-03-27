@@ -1,6 +1,6 @@
 use {
     super::num::{One, Zero},
-    std::ops::{Add, Mul, Sub},
+    std::ops::{Add, Div, Mul, Sub},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -35,6 +35,29 @@ where
         Self::new(self.x + size.width, self.y + size.height)
     }
 }
+
+impl<T> Div<T> for Point<T>
+where
+    T: Div<Output = T> + Copy,
+{
+    type Output = Self;
+
+    fn div(self, scalar: T) -> Self::Output {
+        Self::new(self.x / scalar, self.y / scalar)
+    }
+}
+
+impl<T> Mul<T> for Point<T>
+where
+    T: Mul<Output = T> + Copy,
+{
+    type Output = Self;
+
+    fn mul(self, scalar: T) -> Self::Output {
+        Self::new(self.x * scalar, self.y * scalar)
+    }
+}
+
 
 impl<T> Sub for Point<T>
 where
@@ -116,6 +139,17 @@ where
 impl<T> From<Point<T>> for Size<T> {
     fn from(point: Point<T>) -> Self {
         Self::new(point.x, point.y)
+    }
+}
+
+impl<T> Div<T> for Size<T>
+where
+    T: Div<Output = T> + Copy,
+{
+    type Output = Self;
+
+    fn div(self, scalar: T) -> Self::Output {
+        Self::new(self.width / scalar, self.height / scalar)
     }
 }
 
