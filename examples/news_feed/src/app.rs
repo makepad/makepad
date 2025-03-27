@@ -45,7 +45,7 @@ live_design!{
     IconButton = <Button> {
         draw_text: {
             instance hover: 0.0
-            instance pressed: 0.0
+            instance down: 0.0
             text_style: {
                 font_size: 11.0
             }
@@ -57,7 +57,7 @@ live_design!{
                         self.hover
                     ),
                     (COLOR_BRAND_DARK),
-                    self.pressed
+                    self.down
                 )
             }
         }
@@ -72,7 +72,7 @@ live_design!{
                         self.hover
                     ),
                     (COLOR_BRAND_DARK),
-                    self.pressed
+                    self.down
                 )
             }
         }
@@ -96,9 +96,9 @@ live_design!{
                         icon_walk: {
                             width: 10.0
                         }
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_icon: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
 
@@ -112,24 +112,12 @@ live_design!{
                         icon_walk: {
                             width: 15.
                         }
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
 
-                pressed = {
-                    default: off,
-                    pressed = {
-                        from: {all: Forward {duration: 0.2}}
-                        apply: {
-                            draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                            draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                            draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        }
-                    
-                    }
-                }
             }
         }
      }
@@ -137,7 +125,7 @@ live_design!{
     IconButtonMenu = <Button> {
         draw_text: {
             instance hover: 0.0
-            instance pressed: 0.0
+            instance down: 0.0
             text_style: {
                 font_size: 11.0
             }
@@ -150,7 +138,7 @@ live_design!{
                         self.hover
                     ),
                     (COLOR_BRAND_DARK),
-                    self.pressed
+                    self.down
                 )
             }
         }
@@ -165,7 +153,7 @@ live_design!{
                         self.hover
                     ),
                     (COLOR_BRAND_DARK),
-                    self.pressed
+                    self.down
                 )
             }
         }
@@ -190,9 +178,9 @@ live_design!{
                         icon_walk: {
                             width: 20.0
                         }
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_icon: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
 
@@ -206,18 +194,18 @@ live_design!{
                         icon_walk: {
                             width: 30.
                         }
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
 
-                pressed = {
+                down = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -349,14 +337,14 @@ live_design!{
                             from: {all: Forward {duration: 0.1}}
                             apply: {
                                 draw_text: {hover: 0.0},
-                                draw_selection: {hover: 0.0}
+                                draw_highlight: {hover: 0.0}
                             }
                         }
                         on = {
                             from: {all: Snap}
                             apply: {
                                 draw_text: {hover: 1.0},
-                                draw_selection: {hover: 1.0}
+                                draw_highlight: {hover: 1.0}
                             }
                         }
                     }
@@ -375,7 +363,7 @@ live_design!{
                                     }
                                 }
                                 draw_cursor: {focus: 0.0},
-                                draw_selection: {focus: 0.0}
+                                draw_highlight: {focus: 0.0}
                             }
                         }
                         on = {
@@ -391,7 +379,7 @@ live_design!{
                                     }
                                 }
                                 draw_cursor: {focus: 1.0},
-                                draw_selection: {focus: 1.0}
+                                draw_highlight: {focus: 1.0}
                             }
                         }
                     }
@@ -750,14 +738,14 @@ live_design!{
                                 from: {all: Forward {duration: 0.1}}
                                 apply: {
                                     draw_text: {hover: 0.0},
-                                    draw_selection: {hover: 0.0}
+                                    draw_highlight: {hover: 0.0}
                                 }
                             }
                             on = {
                                 from: {all: Snap}
                                 apply: {
                                     draw_text: {hover: 1.0},
-                                    draw_selection: {hover: 1.0}
+                                    draw_highlight: {hover: 1.0}
                                 }
                             }
                         }
@@ -777,7 +765,7 @@ live_design!{
                                         }
                                     }
                                     draw_cursor: {focus: 0.0},
-                                    draw_selection: {focus: 0.0}
+                                    draw_highlight: {focus: 0.0}
                                 }
                             }
                             on = {
@@ -794,7 +782,7 @@ live_design!{
                                         }
                                     }
                                     draw_cursor: {focus: 1.0},
-                                    draw_selection: {focus: 1.0}
+                                    draw_highlight: {focus: 1.0}
                                 }
                             }
                         }
@@ -842,13 +830,13 @@ live_design!{
         smoothing: 10.0
         use_vertical_finger_scroll: false
 
-        draw_bar: {
-            instance pressed: 0.0
+        draw_bg: {
+            instance down: 0.0
             instance hover: 0.0
             
             instance color: #888,
             instance color_hover: #999
-            instance color_pressed: #666
+            instance color_down: #666
             
             uniform bar_width: 6.0
             uniform border_radius: 1.5
@@ -877,8 +865,8 @@ live_design!{
                     self.color, 
                     mix(
                         self.color_hover,
-                        self.color_pressed,
-                        self.pressed
+                        self.color_down,
+                        self.down
                     ),
                     self.hover
                 ));
