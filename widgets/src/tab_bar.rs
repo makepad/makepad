@@ -85,6 +85,10 @@ live_design!{
         }
     }
     
+    pub TabBarFlat = <TabBar> {
+        CloseableTab = <TabFlat> {closeable: true}
+        PermanentTab = <TabFlat> {closeable: false}
+    }
 
     pub TabBarGradientX = <TabBar> {
         CloseableTab = <TabGradientX> {closeable: true}

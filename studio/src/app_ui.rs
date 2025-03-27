@@ -31,7 +31,7 @@ live_design!{
         }
     }
 
-    IconTab = <Tab> {
+    IconTab = <TabFlat> {
         closeable: false
         icon_walk: { width: 15., height: 15. }
     }
@@ -172,7 +172,7 @@ live_design!{
 
             line = Line,
         }
-        body = {dock = <Dock> {
+        body = {dock = <DockFlat> {
             width: Fill, height: Fill,
             tab_bar:{
                 OutlineFirstTab = <IconTab> {
