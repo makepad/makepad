@@ -12,22 +12,22 @@ live_design!{
     pub FoldButtonBase = {{FoldButton}} {}
     
     pub FoldButton = <FoldButtonBase> {
-        height: 25, width: 15,
-        margin: { left: (THEME_SPACE_2) }
+        height: 20, width: 15,
+        margin: { left: 0. }
         
         draw_bg: {
             instance active: 0.0
             instance hover: 0.0
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color: (THEME_COLOR_TEXT_INACTIVE)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_active: (THEME_COLOR_TEXT_SELECTED)
 
             uniform fade: 1.0
             
             fn pixel(self) -> vec4 {
                 let sz = 2.5;
-                let c = vec2(5.0, 0.6 * self.rect_size.y);
+                let c = vec2(5.0, self.rect_size.y * 0.4);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.clear(vec4(0.));
                     
