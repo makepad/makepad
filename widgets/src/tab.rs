@@ -62,6 +62,8 @@ live_design!{
             uniform border_color_2: (THEME_COLOR_D_HIDDEN)
             uniform border_color_2_hover: (THEME_COLOR_D_HIDDEN)
             uniform border_color_2_active: (THEME_COLOR_D_HIDDEN)
+
+            uniform overlap_fix: 1.
               
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -71,7 +73,7 @@ live_design!{
                     0.,
                     1.,
                     self.rect_size.x,
-                    self.rect_size.y - 1.,
+                    self.rect_size.y - self.overlap_fix,
                     self.border_radius,
                     0.5
                 )
@@ -140,6 +142,30 @@ live_design!{
                     }
                 }
             }
+        }
+    }
+
+    pub TabFlat = <Tab> {
+        margin: 0.
+
+        draw_bg: {
+            border_size: 1.
+            border_radius: 0.5
+            color_dither: 1.
+
+            color: (THEME_COLOR_D_HIDDEN)
+            color_hover: (THEME_COLOR_D_HIDDEN)
+            color_active: (THEME_COLOR_FG_APP)
+
+            border_color_1: (THEME_COLOR_U_HIDDEN)
+            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_1_active: (THEME_COLOR_U_HIDDEN)
+
+            border_color_2: (THEME_COLOR_D_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_D_HIDDEN)
+            border_color_2_active: (THEME_COLOR_D_HIDDEN)
+            
+            overlap_fix: 0.
         }
     }
 
