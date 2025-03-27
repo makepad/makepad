@@ -176,18 +176,12 @@ impl DrawText2 {
 
         let size_in_lpxs = laidout_text.size_in_lpxs * self.font_scale;
         let max_size_in_lpxs = Size::new(
-        cx
-                .turtle()
+            cx.turtle()
                 .max_width(walk)
-                .map_or(size_in_lpxs.width, |max_width| {
-                    max_width as f32
-                }),
-            cx
-                .turtle()
+                .map_or(size_in_lpxs.width, |max_width| max_width as f32),
+            cx.turtle()
                 .max_height(walk)
-                .map_or(size_in_lpxs.height, |max_height| {
-                    max_height as f32
-                }),
+                .map_or(size_in_lpxs.height, |max_height| max_height as f32),
         );
         let turtle_rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
@@ -322,7 +316,10 @@ impl DrawText2 {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
-                Point::new(origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale, origin_in_lpxs.y),
+                Point::new(
+                    origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale,
+                    origin_in_lpxs.y,
+                ),
                 glyph.font_size_in_lpxs,
                 glyph.color,
                 rasterized_glyph,
@@ -346,8 +343,9 @@ impl DrawText2 {
             )
         }
 
-        let transform = Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em * self.font_scale)
-            .translate(point_in_lpxs.x, point_in_lpxs.y);
+        let transform =
+            Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em * self.font_scale)
+                .translate(point_in_lpxs.x, point_in_lpxs.y);
         let bounds_in_lpxs = Rect::new(
             Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
             glyph.bounds_in_dpxs.size,
