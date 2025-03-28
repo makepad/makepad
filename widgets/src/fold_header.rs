@@ -17,7 +17,7 @@ live_design!{
         flow: Down,
         
         animator: {
-            open = {
+            active = {
                 default: on
                 off = {
                     from: {all: Forward {duration: 0.2}}
@@ -65,7 +65,7 @@ enum DrawState {
 impl Widget for FoldHeader {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            if self.animator.is_track_animating(cx, id!(open)) {
+            if self.animator.is_track_animating(cx, id!(active)) {
                 self.area.redraw(cx);
             }
         };
@@ -75,10 +75,10 @@ impl Widget for FoldHeader {
         if let Event::Actions(actions) = event{
             match actions.find_widget_action(self.header.widget(id!(fold_button)).widget_uid()).cast() {
                 FoldButtonAction::Opening => {
-                    self.animator_play(cx, id!(open.on))
+                    self.animator_play(cx, id!(active.on))
                 }
                 FoldButtonAction::Closing => {
-                    self.animator_play(cx, id!(open.off))
+                    self.animator_play(cx, id!(active.off))
                 }
                 _ => ()
             }

@@ -32,14 +32,14 @@ live_design!{
             blend = {
                 default: zero,
                 zero = {
-                    from: {all: Forward {duration: 0.025}}
+                    from: {all: Forward {duration: 0.525}}
                     apply: {
                         image_b:{draw_bg:{opacity: 0.0}}
                     }
                 }
                 one = {
                     from: {
-                        all: Forward {duration: 0.025}
+                        all: Forward {duration: 0.525}
                     }
                     apply: {
                         image_b:{draw_bg:{opacity: 1.0}}

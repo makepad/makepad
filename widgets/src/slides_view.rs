@@ -22,10 +22,15 @@ live_design!{
         flow: Down, spacing: 10,
         align: { x: 0.0, y: 0.5 }
         padding: 50.
-        draw_bg: { color: (THEME_COLOR_SLIDES_BG), radius: (THEME_CONTAINER_CORNER_RADIUS) }
+        draw_bg: {
+            color: (THEME_COLOR_SLIDES_BG),
+            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+        }
         title = <H1> {
             text: "SlideTitle",
-            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
+            draw_text: {
+                color: (THEME_COLOR_TEXT_DEFAULT)
+            }
         }
     }
     
@@ -35,23 +40,30 @@ live_design!{
         align: {x: 0.0, y: 0.5}
         spacing: 10,
         padding: 50,
-        draw_bg: {color: (THEME_COLOR_SLIDES_CHAPTER), radius: (THEME_CONTAINER_CORNER_RADIUS)}
+        draw_bg: {
+            color: (THEME_COLOR_SLIDES_CHAPTER),
+            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+        }
         title = <H1> {
             text: "SlideTitle",
-            draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
+            draw_text: {
+                color: (THEME_COLOR_TEXT_DEFAULT)
+            }
         }
     }
     
     pub SlideBody = <H2> {
         text: "Body of the slide"
-        draw_text: {color: (THEME_COLOR_TEXT_DEFAULT) }
+        draw_text: {
+            color: (THEME_COLOR_TEXT_DEFAULT)
+        }
     }
 }
 
 #[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct SlidesView {
     #[layout] layout: Layout,
-     #[rust] area: Area,
+    #[rust] area: Area,
     #[walk] walk: Walk,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>,

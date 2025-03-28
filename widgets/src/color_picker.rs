@@ -5,7 +5,7 @@ live_design!{
     
     DrawColorWheel= {{DrawColorWheel}} {
         instance hover: float
-        instance pressed: float
+        instance down: float
         
         fn circ_to_rect(u: float, v: float) -> vec2 {
             let u2 = u * u;
@@ -49,20 +49,20 @@ live_design!{
             
             let rect_puk = vec2(cx + self.sat * 2. * rsize - rsize, cy + (1. - self.val) * 2. * rsize - rsize);
             
-            let color = mix(mix(#3, #E, self.hover), #F, self.pressed);
+            let color = mix(mix(#3, #E, self.hover), #F, self.down);
             let puck_size = 0.1 * w;
             sdf.circle(rect_puk.x, rect_puk.y, puck_size);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
             sdf.fill(color);
-            sdf.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * self.hover + self.pressed);
+            sdf.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * self.hover + self.down);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
             sdf.fill(rgbv);
             
             sdf.circle(circle_puk.x, circle_puk.y, puck_size);
             sdf.fill(color);
-            sdf.circle(circle_puk.x, circle_puk.y, puck_size - 1. - 2. * self.hover + self.pressed);
+            sdf.circle(circle_puk.x, circle_puk.y, puck_size - 1. - 2. * self.hover + self.down);
             sdf.fill(rgbv);
             
             return sdf.result;
@@ -77,7 +77,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_wheel: {pressed: 0.0, hover: 0.0}
+                        draw_wheel: { down: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -85,22 +85,22 @@ live_design!{
                     cursor: Arrow,
                     from: {
                         all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+                        down: Forward {duration: 0.01}
                     }
                     apply: {
                         draw_wheel: {
-                            pressed: 0.0,
+                            down: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
                     }
                 }
                 
-                pressed = {
+                down = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_wheel: {
-                            pressed: [{time: 0.0, value: 1.0}],
+                            down: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
                     }
@@ -232,7 +232,7 @@ impl Widget for ColorPicker {
                 self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) => {
-                self.animator_play(cx, id!(hover.pressed));
+                self.animator_play(cx, id!(hover.down));
                 let rsize = (self.size * 0.28) / 2.0f64.sqrt();
                 let rel = fe.abs - fe.rect.pos;
                 let vx = rel.x - 0.5 * self.size;
