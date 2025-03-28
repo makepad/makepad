@@ -45,7 +45,7 @@ live_design!{
                         pressed: 0.0,
                     }
                 }
-                                
+                
                 on = {
                     redraw: true,
                     from: {
@@ -281,24 +281,24 @@ impl StackCounter{
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
-    #[live] pub draw_normal: DrawText,
-    #[live] pub draw_italic: DrawText,
-    #[live] pub draw_bold: DrawText,
-    #[live] pub draw_bold_italic: DrawText,
-    #[live] pub draw_fixed: DrawText,
+    #[live] pub draw_normal: DrawText2,
+    #[live] pub draw_italic: DrawText2,
+    #[live] pub draw_bold: DrawText2,
+    #[live] pub draw_bold_italic: DrawText2,
+    #[live] pub draw_fixed: DrawText2,
     #[live] pub draw_block: DrawFlowBlock,
     
     /// The default font size used for all text if not otherwise specified.
-    #[live] pub font_size: f64,
+    #[live] pub font_size: f32,
     /// The default font color used for all text if not otherwise specified.
     #[live] pub font_color: Vec4,
     #[walk] walk: Walk,
     
     #[rust] area_stack: SmallVec<[Area;4]>,
-    #[rust] pub font_sizes: SmallVec<[f64;8]>,
+    #[rust] pub font_sizes: SmallVec<[f32;8]>,
     #[rust] pub font_colors: SmallVec<[Vec4;8]>,
    // #[rust] pub font: SmallVec<[Font;2]>,
-    #[rust] pub top_drop: SmallVec<[f64;4]>,
+    //#[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust] pub combine_spaces: SmallVec<[bool;4]>,
     #[rust] pub ignore_newlines: SmallVec<[bool;4]>,
     #[rust] pub bold: StackCounter,
@@ -452,7 +452,7 @@ impl TextFlow{
         self.font_sizes.clear();
         self.font_colors.clear();
         self.area_stack.clear();
-        self.top_drop.clear();
+        //self.top_drop.clear();
         self.combine_spaces.clear();
         self.ignore_newlines.clear();
     }
@@ -460,13 +460,13 @@ impl TextFlow{
         
     pub fn push_size_rel_scale(&mut self, scale: f64){
         self.font_sizes.push(
-            self.font_sizes.last().unwrap_or(&self.font_size) * scale
+            self.font_sizes.last().unwrap_or(&self.font_size) * (scale as f32)
         );
     }
             
     pub fn push_size_abs_scale(&mut self, scale: f64){
         self.font_sizes.push(
-            self.font_size * scale
+            self.font_size * (scale  as f32)
         );
     }
 
@@ -496,7 +496,7 @@ impl TextFlow{
         self.draw_normal.text_style.font_size = *fs;
         let fc = self.font_colors.last().unwrap_or(&self.font_color);
         self.draw_normal.color = *fc;
-        let pad = self.draw_normal.get_font_size() * pad;
+        let pad = self.draw_normal.text_style.font_size as f64 * pad;
         cx.begin_turtle(self.list_item_walk, Layout{
             padding:Padding{
                 left: self.list_item_layout.padding.left + pad,
@@ -515,7 +515,7 @@ impl TextFlow{
             _ => {
                 // This calculation takes into account when numbers have more than one digit
                 // making sure they are properly aligned.
-                let pad = pad + self.draw_normal.get_font_size() * (marker_len - 2) as f64;
+                let pad = pad + self.draw_normal.text_style.font_size as f64 * (marker_len - 2) as f64;
                 cx.turtle().pos() - dvec2(pad, 0.0)
             }
         };
@@ -677,8 +677,8 @@ impl TextFlow{
             //dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
             dt.text_style.font_size = *font_size;
             dt.color = *font_color;
-            dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
-            dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
+            //dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
+            //dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
             //if let Some(font) = self.font
             // the turtle is at pos X so we walk it.
            
