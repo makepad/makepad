@@ -39,8 +39,7 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
-            text_style: {
-                font_family: <THEME_FONT_FAMILY_REGULAR> {},
+            text_style: <THEME_FONT_REGULAR>{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: 16.0
             }
@@ -199,7 +198,9 @@ impl TextInput2 {
         } else {
             self.text.as_str().into()
         };
-        self.laidout_text = Some(self.draw_text.layout(cx, self.text_walk, self.text_align, text));
+        let max_width =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
+                
+        self.laidout_text = Some(self.draw_text.layout(cx, max_width, self.text_align, text));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
@@ -234,6 +235,8 @@ impl TextInput2 {
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
         let laidout_text = self.laidout_text.as_ref().unwrap();
+        
+        
         for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
             self.selection_to_password_selection(self.selection)
         ) {
