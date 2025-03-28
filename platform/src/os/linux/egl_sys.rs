@@ -515,8 +515,7 @@ pub unsafe  fn create_egl_context(
 
     let config = available_cfgs[0];
 
-    // TODO FIXME: these attributes were required to make the OpenHarmony emulator work.
-    //             They may not be necessary on real hardware or on other platforms.
+    #[cfg(ohos_sim)]
     let ctx_attributes = vec![
         EGL_CONTEXT_MAJOR_VERSION, 2, // version 1 and 3 also work
         EGL_CONTEXT_MINOR_VERSION_KHR , 0,
@@ -525,6 +524,14 @@ pub unsafe  fn create_egl_context(
         EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, // allows use of deprecated features
         EGL_NONE, 0, 0, 0,
     ];
+
+    #[cfg(not(ohos_sim))]
+    let ctx_attributes = vec![
+        EGL_CONTEXT_MAJOR_VERSION, 2, // version 1 and 3 also work
+        EGL_CONTEXT_MINOR_VERSION_KHR , 0,
+        EGL_NONE,
+    ];
+
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,
