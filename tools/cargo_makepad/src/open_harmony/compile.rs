@@ -233,22 +233,23 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
         let full_llvm_ar_path = native_llvm_bin.join(bin_path("llvm-ar", "exe"));
         let full_llvm_ranlib_path = native_llvm_bin.join(bin_path("llvm-ranlib", "exe"));
 
-        println!("full_clang_path: {}", full_clang_path.display());
-        println!("full_clangcl_path: {}", full_clangcl_path.display());
-        println!("full_clangpp_path: {}", full_clangpp_path.display());
-        println!("full_llvm_ar_path: {}", full_llvm_ar_path.display());
-        println!("full_llvm_ranlib_path: {}", full_llvm_ranlib_path.display());
-        
-        #[cfg(target_os = "windows")]
-        if !full_clang_path.is_file() || !full_clangcl_path.is_file() || !full_clangpp_path.is_file() {
-            return Err(format!("please copy \"{}-clang.cmd\", \"{}-clang-cl.cmd\", and \"{}-clang++.cmd\" from  \"{}\\tools\\open_harmony\\cmd\" into \"{}\\native\\llvm\\bin\"",
-                target_triple,
-                target_triple,
-                target_triple,
-                cwd.display(),
-                sdk_path.display(),
-            ));
-        }
+        // On a Windows host, we must use clang-cl for the compiler, which accepts MSVC-style arguments.
+        // This is necessary for building native code, e.g., any crate that uses `cc` in its build script.
+        // On all other hosts, we just use the regular clang.
+        let cc_path = if matches!(host_os, HostOs::WindowsX64) {
+            if !full_clang_path.is_file() || !full_clangcl_path.is_file() || !full_clangpp_path.is_file() {
+                return Err(format!("please copy \"{}-clang.cmd\", \"{}-clang-cl.cmd\", and \"{}-clang++.cmd\" from  \"{}\\tools\\open_harmony\\cmd\" into \"{}\\native\\llvm\\bin\"",
+                    target_triple,
+                    target_triple,
+                    target_triple,
+                    cwd.display(),
+                    sdk_path.display(),
+                ));
+            }
+            &full_clangcl_path
+        } else {
+            &full_clang_path
+        };
 
         let target_opt = format!("--target={target_triple}");
         let toolchain = target_triple.replace('-',"_");
@@ -271,9 +272,7 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
         let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
         shell_env(
             &[
-                // Use clang-cl for the compiler, which accepts MSVC-style arguments.
-                // This is necessary for building native code, e.g., any crate that uses `cc` in its build script.
-                (&format!("CC_{toolchain}"),     full_clangcl_path.to_str().unwrap()),
+                (&format!("CC_{toolchain}"),     cc_path.to_str().unwrap()),
                 (&format!("CXX_{toolchain}"),    full_clangpp_path.to_str().unwrap()),
                 (&format!("AR_{toolchain}"),     full_llvm_ar_path.to_str().unwrap()),
                 (&format!("RANLIB_{toolchain}"), full_llvm_ranlib_path.to_str().unwrap()),
