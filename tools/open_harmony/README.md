@@ -56,9 +56,13 @@ Click `File` -> `Project Structure` -> `Signing Configs` -> `Sign in`
 
 ![](./pic/signing.png)
 
-After signing
+After signing in, make sure to click the "Apply" button on the bottom right of the `Signing Configs` pane.
 
+Then, the DevEco IDE will auto-populate the `signingConfigs` array within the `build-profile.json5` file,
+which should be located at the path:
 `target/makepad-open-harmony/makepad_example_simple/build-profile.json5`
+
+The contents of that file will look something like this (we have redacted the paths and password fields):
 ```json
 {
   "app": {
