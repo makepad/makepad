@@ -150,14 +150,17 @@ impl DrawText2 {
         &mut self,
         cx: &mut Cx2d,
         text: impl Into<Substr>,
-        mut _f: impl FnMut(&mut Cx2d, makepad_platform::Rect)
+        mut f: impl FnMut(&mut Cx2d, Rect)
     ) {
+        use crate::text::geom::Point;
         use crate::text::layouter::{LayoutOptions, LayoutParams, Span, Style};
-        
-        let fixed_width = if cx.turtle().padded_rect().size.x.is_nan() {
+        use crate::text::selection::{Selection, Cursor};
+                
+        let rect = cx.turtle().padded_rect();
+        let fixed_width = if rect.size.x.is_nan() {
             None
         } else {
-            Some(cx.turtle().padded_rect().size.x)
+            Some(rect.size.x)
         };
         
         let wrap_width = if cx.turtle().layout().flow == Flow::RightWrap {
@@ -166,8 +169,14 @@ impl DrawText2 {
             None
         };
         
+        // ok we need to now fetch the turtle cursor pos because thats the indent
+        // and when done we need to 'set' the turtle cursor pos where we ended up
+        let start_xpos = cx.turtle().pos().x - rect.pos.x;
+        let start_ypos = cx.turtle().pos().y;
+        
         let text = text.into();
         let text_len = text.len();
+        
         let laid_out_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
             text,
             spans: [Span {
@@ -180,11 +189,26 @@ impl DrawText2 {
             }]
             .into(),
             options: LayoutOptions {
+                first_row_start_x_in_lpxs: start_xpos as f32,
                 max_width_in_lpxs:wrap_width.map(|v| v as f32),
                 align: 0.0,
                 line_spacing_scale: self.text_style.line_spacing as f32,
             },
         });
+        // lets give the callback the rects
+        let rects = laid_out_text.selection_rects_in_lpxs(Selection{
+            anchor: Cursor{index: 0, prefer_next_row: false},
+            cursor: Cursor{index: laid_out_text.text.len(), prefer_next_row: false},
+        });
+        for rect in &rects{
+            f(cx, Rect{
+                pos: dvec2(rect.origin.x as f64,rect.origin.y as f64),
+                size: dvec2(rect.size.width as f64, rect.size.height as f64)
+            });
+        }
+        // alright lets draw it
+        self.draw_text(cx, Point::new(rect.pos.x as f32, start_ypos as f32), &laid_out_text);
+        // now update the turtle pos and bounding box with our layout info
     }
         
     pub fn layout(
@@ -211,6 +235,7 @@ impl DrawText2 {
             .into(),
             options: LayoutOptions {
                 max_width_in_lpxs:max_width,
+                first_row_start_x_in_lpxs: 0.0,
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing as f32,
             },
@@ -479,7 +504,7 @@ impl LiveHook for FontFamily {
             next_child_index = nodes.next_child(child_index);
         }
         self.id = id;
-
+        
         let font_family_id = self.to_font_family_id();
         if !fonts.is_font_family_known(font_family_id) {
             let mut font_ids = Vec::new();
@@ -496,6 +521,7 @@ impl LiveHook for FontFamily {
                             },
                         );
                     }
+                   
                     font_ids.push(font_id);
                 }
                 next_child_index = nodes.next_child(child_index);
