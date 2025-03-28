@@ -6,7 +6,6 @@ use {
         geom::{Point, Rect, Size},
         loader,
         loader::{FontDefinition, FontFamilyDefinition, Loader},
-        num::Zero,
         rasterizer,
         rasterizer::{RasterizedGlyph, Rasterizer},
         sdfer,
@@ -124,7 +123,10 @@ impl<'a> LayoutContext<'a> {
             loader,
             text,
             options,
-            current_point_in_lpxs: Point::ZERO,
+            current_point_in_lpxs: Point::new(
+                options.first_row_start_x_in_lpxs,
+                0.0,
+            ),
             current_row_start: 0,
             current_row_end: 0,
             rows: Vec::new(),
@@ -483,6 +485,7 @@ impl PartialEq for Style {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
+    pub first_row_start_x_in_lpxs: f32,
     pub max_width_in_lpxs: Option<f32>,
     pub align: f32,
     pub line_spacing_scale: f32,
@@ -491,6 +494,7 @@ pub struct LayoutOptions {
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
+            first_row_start_x_in_lpxs: 50.0,
             max_width_in_lpxs: None,
             align: 0.0,
             line_spacing_scale: 1.0,
