@@ -12,7 +12,7 @@ live_design!{
     pub SlidePanelBase = {{SlidePanel}} {}
     pub SlidePanel = <SlidePanelBase>{
         animator: {
-            closed = {
+            active = {
                 default: off,
                 on = {
                     redraw: true,
@@ -21,7 +21,7 @@ live_design!{
                     }
                     ease: InQuad
                     apply: {
-                        closed: 1.0
+                        active: 0.0
                     }
                 }
                                 
@@ -32,7 +32,7 @@ live_design!{
                     }
                     ease: OutQuad
                     apply: {
-                        closed: 0.0
+                        active: 1.0
                     }
                 }
             }
@@ -44,7 +44,7 @@ live_design!{
 pub struct SlidePanel {
     #[deref] frame: View,
     #[animator] animator: Animator,
-    #[live] closed: f64,
+    #[live] active: f64,
     #[live] side: SlideSide,
     #[rust] screen_width: f64,
     #[rust] next_frame: NextFrame
@@ -78,13 +78,13 @@ impl Widget for SlidePanel {
         let rect = cx.peek_walk_turtle(walk);
         match self.side{
             SlideSide::Top=>{
-                walk.abs_pos = Some(dvec2(0.0, -rect.size.y * self.closed));
+                walk.abs_pos = Some(dvec2(0.0, -rect.size.y * self.active));
             }
             SlideSide::Left=>{
-                walk.abs_pos = Some(dvec2(-rect.size.x * self.closed, 0.0));
+                walk.abs_pos = Some(dvec2(-rect.size.x * self.active, 0.0));
             }
             SlideSide::Right => {
-                walk.abs_pos = Some(dvec2(self.screen_width - rect.size.x + rect.size.x * self.closed, 0.0));
+                walk.abs_pos = Some(dvec2(self.screen_width - rect.size.x + rect.size.x * self.active, 0.0));
             }
         }
         self.frame.draw_walk(cx, scope, walk)
@@ -128,27 +128,27 @@ impl SlidePanel {
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, id!(closed.on))
+            inner.animator_play(cx, id!(active.off))
         }
     }
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, id!(closed.off))
+            inner.animator_play(cx, id!(active.on))
         }
     }
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.animator_in_state(cx, id!(closed.on)){
-                inner.animator_play(cx, id!(closed.off))
+            if inner.animator_in_state(cx, id!(active.on)){
+                inner.animator_play(cx, id!(active.on))
             }
             else{
-                inner.animator_play(cx, id!(closed.on))
+                inner.animator_play(cx, id!(active.off))
             }
         }
     }
     pub fn is_animating(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.is_track_animating(cx, id!(closed))
+            inner.animator.is_track_animating(cx, id!(active))
         } else {
             false
         }

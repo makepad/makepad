@@ -336,7 +336,7 @@ live_design!{
         <RoundedView>{
             draw_bg:{
                 color: (COLOR_DOWN_2)
-                border_width: 1.0
+                border_size: 1.0
                 border_color: #x00000044
             }
             align: {x:0.5},
@@ -431,7 +431,7 @@ live_design!{
             }
             random_check_box = <CheckBox> {
                 text: "Seed"
-                animator:{selected={default:on}}
+                animator:{active={default:on}}
             }
             seed_input = <TextInput> {
                 draw_text: {text_style: <TEXT_BOLD> {}}

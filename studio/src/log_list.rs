@@ -98,7 +98,7 @@ live_design!{
             
             fold_button = <FoldButton>{
                 animator:{
-                    open={default:off}
+                    active={default:off}
                 }
             }
             
