@@ -17,8 +17,8 @@ live_design! {
         flow: Down,
         height: Fit,
 
-        keyboard_focus_color: (THEME_COLOR_CTRL_HOVER),
-        pointer_hover_color: (THEME_COLOR_CTRL_HOVER * 0.85),
+        color_focus: (THEME_COLOR_CTRL_HOVER),
+        color_hover: (THEME_COLOR_CTRL_HOVER * 0.85),
 
         popup = <RoundedView> {
             flow: Down,
@@ -27,9 +27,9 @@ live_design! {
 
             draw_bg: {
                 color: #fff,
-                border_width: 2.0,
+                border_size: 2.0,
                 border_color: #eaecf0,
-                radius: 8.0,
+                border_radius: 8.0,
 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -40,23 +40,23 @@ live_design! {
                         0.0,
                         self.rect_size.x,
                         self.rect_size.y,
-                        self.radius,
-                        self.radius,
-                        self.radius,
-                        self.radius
+                        self.border_radius,
+                        self.border_radius,
+                        self.border_radius,
+                        self.border_radius
                     );
                     sdf.fill(self.border_color);  // Fill the entire area with border color
 
                     // Internal outline (content area)
                     sdf.box_all(
-                        self.border_width,
-                        self.border_width,
-                        self.rect_size.x - self.border_width * 2.0,
-                        self.rect_size.y - self.border_width * 2.0,
-                        self.radius - self.border_width,
-                        self.radius - self.border_width,
-                        self.radius - self.border_width,
-                        self.radius - self.border_width
+                        self.border_size,
+                        self.border_size,
+                        self.rect_size.x - self.border_size * 2.0,
+                        self.rect_size.y - self.border_size * 2.0,
+                        self.border_radius - self.border_size,
+                        self.border_radius - self.border_size,
+                        self.border_radius - self.border_size,
+                        self.border_radius - self.border_size
                     );
                     sdf.fill(self.color);  // Fill content area with background color
 
@@ -168,11 +168,11 @@ pub struct CommandTextInput {
 
     /// Strong color to highlight the item that would be submitted if `Return` is pressed.
     #[live]
-    pub keyboard_focus_color: Vec4,
+    pub color_focus: Vec4,
 
     /// Weak color to highlight the item that the pointer is hovering over.
     #[live]
-    pub pointer_hover_color: Vec4,
+    pub color_hover: Vec4,
 
     /// To deal with focus requesting issues.
     #[rust]
@@ -639,7 +639,7 @@ impl CommandTextInput {
                     cx,
                     live! {
                         draw_bg: {
-                            color: (self.keyboard_focus_color),
+                            color: (self.color_focus),
                         }
                     },
                 );
@@ -648,7 +648,7 @@ impl CommandTextInput {
                     cx,
                     live! {
                         draw_bg: {
-                            color: (self.pointer_hover_color),
+                            color: (self.color_hover),
                         }
                     },
                 );
