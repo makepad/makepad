@@ -358,7 +358,7 @@ impl ImageRef {
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_file_by_path_async(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            if let Ok((w,h)) = inner.load_image_file_by_path_async(cx, image_path, 0){
+            if let Ok(AsyncLoadResult::Loading(w,h)) = inner.load_image_file_by_path_async(cx, image_path, 0){
                 // lets set the w-h
                 inner.async_image_size = Some((w,h));
                 inner.async_image_path = Some(image_path.into());
