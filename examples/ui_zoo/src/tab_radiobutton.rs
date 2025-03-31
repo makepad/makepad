@@ -510,6 +510,38 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "Button Group Flat"}
+            <ButtonGroup> {
+                height: Fit
+                flow: Right
+                align: { x: 0.0, y: 0.5 }
+                radios_demo_7 = <View> {
+                    spacing: 5.
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonTabFlat> { text: "Option 1" }
+                    radio2 = <RadioButtonTabFlat> { text: "Option 2" }
+                    radio3 = <RadioButtonTabFlat> { text: "Option 3" }
+                    radio4 = <RadioButtonTabFlat> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Button Group Flatter"}
+            <ButtonGroup> {
+                height: Fit
+                flow: Right
+                align: { x: 0.0, y: 0.5 }
+                radios_demo_7 = <View> {
+                    spacing: 5.
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonTabFlatter> { text: "Option 1" }
+                    radio2 = <RadioButtonTabFlatter> { text: "Option 2" }
+                    radio3 = <RadioButtonTabFlatter> { text: "Option 3" }
+                    radio4 = <RadioButtonTabFlatter> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
             <H4> { text: "Button Group styled" }
             <ButtonGroup> {
                 height: Fit
