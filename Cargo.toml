@@ -55,6 +55,7 @@ workspace.members = [
     "examples/image_viewer_2",
     "examples/image_viewer_3",
     "examples/image_viewer_4",
+    "examples/image_viewer_5",
 ]
 
 workspace.exclude = [
