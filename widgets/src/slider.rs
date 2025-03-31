@@ -1574,6 +1574,45 @@ live_design!{
         }
     }
 
+
+    pub RotarySolidFlat = <RotarySolid> {
+        draw_bg: {
+            border_size: (THEME_BEVELING)
+
+            gap: 90.
+            width: 10.
+
+            color_dither: 1.0
+
+            color_1: (THEME_COLOR_CTRL)
+            color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            color_1_focus: (THEME_COLOR_CTRL_FOCUS)
+            color_1_drag: (THEME_COLOR_CTRL_DRAG)
+
+            color_2: (THEME_COLOR_CTRL)
+            color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            color_2_focus: (THEME_COLOR_CTRL_FOCUS)
+            color_2_drag: (THEME_COLOR_CTRL_DRAG)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
+            border_color_1_drag: (THEME_COLOR_BEVEL_DRAG)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
+            border_color_2_drag: (THEME_COLOR_BEVEL_DRAG)
+
+            handle_color: (ROTARY_SOLID_HANDLE_COLOR);
+            handle_color_hover: (ROTARY_FLAT_HANDLE_COLOR * 1.5);
+            handle_color_focus: (THEME_COLOR_W);
+            handle_color_drag: (THEME_COLOR_W);
+
+        }
+    }
+
+
 }
 
 #[derive(Live, LiveHook)]
