@@ -93,7 +93,7 @@ live_design!{
             uniform border_size: 1.0
             uniform border_radius: 1.5
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color: (THEME_COLOR_CTRL)
             uniform color_hover: (THEME_COLOR_CTRL_HOVER)
             uniform color_drag: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
 

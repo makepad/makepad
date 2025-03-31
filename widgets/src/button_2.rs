@@ -50,7 +50,7 @@ live_design! {
             instance hover: 0.0
             instance pressed: 0.0
             uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
+            instance bodytop: (THEME_COLOR_CTRL)
             instance bodybottom: (THEME_COLOR_CTRL_HOVER)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
