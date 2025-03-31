@@ -34,21 +34,21 @@ live_design!{
             instance drag: float
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
+            uniform border_color_1_drag: (THEME_COLOR_BEVEL_LIGHT_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_drag: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
+            uniform border_color_2_drag: (THEME_COLOR_BEVEL_SHADOW_DRAG)
 
             uniform val_color: (THEME_COLOR_AMOUNT_DEFAULT)
             uniform val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
             uniform val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
             uniform val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
 
-            uniform handle_color: (THEME_COLOR_SLIDER_NUB_DEFAULT)
+            uniform handle_color: (THEME_COLOR_SLIDER_NUB)
             uniform handle_color_hover: (THEME_COLOR_SLIDER_NUB_HOVER)
             uniform handle_color_focus: (THEME_COLOR_SLIDER_NUB_HOVER)
             uniform handle_color_drag: (THEME_COLOR_SLIDER_NUB_ACTIVE)
@@ -256,6 +256,56 @@ live_design!{
             }
         }
     }
+
+    pub SliderMinimalFlat = <SliderMinimal> {
+        draw_bg: {
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_focus: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_drag: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_focus: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_drag: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER)
+            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+
+            uniform handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER)
+            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+
+            uniform border_color_1: (THEME_COLOR_CTRL)
+            uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
+            uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
+
+            uniform border_color_2: (THEME_COLOR_CTRL)
+            uniform border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
+            uniform border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
+
+            uniform val_size: 3.
+
+            uniform val_color: (THEME_COLOR_AMOUNT_DEFAULT)
+            uniform val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
+            uniform val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
+            uniform val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
+
+            uniform bipolar: 0.0,
+
+        }
+
+    }
         
     pub Slider = <SliderMinimal> {
         height: 36
@@ -451,52 +501,51 @@ live_design!{
         }
     }
 
-    pub SliderMinimalFlat = <SliderMinimal> {
+    pub SliderFlat = <Slider> {
         draw_bg: {
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_dither: 1.0
+            color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_1_focus: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_1_drag: (THEME_COLOR_INSET_PIT_TOP)
+            color_1: (THEME_COLOR_CTRL)
+            color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            color_1_focus: (THEME_COLOR_CTRL_FOCUS)
+            color_1_drag: (THEME_COLOR_CTRL_DRAG)
 
-            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_2_focus: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_2_drag: (THEME_COLOR_INSET_PIT_BOTTOM)
+            color_2: (THEME_COLOR_CTRL)
+            color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            color_2_focus: (THEME_COLOR_CTRL_FOCUS)
+            color_2_drag: (THEME_COLOR_CTRL_DRAG)
 
-            uniform handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
-            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER)
-            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
-            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB)
+            handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_HOVER)
+            handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_FOCUS)
+            handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_DRAG)
 
-            uniform handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
-            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER)
-            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
-            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB)
+            handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_HOVER)
+            handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_FOCUS)
+            handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_DRAG)
 
-            uniform border_color_1: (THEME_COLOR_CTRL)
-            uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
-            uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
+            border_color_1: (THEME_COLOR_CTRL)
+            border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
+            border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
 
-            uniform border_color_2: (THEME_COLOR_CTRL)
-            uniform border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
-            uniform border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
+            border_color_2: (THEME_COLOR_CTRL)
+            border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
+            border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
 
-            uniform val_size: 3.
+            val_size: 2.
 
-            uniform val_color: (THEME_COLOR_AMOUNT_DEFAULT)
-            uniform val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
-            uniform val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
-            uniform val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
+            val_color: (THEME_COLOR_AMOUNT_DEFAULT)
+            val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
+            val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
+            val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
 
-            uniform bipolar: 0.0,
-
+            bipolar: 0.0,
         }
 
     }
@@ -508,7 +557,7 @@ live_design!{
     pub SLIDER_ALT1_VAL_PADDING = 2.5;
     pub SLIDER_ALT1_VAL_COLOR_A = (THEME_COLOR_AMOUNT_DEFAULT * 0.8);
     pub SLIDER_ALT1_VAL_COLOR_B = (THEME_COLOR_AMOUNT_DEFAULT * 1.4);
-    pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB_DEFAULT);
+    pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_NUB);
 
     pub SliderRound = <SliderMinimal> {
         height: 18.,
@@ -733,10 +782,10 @@ live_design!{
             uniform color_2_focus: (THEME_COLOR_INSET_PIT_BOTTOM)
             uniform color_2_drag: (THEME_COLOR_INSET_PIT_BOTTOM)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1: (THEME_COLOR_CTRL)
+            uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
+            uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT * 1.3)
