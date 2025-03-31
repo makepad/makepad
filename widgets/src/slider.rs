@@ -550,6 +550,12 @@ live_design!{
 
     }
 
+    pub SliderFlatter = <SliderFlat> {
+        draw_bg: {
+            border_size: 0.
+        }
+    }
+
 
     pub SLIDER_ALT1_HANDLE_SIZE = 4.0;
     pub SLIDER_ALT1_LABEL_SIZE = 75.0;
