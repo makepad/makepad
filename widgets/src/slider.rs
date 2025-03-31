@@ -745,6 +745,60 @@ live_design!{
 
     }
 
+    pub SliderRoundFlat = <SliderRound> {
+        draw_bg: {
+            label_size: (SLIDER_ALT1_LABEL_SIZE);
+
+            val_heat: 10.
+
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS * 2.)
+
+            color_dither: 1.0
+            
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_focus: (THEME_COLOR_INSET_FOCUS)
+            color_1_drag: (THEME_COLOR_INSET_DRAG)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_focus: (THEME_COLOR_INSET_FOCUS)
+            color_2_drag: (THEME_COLOR_INSET_DRAG)
+
+            border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_drag: (THEME_COLOR_BEVEL_SHADOW)
+
+            border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_drag: (THEME_COLOR_BEVEL_LIGHT)
+
+            val_color_1: (SLIDER_ALT1_VAL_COLOR_A)
+            val_color_1_hover: (SLIDER_ALT1_VAL_COLOR_A)
+            val_color_1_focus: (SLIDER_ALT1_VAL_COLOR_A)
+            val_color_1_drag: (SLIDER_ALT1_VAL_COLOR_A)
+
+            val_color_2: (SLIDER_ALT1_VAL_COLOR_B)
+            val_color_2_hover: (SLIDER_ALT1_VAL_COLOR_B)
+            val_color_2_focus: (SLIDER_ALT1_VAL_COLOR_B)
+            val_color_2_drag: (SLIDER_ALT1_VAL_COLOR_B)
+
+            handle_color: (SLIDER_ALT1_HANDLE_COLOR_A);
+            handle_color_hover: (SLIDER_ALT1_HANDLE_COLOR_A);
+            handle_color_focus: (SLIDER_ALT1_HANDLE_COLOR_A);
+            handle_color_drag: (THEME_COLOR_W);
+        }
+    }
+
+    pub SliderRoundFlatter = <SliderRoundFlat> {
+        draw_bg: {
+            border_size: 0.
+        }
+    }
+
     pub ROTARY_BG_COLOR_A = (THEME_COLOR_BG_CONTAINER);
     pub ROTARY_BG_HOVER_COLOR_A = (THEME_COLOR_BG_CONTAINER);
     pub ROTARY_BG_DRAG_COLOR_A = (THEME_COLOR_BG_CONTAINER * 1.25);
