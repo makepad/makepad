@@ -123,7 +123,7 @@ live_design! {
     pub THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
 
     // Background of textinputs, radios, checkboxes etc.
-    pub THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_D_1)
+    pub THEME_COLOR_INSET = (THEME_COLOR_D_1)
     pub THEME_COLOR_INSET_PIT_TOP = (THEME_COLOR_D_4)
     pub THEME_COLOR_INSET_PIT_TOP_HOVER = (THEME_COLOR_D_4)
     pub THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)

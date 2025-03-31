@@ -26,8 +26,16 @@ live_design!{
             }
         }
         demos = {
-            <H4> { text: "Standard"}
+            <H4> { text: "Checkbox"}
             <CheckBox> {text:"Check me out!"}
+
+            <Hr> {}
+            <H4> { text: "CheckBoxFlat"}
+            <CheckBoxFlat> { text:"Check me out!" }
+
+            <Hr> {}
+            <H4> { text: "CheckBoxFlatter"}
+            <CheckBoxFlatter> { text:"Check me out!" }
 
             <Hr> {}
             <H4> { text: "Customized"}
@@ -87,15 +95,24 @@ live_design!{
 
             <Hr> {}
 
-            <H4> { text: "Toggle Mode"}
+            <H4> { text: "Toggle"}
             <UIZooRowH> {
-                <CheckBoxToggle> {text:"Check me out!" }
-                <CheckBoxToggle> {text:"Check me out!" }
+                <Toggle> {text:"Check me out!" }
+            }
+
+            <H4> { text: "ToggleFlat"}
+            <UIZooRowH> {
+                <ToggleFlat> {text:"Check me out!" }
+            }
+
+            <H4> { text: "ToggleFlatter"}
+            <UIZooRowH> {
+                <ToggleFlatter> {text:"Check me out!" }
             }
 
             <Hr> {}
             <H4> { text: "Toggle Customized"}
-            <CheckBoxToggle> {
+            <Toggle> {
                 text:"Check me out!"
 
                 draw_bg: {
