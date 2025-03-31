@@ -144,6 +144,13 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "RotaryFlatter" }
+            <UIZooRowH> {
+                <RotaryFlatter> { text: "RotaryFlatter" }
+            }
+
+
+            <Hr> {}
             <H4> { text: "Rotary Solid"}
             <UIZooRowH> {
                 <RotarySolid> {
