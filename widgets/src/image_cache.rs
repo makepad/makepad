@@ -374,7 +374,7 @@ pub trait ImageCacheImpl {
         false
     }
     
-    fn load_image_file_by_path_async(
+    fn load_image_file_by_path_async_impl(
         &mut self,
         cx: &mut Cx,
         image_path: &Path,
@@ -385,7 +385,7 @@ pub trait ImageCacheImpl {
                 ImageCacheEntry::Loaded(texture)=>{
                     let texture = texture.clone();
                     // lets fetch the texture size
-                    let (w,h) = texture.get_format(cx).vec_width_height().unwrap_or((100,100));
+                    //let (_w,_h) = texture.get_format(cx).vec_width_height().unwrap_or((100,100));
                     self.set_texture(Some(texture), id);
                     Ok(AsyncLoadResult::Loaded)
                 }
