@@ -13,7 +13,6 @@ live_design!{
             <H3> { text: "Slider"}
         }
         demos = {
-            <Hr> {}
             <H4> { text: "Slider"}
             <Slider> { text: "Default" }
             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
@@ -102,6 +101,17 @@ live_design!{
                 draw_bg: {label_size: 150. },
             }
 
+            <Hr> {}
+            <H4> { text: "SliderRoundFlat"}
+            <SliderRoundFlat> { text: "min/max", min: 0., max: 100. }
+            <SliderRoundFlat> { text: "precision", precision: 20 }
+            <SliderRoundFlat> { text: "stepped", step: 0.1 }
+
+            <Hr> {}
+            <H4> { text: "SliderRoundFlatter"}
+            <SliderRoundFlatter> { text: "min/max", min: 0., max: 100. }
+            <SliderRoundFlatter> { text: "precision", precision: 20 }
+            <SliderRoundFlatter> { text: "stepped", step: 0.1 }
         }
     }
 }
