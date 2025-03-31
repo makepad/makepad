@@ -21,6 +21,14 @@ live_design!{
             <Slider> { text: "precision", precision: 20 }
             <Slider> { text: "stepped", step: 0.1 }
 
+            <Hr> {}
+            <H4> { text: "SliderFlat"}
+            <SliderFlat> { text: "Default" }
+            <SliderFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+            <SliderFlat> { text: "min/max", min: 0., max: 100. }
+            <SliderFlat> { text: "precision", precision: 20 }
+            <SliderFlat> { text: "stepped", step: 0.1 }
+
             <H4> { text: "SliderMinimal"}
             <SliderMinimal> { text: "Default" }
             <SliderMinimal> { text: "label_align", label_align: { x: 0.5, y: 0. } }
