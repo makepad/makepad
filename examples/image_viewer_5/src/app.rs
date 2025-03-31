@@ -7,6 +7,18 @@ live_design! {
     LEFT_ARROW_ICON = dep("crate://self/resources/left_arrow_icon.svg");
     RIGHT_ARROW_ICON = dep("crate://self/resources/right_arrow_icon.svg");
 
+    TopMenu = <View> {
+        width: Fill,
+        height: Fit,
+
+        <Filler> {}
+        <Button> {
+            width: 100,
+            height: 50,
+            text: "Slideshow"
+        }
+    }
+    
     ImageItem = <View> {
         width: 256,
         height: 256,
@@ -34,6 +46,13 @@ live_design! {
 
             ImageRow = <ImageRow> {}
         }
+    }
+
+    ImageBrowser = <View> {
+        flow: Down,
+
+        <TopMenu> {}
+        <ImageGrid> {}
     }
 
     SlideshowButton = <Button> {
@@ -78,8 +97,10 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             <Window> {
-                body = <View> {
-                    // <ImageGrid> {}
+                body = <PageFlip> {
+                    active_page: image_browser,
+
+                    image_browser = <ImageBrowser> {}
                     slideshow = <Slideshow> {}
                 }
             }
@@ -231,6 +252,7 @@ impl MatchEvent for App{
             match event.key_code {
                 KeyCode::ArrowLeft => self.navigate_left(cx),
                 KeyCode::ArrowRight => self.navigate_right(cx),
+                KeyCode::Escape => self.ui.page_flip(id!(body)).set_active_page(cx, live_id!(image_browser)),
                 _ => {}
             }
         }
