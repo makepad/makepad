@@ -358,17 +358,23 @@ pub trait ImageCacheImpl {
         }
     }
         
-    fn process_async_image_load(&mut self, cx:&mut Cx, self_path: Option<PathBuf>, id: usize, image_path: &Path, result: Result<ImageBuffer, ImageError>)->bool{
+    fn process_async_image_load(&mut self, cx:&mut Cx, id: usize, image_path: &Path, result: Result<ImageBuffer, ImageError>)->bool{
         // alright now we should stuff this thing into our cache
         if let Ok(data) = result{
             let texture = data.into_new_texture(cx);
             cx.get_global::<ImageCache>().map.insert(image_path.into(), ImageCacheEntry::Loaded(texture.clone()));
-            // alright now set it
-            if let Some(self_path) = self_path{
-                if self_path == image_path{
-                    self.set_texture(Some(texture), id);
+        }
+        false
+    }
+    
+    fn load_image_from_cache(&mut self, cx:&mut Cx, image_path: &Path, id: usize)->bool{
+        if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
+            match texture{
+                ImageCacheEntry::Loaded(texture)=>{
+                    self.set_texture(Some(texture.clone()), id);
                     return true
                 }
+                _=>()
             }
         }
         false
