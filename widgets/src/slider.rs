@@ -451,6 +451,57 @@ live_design!{
         }
     }
 
+    pub SliderMinimalFlat = <SliderMinimal> {
+        draw_bg: {
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_focus: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_drag: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_focus: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_drag: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER)
+            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+
+            uniform handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER)
+            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+
+            uniform border_color_1: (THEME_COLOR_CTRL_DEFAULT)
+            uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
+            uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
+
+            uniform border_color_2: (THEME_COLOR_CTRL_DEFAULT)
+            uniform border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
+            uniform border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
+
+            uniform val_size: 3.
+
+            uniform val_color: (THEME_COLOR_AMOUNT_DEFAULT)
+            uniform val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
+            uniform val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
+            uniform val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
+
+            uniform bipolar: 0.0,
+
+        }
+
+    }
+
+
     pub SLIDER_ALT1_HANDLE_SIZE = 4.0;
     pub SLIDER_ALT1_LABEL_SIZE = 75.0;
     pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 3.0;
