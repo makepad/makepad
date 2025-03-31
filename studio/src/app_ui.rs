@@ -528,8 +528,8 @@ live_design!{
                             margin: 0.,
                             padding: <THEME_MSPACE_1> {}
                         }
-                        <CheckBoxToggle> { text: "Release", }
-                        <CheckBoxToggle> { text: "Debug"}
+                        <Toggle> { text: "Release", }
+                        <Toggle> { text: "Debug"}
                     }
                 }
                 <RunList> {}
