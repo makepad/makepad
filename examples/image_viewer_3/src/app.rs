@@ -1,4 +1,4 @@
-use {makepad_widgets::*, std::{env, path::PathBuf}};
+use {makepad_widgets::*, std::{env, path::{Path, PathBuf}}};
 
 live_design! {
     use link::widgets::*;
@@ -55,18 +55,18 @@ impl Widget for ImageRow {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
-                let row_index = scope.props.get::<usize>().unwrap();
-                let item_count = state.images_per_row.min(state.image_paths.len() - row_index * state.images_per_row);
+                let row_idx = scope.props.get::<usize>().unwrap();
+                let item_count = state.images_per_row.min(state.image_paths.len() - row_idx * state.images_per_row);
                 list.set_item_range(cx, 0, item_count);
-                while let Some(item_index) = list.next_visible_item(cx) {
-                    if item_index >= item_count {
+                while let Some(item_idx) = list.next_visible_item(cx) {
+                    if item_idx >= item_count {
                         continue;
                     }
-                    let item = list.item(cx, item_index, live_id!(ImageItem));
+                    let item = list.item(cx, item_idx, live_id!(ImageItem));
                     let image = item.image(id!(image));
-                    let image_index = row_index * state.images_per_row + item_index;
-                    let image_path = &state.image_paths[image_index];
-                    image.load_image_file_by_path(cx, &image_path.to_string_lossy()).unwrap();
+                    let image_idx = row_idx * state.images_per_row + item_idx;
+                    let image_path = &state.image_paths[image_idx];
+                    image.load_image_file_by_path(cx, &image_path).unwrap();
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
@@ -91,9 +91,9 @@ impl Widget for ImageGrid {
                 let state = scope.data.get_mut::<State>().unwrap();
                 let num_rows = state.image_paths.len().div_ceil(state.images_per_row);
                 list.set_item_range(cx, 0, num_rows);
-                while let Some(row_index) = list.next_visible_item(cx) {
-                    let item = list.item(cx, row_index, live_id!(ImageRow));
-                    item.draw_all(cx, &mut Scope::with_data_props(state, &row_index));
+                while let Some(row_idx) = list.next_visible_item(cx) {
+                    let item = list.item(cx, row_idx, live_id!(ImageRow));
+                    item.draw_all(cx, &mut Scope::with_data_props(state, &row_idx));
                 }
             }
         }
@@ -111,18 +111,8 @@ pub struct App {
     #[rust] state: State,
 }
 
-impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.state));
-    }
-}
-
-impl LiveHook for App {
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        let path: PathBuf = env::args().nth(1).unwrap().into();
-        if !path.is_dir() {
-            panic!();
-        }
+impl App {
+    pub fn update_image_paths(&mut self, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -132,6 +122,18 @@ impl LiveHook for App {
             }
             self.state.image_paths.push(path);
         }
+    }
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.state));
+    }
+}
+
+impl LiveHook for App {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+        self.update_image_paths(env::args().nth(1).unwrap().as_ref())
     }
 }
  
