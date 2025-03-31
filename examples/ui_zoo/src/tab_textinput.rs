@@ -26,6 +26,14 @@ live_design!{
             <TextInput> { empty_message: "Inline Label" }
 
             <Hr> {}
+            <H4> { text: "TextInputFlat" }
+            <TextInputFlat> { empty_message: "Inline Label" }
+
+            <Hr> {}
+            <H4> { text: "TextInputFlatter" }
+            <TextInputFlatter> { empty_message: "Inline Label" }
+
+            <Hr> {}
             <H4> { text: "TextInputGradientX" }
             <TextInputGradientX> { empty_message: "Inline Label" }
 
