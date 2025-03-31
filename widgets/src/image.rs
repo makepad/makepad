@@ -136,11 +136,13 @@ impl Widget for Image {
                 if let Some(AsyncImageLoad{image_path, result}) = &action.downcast_ref(){
                     if let Some(result) = result.borrow_mut().take(){
                         // we have a result for the image_cache to load up
-                        if self.process_async_image_load(cx, self.async_image_path.clone(), 0, image_path, result){
-                            self.async_image_size = None;
-                            self.animator_play(cx, id!(async_load.off));
-                            self.redraw(cx);
-                        }
+                        self.process_async_image_load(cx, 0, image_path, result);
+                    }
+                    if self.async_image_size.is_some() && self.async_image_path.clone() == Some(image_path.to_path_buf()){ // see if we can load from cache
+                        self.load_image_from_cache(cx, image_path, 0);
+                        self.async_image_size = None;
+                        self.animator_play(cx, id!(async_load.off));
+                        self.redraw(cx);
                     }
                 }
             }
