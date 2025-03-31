@@ -269,6 +269,11 @@ pub enum ImageError {
     UnsupportedFormat,
 }
 
+pub enum AsyncLoadResult{
+    Loading(usize,usize),
+    Loaded,
+}
+
 impl Error for ImageError {}
 
 impl From<PngDecodeErrors> for ImageError {
@@ -374,7 +379,7 @@ pub trait ImageCacheImpl {
         cx: &mut Cx,
         image_path: &Path,
         id: usize,
-    ) -> Result<(usize,usize), ImageError> {
+    ) -> Result<AsyncLoadResult, ImageError> {
         if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
             match texture{
                 ImageCacheEntry::Loaded(texture)=>{
@@ -382,10 +387,10 @@ pub trait ImageCacheImpl {
                     // lets fetch the texture size
                     let (w,h) = texture.get_format(cx).vec_width_height().unwrap_or((100,100));
                     self.set_texture(Some(texture), id);
-                    Ok((w,h))
+                    Ok(AsyncLoadResult::Loaded)
                 }
                 ImageCacheEntry::Loading(w,h)=>{
-                    Ok((*w,*h))
+                    Ok(AsyncLoadResult::Loading(*w, *h))
                 }
             }
         }
@@ -456,7 +461,7 @@ pub trait ImageCacheImpl {
                     });
                 }
             });
-            Ok((w,h))
+            Ok(AsyncLoadResult::Loading(w, h))
         }
     }
     
