@@ -55,8 +55,8 @@ impl Widget for ImageRow {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 4);
-                while let Some(item_index) = list.next_visible_item(cx) {
-                    let item = list.item(cx, item_index, live_id!(ImageItem));
+                while let Some(item_idx) = list.next_visible_item(cx) {
+                    let item = list.item(cx, item_idx, live_id!(ImageItem));
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
@@ -79,8 +79,8 @@ impl Widget for ImageGrid {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 3);
-                while let Some(row_index) = list.next_visible_item(cx) {
-                    let item = list.item(cx, row_index, live_id!(ImageRow));
+                while let Some(row_idx) = list.next_visible_item(cx) {
+                    let item = list.item(cx, row_idx, live_id!(ImageRow));
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
