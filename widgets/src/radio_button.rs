@@ -320,6 +320,35 @@ live_design!{
         }
     }
 
+    pub RadioButtonTabFlat = <RadioButtonTab> {
+        draw_bg: {
+            radio_type: Tab
+            border_size: (THEME_BEVELING)
+
+            color_1: (THEME_COLOR_CTRL)
+            color_1_hover: (THEME_COLOR_CTRL_HOVER)
+            color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+
+            color_2: (THEME_COLOR_CTRL)
+            color_2_hover: (THEME_COLOR_CTRL_HOVER)
+            color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_active: (THEME_COLOR_BEVEL_ACTIVE)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
+        }
+    }
+
+    pub RadioButtonTabFlatter = <RadioButtonTabFlat> {
+        draw_bg: {
+            border_size: 0.
+        }
+    }
+
     pub RadioButtonTabGradientX = <RadioButton> {
         height: Fit,
 
