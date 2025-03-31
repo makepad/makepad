@@ -47,21 +47,17 @@ live_design! {
         text: ""
     }
 
-    SlideshowLeftButton = <SlideshowButton> {
-        draw_icon: { svg_file: (LEFT_ARROW_ICON) }
-    }
-
-    SlideshowRightButton = <SlideshowButton> {
-        draw_icon: { svg_file: (RIGHT_ARROW_ICON) }
-    }
-
     SlideshowOverlay = <View> {
         height: Fill,
         width: Fill,
 
-        left = <SlideshowLeftButton> {}
+        left = <SlideshowButton> {
+            draw_icon: { svg_file: (LEFT_ARROW_ICON) }
+        }
         <Filler> {}
-        right = <SlideshowRightButton> {}
+        right = <SlideshowButton> {
+            draw_icon: { svg_file: (RIGHT_ARROW_ICON) }
+        }
     }
 
     Slideshow = <View> {
@@ -187,18 +183,18 @@ impl App {
         self.ui.view(id!(slideshow)).redraw(cx);
     }
 
-    pub fn go_to_next_image(&mut self, cx: &mut Cx) {
+    pub fn navigate_left(&mut self, cx: &mut Cx) {
         if let Some(image_idx) = self.state.current_image_idx {
-            if image_idx + 1 < self.state.image_paths.len() {
-                self.set_current_image(cx, Some(image_idx + 1));
+            if image_idx > 0 {
+                self.set_current_image(cx, Some(image_idx - 1));
             }
         }
     }
 
-    pub fn go_to_previous_image(&mut self, cx: &mut Cx) {
+    pub fn navigate_right(&mut self, cx: &mut Cx) {
         if let Some(image_idx) = self.state.current_image_idx {
-            if image_idx > 0 {
-                self.set_current_image(cx, Some(image_idx - 1));
+            if image_idx + 1 < self.state.image_paths.len() {
+                self.set_current_image(cx, Some(image_idx + 1));
             }
         }
     }
@@ -226,15 +222,15 @@ impl LiveRegister for App {
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(id!(left)).clicked(&actions) {
-            self.go_to_previous_image(cx);
+            self.navigate_left(cx);
         }
         if self.ui.button(id!(right)).clicked(&actions) {
-            self.go_to_next_image(cx);
+            self.navigate_right(cx);
         }
         if let Some(event) = self.ui.view(id!(slideshow.overlay)).key_down(&actions) {
             match event.key_code {
-                KeyCode::ArrowLeft => self.go_to_previous_image(cx),
-                KeyCode::ArrowRight => self.go_to_next_image(cx),
+                KeyCode::ArrowLeft => self.navigate_left(cx),
+                KeyCode::ArrowRight => self.navigate_right(cx),
                 _ => {}
             }
         }
