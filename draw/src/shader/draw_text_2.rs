@@ -251,7 +251,7 @@ impl DrawText2 {
         align: Align,
         laidout_text: &LaidoutText,
     ) -> makepad_platform::Rect {
-        use crate::text::geom::{Point};
+        use crate::text::geom::{Point, Size};
         use crate::turtle;
 
         let size_in_lpxs = laidout_text.size_in_lpxs * self.font_scale;
