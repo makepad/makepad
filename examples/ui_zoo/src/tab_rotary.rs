@@ -166,6 +166,28 @@ live_design!{
                 }
             }
 
+            <Hr> {}
+            <H4> { text: "Rotary Solid"}
+            <UIZooRowH> {
+                <RotarySolidFlat> {
+                    text: "Colored",
+                    draw_bg: {
+                        gap: 90.,
+                    }
+                }
+                <RotarySolidFlat> {
+                    text: "Colored",
+                    draw_bg: {
+                        gap: 180.,
+                    }
+                }
+                <RotarySolidFlat> {
+                    text: "Colored",
+                    draw_bg: {
+                        gap: 60.,
+                    }
+                }
+            }
 
         }
     }
