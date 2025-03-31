@@ -90,8 +90,8 @@
                         <SliderRound> { text: "Scale" }
                         <SliderRound> { text: "Contrast"}
                         <Vr> {}
-                        <CheckBoxToggle> { text: "Label Hover"}
-                        <CheckBoxToggle> { text: "Light Theme"}
+                        <Toggle> { text: "Label Hover"}
+                        <Toggle> { text: "Light Theme"}
                     }
 
                     <Dock> {
