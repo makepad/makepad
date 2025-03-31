@@ -508,15 +508,15 @@ live_design!{
 
             color_dither: 1.0
 
-            color_1: (THEME_COLOR_CTRL)
-            color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            color_1_focus: (THEME_COLOR_CTRL_FOCUS)
-            color_1_drag: (THEME_COLOR_CTRL_DRAG)
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_focus: (THEME_COLOR_INSET_FOCUS)
+            color_1_drag: (THEME_COLOR_INSET_DRAG)
 
-            color_2: (THEME_COLOR_CTRL)
-            color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            color_2_focus: (THEME_COLOR_CTRL_FOCUS)
-            color_2_drag: (THEME_COLOR_CTRL_DRAG)
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_focus: (THEME_COLOR_INSET_FOCUS)
+            color_2_drag: (THEME_COLOR_INSET_DRAG)
 
             handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB)
             handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_HOVER)
@@ -542,7 +542,7 @@ live_design!{
 
             val_color: (THEME_COLOR_AMOUNT_DEFAULT)
             val_color_hover: (THEME_COLOR_AMOUNT_HOVER)
-            val_color_focus: (THEME_COLOR_AMOUNT_HOVER)
+            val_color_focus: (THEME_COLOR_AMOUNT_FOCUS)
             val_color_drag: (THEME_COLOR_AMOUNT_ACTIVE)
 
             bipolar: 0.0,
