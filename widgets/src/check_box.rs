@@ -326,8 +326,70 @@ live_design!{
             }
         }
     }
+
+    pub CheckBoxFlat = <CheckBox> {
+        draw_bg: {
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            mark_color: (THEME_COLOR_U_HIDDEN)
+            mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+
+        }
+
+    }
+
+    pub CheckBoxFlatter = <CheckBox> {
+        draw_bg: {
+            border_size: 0.0
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            mark_color: (THEME_COLOR_U_HIDDEN)
+            mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+
+        }
+
+    }
         
-    pub CheckBoxToggle = <CheckBox> {
+    pub Toggle = <CheckBox> {
         align: { x: 0., y: 0. }
         draw_bg: {
             uniform size: 7.5;
@@ -426,7 +488,59 @@ live_design!{
             }
         }
     }
+
+    pub ToggleFlat = <Toggle> {
+        draw_bg: {
+            size: 7.5;
+
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL)
+            border_color_1_active: (THEME_COLOR_BEVEL)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
+
+            mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+        }
+    }
         
+    pub ToggleFlatter = <Toggle> {
+        draw_bg: {
+            border_size: 0.
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+        }
+    }
+
     pub CheckBoxCustom = <CheckBox> {
         draw_bg: { check_type: None }
         align: { x: 0.0, y: 0.5}
