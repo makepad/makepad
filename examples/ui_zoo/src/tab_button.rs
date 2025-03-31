@@ -40,7 +40,7 @@ live_design!{
                         border_radius: (THEME_BEVELING)
                         border_radius: (THEME_CORNER_RADIUS)
 
-                        color: (THEME_COLOR_CTRL_DEFAULT)
+                        color: (THEME_COLOR_CTRL)
                         color_hover: (THEME_COLOR_CTRL_HOVER)
                         color_down: (THEME_COLOR_CTRL_PRESSED)
 

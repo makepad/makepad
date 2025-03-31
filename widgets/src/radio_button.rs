@@ -37,7 +37,7 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color: (THEME_COLOR_CTRL)
             uniform color_hover: (THEME_COLOR_CTRL_HOVER)
             uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
 
@@ -295,11 +295,11 @@ live_design!{
             radio_type: Tab
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR_CTRL_DEFAULT)
+            color_1: (THEME_COLOR_CTRL)
             color_1_hover: (THEME_COLOR_CTRL_HOVER)
             color_1_active: (THEME_COLOR_CTRL_ACTIVE)
 
-            color_2: (THEME_COLOR_CTRL_DEFAULT)
+            color_2: (THEME_COLOR_CTRL)
             color_2_hover: (THEME_COLOR_CTRL_HOVER)
             color_2_active: (THEME_COLOR_CTRL_ACTIVE)
 
@@ -339,11 +339,11 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.5)
+            uniform color_1: (THEME_COLOR_CTRL * 1.5)
             uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_2: (THEME_COLOR_CTRL)
             uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
 
@@ -412,11 +412,11 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.5)
+            uniform color_1: (THEME_COLOR_CTRL * 1.5)
             uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_2: (THEME_COLOR_CTRL)
             uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
 
