@@ -60,11 +60,11 @@ live_design!{
 
                     color_dither: 1.0
 
-                    color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
+                    color_1: (THEME_COLOR_CTRL * 1.75)
                     color_1_hover: #0
                     color_1_focus: #2
 
-                    color_2: (THEME_COLOR_CTRL_DEFAULT)
+                    color_2: (THEME_COLOR_CTRL)
                     color_2_hover: #3
                     color_2_focus: #4
 

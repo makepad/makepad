@@ -478,12 +478,12 @@ live_design!{
             uniform handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
             uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
 
-            uniform border_color_1: (THEME_COLOR_CTRL_DEFAULT)
+            uniform border_color_1: (THEME_COLOR_CTRL)
             uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
             uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
             uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
 
-            uniform border_color_2: (THEME_COLOR_CTRL_DEFAULT)
+            uniform border_color_2: (THEME_COLOR_CTRL)
             uniform border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
             uniform border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
             uniform border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
