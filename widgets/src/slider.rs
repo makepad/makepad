@@ -1167,10 +1167,10 @@ live_design!{
             uniform val_size: 20. // TODO: REMOVE / CHANGE?
             uniform val_padding: 2.0
             
-            uniform color: (ROTARY_FLAT_BG_COLOR)
-            uniform color_hover: (ROTARY_FLAT_BG_HOVER_COLOR)
-            uniform color_focus: (ROTARY_FLAT_BG_FOCUS_COLOR)
-            uniform color_drag: (ROTARY_FLAT_BG_DRAG_COLOR)
+            uniform color: (THEME_COLOR_INSET)
+            uniform color_hover: (THEME_COLOR_INSET_HOVER)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
+            uniform color_drag: (THEME_COLOR_INSET_DRAG)
 
             uniform border_color: (ROTARY_FLAT_BORDER_COLOR)
             uniform border_color_hover: (ROTARY_FLAT_BORDER_HOVER_COLOR)
@@ -1323,6 +1323,16 @@ live_design!{
                 
                 return sdf.result
             }
+        }
+    }
+
+    pub RotaryFlatter = <RotaryFlat> {
+        draw_bg: {
+            border_size: 0.,
+            color: (THEME_COLOR_INSET)
+            color_hover: (THEME_COLOR_INSET_HOVER)
+            color_focus: (THEME_COLOR_INSET_FOCUS)
+            color_drag: (THEME_COLOR_INSET_DRAG)
         }
     }
 
