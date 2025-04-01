@@ -112,7 +112,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn update_image_paths(&mut self, path: &Path) {
+    pub fn load_image_paths(&mut self, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -133,7 +133,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        self.update_image_paths(env::args().nth(1).unwrap().as_ref())
+        self.load_image_paths(env::args().nth(1).unwrap().as_ref())
     }
 }
  
