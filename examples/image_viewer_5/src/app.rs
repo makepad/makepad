@@ -12,9 +12,7 @@ live_design! {
         height: Fit,
 
         <Filler> {}
-        <Button> {
-            width: 100,
-            height: 50,
+        slideshow_button = <Button> {
             text: "Slideshow"
         }
     }
@@ -175,7 +173,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn update_image_paths(&mut self, cx: &mut Cx, path: &Path) {
+    pub fn load_image_paths(&mut self, cx: &mut Cx, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -230,7 +228,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.update_image_paths(cx, env::args().nth(1).unwrap().as_ref());
+        self.load_image_paths(cx, env::args().nth(1).unwrap().as_ref());
     }
 }
  
@@ -242,6 +240,10 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(id!(slideshow_button)).clicked(&actions) {
+            self.ui.page_flip(id!(body)).set_active_page(cx, live_id!(slideshow));
+            self.ui.view(id!(slideshow.overlay)).set_key_focus(cx);
+        }
         if self.ui.button(id!(left)).clicked(&actions) {
             self.navigate_left(cx);
         }
