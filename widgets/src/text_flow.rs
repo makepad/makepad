@@ -8,6 +8,7 @@ live_design!{
     link widgets;
     use link::theme::*;
     use makepad_draw::shader::std::*;
+    use crate::button::Button;
     
     pub DrawFlowBlock = {{DrawFlowBlock}} {}
     pub TextFlowBase = {{TextFlow}} {
