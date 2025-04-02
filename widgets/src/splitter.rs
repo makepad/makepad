@@ -13,7 +13,7 @@ live_design!{
     pub DrawSplitter= {{DrawSplitter}} {}
     pub SplitterBase = {{Splitter}} {}
     pub Splitter = <SplitterBase> {
-        draw_splitter: {
+        draw_bg: {
             instance drag: 0.0
             instance hover: 0.0
             
@@ -75,7 +75,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_splitter: {drag: 0.0, hover: 0.0}
+                        draw_bg: {drag: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -85,7 +85,7 @@ live_design!{
                         state_drag: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_splitter: {
+                        draw_bg: {
                             drag: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -95,7 +95,7 @@ live_design!{
                 drag = {
                     from: { all: Forward { duration: 0.1 }}
                     apply: {
-                        draw_splitter: {
+                        draw_bg: {
                             drag: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
@@ -170,7 +170,7 @@ pub struct Splitter {
     #[live] min_horizontal: f64,
     #[live] max_horizontal: f64,
     
-    #[redraw] #[live] draw_splitter: DrawSplitter,
+    #[redraw] #[live] draw_bg: DrawSplitter,
     #[live] split_bar_size: f64,
     
     // framecomponent mode
@@ -192,7 +192,7 @@ impl Widget for Splitter {
         let uid = self.widget_uid();
         
         self.animator_handle_event(cx, event);
-        match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
+        match event.hits_with_options(cx, self.draw_bg.area(), HitOptions::new().with_margin(self.margin())) {
             Hit::FingerHoverIn(_) => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
@@ -250,7 +250,7 @@ impl Widget for Splitter {
                             }
                         }
                     };
-                    self.draw_splitter.redraw(cx);
+                    self.draw_bg.redraw(cx);
                     cx.widget_action(uid, &scope.path, SplitterAction::Changed {axis: self.axis, align: self.align});
                     
                     self.a.redraw(cx);
@@ -310,12 +310,12 @@ impl Splitter {
         cx.end_turtle_with_area(&mut self.area_a);
         match self.axis {
             SplitterAxis::Horizontal => {
-                self.draw_splitter.is_vertical = 1.0;
-                self.draw_splitter.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
+                self.draw_bg.is_vertical = 1.0;
+                self.draw_bg.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
             }
             SplitterAxis::Vertical => {
-                self.draw_splitter.is_vertical = 0.0;
-                self.draw_splitter.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
+                self.draw_bg.is_vertical = 0.0;
+                self.draw_bg.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
             }
         }
         cx.begin_turtle(Walk::default(), Layout::flow_down());
