@@ -48,10 +48,10 @@ live_design!{
             uniform val_color_focus: (THEME_COLOR_VAL_HOVER)
             uniform val_color_drag: (THEME_COLOR_VAL_ACTIVE)
 
-            uniform handle_color: (THEME_COLOR_SLIDER_HANDLE)
-            uniform handle_color_hover: (THEME_COLOR_SLIDER_HANDLE_HOVER)
-            uniform handle_color_focus: (THEME_COLOR_SLIDER_HANDLE_HOVER)
-            uniform handle_color_drag: (THEME_COLOR_SLIDER_HANDLE_ACTIVE)
+            uniform handle_color: (THEME_COLOR_SLIDER_MINIMAL_HANDLE)
+            uniform handle_color_hover: (THEME_COLOR_SLIDER_MINIMAL_HANDLE_HOVER)
+            uniform handle_color_focus: (THEME_COLOR_SLIDER_MINIMAL_HANDLE_HOVER)
+            uniform handle_color_drag: (THEME_COLOR_SLIDER_MINIMAL_HANDLE_ACTIVE)
 
             fn pixel(self) -> vec4 {
                 let slider_height = 3;
@@ -274,15 +274,15 @@ live_design!{
             uniform color_2_focus: (THEME_COLOR_INSET_BOTTOM)
             uniform color_2_drag: (THEME_COLOR_INSET_BOTTOM)
 
-            uniform handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
-            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER)
-            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
-            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            uniform handle_color_1: (THEME_COLOR_SLIDER_HANDLE_TOP)
+            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_HANDLE_TOP_HOVER)
+            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_HANDLE_TOP)
+            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_HANDLE_TOP)
 
-            uniform handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
-            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER)
-            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
-            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            uniform handle_color_2: (THEME_COLOR_SLIDER_HANDLE_BOTTOM)
+            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_HANDLE_BOTTOM_HOVER)
+            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_BOTTOM)
+            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_BOTTOM)
 
             uniform border_color_1: (THEME_COLOR)
             uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
@@ -326,15 +326,15 @@ live_design!{
             uniform color_2_focus: (THEME_COLOR_INSET_BOTTOM)
             uniform color_2_drag: (THEME_COLOR_INSET_BOTTOM)
 
-            uniform handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
-            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER)
-            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
-            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_TOP)
+            uniform handle_color_1: (THEME_COLOR_SLIDER_HANDLE_TOP)
+            uniform handle_color_1_hover: (THEME_COLOR_SLIDER_HANDLE_TOP_HOVER)
+            uniform handle_color_1_focus: (THEME_COLOR_SLIDER_HANDLE_TOP)
+            uniform handle_color_1_drag: (THEME_COLOR_SLIDER_HANDLE_TOP)
 
-            uniform handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
-            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER)
-            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
-            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
+            uniform handle_color_2: (THEME_COLOR_SLIDER_HANDLE_BOTTOM)
+            uniform handle_color_2_hover: (THEME_COLOR_SLIDER_HANDLE_BOTTOM_HOVER)
+            uniform handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_BOTTOM)
+            uniform handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_BOTTOM)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -518,15 +518,15 @@ live_design!{
             color_2_focus: (THEME_COLOR_INSET_FOCUS)
             color_2_drag: (THEME_COLOR_INSET_DRAG)
 
-            handle_color_1: (THEME_COLOR_SLIDER_BIG_NUB)
-            handle_color_1_hover: (THEME_COLOR_SLIDER_BIG_NUB_HOVER)
-            handle_color_1_focus: (THEME_COLOR_SLIDER_BIG_NUB_FOCUS)
-            handle_color_1_drag: (THEME_COLOR_SLIDER_BIG_NUB_DRAG)
+            handle_color_1: (THEME_COLOR_SLIDER_BIG_HANDLE)
+            handle_color_1_hover: (THEME_COLOR_SLIDER_HANDLE_HOVER)
+            handle_color_1_focus: (THEME_COLOR_SLIDER_HANDLE_FOCUS)
+            handle_color_1_drag: (THEME_COLOR_SLIDER_HANDLE_DRAG)
 
-            handle_color_2: (THEME_COLOR_SLIDER_BIG_NUB)
-            handle_color_2_hover: (THEME_COLOR_SLIDER_BIG_NUB_HOVER)
-            handle_color_2_focus: (THEME_COLOR_SLIDER_BIG_NUB_FOCUS)
-            handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_DRAG)
+            handle_color_2: (THEME_COLOR_SLIDER_BIG_HANDLE)
+            handle_color_2_hover: (THEME_COLOR_SLIDER_HANDLE_HOVER)
+            handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_FOCUS)
+            handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_DRAG)
 
             border_color_1: (THEME_COLOR)
             border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
@@ -563,7 +563,7 @@ live_design!{
     pub SLIDER_ALT1_VAL_PADDING = 2.5;
     pub SLIDER_ALT1_VAL_COLOR_A = (THEME_COLOR_VAL * 0.8);
     pub SLIDER_ALT1_VAL_COLOR_B = (THEME_COLOR_VAL * 1.4);
-    pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_HANDLE);
+    pub SLIDER_ALT1_HANDLE_COLOR_A = (THEME_COLOR_SLIDER_MINIMAL_HANDLE);
 
     pub SliderRound = <SliderMinimal> {
         height: 18.,
