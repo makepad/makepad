@@ -820,6 +820,21 @@ impl Widget for HtmlLink {
     }
 }
 
+impl HtmlLinkRef {
+    pub fn set_url(&mut self, url: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.url = url.to_string();
+        }
+    }
+
+    pub fn url(&self) -> Option<String> {
+        if let Some(inner) = self.borrow() {
+            Some(inner.url.clone())
+        } else {
+            None
+        }
+    }
+}
 
 /// The format and metadata of a list at a given nesting level.
 #[derive(Debug)]
