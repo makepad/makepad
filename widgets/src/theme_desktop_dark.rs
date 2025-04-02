@@ -228,6 +228,7 @@ live_design! {
         //line_scale: 1.2,
         line_spacing: 1.16
     }*/
+    
     pub THEME_FONT_LABEL = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },

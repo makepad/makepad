@@ -358,7 +358,7 @@ pub trait ImageCacheImpl {
         }
     }
         
-    fn process_async_image_load(&mut self, cx:&mut Cx, id: usize, image_path: &Path, result: Result<ImageBuffer, ImageError>)->bool{
+    fn process_async_image_load(&mut self, cx:&mut Cx, image_path: &Path, result: Result<ImageBuffer, ImageError>)->bool{
         // alright now we should stuff this thing into our cache
         if let Ok(data) = result{
             let texture = data.into_new_texture(cx);

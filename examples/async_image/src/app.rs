@@ -30,7 +30,7 @@ live_design!{
                     }
                     image = <Image> {
                         width: 280., height: 180.,
-                        source: dep("crate://self/resources/placeholder2.jpg")
+                        source: dep("crate://self/resources/placeholder.jpg")
                     }
                     async_load= <Button> {
                         text: "Click me 123"
