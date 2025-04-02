@@ -281,11 +281,11 @@ impl StackCounter{
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
-    #[live] pub draw_normal: DrawText2,
-    #[live] pub draw_italic: DrawText2,
-    #[live] pub draw_bold: DrawText2,
-    #[live] pub draw_bold_italic: DrawText2,
-    #[live] pub draw_fixed: DrawText2,
+    #[live] pub draw_normal: DrawText,
+    #[live] pub draw_italic: DrawText,
+    #[live] pub draw_bold: DrawText,
+    #[live] pub draw_bold_italic: DrawText,
+    #[live] pub draw_fixed: DrawText,
     #[live] pub draw_block: DrawFlowBlock,
     
     /// The default font size used for all text if not otherwise specified.
@@ -493,7 +493,7 @@ impl TextFlow{
     pub fn begin_list_item(&mut self, cx:&mut Cx2d, dot:&str, pad:f64){
         // alright we are going to push a block with a layout and a walk
         let fs = self.font_sizes.last().unwrap_or(&self.font_size);
-        self.draw_normal.text_style.font_size = *fs;
+        self.draw_normal.text_style.font_size = *fs as f64;
         let fc = self.font_colors.last().unwrap_or(&self.font_color);
         self.draw_normal.color = *fc;
         let pad = self.draw_normal.text_style.font_size as f64 * pad;
@@ -675,7 +675,7 @@ impl TextFlow{
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             //dt.text_style.top_drop = *self.top_drop.last().unwrap_or(&1.2);
-            dt.text_style.font_size = *font_size;
+            dt.text_style.font_size = *font_size as f64;
             dt.color = *font_color;
             //dt.ignore_newlines = *self.ignore_newlines.last().unwrap_or(&true);
             //dt.combine_spaces = *self.combine_spaces.last().unwrap_or(&true);
