@@ -402,7 +402,7 @@ live_design!{
         draw_text: {
             color: (THEME_COLOR_U_3)
             color_hover: (THEME_COLOR_TEXT_HOVER)
-            color_active: (THEME_COLOR_TEXT_SELECTED)
+            color_active: (THEME_COLOR_TEXT_ACTIVE)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)

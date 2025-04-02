@@ -56,7 +56,7 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_OUTSET_PRESSED, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_OUTSET_DOWN, self.pressed);
                 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
@@ -158,7 +158,7 @@ live_design! {
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                    THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 )
             }
@@ -174,7 +174,7 @@ live_design! {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_OUTSET_PRESSED, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_OUTSET_DOWN, self.pressed);
                 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
@@ -235,7 +235,7 @@ live_design! {
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                    THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 )
             }

@@ -88,7 +88,7 @@ live_design!{
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         let grad_top = 5.0;
                         let grad_bot = 2.0;
-                        let body = mix(mix(self.color, self.color_down, self.hover), THEME_COLOR_OUTSET_PRESSED, self.down);
+                        let body = mix(mix(self.color, self.color_down, self.hover), THEME_COLOR_OUTSET_DOWN, self.down);
                         
                         let body_transp = vec4(body.xyz, 0.0);
                         let top_gradient = mix(
