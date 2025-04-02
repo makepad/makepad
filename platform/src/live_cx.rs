@@ -84,8 +84,6 @@ impl Cx {
     }
     
     pub fn apply_error_no_matching_field(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
-        let index = nodes.parent(index).unwrap();
-        nodes.debug_print(index, 100);
         self.apply_error(origin, index, nodes, format!("no matching field: {}", nodes[index].id))
     }
     
