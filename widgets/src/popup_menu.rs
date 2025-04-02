@@ -23,7 +23,7 @@ live_design!{
 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_active: (THEME_COLOR_TEXT_DOWN)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P),

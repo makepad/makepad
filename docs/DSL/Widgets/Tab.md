@@ -117,7 +117,7 @@ MyTab = <Tab> {
 			return mix(
 				mix(
 					THEME_COLOR_TEXT_INACTIVE,
-					THEME_COLOR_TEXT_SELECTED,
+					THEME_COLOR_TEXT_ACTIVE,
 					self.selected
 				),
 				THEME_COLOR_TEXT_HOVER,

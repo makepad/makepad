@@ -63,7 +63,7 @@ live_design!{
         
         draw_icon: {
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_active: (THEME_COLOR_TEXT_SELECTED)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
