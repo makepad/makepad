@@ -38,8 +38,8 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color: (THEME_COLOR_CTRL)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_1: (THEME_COLOR_INSET_TOP)
             uniform color_1_hover: (THEME_COLOR_INSET_TOP)
@@ -58,7 +58,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
@@ -292,8 +292,8 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color: (THEME_COLOR_CTRL)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_1: (THEME_COLOR_INSET_TOP)
             uniform color_1_hover: (THEME_COLOR_INSET_TOP)
@@ -312,7 +312,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
@@ -422,12 +422,12 @@ live_design!{
             border_size: (THEME_BEVELING)
 
             color_1: (THEME_COLOR_CTRL)
-            color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             color_2: (THEME_COLOR_CTRL)
-            color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -452,12 +452,12 @@ live_design!{
             border_size: (THEME_BEVELING)
 
             color_1: (THEME_COLOR_CTRL)
-            color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             color_2: (THEME_COLOR_CTRL)
-            color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -495,12 +495,12 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color_1: (THEME_COLOR_CTRL * 1.5)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
 
             uniform color_2: (THEME_COLOR_CTRL)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -568,12 +568,12 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color_1: (THEME_COLOR_CTRL * 1.5)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
 
             uniform color_2: (THEME_COLOR_CTRL)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)

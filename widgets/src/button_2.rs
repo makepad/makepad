@@ -51,12 +51,12 @@ live_design! {
             instance pressed: 0.0
             uniform border_radius: (THEME_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_CTRL)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            instance bodybottom: (THEME_COLOR_OUTSET_HOVER)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_OUTSET_PRESSED, self.pressed);
                 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(
@@ -169,12 +169,12 @@ live_design! {
             instance pressed: 0.0
             uniform border_radius: (THEME_CORNER_RADIUS)
             instance bodytop: (THEME_COLOR_U_HIDDEN)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+            instance bodybottom: (THEME_COLOR_OUTSET_HOVER)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_OUTSET_PRESSED, self.pressed);
                 
                 let body_transp = vec4(body.xyz, 0.0);
                 let top_gradient = mix(

@@ -74,8 +74,8 @@ live_design! {
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color: (THEME_COLOR_CTRL)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_down: (THEME_COLOR_OUTSET_PRESSED)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
@@ -192,7 +192,7 @@ live_design! {
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
-            uniform color_2_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_2_down: (THEME_COLOR_OUTSET_PRESSED)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -328,8 +328,8 @@ live_design! {
             border_radius: (THEME_CORNER_RADIUS)
 
             color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_CTRL_HOVER)
-            color_down: (THEME_COLOR_CTRL_PRESSED)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_down: (THEME_COLOR_OUTSET_PRESSED)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)

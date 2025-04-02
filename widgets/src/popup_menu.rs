@@ -52,8 +52,8 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color: (THEME_COLOR_U_HIDDEN)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -164,8 +164,8 @@ live_design!{
             border_radius: (THEME_CORNER_RADIUS)
 
             color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_CTRL_HOVER)
-            color_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -189,12 +189,12 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color_1: (THEME_COLOR_U_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 2.)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 2.)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_2: (THEME_COLOR_U_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -271,12 +271,12 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color_1: (THEME_COLOR_U_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 2.)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 2.)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_2: (THEME_COLOR_U_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
