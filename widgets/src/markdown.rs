@@ -13,8 +13,9 @@ live_design!{
     link widgets;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-
-    pub MarkdownLinkBase = {{MarkdownLink}} {
+    use crate::link_label::LinkLabelBase;
+    
+    pub MarkdownLinkBase = {{MarkdownLink}}<LinkLabelBase> {
         link = {
             draw_text:{
                 // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
