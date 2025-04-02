@@ -66,10 +66,9 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Gradient Versions"}
+            <H4> { text: "GradientX"}
             <UIZooRowH> {
                 <ButtonGradientX> { text: "<ButtonGradientX>" }
-                <ButtonGradientY> { text: "<ButtonGradientY>" }
                 <ButtonGradientX> {
                     draw_bg: {
                         border_radius: 1.0,
@@ -95,6 +94,12 @@ live_design!{
                     text: "<ButtonGradientX>"
                 }
 
+            }
+
+            <Hr> {}
+            <H4> { text: "GradientY"}
+            <UIZooRowH> {
+                <ButtonGradientY> { text: "<ButtonGradientY>" }
                 <ButtonGradientY> {
                     draw_bg: {
                         border_radius: 1.0,
@@ -119,6 +124,7 @@ live_design!{
                     }
                     text: "<ButtonGradientY>"
                 }
+
             }
 
             <Hr> {}
