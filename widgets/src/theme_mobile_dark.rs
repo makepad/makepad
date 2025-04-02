@@ -128,7 +128,6 @@ live_design! {
 
     // Progress bars, slider amounts etc.
     pub THEME_COLOR_VAL = (THEME_COLOR_U_3)
-    pub THEME_COLOR_VAL_BIG = #A
     pub THEME_COLOR_VAL_HOVER = (THEME_COLOR_U_4)
     pub THEME_COLOR_VAL_ACTIVE = (THEME_COLOR_U_5)
     pub THEME_COLOR_VAL_TRACK_DEFAULT = (THEME_COLOR_D_3)
