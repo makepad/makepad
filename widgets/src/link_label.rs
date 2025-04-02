@@ -10,8 +10,9 @@ live_design!{
     
     use link::theme::*;
     use makepad_draw::shader::std::*;
+    use crate::button::ButtonBase
     
-    pub LinkLabelBase = {{LinkLabel}} {}
+    pub LinkLabelBase = {{LinkLabel}}<ButtonBase> {}
     pub LinkLabel = <LinkLabelBase> {
         width: Fit, height: Fit,
         margin: <THEME_MSPACE_2> {}
