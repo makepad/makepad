@@ -115,7 +115,7 @@
                                 tLayoutDemos,
                                 tAdaptiveView,
                                 tButton,
-                                tCheckbox,
+                                tCheckBox,
                                 tCommandTextInput,
                                 tDesktopButton,
                                 tDropDown,
@@ -148,7 +148,7 @@
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tAdaptiveView = Tab { name: "Adaptive View", template: PermanentTab, kind: TabAdaptiveView }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
-                        tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
+                        tCheckBox = Tab { name: "CheckBox", template: PermanentTab, kind: TabCheckBox }
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
                         tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
@@ -177,7 +177,7 @@
                         TabLayoutDemos = <UIZooTab> { <DemoLayout> {} }
                         TabAdaptiveView = <UIZooTab> { <DemoAdaptiveView> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
-                        TabCheckbox = <UIZooTab> { <DemoCheckbox> {} }
+                        TabCheckBox = <UIZooTab> { <DemoCheckBox> {} }
                         TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
                         TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }

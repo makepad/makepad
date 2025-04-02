@@ -8,7 +8,7 @@ live_design!{
     use link::widgets::*;
     use crate::layout_templates::*;
 
-    pub DemoCheckbox = <UIZooTabLayout_B> {
+    pub DemoCheckBox = <UIZooTabLayout_B> {
         desc = {
             <H3> { text: "Checkbox"}
             <P> {
@@ -94,7 +94,15 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "CheckBoxGradientX"}
+            <CheckBoxGradientX> { text:"Check me out!" }
 
+            <Hr> {}
+            <H4> { text: "CheckBoxGradientY"}
+            <CheckBoxGradientY> { text:"Check me out!" }
+
+
+            <Hr> {}
             <H4> { text: "Toggle"}
             <UIZooRowH> {
                 <Toggle> {text:"Check me out!" }
