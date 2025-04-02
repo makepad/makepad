@@ -220,10 +220,10 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
             uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
-            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color_active: (THEME_COLOR_TEXT)
 
             fn get_color(self) -> vec4 {
                 return mix(
