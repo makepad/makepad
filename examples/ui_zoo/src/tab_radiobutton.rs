@@ -26,6 +26,58 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "RadioButtonFlat"}
+            <UIZooRowH> {
+                radios_demo_14 = <View> {
+                    spacing: (THEME_SPACE_2)
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonFlat> { text: "Option 1" }
+                    radio2 = <RadioButtonFlat> { text: "Option 2" }
+                    radio3 = <RadioButtonFlat> { text: "Option 3" }
+                    radio4 = <RadioButtonFlat> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "RadioButtonFlatter"}
+            <UIZooRowH> {
+                radios_demo_15 = <View> {
+                    spacing: (THEME_SPACE_2)
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonFlatter> { text: "Option 1" }
+                    radio2 = <RadioButtonFlatter> { text: "Option 2" }
+                    radio3 = <RadioButtonFlatter> { text: "Option 3" }
+                    radio4 = <RadioButtonFlatter> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "RadioButtonGradientX"}
+            <UIZooRowH> {
+                radios_demo_15 = <View> {
+                    spacing: (THEME_SPACE_2)
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonGradientX> { text: "Option 1" }
+                    radio2 = <RadioButtonGradientX> { text: "Option 2" }
+                    radio3 = <RadioButtonGradientX> { text: "Option 3" }
+                    radio4 = <RadioButtonGradientX> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "RadioButtonGradientY"}
+            <UIZooRowH> {
+                radios_demo_16 = <View> {
+                    spacing: (THEME_SPACE_2)
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButtonGradientY> { text: "Option 1" }
+                    radio2 = <RadioButtonGradientY> { text: "Option 2" }
+                    radio3 = <RadioButtonGradientY> { text: "Option 3" }
+                    radio4 = <RadioButtonGradientY> { text: "Option 4" }
+                }
+            }
+
+            <Hr> {}
             <H4> { text: "Customized"}
             <UIZooRowH> {
                 radios_demo_2 = <View> {
