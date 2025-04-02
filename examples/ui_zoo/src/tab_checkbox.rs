@@ -108,14 +108,28 @@ live_design!{
                 <Toggle> {text:"Check me out!" }
             }
 
+            <Hr> {}
             <H4> { text: "ToggleFlat"}
             <UIZooRowH> {
                 <ToggleFlat> {text:"Check me out!" }
             }
 
+            <Hr> {}
             <H4> { text: "ToggleFlatter"}
             <UIZooRowH> {
                 <ToggleFlatter> {text:"Check me out!" }
+            }
+
+            <Hr> {}
+            <H4> { text: "ToggleGradientX"}
+            <UIZooRowH> {
+                <ToggleGradientX> {text:"Check me out!" }
+            }
+
+            <Hr> {}
+            <H4> { text: "ToggleGradientY"}
+            <UIZooRowH> {
+                <ToggleGradientY> {text:"Check me out!" }
             }
 
             <Hr> {}
