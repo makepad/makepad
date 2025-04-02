@@ -268,6 +268,12 @@ impl Window {
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
     }
+    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+        self.window.resize(cx, size);
+    }
+    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
+        self.window.reposition(cx, size);
+    }
 }
 
 impl WindowRef{
@@ -277,6 +283,17 @@ impl WindowRef{
         }
         else{
             dvec2(0.0,0.0)
+        }
+    }
+    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+        if let Some(inner) = self.borrow() {
+            inner.resize(cx, size);
+        }
+    }
+
+    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
+        if let Some(inner) = self.borrow() {
+            inner.reposition(cx, size);
         }
     }
 }
