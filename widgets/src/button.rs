@@ -21,7 +21,7 @@ live_design! {
 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -49,7 +49,7 @@ live_design! {
 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -75,7 +75,7 @@ live_design! {
 
             uniform color: (THEME_COLOR_CTRL)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_down: (THEME_COLOR_OUTSET_PRESSED)
+            uniform color_down: (THEME_COLOR_OUTSET_DOWN)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
@@ -192,7 +192,7 @@ live_design! {
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
-            uniform color_2_down: (THEME_COLOR_OUTSET_PRESSED)
+            uniform color_2_down: (THEME_COLOR_OUTSET_DOWN)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -329,7 +329,7 @@ live_design! {
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_down: (THEME_COLOR_OUTSET_PRESSED)
+            color_down: (THEME_COLOR_OUTSET_DOWN)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
