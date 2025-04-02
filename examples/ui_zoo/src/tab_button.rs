@@ -41,8 +41,8 @@ live_design!{
                         border_radius: (THEME_CORNER_RADIUS)
 
                         color: (THEME_COLOR_CTRL)
-                        color_hover: (THEME_COLOR_CTRL_HOVER)
-                        color_down: (THEME_COLOR_CTRL_PRESSED)
+                        color_hover: (THEME_COLOR_OUTSET_HOVER)
+                        color_down: (THEME_COLOR_OUTSET_PRESSED)
 
                         border_color_1: (THEME_COLOR_BEVEL_LIGHT)
                         border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
