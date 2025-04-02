@@ -14,6 +14,8 @@ live_design!{
     use link::theme::*;
     use link::shaders::*;
     use crate::popup_menu::PopupMenu;
+    use crate::popup_menu::PopupMenuFlat;
+    use crate::popup_menu::PopupMenuFlatter;
     use crate::popup_menu::PopupMenuGradientX;
     use crate::popup_menu::PopupMenuGradientY;
     
@@ -171,6 +173,28 @@ live_design!{
     
     pub DropDownFlat = <DropDown> {
         draw_bg: {
+            border_size: 1.,
+
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_CTRL_HOVER)
+            color_focus: (THEME_COLOR_CTRL * 1.2)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
+        }
+
+        popup_menu: <PopupMenuFlat> {}
+    }
+
+    pub DropDownFlatter = <DropDown> {
+        draw_bg: {
+            border_size: 0.,
+
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_CTRL_HOVER)
             color_focus: (THEME_COLOR_CTRL * 1.2)
@@ -183,6 +207,8 @@ live_design!{
             border_color_2_hover: (THEME_COLOR_U_HIDDEN)
             border_color_2_focus: (THEME_COLOR_U_HIDDEN)
         }
+
+        popup_menu: <PopupMenuFlatter> {}
     }
 
 

@@ -230,6 +230,7 @@
         #[live] inumber: i32,
         #[live] dropdown: DropDownEnum,
         #[live] dropdown_flat: DropDownEnum,
+        #[live] dropdown_flatter: DropDownEnum,
         #[live] dropdown_gradient_x: DropDownEnum,
         #[live] dropdown_gradient_y: DropDownEnum,
         #[live] dropdown_custom: DropDownEnum,
@@ -390,6 +391,7 @@ impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
+        db.bind(id!(dropdown_flatter), ids!(dropdown_flatter));
         db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
         db.bind(id!(dropdown_gradient_y), ids!(dropdown_gradient_y));
         db.bind(id!(dropdown_custom), ids!(dropdown_custom));

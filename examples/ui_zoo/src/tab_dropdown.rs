@@ -27,6 +27,13 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "DropDownFlatter" }
+            dropdown_flatter = <DropDownFlatter> {
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
+            <Hr> {}
             <H4> { text: "DropDownGradientX" }
             dropdown_gradient_x = <DropDownGradientX> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
