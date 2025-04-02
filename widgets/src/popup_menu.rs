@@ -21,7 +21,7 @@ live_design!{
             instance active: 0.0
             instance hover: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_active: (THEME_COLOR_TEXT_DOWN)
 
@@ -64,7 +64,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform mark_color_active: (THEME_COLOR_TEXT)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -176,7 +176,7 @@ live_design!{
             border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             mark_color: (THEME_COLOR_U_HIDDEN)
-            mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            mark_color_active: (THEME_COLOR_TEXT)
             
         }
     }
@@ -205,7 +205,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform mark_color_active: (THEME_COLOR_TEXT)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -287,7 +287,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform mark_color_active: (THEME_COLOR_TEXT)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);

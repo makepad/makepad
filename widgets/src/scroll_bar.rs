@@ -93,9 +93,9 @@ live_design!{
             uniform border_size: 1.0
             uniform border_radius: 1.5
 
-            uniform color: (THEME_COLOR_CTRL)
+            uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_drag: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
+            uniform color_drag: (THEME_COLOR_SCROLLBAR_HOVER * 1.2)
 
             uniform border_color: (THEME_COLOR_U_HIDDEN)
             uniform border_color_hover: (THEME_COLOR_U_HIDDEN)

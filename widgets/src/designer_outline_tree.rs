@@ -82,7 +82,7 @@ live_design!{
             instance focussed: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
+                    THEME_COLOR_TEXT * self.scale,
                     THEME_COLOR_TEXT_ACTIVE,
                     self.selected
                 )
@@ -192,8 +192,8 @@ live_design!{
     STUDIO_PALETTE_6 = #FFB368
     STUDIO_PALETTE_7 = #FFD864
     
-    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT_DEFAULT)
-    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT_DEFAULT)
+    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT)
+    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT)
     STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)
     STUDIO_COLOR_WIDGET = (STUDIO_PALETTE_2)
     STUDIO_COLOR_ASSET = (STUDIO_PALETTE_5)

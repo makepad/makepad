@@ -42,7 +42,7 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT,
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
@@ -97,7 +97,7 @@ live_design!{
                 sdf.move_to(0., self.rect_size.y - offset_y);
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
+                    THEME_COLOR_TEXT,
                     THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 ), mix(0.0, 0.8, self.hover));
@@ -112,7 +112,7 @@ live_design!{
             uniform color_pressed: (THEME_COLOR_TEXT_DOWN),
 
             wrap: Word
-            color: (THEME_COLOR_TEXT_DEFAULT),
+            color: (THEME_COLOR_TEXT),
             text_style: <THEME_FONT_REGULAR>{
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -136,7 +136,7 @@ live_design!{
         padding: <THEME_MSPACE_1> {}
                 
         font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_TEXT_DEFAULT),
+        font_color: (THEME_COLOR_TEXT),
         
         paragraph_spacing: 16,
         pre_code_spacing: 8,
@@ -147,35 +147,35 @@ live_design!{
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_italic: {
             text_style: <THEME_FONT_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_bold: {
             text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_bold_italic: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_fixed: {
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         code_layout: {
@@ -204,10 +204,10 @@ live_design!{
         }
         
         draw_block: {
-            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            line_color: (THEME_COLOR_TEXT)
             sep_color: (THEME_COLOR_DIVIDER)
             quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            quote_fg_color: (THEME_COLOR_TEXT)
             code_color: (THEME_COLOR_BG_HIGHLIGHT)
             
             fn pixel(self) -> vec4 {

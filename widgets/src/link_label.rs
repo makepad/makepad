@@ -24,7 +24,7 @@ live_design!{
             instance down: 0.0
             instance hover: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
             
@@ -49,7 +49,7 @@ live_design!{
             instance down: 0.0
             instance hover: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT),
+            uniform color: (THEME_COLOR_TEXT),
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
             uniform color_down: (THEME_COLOR_TEXT_DOWN),
 
@@ -320,7 +320,7 @@ live_design!{
             instance hover: 0.0
             instance down: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT),
+            uniform color: (THEME_COLOR_TEXT),
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
             uniform color_down: (THEME_COLOR_TEXT_DOWN),
 

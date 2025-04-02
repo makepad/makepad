@@ -37,7 +37,7 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_CTRL)
+            uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
@@ -150,9 +150,9 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
                 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
+            uniform color_active: (THEME_COLOR_TEXT)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -291,7 +291,7 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_CTRL)
+            uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
@@ -421,11 +421,11 @@ live_design!{
             radio_type: Tab
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR_CTRL)
+            color_1: (THEME_COLOR)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
-            color_2: (THEME_COLOR_CTRL)
+            color_2: (THEME_COLOR)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
@@ -440,7 +440,7 @@ live_design!{
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
             color_hover: (THEME_COLOR_TEXT_HOVER)
             color_active: (THEME_COLOR_TEXT_ACTIVE)
         }
@@ -451,11 +451,11 @@ live_design!{
             radio_type: Tab
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR_CTRL)
+            color_1: (THEME_COLOR)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
-            color_2: (THEME_COLOR_CTRL)
+            color_2: (THEME_COLOR)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
@@ -483,7 +483,7 @@ live_design!{
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
             color_hover: (THEME_COLOR_TEXT_HOVER)
             color_active: (THEME_COLOR_TEXT_ACTIVE)
         }
@@ -494,11 +494,11 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL * 1.5)
+            uniform color_1: (THEME_COLOR * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
 
-            uniform color_2: (THEME_COLOR_CTRL)
+            uniform color_2: (THEME_COLOR)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
 
@@ -557,7 +557,7 @@ live_design!{
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
             color_hover: (THEME_COLOR_TEXT_HOVER)
             color_active: (THEME_COLOR_TEXT_ACTIVE)
         }
@@ -567,11 +567,11 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL * 1.5)
+            uniform color_1: (THEME_COLOR * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
 
-            uniform color_2: (THEME_COLOR_CTRL)
+            uniform color_2: (THEME_COLOR)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
 
