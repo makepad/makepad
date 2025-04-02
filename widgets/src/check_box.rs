@@ -414,8 +414,8 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_hover: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             uniform mark_color_focus: (#f00)
@@ -735,6 +735,94 @@ live_design!{
             mark_color_focus: (#f00)
         }
     }
+
+    pub ToggleGradientX = <Toggle> {
+        draw_bg: {
+            uniform size: 7.5;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1_active: (THEME_COLOR_INSET_PIT_TOP)
+
+            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_focus: (#f00)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let sz = self.size;
+                let left = 1.;
+                let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                // Draw background                        
+                sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            self.active
+                        ),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                        self.hover
+                    )
+                )
+                
+                sdf.stroke(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            self.active
+                        ),
+                        mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                        self.hover
+                    ), self.border_size
+                )
+                    
+                // Draw mark
+                let isz = sz * 0.65;
+                sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
+                sdf.subtract();
+                sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                sdf.blend(self.active)
+                sdf.fill(
+                    mix(
+                        mix(self.mark_color, self.mark_color_hover, self.hover),
+                        mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                        self.active
+                    )
+                )
+
+                return sdf.result
+            }
+        }
+
+    }
+    pub ToggleGradientY = <Toggle> { }
+
 
     pub CheckBoxCustom = <CheckBox> {
         draw_bg: { check_type: None }
