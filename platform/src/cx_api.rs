@@ -169,6 +169,8 @@ impl std::fmt::Debug for CxOsOp {
             Self::SelectFileDialog(..)=>write!(f, "SelectFileDialog"),
             Self::SaveFolderDialog(..)=>write!(f, "SaveFolderDialog"),
             Self::SelectFolderDialog(..)=>write!(f, "SelectFolderDialog"),
+            Self::ResizeWindow(..)=>write!(f, "ResizeWindow"),
+            Self::RepositionWindow(..)=>write!(f, "RepositionWindow"),
         }
     }
 }
