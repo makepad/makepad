@@ -70,7 +70,7 @@ live_design!{
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
             uniform border_size: 1.5
-            uniform color: (THEME_COLOR_CURSOR_BG)
+            uniform color: (THEME_COLOR_CURSOR)
             uniform border_color: (THEME_COLOR_CURSOR_BORDER)
             
             fn get_color(self) -> vec4 {

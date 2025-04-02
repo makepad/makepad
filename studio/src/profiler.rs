@@ -48,7 +48,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DARK)
+            color: (THEME_COLOR_TEXT_D)
         }
     }
     
