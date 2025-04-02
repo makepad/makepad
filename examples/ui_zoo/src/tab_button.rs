@@ -18,7 +18,7 @@ live_design!{
                 basicbutton = <Button> {
 
                     draw_text: {
-                        color: (THEME_COLOR_TEXT_DEFAULT)
+                        color: (THEME_COLOR_TEXT)
                         color_hover: (THEME_COLOR_TEXT_HOVER)
                         color_down: (THEME_COLOR_TEXT_DOWN)
                         text_style: <THEME_FONT_REGULAR> {
@@ -31,7 +31,7 @@ live_design!{
                     }
 
                     draw_icon: {
-                        color: (THEME_COLOR_TEXT_DEFAULT)
+                        color: (THEME_COLOR_TEXT)
                         color_hover: (THEME_COLOR_TEXT_HOVER)
                         color_down: (THEME_COLOR_TEXT_DOWN)
                     }
@@ -40,7 +40,7 @@ live_design!{
                         border_radius: (THEME_BEVELING)
                         border_radius: (THEME_CORNER_RADIUS)
 
-                        color: (THEME_COLOR_CTRL)
+                        color: (THEME_COLOR)
                         color_hover: (THEME_COLOR_OUTSET_HOVER)
                         color_down: (THEME_COLOR_OUTSET_DOWN)
 

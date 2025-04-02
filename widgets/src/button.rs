@@ -19,7 +19,7 @@ live_design! {
             instance hover: 0.0,
             instance down: 0.0,
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
@@ -47,7 +47,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
@@ -73,7 +73,7 @@ live_design! {
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color: (THEME_COLOR_CTRL)
+            uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_down: (THEME_COLOR_OUTSET_DOWN)
 
@@ -186,8 +186,8 @@ live_design! {
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL)
-            uniform color_1_hover: (THEME_COLOR_CTRL)
+            uniform color_1: (THEME_COLOR)
+            uniform color_1_hover: (THEME_COLOR)
             uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
@@ -253,8 +253,8 @@ live_design! {
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL)
-            uniform color_1_hover: (THEME_COLOR_CTRL)
+            uniform color_1: (THEME_COLOR)
+            uniform color_1_hover: (THEME_COLOR)
             uniform color_1_down: (#3)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)

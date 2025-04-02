@@ -20,8 +20,8 @@ live_design!{
             uniform size: 110.0
 
             uniform color: (THEME_COLOR_D_HIDDEN),
-            uniform color_hover: (THEME_COLOR_CTRL_SCROLLBAR_HOVER),
-            uniform color_drag: (THEME_COLOR_CTRL_SCROLLBAR_HOVER * 1.2)
+            uniform color_hover: (THEME_COLOR_SCROLLBAR_HOVER),
+            uniform color_drag: (THEME_COLOR_SCROLLBAR_HOVER * 1.2)
             
             uniform border_radius: 1.0
             uniform splitter_pad: 1.0
