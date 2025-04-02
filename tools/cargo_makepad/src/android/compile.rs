@@ -24,7 +24,6 @@ fn android_jar_path(sdk_dir: &Path) -> PathBuf {
     sdk_dir.join(PLATFORMS_DIR).join(ANDROID_PLATFORM).join("android.jar")
 }
 
-
 #[derive(Debug)]
 struct BuildPaths {
     tmp_dir: PathBuf,
