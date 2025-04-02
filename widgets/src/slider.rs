@@ -123,7 +123,7 @@ live_design!{
 
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
             uniform color_drag: (THEME_COLOR_TEXT_HOVER)
 
             fn get_color(self) -> vec4 {
