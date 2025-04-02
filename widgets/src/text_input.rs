@@ -96,9 +96,9 @@ live_design!{
             instance hover: 0.0
             instance focus: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_focus: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
+            uniform color_focus: (THEME_COLOR_TEXT)
             uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
             uniform color_empty_focus: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
 

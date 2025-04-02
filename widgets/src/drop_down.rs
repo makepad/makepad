@@ -29,7 +29,7 @@ live_design!{
         align: {x: 0., y: 0.}
         
         draw_text: {
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
 
@@ -56,9 +56,9 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_CTRL)
+            uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_focus: (THEME_COLOR_CTRL * 1.2)
+            uniform color_focus: (THEME_COLOR * 1.2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -68,7 +68,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
-            uniform arrow_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform arrow_color: (THEME_COLOR_TEXT)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -177,7 +177,7 @@ live_design!{
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_focus: (THEME_COLOR_CTRL * 1.2)
+            color_focus: (THEME_COLOR * 1.2)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -197,7 +197,7 @@ live_design!{
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_focus: (THEME_COLOR_CTRL * 1.2)
+            color_focus: (THEME_COLOR * 1.2)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -223,13 +223,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL * 1.75)
+            uniform color_1: (THEME_COLOR * 1.75)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR_CTRL * 2.5)
+            uniform color_1_focus: (THEME_COLOR * 2.5)
 
-            uniform color_2: (THEME_COLOR_CTRL)
+            uniform color_2: (THEME_COLOR)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_2_focus: (THEME_COLOR_CTRL * 1.25)
+            uniform color_2_focus: (THEME_COLOR * 1.25)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -239,7 +239,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
-            uniform arrow_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform arrow_color: (THEME_COLOR_TEXT)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -309,13 +309,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL * 1.75)
+            uniform color_1: (THEME_COLOR * 1.75)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR_CTRL * 2.5)
+            uniform color_1_focus: (THEME_COLOR * 2.5)
 
-            uniform color_2: (THEME_COLOR_CTRL)
+            uniform color_2: (THEME_COLOR)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_2_focus: (THEME_COLOR_CTRL * 1.25)
+            uniform color_2_focus: (THEME_COLOR * 1.25)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -325,7 +325,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
             
-            uniform arrow_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform arrow_color: (THEME_COLOR_TEXT)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {

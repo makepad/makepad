@@ -62,7 +62,7 @@ live_design!{
         }
         
         draw_icon: {
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn pixel(self) -> vec4 {
@@ -83,8 +83,8 @@ live_design!{
         }
         
         draw_text: {
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_active: (THEME_COLOR_TEXT)
             
             fn get_color(self) -> vec4 {
                 return mix(
