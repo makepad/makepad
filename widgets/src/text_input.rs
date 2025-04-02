@@ -41,7 +41,7 @@ live_design!{
 
             color: (THEME_COLOR_INSET)
             uniform color_hover: (THEME_COLOR_INSET)
-            uniform color_focus: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -263,7 +263,7 @@ live_design!{
 
             uniform color_1: (THEME_COLOR_INSET)
             uniform color_1_hover: (THEME_COLOR_INSET)
-            uniform color_1_focus: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_1_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_2: (THEME_COLOR_INSET * 2.5)
             uniform color_2_hover: (THEME_COLOR_INSET * 3.)
@@ -379,7 +379,7 @@ live_design!{
 
             uniform color_2: (THEME_COLOR_INSET)
             uniform color_2_hover: #4
-            uniform color_2_focus: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_2_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)

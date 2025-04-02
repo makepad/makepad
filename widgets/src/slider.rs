@@ -285,14 +285,14 @@ live_design!{
             uniform handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_BOTTOM)
 
             uniform border_color_1: (THEME_COLOR_CTRL)
-            uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
-            uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
+            uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
+            uniform border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
             uniform border_color_2: (THEME_COLOR_CTRL)
-            uniform border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
-            uniform border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
+            uniform border_color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
+            uniform border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
 
             uniform val_size: 3.
 
@@ -529,14 +529,14 @@ live_design!{
             handle_color_2_drag: (THEME_COLOR_SLIDER_BIG_NUB_DRAG)
 
             border_color_1: (THEME_COLOR_CTRL)
-            border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
-            border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
+            border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
+            border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
             border_color_2: (THEME_COLOR_CTRL)
-            border_color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            border_color_2_focus: (THEME_COLOR_CTRL_FOCUS)
-            border_color_2_drag: (THEME_COLOR_CTRL_DRAG)
+            border_color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
+            border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
 
             val_size: 2.
 
@@ -843,9 +843,9 @@ live_design!{
             uniform color_2_drag: (THEME_COLOR_INSET_BOTTOM)
 
             uniform border_color_1: (THEME_COLOR_CTRL)
-            uniform border_color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_CTRL_FOCUS)
-            uniform border_color_1_drag: (THEME_COLOR_CTRL_DRAG)
+            uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
+            uniform border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT * 1.3)
@@ -1601,14 +1601,14 @@ live_design!{
             color_dither: 1.0
 
             color_1: (THEME_COLOR_CTRL)
-            color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            color_1_focus: (THEME_COLOR_CTRL_FOCUS)
-            color_1_drag: (THEME_COLOR_CTRL_DRAG)
+            color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
+            color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
             color_2: (THEME_COLOR_CTRL)
-            color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            color_2_focus: (THEME_COLOR_CTRL_FOCUS)
-            color_2_drag: (THEME_COLOR_CTRL_DRAG)
+            color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
+            color_2_drag: (THEME_COLOR_OUTSET_DRAG)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
