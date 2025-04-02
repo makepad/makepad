@@ -124,9 +124,9 @@ live_design! {
 
     // Background of textinputs, radios, checkboxes etc.
     pub THEME_COLOR_INSET = (THEME_COLOR_D_1)
-    pub THEME_COLOR_INSET_PIT_TOP = (THEME_COLOR_D_4)
-    pub THEME_COLOR_INSET_PIT_TOP_HOVER = (THEME_COLOR_D_4)
-    pub THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)
+    pub THEME_COLOR_INSET_TOP = (THEME_COLOR_D_4)
+    pub THEME_COLOR_INSET_TOP_HOVER = (THEME_COLOR_D_4)
+    pub THEME_COLOR_INSET_BOTTOM = (THEME_COLOR_D_HIDDEN)
 
     // Progress bars, slider amounts etc.
     pub THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_U_3)
