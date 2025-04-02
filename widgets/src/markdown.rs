@@ -46,7 +46,7 @@ live_design!{
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                    THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 )
             }
@@ -98,7 +98,7 @@ live_design!{
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
                     THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_PRESSED,
+                    THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 ), mix(0.0, 0.8, self.hover));
             }
@@ -109,7 +109,7 @@ live_design!{
             instance hover: 0.0
 
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
-            uniform color_pressed: (THEME_COLOR_TEXT_PRESSED),
+            uniform color_pressed: (THEME_COLOR_TEXT_DOWN),
 
             wrap: Word
             color: (THEME_COLOR_TEXT_DEFAULT),

@@ -83,7 +83,7 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
+                    THEME_COLOR_TEXT_ACTIVE,
                     self.selected
                 )
             }

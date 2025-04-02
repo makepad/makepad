@@ -20,7 +20,7 @@ live_design!{
                     draw_text: {
                         color: (THEME_COLOR_TEXT_DEFAULT)
                         color_hover: (THEME_COLOR_TEXT_HOVER)
-                        color_down: (THEME_COLOR_TEXT_PRESSED)
+                        color_down: (THEME_COLOR_TEXT_DOWN)
                         text_style: <THEME_FONT_REGULAR> {
                             font_size: (THEME_FONT_SIZE_P)
                         }
@@ -33,7 +33,7 @@ live_design!{
                     draw_icon: {
                         color: (THEME_COLOR_TEXT_DEFAULT)
                         color_hover: (THEME_COLOR_TEXT_HOVER)
-                        color_down: (THEME_COLOR_TEXT_PRESSED)
+                        color_down: (THEME_COLOR_TEXT_DOWN)
                     }
 
                     draw_bg: {
@@ -42,7 +42,7 @@ live_design!{
 
                         color: (THEME_COLOR_CTRL)
                         color_hover: (THEME_COLOR_OUTSET_HOVER)
-                        color_down: (THEME_COLOR_OUTSET_PRESSED)
+                        color_down: (THEME_COLOR_OUTSET_DOWN)
 
                         border_color_1: (THEME_COLOR_BEVEL_LIGHT)
                         border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)

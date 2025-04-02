@@ -19,7 +19,7 @@ live_design!{
         draw_bg: {
             uniform color: (THEME_COLOR_TEXT_DEFAULT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
