@@ -41,13 +41,13 @@ live_design!{
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
-            uniform color_1: (THEME_COLOR_INSET_TOP)
-            uniform color_1_hover: (THEME_COLOR_INSET_TOP)
-            uniform color_1_active: (THEME_COLOR_INSET_TOP)
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
 
-            uniform color_2: (THEME_COLOR_INSET_BOTTOM)
-            uniform color_2_hover: (THEME_COLOR_INSET_BOTTOM)
-            uniform color_2_active: (THEME_COLOR_INSET_BOTTOM)
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -174,11 +174,11 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
 
-            uniform color_1: (THEME_COLOR_INSET_TOP)
+            uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_WHITE)
             uniform color_1_active: (THEME_COLOR_TEXT_ACTIVE)
 
-            uniform color_2: (THEME_COLOR_INSET_BOTTOM)
+            uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_WHITE)
             uniform color_2_active: (THEME_COLOR_TEXT_ACTIVE)
 
@@ -295,13 +295,13 @@ live_design!{
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
-            uniform color_1: (THEME_COLOR_INSET_TOP)
-            uniform color_1_hover: (THEME_COLOR_INSET_TOP)
-            uniform color_1_active: (THEME_COLOR_INSET_TOP)
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
 
-            uniform color_2: (THEME_COLOR_INSET_BOTTOM)
-            uniform color_2_hover: (THEME_COLOR_INSET_BOTTOM)
-            uniform color_2_active: (THEME_COLOR_INSET_BOTTOM)
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
