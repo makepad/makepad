@@ -122,7 +122,7 @@ pub enum CxOsOp {
 
 impl std::fmt::Debug for CxOsOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self{
+        match self {
             Self::CreateWindow(..)=>write!(f, "CreateWindow"),
             Self::CloseWindow(..)=>write!(f, "CloseWindow"),
             Self::MinimizeWindow(..)=>write!(f, "MinimizeWindow"),
@@ -131,9 +131,11 @@ impl std::fmt::Debug for CxOsOp {
             Self::FullscreenWindow(..)=>write!(f, "FullscreenWindow"),
             Self::NormalizeWindow(..)=>write!(f, "NormalizeWindow"),
             Self::RestoreWindow(..)=>write!(f, "RestoreWindow"),
+            Self::ResizeWindow(_, pos)=>write!(f, "ResizeWindow({},{})", pos.x, pos.y),
+            Self::RepositionWindow(.., pos)=>write!(f, "RepositionWindow{},{})", pos.x, pos.y),
             Self::HideWindow(..)=>write!(f, "HideWindow"),
-            Self::SetTopmost(..)=>write!(f, "SetTopmost"),
-            Self::ShowInDock(..)=>write!(f, "ShowInDock"),
+            Self::SetTopmost(_, b)=>write!(f, "SetTopmost({b})"),
+            Self::ShowInDock(b)=>write!(f, "ShowInDock({b})"),
             Self::XrStartPresenting=>write!(f, "XrStartPresenting"),
             Self::XrStopPresenting=>write!(f, "XrStopPresenting"),
             
