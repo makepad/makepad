@@ -211,6 +211,8 @@ impl DrawText2 {
         // alright lets draw it
         self.draw_text(cx, Point::new(rect.pos.x as f32, start_ypos as f32), &laid_out_text);
         // now update the turtle pos and bounding box with our layout info
+        // ok how do we do this
+        // 
     }
         
     pub fn layout(

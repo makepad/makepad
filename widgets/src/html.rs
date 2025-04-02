@@ -12,14 +12,14 @@ live_design!{
     link widgets;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-    
+     
     pub HtmlLinkBase = {{HtmlLink}} {
-        link = {
-            draw_text = {
+        /*link = {
+            draw_text:{
                 // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
                 color: #1a0dab
             }
-        }
+        }*/
     }
 
     pub HtmlBase = {{Html}} {
