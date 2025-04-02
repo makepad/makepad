@@ -413,7 +413,7 @@ impl DesignerOutlineTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off))
+        self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
