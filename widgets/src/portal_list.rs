@@ -723,6 +723,68 @@ impl PortalList {
         !self.tail_range
             && (self.first_id > self.range_end)
     }
+
+    /// Initiates a smooth scrolling animation to the specified target item in the list.
+    ///
+    /// ## Arguments
+    /// * `target_id`: The ID (index) of the item to scroll to.
+    /// * `speed`: A positive floating-point value that controls the speed of the animation.
+    ///    The `speed` will always be treated as an absolute value, with the direction of the scroll
+    ///    (up or down) determined by whether `target_id` is above or below the current item.
+    /// * `max_items_to_show`: The maximum number of items to show during the scrolling animation.
+    ///    If `None`, the default value of 20 is used.
+    ///
+    /// ## Example
+    /// ```rust,ignore
+    /// // Scrolls to item 42 at speed 100.0, including at most 30 items in the scroll animation.
+    /// smooth_scroll_to(&mut cx, 42, 100.0, Some(30));
+    /// ```
+    pub fn smooth_scroll_to(&mut self, cx: &mut Cx, target_id: usize, speed: f64, max_items_to_show: Option<usize>) {
+        if self.items.is_empty() { return };
+        if target_id < self.range_start || target_id > self.range_end { return };
+
+        let max_items_to_show = max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW);
+        let scroll_direction: f64;
+        let starting_id: Option<usize>;
+        if target_id > self.first_id {
+            // Scrolling down to a larger item index
+            scroll_direction = -1.0;
+            starting_id = ((target_id.saturating_sub(self.first_id)) > max_items_to_show)
+                .then_some(target_id.saturating_sub(max_items_to_show));
+        } else {
+            // Scrolling up to a smaller item index
+            scroll_direction = 1.0;
+            starting_id = ((self.first_id.saturating_sub(target_id)) > max_items_to_show)
+                .then_some(target_id + max_items_to_show);
+        };
+
+        // First, if the target_id was too far away, jump directly to a closer starting_id.
+        if let Some(start) = starting_id {
+            self.first_id = start;
+        }
+        // Then, we kick off the actual smooth scroll process.
+        self.scroll_state = ScrollState::ScrollingTo {
+            target_id,
+            delta: speed.abs() * scroll_direction as f64,
+            next_frame: cx.new_next_frame()
+        };
+    }
+
+    /// Trigger an scrolling animation to the end of the list
+    ///
+    /// ## Arguments
+    /// * `speed`: This value controls how fast the scrolling animation is.
+    ///    Note: This number should be large enough to reach the end, so it is important to
+    ///    test the passed number. TODO provide a better implementation to ensure that the end
+    ///    is always reached, no matter the speed value.
+    /// * `max_items_to_show`: The maximum number of items to show during the scrolling animation.
+    ///    If `None`, the default value of 20 is used.
+    pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
+        if self.items.is_empty() { return };
+
+	let speed = speed * self.range_end as f64;
+	self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+    }
 }
 
 
@@ -1172,34 +1234,7 @@ impl PortalListRef {
     /// ```
     pub fn smooth_scroll_to(&self, cx: &mut Cx, target_id: usize, speed: f64, max_items_to_show: Option<usize>) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        if inner.items.is_empty() { return };
-        if target_id < inner.range_start || target_id > inner.range_end { return };
-
-        let max_items_to_show = max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW);
-        let scroll_direction: f64;
-        let starting_id: Option<usize>;
-        if target_id > inner.first_id {
-            // Scrolling down to a larger item index
-            scroll_direction = -1.0;
-            starting_id = ((target_id.saturating_sub(inner.first_id)) > max_items_to_show)
-                .then_some(target_id.saturating_sub(max_items_to_show));
-        } else {
-            // Scrolling up to a smaller item index
-            scroll_direction = 1.0;
-            starting_id = ((inner.first_id.saturating_sub(target_id)) > max_items_to_show)
-                .then_some(target_id + max_items_to_show);
-        };
-
-        // First, if the target_id was too far away, jump directly to a closer starting_id.
-        if let Some(start) = starting_id {
-            inner.first_id = start;
-        }
-        // Then, we kick off the actual smooth scroll process.
-        inner.scroll_state = ScrollState::ScrollingTo {
-            target_id,
-            delta: speed.abs() * scroll_direction as f64,
-            next_frame: cx.new_next_frame()
-        };
+	inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
     }
 
     /// Returns the ID of the item that is currently being smoothly scrolled to, if any.
@@ -1232,19 +1267,8 @@ impl PortalListRef {
     ///    If `None`, the default value of 20 is used.
     pub fn smooth_scroll_to_end(&self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        if inner.items.is_empty() { return };
 
-        let starting_id = inner.range_end
-            .saturating_sub(max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW))
-            .max(inner.first_id); // don't start before the current first_id
-
-        // First, we jump directly to the starting_id.
-        inner.first_id = starting_id;
-        // Then, we kick off the actual scrolling process.
-        inner.scroll_state = ScrollState::Flick {
-            delta: -speed,
-            next_frame: cx.new_next_frame()
-        };
+	inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
     }
 
     /// It indicates if we have items not displayed towards the end of the list (below)
